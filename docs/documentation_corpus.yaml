@@ -1,0 +1,35 @@
+# Documentation corpus used by the Documentation Matcher.
+# Each entry represents a known/documented error condition. Replace this
+# with a real export from your runbooks / Confluence / incident KB.
+#
+# Fields:
+#   id:          stable documentation identifier
+#   title:       short human title
+#   text:        description used to compute the embedding (should read
+#                similarly to how the error appears in logs / templates)
+#   error_code:  optional stable error code to surface on metrics
+
+- id: DOC-DB-001
+  title: Database connection timeout
+  text: "Database connection timeout while connecting to the primary database host. Usually caused by network partition or DB overload."
+  error_code: ERR_DB_TIMEOUT
+
+- id: DOC-DB-002
+  title: Database connection refused
+  text: "Database or cache connection refused by the target host. The service is likely down or unreachable."
+  error_code: ERR_CONN_REFUSED
+
+- id: DOC-AUTH-001
+  title: User authentication failed
+  text: "User authentication failed due to invalid credentials or expired session token."
+  error_code: ERR_AUTH_FAILED
+
+- id: DOC-QUEUE-001
+  title: Message queue consumer lag
+  text: "Message queue consumer is falling behind, indicating a backlog of unprocessed messages."
+  error_code: ERR_QUEUE_LAG
+
+- id: DOC-DISK-001
+  title: Disk space low
+  text: "Available disk space on the host is critically low, risking write failures."
+  error_code: ERR_DISK_LOW

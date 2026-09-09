@@ -1,0 +1,77 @@
+# LogAI Engine configuration.
+# Any value here can be overridden at runtime; ES credentials are best set
+# via environment variables instead (see logai/config.py):
+#   LOGAI_ES_HOSTS, LOGAI_ES_USER, LOGAI_ES_PASSWORD, LOGAI_METRICS_PORT
+
+elasticsearch:
+  hosts:
+    - "http://elasticsearch:9200"
+  index: "app-logs-*"
+  poll_interval_seconds: 5
+  batch_size: 500
+  request_timeout_seconds: 30
+
+drain3:
+  persistence_path: "data/drain3_state.bin"
+  sim_threshold: 0.4
+  depth: 4
+  max_children: 100
+
+embedding:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  device: "cpu"
+  batch_size: 64
+
+clustering:
+  min_cluster_size: 3
+  min_samples: 1
+  metric: "euclidean"
+  assignment_similarity_threshold: 0.80
+
+doc_matcher:
+  corpus_path: "docs/documentation_corpus.yaml"
+  similarity_threshold: 0.75
+  refresh_interval_seconds: 300
+
+features:
+  windows_seconds: [10, 60, 300]
+  rolling_window_points: 30
+  history_retention_seconds: 3600
+
+anomaly:
+  contamination: 0.05
+  n_estimators: 100
+  random_state: 42
+  min_training_samples: 30
+  score_alert_threshold: 0.6
+
+alert:
+  warm_consecutive: 2
+  alert_consecutive: 3
+  cool_consecutive: 3
+  score_high: 0.6
+  score_low: 0.4
+
+storage:
+  base_dir: "data"
+  template_registry_file: "template_registry.json"
+  template_embeddings_file: "template_embeddings.pkl"
+  group_registry_file: "group_registry.json"
+  group_centroids_file: "group_centroids.pkl"
+  checkpoint_file: "checkpoint.json"
+  window_state_file: "window_state.json"
+  anomaly_state_file: "anomaly_state.json"
+  dedup_index_file: "dedup_index.json"
+  dlq_file: "dlq.jsonl"
+  model_dir: "data/models"
+  doc_embeddings_file: "doc_embeddings.pkl"
+
+reliability:
+  max_retries: 5
+  backoff_base_seconds: 1
+  backoff_max_seconds: 60
+  dedup_ttl_seconds: 86400
+
+metrics:
+  http_port: 9108
+  http_host: "0.0.0.0"
