@@ -107,32 +107,38 @@ class WindowState:
 class FeatureVector:
     group_id: str
     timestamp: float
-    z_score: float = 0.0
-    growth_rate: float = 0.0
-    burstiness: float = 0.0
+    z_score_10s: float = 0.0
+    z_score_1m: float = 0.0
+    short_growth_rate: float = 1.0
+    growth_rate: float = 1.0
+    burstiness_10s: float = 0.0
     rate_delta_norm: float = 0.0
     slope_norm: float = 0.0
-    spike_ratio: float = 0.0
+    spike_ratio_10s: float = 1.0
 
     def as_vector(self) -> List[float]:
         return [
-            self.z_score,
+            self.z_score_10s,
+            self.z_score_1m,
+            self.short_growth_rate,
             self.growth_rate,
-            self.burstiness,
+            self.burstiness_10s,
             self.rate_delta_norm,
             self.slope_norm,
-            self.spike_ratio,
+            self.spike_ratio_10s,
         ]
 
     @staticmethod
     def feature_names() -> List[str]:
         return [
-            "z_score",
+            "z_score_10s",
+            "z_score_1m",
+            "short_growth_rate",
             "growth_rate",
-            "burstiness",
+            "burstiness_10s",
             "rate_delta_norm",
             "slope_norm",
-            "spike_ratio",
+            "spike_ratio_10s",
         ]
 
 
@@ -149,7 +155,7 @@ class AnomalyResult:
     timestamp: float
     anomaly_score: float
     anomaly: bool
-    model_version: str = "v1"
+    model_version: str = "if-global-v2"
 
 
 @dataclass
@@ -160,4 +166,4 @@ class AnomalyState:
     anomaly: bool = False
     consecutive_anomaly_count: int = 0
     alert_state: str = AlertStateEnum.NORMAL.value
-    model_version: str = "v1"
+    model_version: str = "if-global-v2"

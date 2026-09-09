@@ -131,3 +131,46 @@ O(T) theo số template.
   `GroupState`.
 - Smoke test với `FakeTemplateRegistry` và `FakeGroupRegistry` xác nhận
   signature mới, aggregate metadata và số lần gọi registry theo số template.
+
+---
+
+## Issue 7 (Bước 1): Mở rộng FeatureVector từ 6 lên 8 chiều chuẩn hóa (Dimensionless)
+
+- **Trạng thái**: ✅ **RESOLVED** (Đã giải quyết Bước 1)
+- **Ngày hoàn thành**: 2026-09-09
+- **Files liên quan**:
+  - `logai/models.py`
+  - `logai/features/feature_engine.py`
+  - `logai/anomaly/isolation_forest_model.py`
+  - `ARCHITECTURE.md`
+  - `tests/test_feature_vector_8d.py`
+
+### 1. Vấn đề giải quyết
+- **Bỏ phí cửa sổ 10s**: `count_10s` trước đây bị bỏ phí, các đợt micro-bursts bùng nổ log chỉ trong vài giây bị làm loãng bởi tốc độ 1 phút.
+- **Ô nhiễm baseline (Baseline Contamination)**: Giá trị rate hiện tại từng bị đẩy vào history trước khi tính mean/std, khiến chính log đột biến kéo vọt baseline lên và làm giảm z-score của nó.
+- **Fano factor trên 1m chưa scale-independent**: Chuyển sang hệ số biến thiên $CV^2 = \sigma^2 / \mu^2$ trên cửa sổ 10s.
+
+### 2. Kiến trúc giải pháp
+- **Bộ 8 đặc trưng dimensionless**:
+  1. `z_score_10s`: $\frac{r_{10} - \mu_{10}}{\sigma_{10} + \epsilon}$ (clip `[-10, 10]`)
+  2. `z_score_1m`: $\frac{r_{1m} - \mu_{1m}}{\sigma_{1m} + \epsilon}$ (clip `[-10, 10]`)
+  3. `short_growth_rate`: $\frac{r_{10}}{r_{1m} + \epsilon}$ (clip `[0, 6]`)
+  4. `growth_rate`: $\frac{r_{1m}}{r_{5m} + \epsilon}$ (clip `[0, 5]`)
+  5. `burstiness_10s`: $\frac{\sigma_{10}^2}{\mu_{10}^2 + \epsilon}$ (clip `[0, 20]`)
+  6. `rate_delta_norm`: $\frac{r_{1m} - r_{5m}}{\sigma_{1m} + \epsilon}$ (clip `[-10, 10]`)
+  7. `slope_norm`: $\frac{\text{slope}(r_{1m})}{\mu_{1m} + \epsilon}$ (clip `[-10, 10]`)
+  8. `spike_ratio_10s`: $\frac{\max(r_{10})}{\mu_{10} + \epsilon}$ (clip `[0, 20]`)
+- **Tách biệt baseline**: Baseline $\mu, \sigma$ được tính từ lịch sử trước khi append mẫu hiện tại.
+- **Neutral Baseline (Cold-start)**: `[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]`.
+- **An toàn mô hình**: Nâng `MODEL_VERSION` thành `if-global-v2`. `GlobalAnomalyModel` kiểm tra `EXPECTED_NUM_FEATURES = 8`. Nếu load trúng mô hình cũ 6D (`n_features_in_ != 8`), log cảnh báo và trả về `None` thay vì làm sập tiến trình.
+
+### 3. Kết quả kiểm thử
+- Tạo bộ kiểm thử toàn diện tại `tests/test_feature_vector_8d.py` bao gồm 9 unit tests:
+  - Kiểm tra schema, thứ tự, tên 8 đặc trưng.
+  - Kiểm tra Cold-start Neutral Baseline.
+  - Kiểm tra kích thước `_GroupWindow` tuân thủ `rolling_window_points`.
+  - Kiểm tra dòng log đều (steady stream).
+  - Kiểm tra độ nhạy khi xảy ra micro-burst trong 10s.
+  - Kiểm tra các ngưỡng clipping bảo vệ số học.
+  - Kiểm tra từ chối tương thích mô hình cũ 6D và dự đoán thành công với 8D.
+- Toàn bộ 9/9 tests đều PASS.

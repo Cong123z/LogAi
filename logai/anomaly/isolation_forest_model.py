@@ -12,8 +12,9 @@ from logai.models import AnomalyResult, FeatureVector
 from logai.storage.base import ModelStore
 
 logger = logging.getLogger(__name__)
-MODEL_VERSION = "if-global-v1"
+MODEL_VERSION = "if-global-v2"
 GLOBAL_MODEL_KEY = "global"
+EXPECTED_NUM_FEATURES = 8
 
 
 class GlobalAnomalyModel:
@@ -35,7 +36,15 @@ class GlobalAnomalyModel:
             )
             return False
 
-        X = np.array([fv.as_vector() for fv in feature_vectors])
+        X = np.array([fv.as_vector() for fv in feature_vectors], dtype=np.float64)
+        if X.ndim != 2 or X.shape[1] != EXPECTED_NUM_FEATURES:
+            logger.error(
+                "Invalid feature dimensions for training: expected shape (*, %d), got %s",
+                EXPECTED_NUM_FEATURES,
+                X.shape,
+            )
+            return False
+
         model = IsolationForest(
             n_estimators=self.config.n_estimators,
             contamination=self.config.contamination,
@@ -69,7 +78,23 @@ class GlobalAnomalyModel:
         model = self._load()
         if model is None:
             return None
-        X = np.array([feature_vector.as_vector()])
+        vec = feature_vector.as_vector()
+        if len(vec) != EXPECTED_NUM_FEATURES:
+            logger.error(
+                "Feature vector dimension mismatch: expected %d, got %d",
+                EXPECTED_NUM_FEATURES,
+                len(vec),
+            )
+            return None
+        if hasattr(model, "n_features_in_") and model.n_features_in_ != EXPECTED_NUM_FEATURES:
+            logger.warning(
+                "Loaded model expects %d features, but feature vector has %d. Please retrain model.",
+                model.n_features_in_,
+                EXPECTED_NUM_FEATURES,
+            )
+            return None
+
+        X = np.array([vec], dtype=np.float64)
         # decision_function: higher = more normal. We flip + normalize to a
         # 0..1 "anomaly score" so it reads naturally as a Prometheus gauge.
         raw_score = float(model.decision_function(X)[0])

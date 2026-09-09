@@ -24,13 +24,22 @@ from logai.models import FeatureVector
 @dataclass
 class _GroupWindow:
     timestamps: Deque[float] = field(default_factory=deque)
-    rate_1m_history: Deque[float] = field(default_factory=lambda: deque(maxlen=64))
+    rate_10s_history: Deque[float] = field(default_factory=deque)
+    rate_1m_history: Deque[float] = field(default_factory=deque)
 
 
 class FeatureEngine:
     def __init__(self, config: FeatureConfig):
         self.config = config
-        self._windows: Dict[str, _GroupWindow] = defaultdict(_GroupWindow)
+        self._windows: Dict[str, _GroupWindow] = defaultdict(self._create_window)
+
+    def _create_window(self) -> _GroupWindow:
+        maxlen = self.config.rolling_window_points
+        return _GroupWindow(
+            timestamps=deque(),
+            rate_10s_history=deque(maxlen=maxlen),
+            rate_1m_history=deque(maxlen=maxlen),
+        )
 
     def _prune(self, gw: _GroupWindow, now: float) -> None:
         retention = self.config.history_retention_seconds
@@ -69,52 +78,96 @@ class FeatureEngine:
         count_1m = count_since(w1m)
         count_5m = count_since(w5m)
 
+        rate_10s = count_10s / w10
         rate_1m = count_1m / w1m
         rate_5m = count_5m / w5m
 
-        gw.rate_1m_history.append(rate_1m)
-        hist = list(gw.rate_1m_history)
+        # 1. Baseline statistics computed strictly from prior history (prior samples)
+        # to prevent anomaly from self-inflating the baseline (Baseline Contamination).
+        hist_10s = list(gw.rate_10s_history)
+        hist_1m = list(gw.rate_1m_history)
 
-        rolling_mean = statistics.fmean(hist) if hist else 0.0
-        rolling_std = statistics.pstdev(hist) if len(hist) > 1 else 0.0
+        mu_10 = statistics.fmean(hist_10s) if hist_10s else 0.0
+        sigma_10 = statistics.pstdev(hist_10s) if len(hist_10s) > 1 else 0.0
+
+        mu_1m = statistics.fmean(hist_1m) if hist_1m else 0.0
+        sigma_1m = statistics.pstdev(hist_1m) if len(hist_1m) > 1 else 0.0
+
+        # Append current rates to history after capturing prior baseline
+        gw.rate_10s_history.append(rate_10s)
+        gw.rate_1m_history.append(rate_1m)
+
+        # Cold-start: return neutral baseline vector
+        if len(gw.timestamps) <= 1:
+            return FeatureVector(
+                group_id=group_id,
+                timestamp=now,
+                z_score_10s=0.0,
+                z_score_1m=0.0,
+                short_growth_rate=1.0,
+                growth_rate=1.0,
+                burstiness_10s=0.0,
+                rate_delta_norm=0.0,
+                slope_norm=0.0,
+                spike_ratio_10s=1.0,
+            )
 
         eps = 1e-9
 
-        # 1. z_score: standard score of rate_1m against rolling history
-        z_score = (rate_1m - rolling_mean) / rolling_std if rolling_std > eps else 0.0
+        # 1. z_score_10s: short-term burst compared to 10s baseline
+        z_score_10s = (rate_10s - mu_10) / (sigma_10 + eps) if sigma_10 > eps else 0.0
+        z_score_10s = max(-10.0, min(10.0, z_score_10s))
 
-        # 2. growth_rate: ratio of 1m rate to 5m rate; neutral 1.0 when cold-starting (single event)
-        if len(gw.timestamps) <= 1:
-            growth_rate = 1.0
+        # 2. z_score_1m: medium-term deviation compared to 1m baseline
+        z_score_1m = (rate_1m - mu_1m) / (sigma_1m + eps) if sigma_1m > eps else 0.0
+        z_score_1m = max(-10.0, min(10.0, z_score_1m))
+
+        # 3. short_growth_rate: instant burst ratio between 10s and 1m (theoretical max ~6.0)
+        if rate_1m > eps:
+            short_growth_rate = rate_10s / (rate_1m + eps)
         else:
-            growth_rate = (rate_1m / rate_5m) if rate_5m > eps else (1.0 if rate_1m > 0 else 0.0)
+            short_growth_rate = 1.0 if rate_10s <= eps else 6.0
+        short_growth_rate = max(0.0, min(6.0, short_growth_rate))
 
-        # 3. burstiness: Fano factor (variance / mean) over rate history
-        if len(hist) > 1 and rolling_mean > eps:
-            burstiness = (rolling_std ** 2) / rolling_mean
+        # 4. growth_rate: medium-term ratio between 1m and 5m (theoretical max ~5.0)
+        if rate_5m > eps:
+            growth_rate = rate_1m / (rate_5m + eps)
         else:
-            burstiness = 0.0
+            growth_rate = 1.0 if rate_1m <= eps else 5.0
+        growth_rate = max(0.0, min(5.0, growth_rate))
 
-        # 4. rate_delta_norm: difference between 1m and 5m rates normalized by rolling std
-        rate_delta_norm = (rate_1m - rate_5m) / rolling_std if rolling_std > eps else 0.0
+        # 5. burstiness_10s: relative variance (CV^2 = sigma^2 / mu^2) on 10s rate history
+        if len(hist_10s) > 1 and mu_10 > eps:
+            burstiness_10s = (sigma_10 ** 2) / (mu_10 ** 2 + eps)
+        else:
+            burstiness_10s = 0.0
+        burstiness_10s = max(0.0, min(20.0, burstiness_10s))
 
-        # 5. slope_norm: linear trend of rate history normalized by rolling mean
-        slope = self._slope(hist)
-        slope_norm = slope / rolling_mean if rolling_mean > eps else 0.0
+        # 6. rate_delta_norm: rate delta normalized by 1m standard deviation
+        rate_delta_norm = (rate_1m - rate_5m) / (sigma_1m + eps) if sigma_1m > eps else 0.0
+        rate_delta_norm = max(-10.0, min(10.0, rate_delta_norm))
 
-        # 6. spike_ratio: max recent rate relative to rolling mean; neutral 1.0 when idle/new
-        max_recent_rate = max(hist) if hist else 0.0
-        spike_ratio = max_recent_rate / rolling_mean if rolling_mean > eps else 1.0
+        # 7. slope_norm: linear trend of 1m rate history normalized by mean
+        slope = self._slope(list(gw.rate_1m_history))
+        slope_norm = slope / (mu_1m + eps) if mu_1m > eps else 0.0
+        slope_norm = max(-10.0, min(10.0, slope_norm))
+
+        # 8. spike_ratio_10s: peak recent 10s rate relative to baseline mu_10
+        max_recent_r10 = max(gw.rate_10s_history) if gw.rate_10s_history else rate_10s
+        spike_ratio_10s = max_recent_r10 / (mu_10 + eps) if mu_10 > eps else 1.0
+        spike_ratio_10s = max(0.0, min(20.0, spike_ratio_10s))
 
         return FeatureVector(
             group_id=group_id,
             timestamp=now,
-            z_score=z_score,
+            z_score_10s=z_score_10s,
+            z_score_1m=z_score_1m,
+            short_growth_rate=short_growth_rate,
             growth_rate=growth_rate,
-            burstiness=burstiness,
+            burstiness_10s=burstiness_10s,
             rate_delta_norm=rate_delta_norm,
             slope_norm=slope_norm,
-            spike_ratio=spike_ratio,
+            spike_ratio_10s=spike_ratio_10s,
         )
 
     @staticmethod

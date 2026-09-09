@@ -223,19 +223,23 @@ event. Với group chứa nhiều service, service của template đầu tiên �
 
 ### 5.6 FeatureVector
 
-Vector sáu chiều, không chứa volume tuyệt đối và không dùng normalizer riêng.
+Vector tám chiều, không chứa volume tuyệt đối và không dùng normalizer riêng.
+Bảo đảm cách ly baseline (tính baseline từ lịch sử trước khi append sample mới)
+và áp dụng numerical clipping guards.
 
-| Field | Công thức/ý nghĩa |
-|---|---|
-| `z_score` | `(rate_1m - rolling_mean) / rolling_std`; `0` nếu std gần 0 |
-| `growth_rate` | `rate_1m / rate_5m`; event đầu dùng neutral value `1` |
-| `burstiness` | `rolling_std^2 / rolling_mean` (Fano factor) |
-| `rate_delta_norm` | `(rate_1m - rate_5m) / rolling_std` |
-| `slope_norm` | Linear slope của rate history chia rolling mean |
-| `spike_ratio` | Max recent 1-minute rate chia rolling mean |
+| Field | Công thức/ý nghĩa | Clipping |
+|---|---|---|
+| `z_score_10s` | `(rate_10s - mu10) / (sigma10 + eps)`; độ lệch chuẩn hóa 10s | `[-10, 10]` |
+| `z_score_1m` | `(rate_1m - mu1m) / (sigma1m + eps)`; độ lệch chuẩn hóa 1m | `[-10, 10]` |
+| `short_growth_rate` | `rate_10s / (rate_1m + eps)`; tỷ lệ tăng trưởng tức thì 10s vs 1m | `[0, 6]` |
+| `growth_rate` | `rate_1m / (rate_5m + eps)`; tỷ lệ tăng trưởng 1m vs 5m | `[0, 5]` |
+| `burstiness_10s` | `sigma10^2 / (mu10^2 + eps)`; hệ số biến thiên bậc hai (CV^2) trên 10s | `[0, 20]` |
+| `rate_delta_norm` | `(rate_1m - rate_5m) / (sigma1m + eps)` | `[-10, 10]` |
+| `slope_norm` | Linear slope của rate 1m history chia mu1m | `[-10, 10]` |
+| `spike_ratio_10s` | Max recent 10s rate chia mu10 | `[0, 20]` |
 
 `FeatureVector.as_vector()` luôn trả feature theo đúng thứ tự trên. Event đầu
-của group tạo neutral baseline `[0, 1, 0, 0, 0, 1]`.
+của group tạo neutral baseline `[0, 0, 1, 1, 0, 0, 0, 1]`.
 
 ### 5.7 AnomalyResult và AnomalyState
 
@@ -247,7 +251,7 @@ của group tạo neutral baseline `[0, 1, 0, 0, 0, 1]`.
 | `timestamp` | `float` | Timestamp của feature vector |
 | `anomaly_score` | `float` | Score clamp trong `[0, 1]` |
 | `anomaly` | `bool` | IF outlier hoặc score vượt threshold |
-| `model_version` | `str` | Hiện là `if-global-v1` |
+| `model_version` | `str` | Hiện là `if-global-v2` |
 
 `AnomalyState` bổ sung `consecutive_anomaly_count` và `alert_state` để persist
 hysteresis theo group. Alert states gồm `NORMAL`, `WARMING`, `ALERTING`,
