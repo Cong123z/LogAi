@@ -70,7 +70,9 @@ class RealtimePipeline:
         )
         self.metrics = MetricsExporter(config.metrics)
 
-        self._doc_refresh_at = 0.0
+        # DocumentationMatcher already attempted its initial load in __init__.
+        # Avoid encoding the same corpus again on the first realtime event.
+        self._doc_refresh_at = time.time()
         self._template_counts: dict[str, int] = {}
         for svc, count in self.template_registry.all_counts_by_service().items():
             self.metrics.set_template_count(svc, count)
@@ -124,7 +126,17 @@ class RealtimePipeline:
             self.metrics.record_raw_event(parsed)
 
             if grouped is not None:
-                self._match_documentation_if_stale(grouped.group_id)
+                # Documentation is optional enrichment. A malformed corpus or
+                # incompatible embedding must not suppress anomaly detection.
+                try:
+                    self._match_documentation_if_stale(grouped.group_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Documentation enrichment failed for group %s; "
+                        "continuing with the previous match: %s",
+                        grouped.group_id,
+                        exc,
+                    )
                 fv = self.feature_engine.update(grouped.group_id, raw.timestamp)
                 self._run_anomaly_and_alert(grouped.group_id, fv)
 
@@ -207,6 +219,8 @@ class RealtimePipeline:
             self.doc_matcher.reload()
             self._doc_refresh_at = now
 
+        if not self.doc_matcher.ready:
+            return
         group = self.group_registry.get(group_id)
         centroid = self.group_registry.get_centroid(group_id)
         if group is None or centroid is None:
@@ -215,8 +229,7 @@ class RealtimePipeline:
         group.documented = match.documented
         group.documentation_id = match.documentation_id
         group.confidence = match.similarity
-        if match.error_code:
-            group.error_code = match.error_code
+        group.error_code = match.error_code
         self.group_registry.upsert(group, flush=False)
 
     def _run_anomaly_and_alert(self, group_id: str, feature_vector: FeatureVector) -> None:

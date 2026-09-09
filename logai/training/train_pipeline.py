@@ -296,8 +296,20 @@ class TrainingPipeline:
             self.group_registry.set_centroid(group.group_id, centroid)
 
     def _match_documentation(self) -> None:
+        if not self.doc_matcher.ready:
+            logger.warning(
+                "Documentation matcher is unavailable; training will keep groups undocumented"
+            )
+            return
         centroids = self.group_registry.all_centroids()
-        matches = self.doc_matcher.match_all(centroids)
+        try:
+            matches = self.doc_matcher.match_all(centroids)
+        except Exception as exc:  # noqa: BLE001 - documentation is optional enrichment
+            logger.warning(
+                "Documentation matching failed; continuing training without enrichment: %s",
+                exc,
+            )
+            return
         for gid, match in matches.items():
             group = self.group_registry.get(gid)
             if not group:
@@ -305,7 +317,7 @@ class TrainingPipeline:
             group.documented = match.documented
             group.documentation_id = match.documentation_id
             group.confidence = match.similarity
-            group.error_code = match.error_code or group.error_code
+            group.error_code = match.error_code
             self.group_registry.upsert(group, flush=False)
         self.group_registry.flush()
 

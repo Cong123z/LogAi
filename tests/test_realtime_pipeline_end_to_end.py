@@ -35,9 +35,11 @@ for mod in [
 
 from logai.config import AppConfig
 from logai.collector.es_collector import ElasticsearchCollector
+from logai.docmatch.doc_matcher import MatchResult
 from logai.models import (
     AlertStateEnum,
     AnomalyResult,
+    FeatureVector,
     GroupState,
     ParsedEvent,
     RawLog,
@@ -202,6 +204,106 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["payload"]["event_id"], "evt_bad")
         self.assertIn("Parsing corrupted byte stream", records[0]["error"])
+
+    def test_documentation_failure_does_not_block_anomaly_processing(self):
+        """Optional documentation enrichment must not become an event failure."""
+        raw = RawLog(
+            event_id="evt_doc_failure",
+            timestamp=1011.0,
+            service="auth",
+            level="ERROR",
+            message="Authentication failed",
+        )
+        self.pipeline.parser.parse = MagicMock(
+            return_value=ParsedEvent(
+                raw=raw,
+                template="Authentication failed",
+                template_id="t_doc_failure",
+                parameters=[],
+                is_new_template=True,
+            )
+        )
+        self.pipeline._match_documentation_if_stale = MagicMock(
+            side_effect=ValueError("incompatible documentation embedding")
+        )
+        feature_vector = FeatureVector(group_id="G_AUTH", timestamp=raw.timestamp)
+        self.pipeline.feature_engine.update = MagicMock(return_value=feature_vector)
+        self.pipeline.anomaly_model.predict = MagicMock(return_value=None)
+
+        completed = self.pipeline._process_one(raw)
+
+        self.assertTrue(completed)
+        self.pipeline.feature_engine.update.assert_called_once()
+        self.pipeline.anomaly_model.predict.assert_called_once_with(feature_vector)
+        self.assertTrue(self.pipeline.dedup.seen(raw.event_id))
+        self.assertEqual(self.pipeline.dlq.count(), 0)
+
+    def test_documentation_no_match_clears_stale_metadata(self):
+        """A removed match must not leave an old documentation ID/error code."""
+        group = self.pipeline.group_registry.get("G_AUTH")
+        group.documented = True
+        group.documentation_id = "DOC-OLD"
+        group.error_code = "ERR_OLD"
+        group.confidence = 0.95
+        self.pipeline.group_registry.upsert(group)
+        self.pipeline.group_registry.get_centroid = MagicMock(return_value=[0.1] * 384)
+        self.pipeline.doc_matcher.ready = True
+        self.pipeline.doc_matcher.match = MagicMock(
+            return_value=MatchResult("G_AUTH", None, 0.42, False)
+        )
+
+        self.pipeline._match_documentation_if_stale("G_AUTH")
+
+        updated = self.pipeline.group_registry.get("G_AUTH")
+        self.assertFalse(updated.documented)
+        self.assertIsNone(updated.documentation_id)
+        self.assertEqual(updated.error_code, "")
+        self.assertEqual(updated.confidence, 0.42)
+
+    def test_unavailable_documentation_does_not_drop_events_under_load(self):
+        """Every grouped event must still reach feature and anomaly stages."""
+        self.pipeline.template_registry.upsert(
+            TemplateState(
+                template_id="t_load",
+                template_text="Load event",
+                service="auth",
+                group_id="G_AUTH",
+            )
+        )
+        self.pipeline.doc_matcher.ready = False
+        self.pipeline.feature_engine.update = MagicMock(
+            side_effect=lambda group_id, timestamp: FeatureVector(
+                group_id=group_id, timestamp=timestamp
+            )
+        )
+        self.pipeline.anomaly_model.predict = MagicMock(return_value=None)
+
+        def parse(raw):
+            return ParsedEvent(
+                raw=raw,
+                template="Load event",
+                template_id="t_load",
+                parameters=[],
+                is_new_template=False,
+            )
+
+        self.pipeline.parser.parse = MagicMock(side_effect=parse)
+        event_count = 2_000
+        for index in range(event_count):
+            completed = self.pipeline._process_one(
+                RawLog(
+                    event_id=f"evt_doc_load_{index}",
+                    timestamp=2000.0 + index,
+                    service="auth",
+                    level="INFO",
+                    message="Load event",
+                )
+            )
+            self.assertTrue(completed)
+
+        self.assertEqual(self.pipeline.feature_engine.update.call_count, event_count)
+        self.assertEqual(self.pipeline.anomaly_model.predict.call_count, event_count)
+        self.assertEqual(self.pipeline.dlq.count(), 0)
 
     def test_batch_execution_and_gc(self):
         """Verify collector run_forever iteration, queue depth tracking, and GC invocation."""
