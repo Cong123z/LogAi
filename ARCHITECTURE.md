@@ -79,6 +79,11 @@ giá trị retry, nhưng decorator của Elasticsearch collector hiện dùng tr
 default của `retry_with_backoff`; các giá trị `reliability.max_retries` và
 `backoff_*` chưa được truyền vào collector.
 
+Historical training sử dụng section `training` trong `config.yaml` cho
+`batch_size`, `max_docs`, `lookback_seconds` và `dedup_buffer_size`. CLI chỉ
+override `lookback_seconds` khi truyền `--lookback-hours`; các giá trị còn lại
+được lấy từ file config.
+
 ## 4. External input contract
 
 ### 4.1 Elasticsearch document

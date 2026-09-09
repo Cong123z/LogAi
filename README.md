@@ -70,6 +70,10 @@ POST /app-logs-2026.09.07/_doc
 LogAI Engine **không** cần biết gì về cách bạn sinh log — nó chỉ poll
 Elasticsearch bằng `search_after`, xử lý, và expose `/metrics`.
 
+Các tham số historical training được cấu hình trong section `training` của
+`config.yaml`, gồm `max_docs`, `batch_size`, `lookback_seconds` và
+`dedup_buffer_size`. Mặc định training lấy tối đa `200000` logs.
+
 ## 3. Chạy thử (Docker Compose)
 
 ```bash

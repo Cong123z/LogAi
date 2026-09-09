@@ -350,21 +350,9 @@ def run_training_from_elasticsearch(
     max_docs: Optional[int] = None,
     batch_size: Optional[int] = None,
 ) -> None:
-    lookback = (
-        lookback_seconds
-        if lookback_seconds is not None
-        else getattr(config.training, "lookback_seconds", 7 * 24 * 3600)
-    )
-    total_docs = (
-        max_docs
-        if max_docs is not None
-        else getattr(config.training, "max_docs", 200_000)
-    )
-    chunk_size = (
-        batch_size
-        if batch_size is not None
-        else getattr(config.training, "batch_size", 2000)
-    )
+    lookback = config.training.lookback_seconds if lookback_seconds is None else lookback_seconds
+    total_docs = config.training.max_docs if max_docs is None else max_docs
+    chunk_size = config.training.batch_size if batch_size is None else batch_size
 
     checkpoint_file = getattr(
         config.storage, "training_checkpoint_file", "training_checkpoint.json"

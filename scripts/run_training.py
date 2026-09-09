@@ -22,8 +22,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LogAI training pipeline")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument(
-        "--lookback-hours", type=float, default=168.0,
-        help="How many hours of historical logs to pull from Elasticsearch (default: 7 days)",
+        "--lookback-hours", type=float, default=None,
+        help="Override training.lookback_seconds from config (hours)",
     )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -34,7 +34,10 @@ def main() -> None:
     )
 
     config = load_config(args.config)
-    run_training_from_elasticsearch(config, lookback_seconds=args.lookback_hours * 3600)
+    lookback_seconds = (
+        args.lookback_hours * 3600 if args.lookback_hours is not None else None
+    )
+    run_training_from_elasticsearch(config, lookback_seconds=lookback_seconds)
 
 
 if __name__ == "__main__":

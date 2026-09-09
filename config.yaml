@@ -52,6 +52,12 @@ alert:
   score_high: 0.6
   score_low: 0.4
 
+training:
+  batch_size: 2000
+  max_docs: 200000
+  lookback_seconds: 604800
+  dedup_buffer_size: 10000
+
 storage:
   base_dir: "data"
   template_registry_file: "template_registry.json"
