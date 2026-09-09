@@ -277,7 +277,7 @@ flowchart TD
     I[Normalized centroids]
     J[Documentation matching]
     K[Events grouped chronologically]
-    L[6D feature generation]
+    L[8D feature generation]
     M[Global Isolation Forest]
     N[(data/ artifacts)]
 
@@ -296,9 +296,9 @@ flowchart TD
 
 | Bước | Module | Input | Output/state |
 |---:|---|---|---|
-| 1 | `ElasticsearchCollector.fetch_historical_range` | `start_ts`, `end_ts`, `max_docs` | `List[RawLog]` |
-| 2 | `Drain3Parser` | Raw logs sorted theo timestamp | `List[ParsedEvent]`, Drain3 state |
-| 3 | `TrainingPipeline._build_template_registry` | Parsed events | Template metadata |
+| 1 | `ElasticsearchCollector.stream_historical_batches` | `start_ts`, `end_ts`, `max_docs`, `batch_size`, cursor | Iterator của `(List[RawLog], cursor)` |
+| 2 | `Drain3Parser` | Raw logs sorted theo timestamp, từng batch | Drain3 state + durable training event index |
+| 3 | `TrainingPipeline._rebuild_template_registry` | Durable event index | Template metadata |
 | 4 | `TemplateEmbedder` | Template texts | L2-normalized vectors |
 | 5 | `GroupClusterer.cluster` | Template IDs + embedding matrix | HDBSCAN labels |
 | 6 | `TrainingPipeline._cluster_templates` | Labels | `template_id -> group_id` |
@@ -306,7 +306,7 @@ flowchart TD
 | 8 | `GroupClusterer.compute_centroid` | Embeddings trong group | L2-normalized centroid |
 | 9 | `DocumentationMatcher.match_all` | Group centroids | Match metadata trong Group Registry |
 | 10 | `FeatureEngine` | Events theo từng group, chronological | `FeatureVector` list |
-| 11 | `GlobalAnomalyModel.train` | Tất cả feature vectors | `models/global.pkl` |
+| 11 | `GlobalAnomalyModel.train` | Feature vectors replay từ event index | `models/global.pkl` |
 
 ### 6.2 Group ID rules
 
@@ -442,7 +442,7 @@ luôn thay đổi state.
 |---|---|---|---|---|
 | `logai/config.py` | Load và merge cấu hình | YAML + environment | `AppConfig` | Không |
 | `logai/models.py` | Data contracts dùng chung | Field values | Dataclass instances | Không |
-| `collector/es_collector.py` | Poll realtime và fetch historical | ES config + checkpoint | `RawLog` batches | Search cursor qua CheckpointStore |
+| `collector/es_collector.py` | Poll realtime và stream historical | ES config + checkpoint | `RawLog` batches/cursor | Realtime hoặc training cursor qua CheckpointStore |
 | `parsing/drain3_parser.py` | Mine template và extract parameters | `RawLog` | `ParsedEvent` | `drain3_state.bin` |
 | `embedding/embedder.py` | Encode text thành normalized vector | Template/doc text | NumPy matrix/vector | Model in-memory/Hugging Face cache |
 | `clustering/hdbscan_cluster.py` | Offline clustering, centroid, realtime nearest-group | IDs + vectors | Labels, centroid, assignment | Không |
@@ -453,7 +453,7 @@ luôn thay đổi state.
 | `metrics/prometheus_exporter.py` | Expose/update metrics | Parsed/group/anomaly state | `/metrics` | Prometheus client in-memory |
 | `storage/base.py` | Atomic JSON/pickle/model persistence | Python objects | Files | File contents |
 | `storage/registries.py` | Template/group metadata và vectors | State dataclasses/vectors | Registry lookup/list | Registry files + caches |
-| `storage/checkpoint.py` | Persist Elasticsearch cursor | sort values/timestamp | Current checkpoint | `checkpoint.json` |
+| `storage/checkpoint.py` | Persist Elasticsearch cursor | sort values/timestamp | Current checkpoint | `checkpoint.json` hoặc `training_checkpoint.json` |
 | `storage/dedup.py` | Event idempotency theo TTL | `event_id` | seen/not seen | `dedup_index.json` |
 | `reliability/retry.py` | Exponential backoff + jitter | Callable | Result hoặc re-raised error | Không |
 | `reliability/dlq.py` | Ghi và đọc failed events | Payload + error | JSONL records | `dlq.jsonl` |
@@ -499,6 +499,8 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 | `data/doc_embeddings.pkl` | Pickle | Doc matcher | Hiện chưa được reuse khi reload | Corpus entries + embeddings |
 | `data/drain3_state.bin` | Drain3 persistence | Parser | Parser | Drain tree/template clusters |
 | `data/checkpoint.json` | JSON object | Collector | Collector | `search_after`, `last_timestamp` |
+| `data/training_checkpoint.json` | JSON object | Training pipeline | Training collector | Historical `search_after` cursor |
+| `data/training_event_index.jsonl` | Append-only JSONL | Training pipeline | Training pipeline | Lightweight parsed event records for replay |
 | `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine | `group_id -> AnomalyState` |
 | `data/dedup_index.json` | JSON object | Dedup index | Dedup index | `event_id -> processed wall-clock time` |
 | `data/dlq.jsonl` | Append-only JSONL | Realtime | Manual replay API | Failed event records |
@@ -562,10 +564,10 @@ Realtime kiểm tra `DedupIndex.seen(event_id)` trước parse. Event thành cô
 
 ### 10.3 Checkpoint và crash recovery
 
-Checkpoint gồm sort value cuối cùng và timestamp cuối cùng. Mỗi setter atomic
-write JSON qua temp file + `os.replace`.
+Realtime checkpoint gồm sort value cuối cùng và timestamp cuối cùng. Mỗi setter
+atomic write JSON qua temp file + `os.replace`.
 
-**Behavior hiện tại chưa cung cấp at-least-once delivery.** Collector advance
+**Realtime behavior hiện tại chưa cung cấp at-least-once delivery.** Collector advance
 checkpoint ngay sau khi fetch batch và trước khi caller xử lý:
 
 ```text
@@ -587,6 +589,12 @@ Target semantics sau khi sửa phải là:
 3. Flush state cần thiết.
 4. Chỉ commit checkpoint khi batch đạt điều kiện hoàn tất.
 5. Restart có thể refetch batch; dedup loại events đã commit thành công.
+
+Historical training có semantics riêng: `stream_historical_batches()` không tự
+ghi checkpoint. Training append và `fsync` event index trước, sau đó mới commit
+cursor theo từng batch. Khi process restart, cursor xác định page kế tiếp còn
+event index giữ toàn bộ dữ liệu đã parse cho các phase grouping và model. Hai file
+training này chỉ bị xóa sau khi toàn bộ training artifacts được ghi thành công.
 
 ### 10.4 File atomicity và process model
 
@@ -669,7 +677,7 @@ thiết kế tương lai:
 |---|---|---|
 | Critical | Checkpoint commit trước xử lý batch | Có thể mất event khi crash |
 | Resolved | Dedup JSON không bounded, GC/flush O(D) | Đã giải quyết (Bounded LRU Cache - Issue 2) |
-| Critical | Historical fetch và parse giữ full lists | Training có thể OOM; fetch mặc định cap 200,000 docs |
+| Resolved | Historical fetch/parse giữ full `RawLog` và `ParsedEvent` lists | Stream theo batch, replay qua `training_event_index.jsonl`; feature-vector sampling vẫn là Issue 7 |
 | Critical | Feature generation scan timestamps và giữ toàn bộ vectors | CPU/RAM tăng mạnh khi training lớn |
 | High | Template metric scan toàn registry mỗi event | Realtime CPU/object allocation tăng theo số template |
 | High | Feature windows không persist | Restart mất baseline ngắn hạn |

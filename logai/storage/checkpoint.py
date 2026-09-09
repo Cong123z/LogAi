@@ -10,22 +10,31 @@ from logai.storage.base import JSONStore
 
 
 class CheckpointStore:
-    def __init__(self, storage: StorageConfig):
+    def __init__(self, storage: StorageConfig, checkpoint_file: Optional[str] = None):
         base = Path(storage.base_dir)
-        self._store = JSONStore(base / storage.checkpoint_file)
+        filename = checkpoint_file or storage.checkpoint_file
+        self.path = base / filename
+        self._store = JSONStore(self.path)
 
     def get_search_after(self) -> Optional[List[Any]]:
         return self._store.get("search_after")
 
-    def set_search_after(self, value: List[Any]) -> None:
-        self._store.set("search_after", value)
+    def set_search_after(self, value: List[Any], flush: bool = True) -> None:
+        self._store.set("search_after", value, flush=flush)
 
     def get_last_timestamp(self) -> Optional[float]:
         return self._store.get("last_timestamp")
 
-    def set_last_timestamp(self, ts: float) -> None:
-        self._store.set("last_timestamp", ts)
+    def set_last_timestamp(self, ts: float, flush: bool = True) -> None:
+        self._store.set("last_timestamp", ts, flush=flush)
 
     def reset(self) -> None:
         self._store.set("search_after", None, flush=False)
         self._store.set("last_timestamp", None)
+
+    def clear(self) -> None:
+        if self.path.exists():
+            try:
+                self.path.unlink()
+            except OSError:
+                pass

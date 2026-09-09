@@ -90,6 +90,14 @@ class AlertConfig:
 
 
 @dataclass
+class TrainingConfig:
+    batch_size: int = 2000
+    max_docs: int = 200_000
+    lookback_seconds: float = 7 * 24 * 3600
+    dedup_buffer_size: int = 10_000
+
+
+@dataclass
 class StorageConfig:
     base_dir: str = "data"
     template_registry_file: str = "template_registry.json"
@@ -97,6 +105,8 @@ class StorageConfig:
     group_registry_file: str = "group_registry.json"
     group_centroids_file: str = "group_centroids.pkl"
     checkpoint_file: str = "checkpoint.json"
+    training_checkpoint_file: str = "training_checkpoint.json"
+    training_event_index_file: str = "training_event_index.jsonl"
     window_state_file: str = "window_state.json"
     anomaly_state_file: str = "anomaly_state.json"
     dedup_index_file: str = "dedup_index.json"
@@ -133,6 +143,7 @@ class AppConfig:
     storage: StorageConfig = field(default_factory=StorageConfig)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:

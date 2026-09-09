@@ -76,6 +76,11 @@ class JSONStore:
             self._data.update(mapping)
             self._flush()
 
+    def replace_all(self, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._data = dict(mapping)
+            self._flush()
+
     def flush(self) -> None:
         self._flush()
 

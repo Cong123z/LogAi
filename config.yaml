@@ -59,6 +59,8 @@ storage:
   group_registry_file: "group_registry.json"
   group_centroids_file: "group_centroids.pkl"
   checkpoint_file: "checkpoint.json"
+  training_checkpoint_file: "training_checkpoint.json"
+  training_event_index_file: "training_event_index.jsonl"
   window_state_file: "window_state.json"
   anomaly_state_file: "anomaly_state.json"
   dedup_index_file: "dedup_index.json"

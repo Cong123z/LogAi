@@ -51,7 +51,7 @@ Các feature tuyệt đối gây hại cho global model vì chúng encode thông
 | `slope_norm`       | slope / (rolling_mean + ε)                 | thay `slope`       |
 | `spike_ratio`      | max_recent_rate / (rolling_mean + ε)       | thay `max_recent`  |
 
-6 features, tất cả dimensionless → không cần thêm normalizer, global model
+8 features, tất cả dimensionless → không cần thêm normalizer, global model
 hoạt động trực tiếp.
 
 **Bước 2**: Đổi `GroupAnomalyModels` — train 1 IF duy nhất trên tất cả groups:
@@ -245,24 +245,25 @@ Dedup index sẽ skip các events đã xử lý, chỉ xử lý tiếp phần c�
 
 ## 5. Training Pipeline: Stream Fetch + Parse theo từng batch để chống OOM
 
-**Status**: TODO  
-**Severity**: Critical — gây OOM với dataset lớn (>1M - 35M logs)  
+**Status**: ✅ RESOLVED
+**Severity**: Critical — đã giảm đáng kể RAM cho raw/parsed logs; feature vectors vẫn là issue riêng
 **Files liên quan**:
 - `logai/collector/es_collector.py`
 - `logai/training/train_pipeline.py`
 
-### Vấn đề
-Hiện tại `fetch_historical_range()` gom toàn bộ `List[RawLog]` vào RAM, sau đó `_parse_all()` lại sort và tạo thêm 1 list `List[ParsedEvent]`. Với dataset lớn (ví dụ 35M logs ~ 10GB raw):
+### Vấn đề cũ
+`fetch_historical_range()` từng gom toàn bộ `List[RawLog]` vào RAM, sau đó `_parse_all()` lại sort và tạo thêm một list `List[ParsedEvent]`.
 - `raw_logs` + `parsed_events` chiếm tới ~30–50 GB RAM, chắc chắn gây crash OOM.
 - Drain3 là một thuật toán online/streaming, hoàn toàn có khả năng cập nhật theo từng batch mà không cần giữ toàn bộ log thô.
 
-### Hướng sửa
-1. Cung cấp generator trong `ElasticsearchCollector` (ví dụ: `stream_historical_batches(start_ts, end_ts, batch_size=5000)`).
-2. Xử lý streaming qua Drain3 theo từng batch:
-   - Parse từng log qua Drain3 và cập nhật số liệu cho `TemplateRegistry`.
-   - Thu hồi ngay `RawLog` và `ParsedEvent` sau mỗi batch.
-   - Chỉ lưu lại danh sách định danh siêu nhẹ `event_index: List[Tuple[str, float]]` (hoặc binary temp file `(template_id, timestamp)` chỉ 12 bytes/event) để phục vụ cho phase sinh feature sau này.
-3. Bộ nhớ cho log thô giảm từ ~50 GB xuống chỉ còn kích thước của 1 batch trong RAM (~vài chục MB).
+### Đã triển khai
+1. `stream_historical_batches()` lấy dữ liệu theo batch và không dùng realtime checkpoint.
+2. Mỗi batch được đưa vào Drain3 ngay; dedup training dùng `LocalTrainingDedup` trong RAM.
+3. `training_event_index.jsonl` lưu durable các trường nhẹ cần cho grouping/feature replay.
+4. Cursor training chỉ commit sau khi event index của batch đã `fsync`; chỉ xóa index/checkpoint sau khi toàn bộ artifacts train thành công.
+5. Khi resume, event index được replay toàn bộ để không mất event trước checkpoint.
+
+Residual: phase feature generation vẫn giữ các sample cần train trong RAM; đây là phạm vi của Issue 7 (reservoir sampling).
 
 ---
 

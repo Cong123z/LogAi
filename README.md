@@ -104,7 +104,7 @@ python scripts/run_realtime.py
 - **Training** (`run_training.py`, chạy định kỳ — cron/Airflow, KHÔNG chạy
   liên tục): kéo log lịch sử từ ES → Drain3 → Template Registry → embedding
   → HDBSCAN → centroid → doc matcher → feature history → train **1 Global
-  Isolation Forest chung cho mọi groups** (trên 6 feature chuẩn hóa dimensionless)
+  Isolation Forest chung cho mọi groups** (trên 8 feature chuẩn hóa dimensionless)
   → lưu tất cả registry + model xuống `data/`.
 - **Realtime** (`run_realtime.py`, long-running process): chỉ
   Collect→Parse→Assign→Match→Aggregate→Predict→Export. **Không** cluster
@@ -127,6 +127,8 @@ Tất cả state nằm dưới `data/` (mount volume `logai-data` trong Docker):
 | `template_registry.json` / `template_embeddings.pkl` | Template State + embedding (mục 6) |
 | `group_registry.json` / `group_centroids.pkl` | Group State + centroid (mục 6) |
 | `checkpoint.json` | `search_after` cursor của ES collector (mục 7) |
+| `training_checkpoint.json` | cursor riêng cho historical training; xóa sau khi training hoàn tất |
+| `training_event_index.jsonl` | event index nhẹ để resume/replay training trước các phase grouping và model |
 | `anomaly_state.json` | Alert state machine per group (mục 6) |
 | `dedup_index.json` | idempotency index theo `event_id` (mục 7) |
 | `dlq.jsonl` | events lỗi sau khi retry hết (mục 7) |
@@ -143,10 +145,9 @@ instance `run_realtime.py` song song trên cùng thư mục `data/`).
   (`logai/reliability/retry.py`).
 - DLQ (`data/dlq.jsonl`) khi 1 event lỗi sau khi retry hết trong pipeline
   realtime — không làm nghẽn toàn bộ batch.
-- Checkpoint (`search_after`) + `event_id` dedup index hỗ trợ resume và
-  idempotency. Hiện checkpoint vẫn được commit trước khi xử lý xong batch nên
-  chưa bảo đảm không mất dữ liệu khi crash; xem Issue 4 trong
-  `KNOWN_ISSUES.md`.
+- Realtime checkpoint (`search_after`) + `event_id` dedup index hỗ trợ resume và
+  idempotency. Historical training dùng checkpoint và event index riêng; cursor
+  chỉ commit sau khi batch đã được ghi bền vững.
 
 ## 7. Metrics (mục 8 + 4.9)
 

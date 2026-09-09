@@ -4,6 +4,21 @@ Tài liệu ghi nhận chi tiết các vấn đề kỹ thuật đã được gi
 
 ---
 
+## Issue 8: Streaming Historical Training và Resume Checkpoint
+
+- **Trạng thái**: ✅ **RESOLVED**
+- Elasticsearch historical data được đọc bằng `stream_historical_batches()`.
+- Mỗi batch được parse vào Drain3 ngay, không tích lũy `RawLog` trước khi parse.
+- `LocalTrainingDedup` loại duplicate mà không chạm realtime dedup state.
+- `training_event_index.jsonl` được append và `fsync` trước khi ghi cursor
+  `training_checkpoint.json`.
+- Grouping, feature generation và Global Isolation Forest replay từ event index,
+  nên resume không bỏ qua dữ liệu của các batch trước sự cố.
+- Checkpoint và event index chỉ được xóa sau khi toàn bộ training thành công.
+- Realtime vẫn dùng `checkpoint.json` và `dedup_index.json` độc lập.
+
+---
+
 ## Issue 1: Anomaly Detection — Chuyển sang 1 Global Model với 6 Feature chuẩn hóa
 
 - **Trạng thái**: ✅ **RESOLVED** (Đã giải quyết)
@@ -303,6 +318,4 @@ O(T) theo số template.
 3. **Bộ kiểm thử tích hợp Pipeline toàn trình** (`tests/test_realtime_pipeline_end_to_end.py` - 6 tests):
    - Xác nhận sự phối hợp mượt mà giữa Dedup Index ($O(1)$) $\rightarrow$ Template Counting ($O(1)$) $\rightarrow$ Fast-path cho known templates $\rightarrow$ Feature Engine 8D $\rightarrow$ Global Anomaly Model $\rightarrow$ Alert State Machine $\rightarrow$ Dead Letter Queue $\rightarrow$ Batch GC.
 
-- **Tổng kết**: Toàn bộ **36/36 tests** trong hệ thống (`python3 -m unittest discover -s tests`) đều **PASS 100%**.
-
-
+- **Tổng kết**: Toàn bộ **40/40 tests** trong hệ thống (`python3 -m unittest discover -s tests`) đều **PASS 100%**.

@@ -104,6 +104,16 @@ class TemplateRegistry:
         self._meta.flush()
         self._embeddings.save(self._embedding_cache)
 
+    def replace_all(self, states: List[TemplateState]) -> None:
+        """Persist a consistent template snapshot for a training run."""
+        with self._lock:
+            self._counts_by_service = {}
+            self._embedding_cache = {}
+            self._meta.replace_all({})
+            for state in states:
+                self.upsert(state, flush=False)
+            self.flush()
+
 
 class GroupRegistry:
     """group_id -> GroupState (metadata) + group_id -> centroid embedding."""

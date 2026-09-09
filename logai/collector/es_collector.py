@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from elasticsearch import Elasticsearch
 
@@ -104,11 +104,19 @@ class ElasticsearchCollector:
             else:
                 time.sleep(self.config.poll_interval_seconds)
 
-    def fetch_historical_range(
-        self, start_ts: float, end_ts: Optional[float] = None, max_docs: int = 200_000
-    ) -> List[RawLog]:
-        """Used by the training pipeline to pull a bounded historical window
-        for building templates/groups/models (plan section 3.1)."""
+    def stream_historical_batches(
+        self,
+        start_ts: float,
+        end_ts: Optional[float] = None,
+        max_docs: int = 200_000,
+        batch_size: Optional[int] = None,
+        initial_search_after: Optional[List[Any]] = None,
+    ) -> Iterator[Tuple[List[RawLog], Optional[List[Any]]]]:
+        """Stream historical logs in batches without accumulating all logs into RAM.
+
+        Yields (batch, last_sort_value) tuples for each page fetched.
+        Does NOT touch or modify self.checkpoint (protects realtime pipeline).
+        """
         from datetime import datetime, timezone
 
         range_filter: Dict[str, Any] = {
@@ -117,22 +125,43 @@ class ElasticsearchCollector:
         if end_ts:
             range_filter["lte"] = datetime.fromtimestamp(end_ts, tz=timezone.utc).isoformat()
 
-        results: List[RawLog] = []
-        search_after = None
-        while len(results) < max_docs:
+        chunk_size = batch_size or self.config.batch_size
+        search_after = initial_search_after
+        total_fetched = 0
+
+        while total_fetched < max_docs:
+            current_limit = min(chunk_size, max_docs - total_fetched)
             body: Dict[str, Any] = {
-                "size": min(self.config.batch_size, max_docs - len(results)),
+                "size": current_limit,
                 "sort": [{"@timestamp": "asc"}, {"_id": "asc"}],
                 "query": {"range": {"@timestamp": range_filter}},
             }
             if search_after:
                 body["search_after"] = search_after
+
             response = self._search(body)
             hits = response.get("hits", {}).get("hits", [])
             if not hits:
                 break
-            results.extend(_hit_to_rawlog(h, self.config.index) for h in hits)
+
+            batch = [_hit_to_rawlog(h, self.config.index) for h in hits]
+            total_fetched += len(batch)
             search_after = hits[-1]["sort"]
-            if len(hits) < body["size"]:
+
+            yield batch, search_after
+
+            if len(hits) < current_limit:
                 break
+
+    def fetch_historical_range(
+        self, start_ts: float, end_ts: Optional[float] = None, max_docs: int = 200_000
+    ) -> List[RawLog]:
+        """Used by the training pipeline to pull a bounded historical window
+        for building templates/groups/models (plan section 3.1).
+
+        Preserved for backward compatibility, delegates to stream_historical_batches.
+        """
+        results: List[RawLog] = []
+        for batch, _ in self.stream_historical_batches(start_ts, end_ts, max_docs=max_docs):
+            results.extend(batch)
         return results
