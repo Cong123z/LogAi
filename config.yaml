@@ -71,6 +71,7 @@ reliability:
   backoff_base_seconds: 1
   backoff_max_seconds: 60
   dedup_ttl_seconds: 86400
+  dedup_max_size: 200000
 
 metrics:
   http_port: 9108

@@ -60,8 +60,11 @@ class RealtimePipeline:
             f"{config.storage.base_dir}/{config.storage.anomaly_state_file}"
         )
         self.alert_sm = AlertStateMachine(config.alert, alert_state_store)
-
-        self.dedup = DedupIndex(config.storage, config.reliability.dedup_ttl_seconds)
+        self.dedup = DedupIndex(
+            config.storage,
+            config.reliability.dedup_ttl_seconds,
+            config.reliability.dedup_max_size,
+        )
         self.dlq = DeadLetterQueue(
             f"{config.storage.base_dir}/{config.storage.dlq_file}"
         )

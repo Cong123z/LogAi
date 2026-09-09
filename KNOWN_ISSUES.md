@@ -95,13 +95,18 @@ bất kể chọn IF hay static thresholds.
 
 ## 2. Bottleneck: DedupIndex sẽ sập ở quy mô lớn
 
-**Status**: TODO  
+**Status**: ✅ RESOLVED (Đã giải quyết — xem chi tiết tại `ISSUES_FIXED.md`)  
 **Severity**: Critical — gây OOM hoặc pipeline stall  
-**File liên quan**: `logai/storage/dedup.py`
+**Files liên quan**:
+- `logai/storage/dedup.py`
+- `logai/config.py`
+- `config.yaml`
+- `logai/realtime/realtime_pipeline.py`
+- `tests/test_dedup_index.py`
 
 ### Vấn đề
 
-`DedupIndex` dùng `JSONStore` (Python dict backed by JSON file) lưu tất cả
+`DedupIndex` cũ dùng `JSONStore` (Python dict backed by JSON file) lưu tất cả
 `event_id` đã xử lý trong 24h (TTL = 86400s).
 
 Ở quy mô 10GB/ngày (~35M events/ngày):
@@ -109,36 +114,14 @@ bất kể chọn IF hay static thresholds.
 - `gc()` chạy mỗi batch, duyệt toàn bộ 35M entries → **pipeline stall vài giây**.
 - `flush()` serialize 35M entries ra JSON file → **file ~1-2 GB**, ghi chậm.
 
-### Hướng sửa
+### Giải pháp đã triển khai
 
-Thay `JSONStore` bằng bounded `OrderedDict` với eviction tự động:
-
-```python
-from collections import OrderedDict
-
-class BoundedDedupIndex:
-    def __init__(self, max_size=500_000):
-        self._data = OrderedDict()
-        self._max = max_size
-
-    def seen(self, event_id: str) -> bool:
-        return event_id in self._data
-
-    def mark(self, event_id: str) -> None:
-        self._data[event_id] = True
-        if len(self._data) > self._max:
-            self._data.popitem(last=False)  # evict oldest
-
-    def gc(self):
-        pass  # không cần, evict tự động
-```
-
-Lý do 500K entries là đủ: checkpoint `search_after` đã đảm bảo ES không trả
-lại events cũ trong hoạt động bình thường. Dedup chỉ cần cover khoảng giữa
-2 lần lưu checkpoint (vài batch) — 500K entries ≈ ~20 phút buffer, thừa đủ
-cho trường hợp restart.
-
-RAM: 500K × ~100 bytes ≈ **50 MB** thay vì 5 GB.
+Thay thế bằng Bounded LRU Cache sử dụng `OrderedDict` với giới hạn `max_size` (mặc định 200.000 entries, cấu hình qua `reliability.dedup_max_size`):
+- Tự động evict phần tử cũ nhất ở đầu trong $O(1)$ amortized (`popitem(last=False)`).
+- RAM tiêu thụ cố định ở mức **~20 MB** (hoặc ~50 MB với 500k entries).
+- Hàm `gc()` triệt tiêu hoàn toàn độ trễ $O(D)$ stall.
+- Cơ chế ghi snapshot đĩa compact JSON không indent chỉ khi dirty.
+- Tương thích ngược 100% với file JSON cũ và các caller hiện có.
 
 ---
 

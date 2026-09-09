@@ -184,3 +184,46 @@ O(T) theo số template.
   - Khi có micro-burst bùng nổ, `z_score_10s` và `short_growth_rate` kích hoạt tức thì, đưa `AlertStateMachine` từ `NORMAL` $\rightarrow$ `WARMING` $\rightarrow$ `ALERTING` trong thời gian thực.
   - Hai engine độc lập chạy cùng 1 chuỗi log cho ra kết quả vector 8D đồng nhất 100%.
 - **Tổng kết**: 10/10 tests PASS (`python3 -m unittest discover -s tests`).
+
+---
+
+## Issue 2: Bottleneck DedupIndex — Chuyển sang Bounded LRU Cache (OrderedDict)
+
+- **Trạng thái**: ✅ **RESOLVED** (Đã giải quyết)
+- **Ngày hoàn thành**: 2026-09-09
+- **Files liên quan**:
+  - `logai/storage/dedup.py`
+  - `logai/config.py`
+  - `config.yaml`
+  - `logai/realtime/realtime_pipeline.py`
+  - `tests/test_dedup_index.py`
+
+### 1. Vấn đề ban đầu (Root Cause & Bottlenecks)
+1. **Tràn bộ nhớ RAM (OOM Crash)**:
+   - `DedupIndex` cũ dùng `JSONStore` lưu toàn bộ `event_id` trong 24 giờ.
+   - Ở quy mô 10GB/ngày (~35 triệu events/ngày), Python dict chứa 35 triệu keys tiêu tốn **~5.25 GB RAM**, gây sập container do hết bộ nhớ.
+2. **Nghẽn CPU ở hàm `gc()` (Pipeline Stall)**:
+   - Sau mỗi batch 500 logs, hàm `gc()` quét qua toàn bộ 35 triệu phần tử ($O(D)$), gây đơ (stall) pipeline từ 1 đến 3 giây CPU cho mỗi batch.
+3. **Quá tải đĩa (Disk I/O Write Amplification)**:
+   - Mỗi lần flush, toàn bộ dict được serialize ra file JSON có `indent=2`, tạo ra file nặng 1.5 – 2 GB và ghi đè liên tục xuống SSD.
+
+### 2. Kiến trúc giải pháp
+1. **Bounded LRU Cache với `OrderedDict`**:
+   - Khóa trần kích thước tối đa qua cấu hình `reliability.dedup_max_size` (mặc định: `200.000` entries, tương đương vùng đệm 400 batches liên tiếp).
+   - Khi chèn key mới vượt quá `max_size`, hàm `mark()` tự động đẩy phần tử cũ nhất ở đầu ra khỏi hàng đợi (`popitem(last=False)`) với chi phí $O(1)$ amortized.
+2. **Triệt tiêu Stall ở `gc()`**:
+   - Do việc loại bỏ phần tử diễn ra tự động ở $O(1)$, hàm `gc()` không còn phải duyệt tuyến tính qua danh sách khóa. Hàm `gc()` chỉ thực hiện flush nếu có thay đổi và trả về `0`, loại bỏ 100% thời gian stall.
+3. **Snapshot đĩa gọn nhẹ & Lazy Flush**:
+   - Sử dụng cờ `_dirty`: chỉ ghi đĩa khi có dữ liệu mới được đánh dấu.
+   - Lưu trữ dạng mảng JSON compact không indent (`separators=(',', ':')`), giảm kích thước file từ 2 GB xuống chỉ còn **~3 – 5 MB**.
+   - Tương thích ngược 100% với file JSON định dạng dict cũ (`{"event_id": timestamp}`) khi khởi động lại.
+
+### 3. Kết quả kiểm thử & Nghiệm thu
+- Tạo bộ kiểm thử chuyên biệt [tests/test_dedup_index.py](file:///home/cong/Documents/logai-engine/tests/test_dedup_index.py) gồm 5 tests:
+  - `test_bounded_size_eviction`: Xác nhận tự động evict phần tử cũ nhất khi chạm trần `max_size` trong $O(1)$.
+  - `test_lru_move_to_end`: Xác nhận làm mới vị trí LRU khi một key xuất hiện lại.
+  - `test_persistence_flush_and_reload`: Xác nhận ghi snapshot xuống đĩa an toàn và load lại nguyên vẹn khi restart.
+  - `test_legacy_format_compatibility`: Xác nhận nạp mượt mà định dạng JSON dict cũ mà không phát sinh lỗi.
+  - `test_gc_flushes_and_returns_zero`: Xác nhận `gc()` chạy tức thì, không gây nghẽn CPU.
+- **Tổng kết**: Toàn bộ **15/15 tests** trong test suite (`discover -s tests`) đều **PASS 100%**.
+

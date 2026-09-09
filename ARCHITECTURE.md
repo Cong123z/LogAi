@@ -540,15 +540,17 @@ Chỉ Elasticsearch `_search()` được bọc retry ở trạng thái hiện t�
 ### 10.2 Dedup
 
 Realtime kiểm tra `DedupIndex.seen(event_id)` trước parse. Event thành công được
-`mark()` sau toàn bộ processing. TTL mặc định là 24 giờ.
+`mark()` sau toàn bộ processing.
 
-`mark()` chỉ cập nhật JSONStore trong memory (`flush=False`). Sau mỗi batch,
-`gc()` xóa entry hết TTL rồi flush toàn bộ index. Do đó:
+`DedupIndex` sử dụng Bounded LRU Cache (`OrderedDict`) với dung lượng cố định
+`reliability.dedup_max_size` (mặc định 200.000 entries).
 
-- Dedup state của batch chỉ bền vững sau khi batch kết thúc và `gc()` chạy.
-- Lookup là O(1), nhưng GC là O(D) và serialize toàn bộ D entries.
-- Index không bounded; volume lớn có thể gây RAM/file growth và pipeline stall.
-- Key chỉ là Elasticsearch `_id`, chưa namespace theo `_index`.
+- Lookup là $O(1)$, insert và eviction tự động loại bỏ phần tử cũ nhất ở đầu ở $O(1)$ amortized (`popitem(last=False)`).
+- RAM tiêu thụ cố định ở mức ~20 MB (thay vì tăng không giới hạn theo log volume).
+- Hàm `gc()` không còn duyệt $O(D)$, loại bỏ hoàn toàn hiện tượng pipeline stall.
+- Snapshot được ghi compact JSON không indent xuống đĩa khi batch có thay đổi (`_dirty`) để phục hồi khi crash.
+- Tương thích ngược với file JSON cũ định dạng dict.
+
 
 ### 10.3 Checkpoint và crash recovery
 
@@ -658,13 +660,13 @@ thiết kế tương lai:
 | Mức độ | Giới hạn | Ảnh hưởng |
 |---|---|---|
 | Critical | Checkpoint commit trước xử lý batch | Có thể mất event khi crash |
-| Critical | Dedup JSON không bounded, GC/flush O(D) | OOM hoặc stall ở volume lớn |
+| Resolved | Dedup JSON không bounded, GC/flush O(D) | Đã giải quyết (Bounded LRU Cache - Issue 2) |
 | Critical | Historical fetch và parse giữ full lists | Training có thể OOM; fetch mặc định cap 200,000 docs |
 | Critical | Feature generation scan timestamps và giữ toàn bộ vectors | CPU/RAM tăng mạnh khi training lớn |
 | High | Template metric scan toàn registry mỗi event | Realtime CPU/object allocation tăng theo số template |
 | High | Feature windows không persist | Restart mất baseline ngắn hạn |
 | High | Realtime registry metadata không flush cuối batch | Có thể mất cập nhật metadata khi crash |
-| Medium | `rolling_window_points` config chưa được dùng; deque hardcode 64 | Config và behavior không khớp |
+| Resolved | `rolling_window_points` config chưa được dùng | Đã giải quyết (kết nối trực tiếp vào _GroupWindow - Issue 7) |
 | Medium | `logai_retry_total` không được nối với retry helper | Metric luôn không phản ánh retry thật |
 | Medium | Documentation cache chỉ ghi, chưa đọc reuse | Reload embed lại corpus |
 | Medium | Re-run training trên registry cũ có thể cộng lại event counts | Overlapping lookback làm metadata count tăng lặp |
