@@ -28,6 +28,15 @@ class CheckpointStore:
     def set_last_timestamp(self, ts: float, flush: bool = True) -> None:
         self._store.set("last_timestamp", ts, flush=flush)
 
+    def commit(self, search_after: List[Any], last_timestamp: float) -> None:
+        """Atomically persist the cursor and its timestamp after batch completion."""
+        self._store.bulk_set(
+            {
+                "search_after": search_after,
+                "last_timestamp": last_timestamp,
+            }
+        )
+
     def reset(self) -> None:
         self._store.set("search_after", None, flush=False)
         self._store.set("last_timestamp", None)

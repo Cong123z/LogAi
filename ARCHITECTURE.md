@@ -336,7 +336,7 @@ Entry point: `scripts/run_realtime.py`.
 ```mermaid
 flowchart TD
     A[Poll Elasticsearch batch]
-    B[Checkpoint advanced<br/>CURRENT behavior]
+    B[Fetch batch + cursor<br/>checkpoint not advanced]
     C{event_id seen?}
     D[Drain3 parse]
     E{Known template<br/>with group_id?}
@@ -569,25 +569,27 @@ Realtime kiểm tra `DedupIndex.seen(event_id)` trước parse. Event thành cô
 
 ### 10.3 Checkpoint và crash recovery
 
-Realtime checkpoint gồm sort value cuối cùng và timestamp cuối cùng. Mỗi setter
-atomic write JSON qua temp file + `os.replace`.
+Realtime checkpoint gồm sort value cuối cùng và timestamp cuối cùng. Collector
+chỉ trả cursor; `RealtimePipeline` commit cả hai giá trị atomically sau khi
+batch đạt trạng thái hoàn tất.
 
-**Realtime behavior hiện tại chưa cung cấp at-least-once delivery.** Collector advance
-checkpoint ngay sau khi fetch batch và trước khi caller xử lý:
+Realtime xử lý batch theo at-least-once semantics. Collector không advance
+checkpoint ngay sau khi fetch batch:
 
 ```text
 fetch [F, G, H, I, J]
-persist checkpoint after J
 process F, G, H
 process crash
-restart from after J -> I và J không được đọc lại
+restart và fetch lại [F, G, H, I, J]
+dedup skip F, G, H; xử lý I, J
+commit checkpoint after J
 ```
 
-Đây là known critical issue. Dedup không thể phục hồi event đã bị checkpoint
-bỏ qua. Cho đến khi issue được sửa, tuyên bố “restart không mất dữ liệu” không
-phải là guarantee của implementation.
+Checkpoint chỉ được commit sau khi toàn bộ event trong batch thành công hoặc đã
+được ghi DLQ thành công. Nếu processing, DLQ, registry flush, dedup flush hoặc
+checkpoint commit thất bại, process không advance cursor; batch sẽ được đọc lại.
 
-Target semantics sau khi sửa phải là:
+Realtime semantics hiện tại là:
 
 1. Fetch batch nhưng chưa advance checkpoint.
 2. Xử lý từng event; success được dedup mark, failure được ghi DLQ theo policy.

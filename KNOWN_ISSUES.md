@@ -165,11 +165,11 @@ Chuyển sang bộ đếm incremental $O(1)$ quản lý tập trung trong `Templ
 
 ## 4. Bug: Checkpoint lưu trước khi xử lý xong batch — mất dữ liệu
 
-**Status**: TODO  
-**Severity**: Critical — có thể mất events vĩnh viễn khi crash  
+**Status**: ✅ RESOLVED
+**Severity**: Critical — đã xử lý bằng batch commit và dedup
 **File liên quan**: `logai/collector/es_collector.py` (dòng 74-95)
 
-### Vấn đề
+### Vấn đề cũ
 
 Trong `poll_batch()`, checkpoint được lưu **ngay sau khi fetch** từ ES,
 **trước khi** caller xử lý xong batch:
@@ -204,9 +204,9 @@ Kịch bản mất dữ liệu:
 Dedup index không cứu được vì nó chỉ ngăn **double-count**, không ngăn
 **bỏ sót**. Checkpoint đã nhảy qua I, J.
 
-### Hướng sửa
+### Đã triển khai
 
-Tách checkpoint ra khỏi `poll_batch()`, để caller lưu **sau khi xử lý xong**:
+Checkpoint đã được tách khỏi `poll_batch()`, caller lưu **sau khi xử lý xong**:
 
 ```python
 # es_collector.py — poll_batch trả thêm sort value, không tự lưu checkpoint
@@ -238,8 +238,8 @@ def run_forever(self):
         self.dedup.gc()
 ```
 
-Đảm bảo: nếu crash giữa batch, restart sẽ fetch lại batch đó từ ES.
-Dedup index sẽ skip các events đã xử lý, chỉ xử lý tiếp phần còn lại.
+Đảm bảo: nếu crash giữa batch, restart sẽ fetch lại batch đó từ ES. Dedup index
+skip các event đã xử lý thành công và pipeline tiếp tục với phần còn lại.
 
 ---
 

@@ -71,9 +71,12 @@ class ElasticsearchCollector:
     def _search(self, body: Dict[str, Any]) -> Dict[str, Any]:
         return self.client.search(index=self.config.index, body=body)
 
-    def poll_batch(self) -> List[RawLog]:
-        """Fetch up to `batch_size` new documents since the last checkpoint,
-        ordered by (@timestamp, _id), and advance the checkpoint."""
+    def poll_batch(self) -> Tuple[List[RawLog], Optional[List[Any]]]:
+        """Fetch a batch and return its cursor without advancing checkpoint.
+
+        The realtime orchestrator commits the cursor only after processing the
+        complete batch and flushing durable state.
+        """
         search_after = self.checkpoint.get_search_after()
         body: Dict[str, Any] = {
             "size": self.config.batch_size,
@@ -86,21 +89,18 @@ class ElasticsearchCollector:
         response = self._search(body)
         hits = response.get("hits", {}).get("hits", [])
         if not hits:
-            return []
+            return [], None
 
         raw_logs = [_hit_to_rawlog(h, self.config.index) for h in hits]
-        last_hit = hits[-1]
-        self.checkpoint.set_search_after(last_hit["sort"])
-        self.checkpoint.set_last_timestamp(raw_logs[-1].timestamp)
-        return raw_logs
+        return raw_logs, hits[-1]["sort"]
 
-    def run_forever(self) -> Iterator[List[RawLog]]:
+    def run_forever(self) -> Iterator[Tuple[List[RawLog], Optional[List[Any]]]]:
         """Generator that polls indefinitely, sleeping `poll_interval_seconds`
         when there's nothing new. Caller drives processing per batch."""
         while True:
-            batch = self.poll_batch()
+            batch, cursor = self.poll_batch()
             if batch:
-                yield batch
+                yield batch, cursor
             else:
                 time.sleep(self.config.poll_interval_seconds)
 

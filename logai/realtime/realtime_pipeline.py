@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional, Tuple, Union
 
 from logai.config import AppConfig
 from logai.alert.alert_state_machine import AlertStateMachine
@@ -85,19 +85,39 @@ class RealtimePipeline:
     def run_forever(self) -> None:
         self.start_metrics_server()
         logger.info("Realtime pipeline started, polling Elasticsearch...")
-        for batch in self.collector.run_forever():
-            self.metrics.logai_queue_depth.set(len(batch))
-            for raw in batch:
-                self.metrics.logai_events_received_total.inc()
-                self._process_one(raw)
-            self.metrics.logai_queue_depth.set(0)
-            self.dedup.gc()
+        for item in self.collector.run_forever():
+            # Accept legacy List[RawLog] iterators while the collector uses the
+            # cursor-bearing tuple contract.
+            if isinstance(item, tuple) and len(item) == 2:
+                batch, cursor = item
+            else:
+                batch, cursor = item, None
 
-    def _process_one(self, raw: RawLog) -> None:
+            self.metrics.logai_queue_depth.set(len(batch))
+            try:
+                for raw in batch:
+                    self.metrics.logai_events_received_total.inc()
+                    if not self._process_one(raw):
+                        raise RuntimeError(
+                            f"Event {raw.event_id} did not reach a terminal state"
+                        )
+
+                # Registry updates use flush=False in the event hot path.
+                # They must be durable before the cursor advances.
+                self.template_registry.flush()
+                self.group_registry.flush()
+                self.dedup.gc()
+
+                if batch and cursor is not None:
+                    self.checkpoint.commit(cursor, batch[-1].timestamp)
+            finally:
+                self.metrics.logai_queue_depth.set(0)
+
+    def _process_one(self, raw: RawLog) -> bool:
         start = time.time()
         try:
             if self.dedup.seen(raw.event_id):
-                return  # idempotency: already processed this event_id
+                return True  # idempotency: already processed this event_id
 
             parsed = self.parser.parse(raw)
             grouped = self._assign_group(parsed)
@@ -110,10 +130,12 @@ class RealtimePipeline:
 
             self.dedup.mark(raw.event_id)
             self.metrics.logai_events_processed_total.inc()
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to process event %s: %s", raw.event_id, exc)
             self.metrics.logai_events_failed_total.inc()
             self.dlq.push(raw.to_dict(), str(exc))
+            return True  # durable DLQ is a terminal outcome for this event
         finally:
             self.metrics.logai_processing_latency_seconds.observe(time.time() - start)
 

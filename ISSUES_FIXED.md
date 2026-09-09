@@ -19,6 +19,20 @@ Tài liệu ghi nhận chi tiết các vấn đề kỹ thuật đã được gi
 
 ---
 
+## Issue 9: Realtime Checkpoint Commit Trước Khi Xử Lý Batch
+
+- **Trạng thái**: ✅ **RESOLVED**
+- `ElasticsearchCollector.poll_batch()` không còn ghi checkpoint sau khi fetch.
+- Collector trả về batch kèm `search_after` cursor cho realtime orchestrator.
+- Realtime xử lý toàn bộ batch, flush registry và dedup trước khi commit cursor.
+- Crash giữa batch khiến batch được fetch lại; `DedupIndex` loại event đã xử lý.
+- Lỗi processing được ghi DLQ thành công được coi là terminal để batch có thể
+  commit; lỗi ghi DLQ/flush/checkpoint sẽ không advance cursor.
+- Bổ sung test collector side-effect, crash giữa batch, flush failure, DLQ,
+  duplicate boundary và batch 20.000 events.
+
+---
+
 ## Issue 1: Anomaly Detection — Chuyển sang 1 Global Model với 6 Feature chuẩn hóa
 
 - **Trạng thái**: ✅ **RESOLVED** (Đã giải quyết)

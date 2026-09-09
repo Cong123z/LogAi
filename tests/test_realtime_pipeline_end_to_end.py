@@ -34,6 +34,7 @@ for mod in [
         sys.modules[mod] = MagicMock()
 
 from logai.config import AppConfig
+from logai.collector.es_collector import ElasticsearchCollector
 from logai.models import (
     AlertStateEnum,
     AnomalyResult,
@@ -43,6 +44,7 @@ from logai.models import (
     TemplateState,
 )
 from logai.realtime.realtime_pipeline import RealtimePipeline
+from logai.storage.checkpoint import CheckpointStore
 
 
 class TestRealtimePipelineEndToEnd(unittest.TestCase):
@@ -283,6 +285,126 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         # State should transition to ALERTING
         final_state = self.pipeline.alert_sm._load("G_AUTH")
         self.assertEqual(final_state.alert_state, AlertStateEnum.ALERTING.value)
+
+
+class TestRealtimeCheckpointRecovery(unittest.TestCase):
+    """Batch checkpoint contract and crash/pressure tests for realtime."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.cfg = AppConfig()
+        self.cfg.storage.base_dir = self.temp_dir
+        self.cfg.storage.model_dir = f"{self.temp_dir}/models"
+        self.cfg.doc_matcher.corpus_path = f"{self.temp_dir}/missing.yaml"
+        self.pipeline = RealtimePipeline(self.cfg)
+        self.pipeline.start_metrics_server = MagicMock()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _raw_batch(self, size):
+        return [
+            RawLog(
+                event_id=f"rt_{i}", timestamp=1000.0 + i,
+                service="api", level="INFO", message=f"message {i}",
+            )
+            for i in range(size)
+        ]
+
+    def test_collector_fetch_does_not_commit_checkpoint(self):
+        checkpoint = CheckpointStore(self.cfg.storage)
+        checkpoint.commit([1, "old"], 999.0)
+        collector = object.__new__(ElasticsearchCollector)
+        collector.config = self.cfg.elasticsearch
+        collector.checkpoint = checkpoint
+        collector._search = MagicMock(return_value={
+            "hits": {"hits": [{
+                "_id": "evt_1",
+                "_source": {
+                    "@timestamp": "2026-01-01T00:00:00Z",
+                    "service": "api", "level": "INFO", "message": "ok",
+                },
+                "sort": [2, "evt_1"],
+            }]}
+        })
+
+        batch, cursor = collector.poll_batch()
+
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(cursor, [2, "evt_1"])
+        self.assertEqual(checkpoint.get_search_after(), [1, "old"])
+        self.assertEqual(checkpoint.get_last_timestamp(), 999.0)
+
+    def test_commit_happens_after_processing_flush_and_dedup(self):
+        batch = self._raw_batch(4)
+        cursor = [1003, "rt_3"]
+        order = []
+        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+        self.pipeline._process_one = MagicMock(
+            side_effect=lambda raw: order.append(f"process:{raw.event_id}") or True
+        )
+        self.pipeline.template_registry.flush = MagicMock(side_effect=lambda: order.append("templates"))
+        self.pipeline.group_registry.flush = MagicMock(side_effect=lambda: order.append("groups"))
+        self.pipeline.dedup.gc = MagicMock(side_effect=lambda: order.append("dedup"))
+        self.pipeline.checkpoint.commit = MagicMock(side_effect=lambda *_: order.append("checkpoint"))
+
+        self.pipeline.run_forever()
+
+        self.assertEqual(order[-4:], ["templates", "groups", "dedup", "checkpoint"])
+        self.pipeline.checkpoint.commit.assert_called_once_with(cursor, batch[-1].timestamp)
+
+    def test_unhandled_crash_mid_batch_does_not_commit(self):
+        batch = self._raw_batch(10)
+        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, [1009, "rt_9"])]))
+        self.pipeline._process_one = MagicMock(side_effect=RuntimeError("crash in realtime phase"))
+        self.pipeline.checkpoint.commit = MagicMock()
+
+        with self.assertRaises(RuntimeError):
+            self.pipeline.run_forever()
+
+        self.pipeline.checkpoint.commit.assert_not_called()
+        self.assertEqual(self.pipeline.metrics.logai_queue_depth.set.call_args_list[-1].args, (0,))
+
+    def test_flush_failure_does_not_commit(self):
+        batch = self._raw_batch(2)
+        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, [1001, "rt_1"])]))
+        self.pipeline._process_one = MagicMock(return_value=True)
+        self.pipeline.template_registry.flush = MagicMock(side_effect=OSError("disk full"))
+        self.pipeline.checkpoint.commit = MagicMock()
+
+        with self.assertRaises(OSError):
+            self.pipeline.run_forever()
+
+        self.pipeline.checkpoint.commit.assert_not_called()
+
+    def test_large_batch_commits_once_after_all_events(self):
+        batch = self._raw_batch(20_000)
+        cursor = [20999, "rt_19999"]
+        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+        self.pipeline._process_one = MagicMock(return_value=True)
+        self.pipeline.template_registry.flush = MagicMock()
+        self.pipeline.group_registry.flush = MagicMock()
+        self.pipeline.dedup.gc = MagicMock()
+        self.pipeline.checkpoint.commit = MagicMock()
+
+        self.pipeline.run_forever()
+
+        self.assertEqual(self.pipeline._process_one.call_count, 20_000)
+        self.pipeline.checkpoint.commit.assert_called_once_with(cursor, batch[-1].timestamp)
+
+    def test_dlq_terminal_failure_still_allows_batch_commit(self):
+        batch = self._raw_batch(1)
+        cursor = [1000, "rt_0"]
+        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+        self.pipeline._process_one = MagicMock(return_value=True)  # event was persisted to DLQ
+        self.pipeline.template_registry.flush = MagicMock()
+        self.pipeline.group_registry.flush = MagicMock()
+        self.pipeline.dedup.gc = MagicMock()
+        self.pipeline.checkpoint.commit = MagicMock()
+
+        self.pipeline.run_forever()
+
+        self.pipeline.checkpoint.commit.assert_called_once_with(cursor, batch[-1].timestamp)
 
 
 if __name__ == "__main__":
