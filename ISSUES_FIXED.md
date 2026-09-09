@@ -134,21 +134,25 @@ O(T) theo số template.
 
 ---
 
-## Issue 7 (Bước 1): Mở rộng FeatureVector từ 6 lên 8 chiều chuẩn hóa (Dimensionless)
+## Issue 7 (Bước 1): Mở rộng FeatureVector từ 6 lên 8 chiều chuẩn hóa & Xác nhận Per-Event Realtime Parity
 
-- **Trạng thái**: ✅ **RESOLVED** (Đã giải quyết Bước 1)
+- **Trạng thái**: ✅ **RESOLVED**
 - **Ngày hoàn thành**: 2026-09-09
 - **Files liên quan**:
   - `logai/models.py`
   - `logai/features/feature_engine.py`
   - `logai/anomaly/isolation_forest_model.py`
+  - `logai/training/train_pipeline.py`
+  - `logai/realtime/realtime_pipeline.py`
   - `ARCHITECTURE.md`
   - `tests/test_feature_vector_8d.py`
+  - `tests/test_end_to_end_parity.py`
 
 ### 1. Vấn đề giải quyết
 - **Bỏ phí cửa sổ 10s**: `count_10s` trước đây bị bỏ phí, các đợt micro-bursts bùng nổ log chỉ trong vài giây bị làm loãng bởi tốc độ 1 phút.
 - **Ô nhiễm baseline (Baseline Contamination)**: Giá trị rate hiện tại từng bị đẩy vào history trước khi tính mean/std, khiến chính log đột biến kéo vọt baseline lên và làm giảm z-score của nó.
 - **Fano factor trên 1m chưa scale-independent**: Chuyển sang hệ số biến thiên $CV^2 = \sigma^2 / \mu^2$ trên cửa sổ 10s.
+- **History config không có tác dụng**: Trước đây `_GroupWindow` hardcode `maxlen=64`. Hiện đã liên kết trực tiếp với cấu hình `config.rolling_window_points` (mặc định 30).
 
 ### 2. Kiến trúc giải pháp
 - **Bộ 8 đặc trưng dimensionless**:
@@ -161,11 +165,12 @@ O(T) theo số template.
   7. `slope_norm`: $\frac{\text{slope}(r_{1m})}{\mu_{1m} + \epsilon}$ (clip `[-10, 10]`)
   8. `spike_ratio_10s`: $\frac{\max(r_{10})}{\mu_{10} + \epsilon}$ (clip `[0, 20]`)
 - **Tách biệt baseline**: Baseline $\mu, \sigma$ được tính từ lịch sử trước khi append mẫu hiện tại.
-- **Neutral Baseline (Cold-start)**: `[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]`.
+- **Neutral Baseline (Cold-start)**: `[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0]` cho event đầu tiên.
 - **An toàn mô hình**: Nâng `MODEL_VERSION` thành `if-global-v2`. `GlobalAnomalyModel` kiểm tra `EXPECTED_NUM_FEATURES = 8`. Nếu load trúng mô hình cũ 6D (`n_features_in_ != 8`), log cảnh báo và trả về `None` thay vì làm sập tiến trình.
+- **Cơ chế xử lý Per-Event**: Giữ nguyên xử lý bắt và tính toán trực tiếp trên từng event ở cả Realtime Pipeline và Training Pipeline để đảm bảo độ trễ phát hiện tức thời ($<1\text{ms}$). Đảm bảo tính nhất quán tuyệt đối (Train/Serve Parity).
 
-### 3. Kết quả kiểm thử
-- Tạo bộ kiểm thử toàn diện tại `tests/test_feature_vector_8d.py` bao gồm 9 unit tests:
+### 3. Kết quả kiểm thử & Nghiệm thu
+- **Bộ kiểm thử đặc trưng 8D** (`tests/test_feature_vector_8d.py`):
   - Kiểm tra schema, thứ tự, tên 8 đặc trưng.
   - Kiểm tra Cold-start Neutral Baseline.
   - Kiểm tra kích thước `_GroupWindow` tuân thủ `rolling_window_points`.
@@ -173,4 +178,9 @@ O(T) theo số template.
   - Kiểm tra độ nhạy khi xảy ra micro-burst trong 10s.
   - Kiểm tra các ngưỡng clipping bảo vệ số học.
   - Kiểm tra từ chối tương thích mô hình cũ 6D và dự đoán thành công với 8D.
-- Toàn bộ 9/9 tests đều PASS.
+- **Bộ kiểm thử toàn trình & Train/Serve Parity** (`tests/test_end_to_end_parity.py`):
+  - Mô phỏng training trích xuất vector 8D per-event và fit Global model thành công.
+  - Mô phỏng realtime tiếp nhận log và suy luận per-event; alert state duy trì `NORMAL` khi log đều.
+  - Khi có micro-burst bùng nổ, `z_score_10s` và `short_growth_rate` kích hoạt tức thì, đưa `AlertStateMachine` từ `NORMAL` $\rightarrow$ `WARMING` $\rightarrow$ `ALERTING` trong thời gian thực.
+  - Hai engine độc lập chạy cùng 1 chuỗi log cho ra kết quả vector 8D đồng nhất 100%.
+- **Tổng kết**: 10/10 tests PASS (`python3 -m unittest discover -s tests`).

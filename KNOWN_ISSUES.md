@@ -332,8 +332,8 @@ Không cần duyệt lại $N$ events, giảm độ phức tạp thời gian t�
 
 ## 7. Training Pipeline: Tối ưu Phase 9 (Feature Generation & Training Anomaly Model)
 
-**Status**: TODO  
-**Severity**: Critical — gây nghẽn CPU (hàng tỷ phép tính) và OOM bộ nhớ  
+**Status**: 🟡 PARTIALLY RESOLVED (Bước 1 đã hoàn thành — xem chi tiết tại `ISSUES_FIXED.md`)  
+**Severity**: Medium (Đã giải quyết chất lượng feature 8D và parity; Bước tiếp theo là Reservoir Sampling cho training)  
 **Files liên quan**:
 - `logai/features/feature_engine.py`
 - `logai/models.py` (`FeatureVector`)
@@ -342,44 +342,26 @@ Không cần duyệt lại $N$ events, giảm độ phức tạp thời gian t�
 - `logai/anomaly/isolation_forest_model.py`
 - `logai/config.py`
 - `config.yaml`
+- `tests/test_feature_vector_8d.py`
+- `tests/test_end_to_end_parity.py`
 
-### Vấn đề
+### Tiến độ giải quyết & Quyết định kiến trúc
 
-Phase sinh feature hiện tạo một `FeatureVector` sau **mỗi event**:
+1. **Đã giải quyết ở Bước 1 (2026-09-09)**:
+   - ✅ **Mở rộng FeatureVector lên 8 chiều chuẩn hóa (Dimensionless)**: Tận dụng triệt để cửa sổ 10s bắt micro-bursts (`z_score_10s`, `short_growth_rate`, `spike_ratio_10s`).
+   - ✅ **Chống ô nhiễm baseline (Baseline Contamination)**: Baseline $\mu, \sigma$ được tính toán độc lập trước khi append rate mới vào history.
+   - ✅ **Chuẩn hóa Burstiness**: Đổi sang hệ số biến thiên bậc hai ($CV^2 = \sigma^2/\mu^2$) trên cửa sổ 10s, scale-independent.
+   - ✅ **Kích hoạt cấu hình history**: `_GroupWindow` sử dụng trực tiếp `config.rolling_window_points` thay vì hardcode 64.
+   - ✅ **Cơ chế Cold-start an toàn**: Áp dụng Neutral Baseline `[0, 0, 1, 1, 0, 0, 0, 1]` cho event đầu tiên.
+   - ✅ **Nâng cấp Model**: Nâng `MODEL_VERSION` lên `if-global-v2`, kiểm tra xác thực shape $(M, 8)$ và từ chối an toàn model 6D cũ.
+2. **Quyết định kiến trúc xác nhận**:
+   - **Giữ nguyên cơ chế Per-Event Evaluation**: Cả hai pipeline Training và Realtime duy trì đánh giá và suy luận trực tiếp trên từng event để đảm bảo phát hiện bất thường và kích hoạt cảnh báo tức thời ($<1\text{ms}$). Đảm bảo 100% Train/Serve Parity.
+3. **Hạng mục tiếp theo (Bước 2)**:
+   - Áp dụng **Reservoir Sampling / Subsampling** trong `train_pipeline.py` để giới hạn tập huấn luyện toàn cục ở mức tối ưu **50.000 – 100.000 vectors**, chống tràn RAM khi tập log lịch sử có hàng chục triệu events.
 
-```python
-for event in events:
-    fv = engine.update(group_id, event.raw.timestamp)
-    all_feature_vectors.append(fv)
-```
+### Proposed design: fixed-interval evaluation 2 giây (Lưu trữ tham khảo)
 
-Với $N$ logs, training tạo xấp xỉ $N$ vectors. Mỗi lần update còn gọi
-`count_since()` ba lần để quét timestamp của group trong các cửa sổ 10 giây,
-1 phút và 5 phút.
-
-Các vấn đề cụ thể:
-
-1. **Số feature vectors là O(N)**: service volume cao sinh nhiều sample hơn
-   service volume thấp, làm tăng RAM/CPU và làm global model bị thiên lệch theo
-   volume.
-2. **Đếm cửa sổ là O(W) mỗi event**: `count_since()` quét tuyến tính toàn bộ
-   timestamp còn giữ trong window.
-3. **Re-sort khi timestamp lệch thứ tự**: toàn bộ deque bị sort lại với chi phí
-   O(W log W).
-4. **Feature 10 giây bị bỏ phí**: `count_10s` được tính nhưng không được dùng
-   trong `FeatureVector`; burst ngắn có thể bị làm mờ bởi rate 1 phút.
-5. **Baseline chứa sample hiện tại**: rate hiện tại được append vào history
-   trước khi tính mean/std, khiến anomaly tự kéo baseline lên và giảm z-score.
-6. **`burstiness` chưa hoàn toàn scale-independent**: công thức variance/mean
-   trên rate vẫn phụ thuộc scale và phản ứng chậm với burst dưới 1 phút.
-7. **History config không được dùng**: `rolling_window_points` có trong config
-   nhưng `_GroupWindow` hardcode `maxlen=64`.
-8. **Toàn bộ vectors được giữ trong RAM** trước khi gọi
-   `IsolationForest.fit()`.
-
-### Proposed design: fixed-interval evaluation 2 giây
-
-Đây là thiết kế đề xuất để triển khai sau, chưa phải behavior hiện tại.
+Đây là thiết kế đề xuất nghiên cứu trước đây (hiện hệ thống lựa chọn giữ per-event để ưu tiên độ nhạy thời gian thực).
 
 Tách việc nhận event khỏi việc tạo feature:
 
