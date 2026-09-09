@@ -72,6 +72,8 @@ class RealtimePipeline:
 
         self._doc_refresh_at = 0.0
         self._template_counts: dict[str, int] = {}
+        for svc, count in self.template_registry.all_counts_by_service().items():
+            self.metrics.set_template_count(svc, count)
 
     def start_metrics_server(self) -> None:
         self.metrics.start()
@@ -100,7 +102,6 @@ class RealtimePipeline:
             parsed = self.parser.parse(raw)
             grouped = self._assign_group(parsed)
             self.metrics.record_raw_event(parsed)
-            self._update_template_metrics(parsed.raw.service)
 
             if grouped is not None:
                 self._match_documentation_if_stale(grouped.group_id)
@@ -149,7 +150,9 @@ class RealtimePipeline:
             # group -> leave ungrouped/pending; a future training run will
             # cluster it properly (plan 4.4).
             state.group_id = None
-            self.template_registry.upsert(state, flush=False)
+            is_new = self.template_registry.upsert(state, flush=False)
+            if is_new:
+                self._update_template_metrics(parsed.raw.service)
             logger.info(
                 "Template %s is Unknown/Pending (best similarity=%.2f) - "
                 "awaiting next training run to form/join a group.",
@@ -158,7 +161,9 @@ class RealtimePipeline:
             return None
 
         state.group_id = group_id
-        self.template_registry.upsert(state, flush=False)
+        is_new = self.template_registry.upsert(state, flush=False)
+        if is_new:
+            self._update_template_metrics(parsed.raw.service)
         self._touch_group(group_id, parsed.raw.timestamp, new_template_id=parsed.template_id)
         return GroupedEvent(parsed=parsed, group_id=group_id, group_similarity=similarity)
 
@@ -202,11 +207,6 @@ class RealtimePipeline:
         self.metrics.set_alert_state(state)
 
     def _update_template_metrics(self, service: str) -> None:
-        # NOTE: MVP implementation recomputes the per-service template count
-        # on every event by scanning the full registry. Fine for the small
-        # template cardinality expected at MVP scale; if this becomes a
-        # bottleneck, maintain an incremental Counter[service] instead.
-        count = sum(
-            1 for t in self.template_registry.all_templates() if t.service == service
-        )
-        self.metrics.set_template_count(service, count)
+        svc = service or "unknown"
+        count = self.template_registry.count_by_service(svc)
+        self.metrics.set_template_count(svc, count)

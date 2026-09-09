@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+import threading
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -20,16 +21,65 @@ class TemplateRegistry:
 
     def __init__(self, storage: StorageConfig):
         base = Path(storage.base_dir)
+        self._lock = threading.RLock()
         self._meta = JSONStore(base / storage.template_registry_file)
         self._embeddings = PickleStore(base / storage.template_embeddings_file)
         self._embedding_cache: Dict[str, np.ndarray] = self._embeddings.load({})
+        self._counts_by_service: Dict[str, int] = {}
+        for raw in self._meta.all().values():
+            svc = ((raw.get("service") or "unknown").strip()) or "unknown"
+            self._counts_by_service[svc] = self._counts_by_service.get(svc, 0) + 1
 
     def get(self, template_id: str) -> Optional[TemplateState]:
         raw = self._meta.get(template_id)
         return TemplateState(**raw) if raw else None
 
-    def upsert(self, state: TemplateState, flush: bool = True) -> None:
-        self._meta.set(state.template_id, asdict(state), flush=flush)
+    def upsert(self, state: TemplateState, flush: bool = True) -> bool:
+        with self._lock:
+            old_raw = self._meta.get(state.template_id)
+            is_new = old_raw is None
+            if is_new:
+                svc = ((state.service or "unknown").strip()) or "unknown"
+                self._counts_by_service[svc] = self._counts_by_service.get(svc, 0) + 1
+            else:
+                old_svc = ((old_raw.get("service") or "unknown").strip()) or "unknown"
+                new_svc = ((state.service or "unknown").strip()) or "unknown"
+                if old_svc != new_svc:
+                    if old_svc in self._counts_by_service and self._counts_by_service[old_svc] > 0:
+                        self._counts_by_service[old_svc] -= 1
+                        if self._counts_by_service[old_svc] == 0:
+                            del self._counts_by_service[old_svc]
+                    self._counts_by_service[new_svc] = self._counts_by_service.get(new_svc, 0) + 1
+
+            self._meta.set(state.template_id, asdict(state), flush=flush)
+            return is_new
+
+    def delete(self, template_id: str, flush: bool = True) -> bool:
+        with self._lock:
+            raw = self._meta.get(template_id)
+            if raw is not None:
+                svc = ((raw.get("service") or "unknown").strip()) or "unknown"
+                if svc in self._counts_by_service and self._counts_by_service[svc] > 0:
+                    self._counts_by_service[svc] -= 1
+                    if self._counts_by_service[svc] == 0:
+                        del self._counts_by_service[svc]
+                self._meta.delete(template_id, flush=flush)
+                self._embedding_cache.pop(template_id, None)
+                return True
+            return False
+
+    def count_by_service(self, service: str) -> int:
+        with self._lock:
+            svc = ((service or "unknown").strip()) or "unknown"
+            return self._counts_by_service.get(svc, 0)
+
+    def all_counts_by_service(self) -> Dict[str, int]:
+        with self._lock:
+            return dict(self._counts_by_service)
+
+    def total_count(self) -> int:
+        with self._lock:
+            return sum(self._counts_by_service.values())
 
     def set_embedding(self, template_id: str, embedding: np.ndarray) -> None:
         self._embedding_cache[template_id] = embedding

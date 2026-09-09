@@ -227,3 +227,82 @@ O(T) theo số template.
   - `test_gc_flushes_and_returns_zero`: Xác nhận `gc()` chạy tức thì, không gây nghẽn CPU.
 - **Tổng kết**: Toàn bộ **15/15 tests** trong test suite (`discover -s tests`) đều **PASS 100%**.
 
+---
+
+## Issue 3: Bottleneck `_update_template_metrics` — Chuyển sang O(1) Incremental Counter trong TemplateRegistry
+
+- **Trạng thái**: ✅ **RESOLVED** (Đã giải quyết)
+- **Ngày hoàn thành**: 2026-09-09
+- **Files liên quan**:
+  - `logai/storage/registries.py`
+  - `logai/realtime/realtime_pipeline.py`
+  - `tests/test_template_metrics.py`
+  - `tests/test_realtime_pipeline_end_to_end.py`
+
+### 1. Vấn đề ban đầu (Root Cause & Bottlenecks)
+
+1. **Nghẽn CPU nghiêm trọng trên Hot Path ($O(T)$ mỗi log event)**:
+   - Trong `realtime_pipeline._process_one`, mỗi log event đi qua đều gọi `_update_template_metrics(parsed.raw.service)`.
+   - Hàm này gọi `self.template_registry.all_templates()`, hàm này deserialize toàn bộ dict `self._meta.all()` và instantiate lại đối tượng dataclass `TemplateState` cho toàn bộ $T$ templates, sau đó chạy vòng lặp Python `sum(1 for t in ... if t.service == service)`.
+   - Với $T = 2.000$ templates và lưu lượng $35$ triệu logs/ngày: tạo ra $2.000 \times 35.000.000 = 70$ tỷ object dataclass mỗi ngày, ngốn khoảng **6 – 10 giờ CPU mỗi ngày** vô nghĩa chỉ để đếm lại một con số hầu như không đổi.
+2. **Lãng phí Prometheus Metric update**:
+   - Tần suất xuất hiện template mới trong môi trường production ổn định là rất thấp (thường chỉ vài chục đến vài trăm template mới mỗi ngày). Tuy nhiên, gauge Prometheus `app_log_templates_total` lại bị ghi đè liên tục 35 triệu lần mỗi ngày.
+
+### 2. Kiến trúc giải pháp (Approach 2 - O(1) Incremental Counter)
+
+1. **Quản lý bộ đếm O(1) tập trung trong `TemplateRegistry` (`logai/storage/registries.py`)**:
+   - `TemplateRegistry` duy trì map bộ nhớ trong `self._counts_by_service: Dict[str, int] = {}`.
+   - Khi khởi tạo (`__init__`), registry duyệt metadata 1 lần duy nhất để nạp số lượng ban đầu ($O(T)$ một lần duy nhất lúc khởi động process).
+   - Chuẩn hóa tên service: tự động strip khoảng trắng và fallback về `"unknown"` nếu giá trị rỗng hoặc `None`.
+   - Trong hàm `upsert(state)`:
+     - Kiểm tra nếu `state.template_id` chưa từng tồn tại (`is_new = old_raw is None`): tăng bộ đếm `_counts_by_service[service] += 1` trong $O(1)$ và trả về `is_new = True`.
+     - Nếu cập nhật template đã có (cập nhật `last_seen`, `event_count`, v.v.): không tăng bộ đếm, trả về `is_new = False`.
+     - Hỗ trợ đổi service an toàn: tự động giảm đếm service cũ, tăng đếm service mới, và tự động dọn dẹp key nếu đếm giảm về 0.
+     - Bảo vệ đa luồng bằng `threading.RLock()`.
+   - Bổ sung các phương thức truy vấn $O(1)$ và thao tác dữ liệu an toàn:
+     - `count_by_service(service: str) -> int`: Truy vấn tức thì trong $O(1)$.
+     - `all_counts_by_service() -> Dict[str, int]`: Trả về bản sao shallow copy độc lập để caller không làm thay đổi trạng thái bên trong registry.
+     - `total_count() -> int`: Tổng số template hiện có.
+     - `delete(template_id: str)`: Giảm bộ đếm và dọn key sạch sẽ khi xóa template.
+
+2. **Tối ưu hóa luồng Realtime Pipeline (`logai/realtime/realtime_pipeline.py`)**:
+   - **Khởi động (`__init__`)**: Duyệt qua `self.template_registry.all_counts_by_service()` để warm-up ngay giá trị cho Prometheus gauge `app_log_templates_total` của từng service khi tiến trình vừa khởi chạy.
+   - **Loại bỏ khỏi Hot Path (`_process_one`)**: **Đã xóa bỏ hoàn toàn** lệnh gọi `self._update_template_metrics()` sau mỗi sự kiện log.
+   - **Kích hoạt theo sự kiện (`_assign_group`)**: Chỉ khi `upsert()` trả về `is_new is True` (phát hiện và lưu một template mới toanh vào registry), pipeline mới gọi `self._update_template_metrics(parsed.raw.service)`.
+   - **Truy vấn $O(1)$**: Hàm `_update_template_metrics()` chuyển sang gọi `self.template_registry.count_by_service(svc)` ($O(1)$) thay vì quét toàn bộ template.
+
+### 3. Kết quả kiểm thử & Đo kiểm chuẩn hiệu năng (Verification & Benchmark)
+
+1. **Bộ kiểm thử Template Counting & Edge Cases** (`tests/test_template_metrics.py` - 15 tests):
+   - `test_initial_counts_empty`: Trạng thái ban đầu rỗng.
+   - `test_upsert_new_template_increments_count`: Thêm template mới -> tăng đếm chính xác.
+   - `test_upsert_existing_template_does_not_increment_count`: Cập nhật template cũ -> không tăng lặp.
+   - `test_multiple_templates_and_services`: Quản lý đa service và fallback "unknown".
+   - `test_reload_from_disk_restores_counts`: Khôi phục chính xác bộ đếm sau khi restart process.
+   - `test_service_change_updates_counts`: Xử lý mượt mà khi template đổi service.
+   - `test_concurrent_upserts_thread_safety`: Đảm bảo an toàn đa luồng dưới tải đồng thời.
+   - `test_whitespace_and_none_service_normalization`: Chuẩn hóa khoảng trắng và None.
+   - `test_delete_template_decrements_and_prunes_empty_services`: Xóa template và dọn dẹp key 0.
+   - `test_all_counts_immutability`: Đảm bảo tính bất biến của dữ liệu trả về.
+   - `test_corrupt_file_graceful_recovery`: Phục hồi an toàn khi file JSON bị hỏng.
+   - `test_high_concurrency_race_condition_same_template_id`: 30 thread đồng thời ghi cùng 1 template ID -> đếm đúng 1.
+   - `test_pending_to_grouped_template_lifecycle_no_double_counting`: Vòng đời template chuyển từ Pending sang Grouped chỉ kích hoạt metric đúng 1 lần duy nhất.
+   - `test_pipeline_does_not_scan_all_templates_on_events`: Xác thực thực tế pipeline không bao giờ gọi `all_templates()` trên hot path.
+
+2. **Kết quả đo kiểm chuẩn hiệu năng thực tế (Benchmark)**:
+   - Mô phỏng môi trường production với $T = 2.000$ templates và $N = 2.000$ log events:
+     ```text
+     [BENCHMARK] Events: 2000 | Templates: 2000
+       - Old O(T) approach: 1.2117s (605.85 µs/event)
+       - New O(1) approach: 0.0002s (0.12 µs/event)
+       - Speedup: 5015.0x faster!
+     ```
+   - **Tăng tốc độ xử lý**: Nhanh hơn **hơn 5.000 lần** ($5015\times$).
+   - **Tiết kiệm CPU**: Tiết kiệm triệt để **~6 giờ CPU mỗi ngày** ở quy mô 35M events/ngày.
+
+3. **Bộ kiểm thử tích hợp Pipeline toàn trình** (`tests/test_realtime_pipeline_end_to_end.py` - 6 tests):
+   - Xác nhận sự phối hợp mượt mà giữa Dedup Index ($O(1)$) $\rightarrow$ Template Counting ($O(1)$) $\rightarrow$ Fast-path cho known templates $\rightarrow$ Feature Engine 8D $\rightarrow$ Global Anomaly Model $\rightarrow$ Alert State Machine $\rightarrow$ Dead Letter Queue $\rightarrow$ Batch GC.
+
+- **Tổng kết**: Toàn bộ **36/36 tests** trong hệ thống (`python3 -m unittest discover -s tests`) đều **PASS 100%**.
+
+

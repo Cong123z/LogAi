@@ -367,14 +367,16 @@ flowchart TD
     O -. exception .-> S
 ```
 
-### 7.1 Known template path
+### 7.1 Known template path (Fast-path)
 
 Nếu `TemplateRegistry` đã có template và `group_id`:
 
-1. Không tạo embedding mới.
-2. Cập nhật template `last_seen`, `event_count`.
-3. Cập nhật group `last_seen`, `event_count`.
-4. Chạy documentation match, feature generation, prediction và alert.
+1. Không tạo embedding mới (bỏ qua SentenceTransformer).
+2. Không cluster hay so khớp centroids (bỏ qua HDBSCAN/Centroids).
+3. Không tính toán lại template metrics (bỏ qua `_update_template_metrics`).
+4. Cập nhật template `last_seen`, `event_count`.
+5. Cập nhật group `last_seen`, `event_count`.
+6. Chạy documentation match, feature generation (8D dimensionless vector), prediction (`if-global-v2`) và alert.
 
 `group_similarity` được đặt là `1.0` để biểu thị direct mapping, không phải
 cosine similarity được tính lại.
@@ -383,13 +385,19 @@ cosine similarity được tính lại.
 
 Nếu template mới hoặc chưa có `group_id`:
 
-1. Tạo embedding cho template.
+1. Tạo embedding cho template qua `embedder.embed_one()`.
 2. So cosine similarity với tất cả group centroids.
 3. Nếu best score đạt `assignment_similarity_threshold`, gắn template vào
    group gần nhất.
 4. Nếu không đạt, lưu template với `group_id = None` và chờ training tiếp theo.
+5. Khi lưu template vào `TemplateRegistry`, hàm `upsert()` xác định liệu đây có
+   phải template mới toanh (`is_new=True`) hay không. Nếu `is_new=True`, pipeline
+   kích hoạt `_update_template_metrics()` cập nhật Prometheus gauge
+   `app_log_templates_total{service}` thông qua bộ đếm $O(1)$ trong RAM.
+6. Nếu template đã tồn tại (ví dụ đã lưu Pending ở sự kiện trước), `is_new=False`
+   và không tăng đếm trùng lặp.
 
-Pending event vẫn được tính raw/template metrics và được mark processed, nhưng
+Pending event vẫn được tính raw metrics và mark dedup processed, nhưng
 không có feature vector, anomaly score hoặc alert state.
 
 ### 7.3 Documentation refresh
@@ -483,7 +491,7 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 
 | Artifact | Format | Writer | Reader | Nội dung |
 |---|---|---|---|---|
-| `data/template_registry.json` | JSON object | Training + realtime | Training + realtime | `template_id -> TemplateState` |
+| `data/template_registry.json` | JSON object | Training + realtime | Training + realtime | `template_id -> TemplateState` (kèm in-memory $O(1)$ Counter theo service) |
 | `data/template_embeddings.pkl` | Pickle | Training + realtime | Training + realtime | `template_id -> numpy vector` |
 | `data/group_registry.json` | JSON object | Training + realtime | Training + realtime | `group_id -> GroupState` |
 | `data/group_centroids.pkl` | Pickle | Training | Training + realtime | `group_id -> normalized centroid` |
