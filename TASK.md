@@ -489,3 +489,94 @@ self.collector._malformed_counter = self.metrics.logai_es_malformed_hits_total
 | 17 | `test_run_forever_backoff_caps_at_max` | 10 lần fail | backoff ≤ 300s |
 | 18 | `test_poll_error_metric_incremented` | 2 lần fail | counter += 2 |
 | 19 | `test_checkpoint_not_advanced_on_poll_failure` | poll fail | checkpoint unchanged |
+
+---
+
+# TRIỂN KHAI DOCKER — Nhật ký tiến trình (2026-09-10)
+
+Mục tiêu: deploy engine **song song** với stack đang chạy (Elasticsearch +
+generator log + Prometheus) trên network external `aiops-net`, chạy training
+rồi chuyển sang realtime.
+
+## Bối cảnh hạ tầng đang chạy
+
+| Container | Image | Vai trò |
+|---|---|---|
+| `elasticsearch` | elasticsearch:8.12.2 :9200 | ES chung (network `aiops-net`) |
+| `hdfs_log_generator` | FastAPI :8000 | Sinh log → index **`hdfs-logs`** (UI tại http://localhost:8000) |
+| `prometheus` | prom/prometheus :9090 | Scrape metrics |
+
+Generator ghi `_source`: `@timestamp`, `service="hdfs"`, `level`, `module`,
+`pid`, `block_id`, `message`, `raw_log`. Khớp `_hit_to_rawlog` của engine
+(4 field bắt buộc có đủ; field thừa → `metadata`). **Không cần sửa generator.**
+Cả 2 chế độ ingest (realtime-stream & fast-bulk) đều dùng `datetime.now()` →
+timestamp hiện tại (2026), KHÔNG phải 2008.
+
+## Thay đổi cấu hình đã thực hiện
+
+1. **`config.yaml`**: `elasticsearch.index` đổi `app-logs-*` → **`hdfs-logs`**
+   (index không override được bằng env, chỉ hosts/user/password/metrics_port).
+2. **`docker-compose.yml`** (bản gốc): thêm volume `hf-cache:/root/.cache/huggingface`
+   để cache model embedding (~90MB), khỏi tải lại mỗi lần recreate.
+3. **`docker-compose.reuse.yml`** (MỚI): compose chỉ chạy `logai-engine`
+   (realtime), `logai-training` (profile `training`, one-off), `grafana`
+   (profile `ui`); gắn network **external `aiops-net`**, KHÔNG dựng lại
+   ES/Prometheus. Volume đặt `name:` tường minh (`logai-data`, `hf-cache`) để
+   dùng chung giữa job training và service realtime.
+4. **Prometheus** (`~/prometheus/prometheus.yml`): target đổi
+   `host.docker.internal:9108` → **`logai-engine:9108`**; đã `docker network
+   connect aiops-net prometheus` + restart để nạp. ⚠️ Kết nối mạng thủ công
+   này MẤT nếu prometheus bị recreate — xem "Việc còn lại" #2.
+5. **Elasticsearch cluster setting**: đã bật
+   `PUT _cluster/settings {"persistent":{"indices.id_field_data.enabled":true}}`
+   — xem lý do ở "Sự cố đã xử lý".
+
+## Sự cố đã xử lý trong lúc training
+
+**Lỗi**: training fail exit 1 với
+`BadRequestError(400): Fielddata access on the _id field is disallowed`.
+**Gốc rễ**: engine phân trang `search_after` sort `[{"@timestamp":"asc"},
+{"_id":"asc"}]` (`es_collector.py:182` và `:248`); ES 8.x mặc định cấm
+fielddata trên `_id`. (Fix 2 chạy đúng: `BadRequestError` là non-retryable →
+fail-fast, không retry vô ích.)
+**Đã xử lý (cách A, nhanh)**: bật `indices.id_field_data.enabled=true` trên ES.
+**Cách B (chuẩn hơn, CHƯA làm — TODO)**: đổi tiebreaker sort khỏi `_id` (PIT +
+`_shard_doc`, hoặc thêm field keyword id vào doc). To hơn vì ảnh hưởng
+checkpoint `search_after` + dedup. Nếu triển khai production nên làm cách B.
+
+## ✅ Training ĐÃ HOÀN TẤT (exit 0)
+
+- Dữ liệu: `hdfs-logs` = 180.000 log, timestamp 2026-09-10 (trong lookback 24h).
+- Kết quả: **30 templates, 11 groups**, Isolation Forest train trên 180.000 mẫu.
+- Artifacts ghi vào volume **`logai-data`** (`/app/data` trong container):
+  `template_registry.json`, `template_embeddings.pkl`, `group_registry.json`,
+  `group_centroids.pkl`, `drain3_state.bin`, `training_checkpoint.json`,
+  `doc_embeddings.pkl`, và model trong `data/models/`.
+
+## ▶️ BƯỚC TIẾP THEO — Chạy realtime
+
+Realtime dùng lại templates/groups/model từ `logai-data` (cùng volume), chỉ cần
+KHÔNG xóa volume. Checkpoint realtime (`checkpoint.json`) tách biệt với training
+→ lần đầu đọc `hdfs-logs` từ log cũ nhất tiến dần, xử lý bằng model đã train.
+
+```bash
+cd ~/Documents/logai-engine
+docker compose -f docker-compose.reuse.yml up -d logai-engine
+
+# xác nhận nạp lại registries/model (không có bước "Training..."):
+docker logs logai-engine 2>&1 | grep -iE "load|registr|model|template|group|polling"
+
+# kiểm tra metrics + prometheus target:
+curl http://localhost:9108/metrics | grep logai_events_received
+curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[^"]*"'   # kỳ vọng "up"
+```
+
+## Việc còn lại (TODO)
+
+1. **Fix B** cho sort `_id` (bỏ phụ thuộc `id_field_data` — xem trên) nếu lên
+   production, để không phải bật setting tốn RAM trên ES.
+2. **Prometheus + `aiops-net` bền vững**: thêm `aiops-net` (external) vào
+   compose gốc của prometheus (`~/prometheus/...`) thay cho `docker network
+   connect` thủ công.
+3. (Tùy chọn) Grafana dashboard: `docker compose -f docker-compose.reuse.yml
+   --profile ui up -d grafana` (http://localhost:3000, admin/admin).

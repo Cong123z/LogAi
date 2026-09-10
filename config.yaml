@@ -6,7 +6,7 @@
 elasticsearch:
   hosts:
     - "http://elasticsearch:9200"
-  index: "app-logs-*"
+  index: "hdfs-logs"
   poll_interval_seconds: 5
   batch_size: 500
   request_timeout_seconds: 30
