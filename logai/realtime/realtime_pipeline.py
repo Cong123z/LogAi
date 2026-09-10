@@ -70,6 +70,13 @@ class RealtimePipeline:
         )
         self.metrics = MetricsExporter(config.metrics)
 
+        # Wire metric hooks into the collector. Done here (not next to the
+        # collector's construction) because self.metrics must exist first.
+        self.collector._on_retry_hook = (
+            lambda attempt, exc: self.metrics.logai_retry_total.inc()
+        )
+        self.collector._malformed_counter = self.metrics.logai_es_malformed_hits_total
+
         # DocumentationMatcher already attempted its initial load in __init__.
         # Avoid encoding the same corpus again on the first realtime event.
         self._doc_refresh_at = time.time()
@@ -87,14 +94,34 @@ class RealtimePipeline:
     def run_forever(self) -> None:
         self.start_metrics_server()
         logger.info("Realtime pipeline started, polling Elasticsearch...")
-        for item in self.collector.run_forever():
-            # Accept legacy List[RawLog] iterators while the collector uses the
-            # cursor-bearing tuple contract.
-            if isinstance(item, tuple) and len(item) == 2:
-                batch, cursor = item
-            else:
-                batch, cursor = item, None
+        consecutive_poll_failures = 0
+        MAX_POLL_BACKOFF = 300.0  # 5 minutes
 
+        while True:
+            # ── Phase 1: Poll ES ──────────────────────────────────────────
+            try:
+                batch, cursor = self.collector.poll_batch()
+                consecutive_poll_failures = 0
+            except Exception as exc:  # noqa: BLE001
+                consecutive_poll_failures += 1
+                backoff = min(
+                    self.config.elasticsearch.poll_interval_seconds
+                    * (2 ** consecutive_poll_failures),
+                    MAX_POLL_BACKOFF,
+                )
+                logger.error(
+                    "ES poll failed (%d consecutive): %s. Retrying in %.1fs...",
+                    consecutive_poll_failures, exc, backoff,
+                )
+                self.metrics.logai_es_poll_errors_total.inc()
+                time.sleep(backoff)
+                continue
+
+            if not batch:
+                time.sleep(self.config.elasticsearch.poll_interval_seconds)
+                continue
+
+            # ── Phase 2: Process batch ────────────────────────────────────
             self.metrics.logai_queue_depth.set(len(batch))
             try:
                 for raw in batch:

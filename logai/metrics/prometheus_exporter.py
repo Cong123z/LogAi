@@ -72,6 +72,14 @@ class MetricsExporter:
         self.logai_queue_depth = Gauge(
             "logai_queue_depth", "Events buffered waiting for processing"
         )
+        self.logai_es_poll_errors_total = Counter(
+            "logai_es_poll_errors_total",
+            "ES poll failures (transport errors, auth errors, etc.)",
+        )
+        self.logai_es_malformed_hits_total = Counter(
+            "logai_es_malformed_hits_total",
+            "ES hits skipped due to missing/invalid _source or _id",
+        )
 
     def start(self) -> None:
         start_http_server(self.config.http_port, addr=self.config.http_host)

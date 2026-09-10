@@ -100,6 +100,15 @@ from logai.realtime.realtime_pipeline import RealtimePipeline
 from logai.storage.checkpoint import CheckpointStore
 
 
+class _StopLoop(BaseException):
+    """Sentinel raised from a mocked poll_batch to break run_forever's
+    infinite poll loop after the test's batches have been consumed.
+
+    Subclasses BaseException (not Exception) so run_forever's poll-error
+    handler — which only catches Exception — lets it propagate out.
+    """
+
+
 class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -171,7 +180,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # -------------------------------------------------------------
         with patch.object(self.pipeline.parser, "parse", side_effect=ValueError("Corrupt record")):
             with patch.object(self.pipeline.dlq, "push", side_effect=IOError("DLQ disk full")):
-                self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+                self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
                 with self.assertRaises(IOError):
                     self.pipeline.run_forever()
                 self.assertIsNone(checkpoint.get_search_after())
@@ -180,7 +189,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # Stage 2: Fatal error in _process_one returning False (non-terminal outcome)
         # -------------------------------------------------------------
         with patch.object(self.pipeline, "_process_one", return_value=False):
-            self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
             with self.assertRaises(RuntimeError) as ctx:
                 self.pipeline.run_forever()
             self.assertIn("did not reach a terminal state", str(ctx.exception))
@@ -190,7 +199,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # Stage 3: Fatal interruption (KeyboardInterrupt/SIGINT) during feature update
         # -------------------------------------------------------------
         with patch.object(self.pipeline.feature_engine, "update", side_effect=KeyboardInterrupt("SIGINT")):
-            self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
             with self.assertRaises(KeyboardInterrupt):
                 self.pipeline.run_forever()
             self.assertIsNone(checkpoint.get_search_after())
@@ -199,7 +208,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # Stage 4: Fatal error during TemplateRegistry.flush()
         # -------------------------------------------------------------
         with patch.object(self.pipeline.template_registry, "flush", side_effect=IOError("Disk write failed on flush")):
-            self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
             with self.assertRaises(IOError):
                 self.pipeline.run_forever()
             self.assertIsNone(checkpoint.get_search_after())
@@ -208,7 +217,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # Stage 5: Fatal error during GroupRegistry.flush()
         # -------------------------------------------------------------
         with patch.object(self.pipeline.group_registry, "flush", side_effect=IOError("Group registry flush error")):
-            self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
             with self.assertRaises(IOError):
                 self.pipeline.run_forever()
             self.assertIsNone(checkpoint.get_search_after())
@@ -217,7 +226,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # Stage 6: Fatal error during DedupIndex.gc()
         # -------------------------------------------------------------
         with patch.object(self.pipeline.dedup, "gc", side_effect=IOError("Dedup GC error")):
-            self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
             with self.assertRaises(IOError):
                 self.pipeline.run_forever()
             self.assertIsNone(checkpoint.get_search_after())
@@ -247,7 +256,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
             return original_process(raw)
 
         # Run 1: Crash at event 60
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch_1, cursor_1)]))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch_1, cursor_1)])
         with patch.object(self.pipeline, "_process_one", side_effect=flaky_process):
             with self.assertRaises(SystemError):
                 self.pipeline.run_forever()
@@ -270,9 +279,12 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
                 second_run_processed.append(raw.event_id)
             return original_process(raw)
 
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch_1, cursor_1), (batch_2, cursor_2)]))
+        self.pipeline.collector.poll_batch = MagicMock(
+            side_effect=[(batch_1, cursor_1), (batch_2, cursor_2), _StopLoop]
+        )
         with patch.object(self.pipeline, "_process_one", side_effect=normal_process):
-            self.pipeline.run_forever()
+            with self.assertRaises(_StopLoop):
+                self.pipeline.run_forever()
 
         # In second run: events 0..59 were skipped by dedup! Events 60..99 + 100..149 processed.
         self.assertEqual(len(second_run_processed), 40 + 50)
@@ -298,10 +310,11 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
             cursor = [b_logs[-1].timestamp, b_logs[-1].event_id]
             stream.append((b_logs, cursor))
 
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter(stream))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=list(stream) + [_StopLoop])
 
         t0 = time.perf_counter()
-        self.pipeline.run_forever()
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
         elapsed = time.perf_counter() - t0
 
         throughput = total_logs / elapsed
@@ -325,13 +338,15 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         cursor = [3000.0 + 5000 * 0.05, "evt_4999"]
 
         # First run: process and populate dedup
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
-        self.pipeline.run_forever()
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
 
         # Second run: replay exact same 5,000 logs
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
         t0 = time.perf_counter()
-        self.pipeline.run_forever()
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
         elapsed = time.perf_counter() - t0
         replay_throughput = len(batch) / elapsed
         self.assertGreater(replay_throughput, 10_000)
@@ -351,8 +366,11 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
             )
             for i in range(60)
         ]
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(normal_logs, [2059.0, "norm_59"])]))
-        self.pipeline.run_forever()
+        self.pipeline.collector.poll_batch = MagicMock(
+            side_effect=[(normal_logs, [2059.0, "norm_59"]), _StopLoop]
+        )
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
 
         state = self.pipeline.alert_sm._load("G_AUTH")
         # Steady state should be NORMAL
@@ -370,8 +388,11 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
             )
             for i in range(20)
         ]
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(burst_logs, [burst_base + 0.2, "burst_19"])]))
-        self.pipeline.run_forever()
+        self.pipeline.collector.poll_batch = MagicMock(
+            side_effect=[(burst_logs, [burst_base + 0.2, "burst_19"]), _StopLoop]
+        )
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
 
         # State machine should have transitioned to ALERTING
         state = self.pipeline.alert_sm._load("G_AUTH")

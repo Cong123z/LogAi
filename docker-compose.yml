@@ -35,6 +35,7 @@ services:
       - "9108:9108"
     volumes:
       - logai-data:/app/data
+      - hf-cache:/root/.cache/huggingface   # persist downloaded embedding model (~90MB)
     restart: unless-stopped
 
   prometheus:
@@ -61,5 +62,6 @@ services:
 volumes:
   es-data:
   logai-data:
+  hf-cache:
   prom-data:
   grafana-data:

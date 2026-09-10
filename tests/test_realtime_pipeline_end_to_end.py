@@ -49,6 +49,15 @@ from logai.realtime.realtime_pipeline import RealtimePipeline
 from logai.storage.checkpoint import CheckpointStore
 
 
+class _StopLoop(BaseException):
+    """Sentinel raised from a mocked poll_batch to break run_forever's
+    infinite poll loop after the test's batches have been consumed.
+
+    Subclasses BaseException so run_forever's poll-error handler (which only
+    catches Exception) lets it propagate out of the loop.
+    """
+
+
 class TestRealtimePipelineEndToEnd(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -306,7 +315,7 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         self.assertEqual(self.pipeline.dlq.count(), 0)
 
     def test_batch_execution_and_gc(self):
-        """Verify collector run_forever iteration, queue depth tracking, and GC invocation."""
+        """Verify poll_batch iteration, queue depth tracking, and GC invocation."""
         batch_1 = [
             RawLog(event_id=f"b1_{i}", timestamp=1000.0 + i, service="auth", level="INFO", message=f"msg {i}")
             for i in range(5)
@@ -316,13 +325,16 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
             for i in range(3)
         ]
 
-        # Mock collector iterator to yield 2 batches and terminate
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([batch_1, batch_2]))
+        # Mock collector to yield 2 batches then stop the poll loop.
+        self.pipeline.collector.poll_batch = MagicMock(
+            side_effect=[(batch_1, [1005.0, "b1_4"]), (batch_2, [1012.0, "b2_2"]), _StopLoop]
+        )
         self.pipeline.start_metrics_server = MagicMock()
         self.pipeline._process_one = MagicMock()
         self.pipeline.dedup.gc = MagicMock()
 
-        self.pipeline.run_forever()
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
 
         # Both batches processed
         self.assertEqual(self.pipeline._process_one.call_count, 8)
@@ -441,7 +453,7 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
         batch = self._raw_batch(4)
         cursor = [1003, "rt_3"]
         order = []
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
         self.pipeline._process_one = MagicMock(
             side_effect=lambda raw: order.append(f"process:{raw.event_id}") or True
         )
@@ -450,14 +462,15 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
         self.pipeline.dedup.gc = MagicMock(side_effect=lambda: order.append("dedup"))
         self.pipeline.checkpoint.commit = MagicMock(side_effect=lambda *_: order.append("checkpoint"))
 
-        self.pipeline.run_forever()
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
 
         self.assertEqual(order[-4:], ["templates", "groups", "dedup", "checkpoint"])
         self.pipeline.checkpoint.commit.assert_called_once_with(cursor, batch[-1].timestamp)
 
     def test_unhandled_crash_mid_batch_does_not_commit(self):
         batch = self._raw_batch(10)
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, [1009, "rt_9"])]))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, [1009, "rt_9"])])
         self.pipeline._process_one = MagicMock(side_effect=RuntimeError("crash in realtime phase"))
         self.pipeline.checkpoint.commit = MagicMock()
 
@@ -469,7 +482,7 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
 
     def test_flush_failure_does_not_commit(self):
         batch = self._raw_batch(2)
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, [1001, "rt_1"])]))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, [1001, "rt_1"])])
         self.pipeline._process_one = MagicMock(return_value=True)
         self.pipeline.template_registry.flush = MagicMock(side_effect=OSError("disk full"))
         self.pipeline.checkpoint.commit = MagicMock()
@@ -482,14 +495,15 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
     def test_large_batch_commits_once_after_all_events(self):
         batch = self._raw_batch(20_000)
         cursor = [20999, "rt_19999"]
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
         self.pipeline._process_one = MagicMock(return_value=True)
         self.pipeline.template_registry.flush = MagicMock()
         self.pipeline.group_registry.flush = MagicMock()
         self.pipeline.dedup.gc = MagicMock()
         self.pipeline.checkpoint.commit = MagicMock()
 
-        self.pipeline.run_forever()
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
 
         self.assertEqual(self.pipeline._process_one.call_count, 20_000)
         self.pipeline.checkpoint.commit.assert_called_once_with(cursor, batch[-1].timestamp)
@@ -497,14 +511,15 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
     def test_dlq_terminal_failure_still_allows_batch_commit(self):
         batch = self._raw_batch(1)
         cursor = [1000, "rt_0"]
-        self.pipeline.collector.run_forever = MagicMock(return_value=iter([(batch, cursor)]))
+        self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
         self.pipeline._process_one = MagicMock(return_value=True)  # event was persisted to DLQ
         self.pipeline.template_registry.flush = MagicMock()
         self.pipeline.group_registry.flush = MagicMock()
         self.pipeline.dedup.gc = MagicMock()
         self.pipeline.checkpoint.commit = MagicMock()
 
-        self.pipeline.run_forever()
+        with self.assertRaises(_StopLoop):
+            self.pipeline.run_forever()
 
         self.pipeline.checkpoint.commit.assert_called_once_with(cursor, batch[-1].timestamp)
 

@@ -8,14 +8,32 @@ training pipeline (plan section 3.1).
 from __future__ import annotations
 
 import logging
+import random
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from elasticsearch import Elasticsearch
 
+try:
+    from elasticsearch import (
+        AuthenticationException,
+        AuthorizationException,
+        BadRequestError,
+        NotFoundError,
+    )
+    # Filter out mock objects when elasticsearch is mocked in tests
+    _ES_NON_RETRYABLE = tuple(
+        cls for cls in (
+            AuthenticationException, AuthorizationException,
+            BadRequestError, NotFoundError,
+        )
+        if isinstance(cls, type) and issubclass(cls, BaseException)
+    )
+except (ImportError, AttributeError):
+    _ES_NON_RETRYABLE = ()
+
 from logai.config import ElasticsearchConfig
 from logai.models import RawLog
-from logai.reliability.retry import retry_with_backoff
 from logai.storage.checkpoint import CheckpointStore
 
 logger = logging.getLogger("logai.collector")
@@ -32,7 +50,24 @@ def _build_client(config: ElasticsearchConfig) -> Elasticsearch:
 
 
 def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
-    src = hit["_source"]
+    """Convert a single ES hit dict to RawLog.
+
+    Raises ValueError with a descriptive message when the hit is missing
+    required fields (_source, _id) or _source is not a dict.  Callers
+    should catch exceptions per-hit so one bad document never crashes an
+    entire batch.
+    """
+    src = hit.get("_source")
+    if not isinstance(src, dict):
+        raise ValueError(
+            f"Hit missing or invalid _source (got {type(src).__name__}): "
+            f"_id={hit.get('_id', '<no_id>')}"
+        )
+    hit_id = hit.get("_id")
+    if not hit_id:
+        raise ValueError(
+            f"Hit missing _id, _source keys: {list(src.keys())[:5]}"
+        )
     ts_raw = src.get("@timestamp")
     ts = _parse_timestamp(ts_raw)
     return RawLog(
@@ -41,10 +76,41 @@ def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
         level=src.get("level", "INFO"),
         message=src.get("message", ""),
         metadata={k: v for k, v in src.items() if k not in ("@timestamp", "service", "level", "message")},
-        event_id=hit["_id"],
+        event_id=hit_id,
         es_index=index,
-        es_doc_id=hit["_id"],
+        es_doc_id=hit_id,
     )
+
+
+def _safe_hits_to_rawlogs(
+    hits: List[Dict[str, Any]],
+    index: str,
+    malformed_counter: Optional[Any] = None,
+) -> List[RawLog]:
+    """Convert a list of ES hits to RawLog, skipping malformed ones.
+
+    Each hit is processed independently so a single bad document never
+    crashes the entire batch.  Malformed hits are logged at WARNING level.
+    If a malformed_counter metric is provided, its .inc() method is called.
+    """
+    raw_logs: List[RawLog] = []
+    for hit in hits:
+        try:
+            raw_logs.append(_hit_to_rawlog(hit, index))
+        except Exception as exc:  # noqa: BLE001
+            hit_id = "<unknown>"
+            try:
+                hit_id = (
+                    hit.get("_id", "<no_id>")
+                    if isinstance(hit, dict)
+                    else repr(hit)[:80]
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            logger.warning("Skipping malformed ES hit %s: %s", hit_id, exc)
+            if malformed_counter is not None:
+                malformed_counter.inc()
+    return raw_logs
 
 
 def _parse_timestamp(value: Any) -> float:
@@ -62,14 +128,47 @@ def _parse_timestamp(value: Any) -> float:
 
 
 class ElasticsearchCollector:
+    _malformed_counter: Optional[Any] = None
+    _on_retry_hook: Optional[Callable[[int, BaseException], None]] = None
+
     def __init__(self, config: ElasticsearchConfig, checkpoint: CheckpointStore):
         self.config = config
         self.checkpoint = checkpoint
         self.client = _build_client(config)
+        # Injected by the pipeline for Prometheus metrics (see RealtimePipeline).
+        self._malformed_counter = None
+        self._on_retry_hook = None
 
-    @retry_with_backoff(exceptions=(Exception,))
     def _search(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        return self.client.search(index=self.config.index, body=body)
+        """Search with exponential backoff, classifying ES errors.
+
+        Non-retryable client errors (400/401/403/404) fail fast instead of
+        wasting the full retry budget.  Retryable errors (connection/timeout,
+        429, 5xx) back off.  An instance-level ``_on_retry_hook`` is invoked
+        before each sleep so the pipeline can increment ``logai_retry_total``.
+        """
+        attempt = 0
+        while True:
+            try:
+                return self.client.search(index=self.config.index, body=body)
+            except _ES_NON_RETRYABLE:
+                raise  # fail-fast: no point retrying a 400/401/403/404
+            except Exception as exc:  # noqa: BLE001
+                attempt += 1
+                if attempt > 5:
+                    logger.error(
+                        "_search failed after %d attempts: %s", attempt - 1, exc
+                    )
+                    raise
+                delay = min(1.0 * (2 ** (attempt - 1)), 60.0)
+                delay += random.uniform(0, delay * 0.1)  # jitter
+                logger.warning(
+                    "_search attempt %d/5 failed (%s), retrying in %.2fs",
+                    attempt, exc, delay,
+                )
+                if self._on_retry_hook is not None:
+                    self._on_retry_hook(attempt, exc)
+                time.sleep(delay)
 
     def poll_batch(self) -> Tuple[List[RawLog], Optional[List[Any]]]:
         """Fetch a batch and return its cursor without advancing checkpoint.
@@ -91,8 +190,21 @@ class ElasticsearchCollector:
         if not hits:
             return [], None
 
-        raw_logs = [_hit_to_rawlog(h, self.config.index) for h in hits]
-        return raw_logs, hits[-1]["sort"]
+        counter = getattr(self, "_malformed_counter", None)
+        raw_logs = _safe_hits_to_rawlogs(hits, self.config.index, counter)
+
+        # Cursor must be extracted from the last hit regardless of whether
+        # that hit parsed successfully — otherwise the batch would be
+        # refetched indefinitely.
+        last_sort = hits[-1].get("sort")
+        if last_sort is None:
+            logger.error(
+                "Last hit in batch missing 'sort' field; cannot advance "
+                "cursor.  Batch had %d hits, %d parsed successfully.",
+                len(hits), len(raw_logs),
+            )
+
+        return raw_logs, last_sort
 
     def run_forever(self) -> Iterator[Tuple[List[RawLog], Optional[List[Any]]]]:
         """Generator that polls indefinitely, sleeping `poll_interval_seconds`
@@ -144,9 +256,17 @@ class ElasticsearchCollector:
             if not hits:
                 break
 
-            batch = [_hit_to_rawlog(h, self.config.index) for h in hits]
+            counter = getattr(self, "_malformed_counter", None)
+            batch = _safe_hits_to_rawlogs(hits, self.config.index, counter)
             total_fetched += len(batch)
-            search_after = hits[-1]["sort"]
+
+            last_sort = hits[-1].get("sort")
+            if last_sort is None:
+                logger.error(
+                    "Historical hit missing 'sort' field; stopping stream."
+                )
+                break
+            search_after = last_sort
 
             yield batch, search_after
 

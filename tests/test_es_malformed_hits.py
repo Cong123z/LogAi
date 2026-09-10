@@ -1,0 +1,372 @@
+"""Tests for malformed ES hit isolation in ElasticsearchCollector.
+
+Verifies that:
+- A single malformed hit does not crash the entire batch
+- Valid hits in the same batch are still returned
+- Missing _source, missing _id, non-dict _source are all handled
+- Missing 'sort' on last hit returns cursor=None
+- All hits malformed returns ([], cursor) so the pipeline is not stuck
+- Input/output contract of poll_batch() and stream_historical_batches()
+  is unchanged for valid data
+"""
+from __future__ import annotations
+
+import logging
+import sys
+import unittest
+from typing import Any, Dict, List, Optional
+from unittest.mock import MagicMock, patch
+
+# Lightweight mock for elasticsearch driver
+if "elasticsearch" not in sys.modules:
+    sys.modules["elasticsearch"] = MagicMock()
+
+from logai.collector.es_collector import (
+    ElasticsearchCollector,
+    _hit_to_rawlog,
+    _safe_hits_to_rawlogs,
+)
+from logai.config import ElasticsearchConfig
+from logai.models import RawLog
+from logai.storage.checkpoint import CheckpointStore
+
+
+def _make_hit(
+    doc_id: str = "doc_1",
+    source: Any = None,
+    sort: Optional[List[Any]] = None,
+    *,
+    include_source: bool = True,
+    include_id: bool = True,
+    include_sort: bool = True,
+) -> Dict[str, Any]:
+    """Build a synthetic ES hit dict with fine-grained control."""
+    hit: Dict[str, Any] = {}
+    if include_id:
+        hit["_id"] = doc_id
+    if include_source:
+        hit["_source"] = source if source is not None else {
+            "@timestamp": "2026-09-10T10:00:00Z",
+            "service": "payment",
+            "level": "INFO",
+            "message": f"Event {doc_id}",
+        }
+    if include_sort:
+        hit["sort"] = sort if sort is not None else [1725958800, doc_id]
+    return hit
+
+
+def _make_valid_hits(n: int, base_id: int = 0) -> List[Dict[str, Any]]:
+    return [_make_hit(doc_id=f"doc_{base_id + i}") for i in range(n)]
+
+
+# ── Unit tests for _hit_to_rawlog ────────────────────────────────────────
+
+class TestHitToRawlog(unittest.TestCase):
+    """Verify _hit_to_rawlog raises clear errors on malformed hits and
+    produces correct RawLog on valid hits (input/output parity)."""
+
+    def test_valid_hit_returns_rawlog(self):
+        hit = _make_hit(doc_id="abc123")
+        result = _hit_to_rawlog(hit, "app-logs-*")
+        self.assertIsInstance(result, RawLog)
+        self.assertEqual(result.event_id, "abc123")
+        self.assertEqual(result.es_doc_id, "abc123")
+        self.assertEqual(result.service, "payment")
+        self.assertEqual(result.level, "INFO")
+        self.assertIn("Event abc123", result.message)
+        self.assertEqual(result.es_index, "app-logs-*")
+
+    def test_missing_source_raises_valueerror(self):
+        hit = _make_hit(include_source=False)
+        with self.assertRaises(ValueError) as ctx:
+            _hit_to_rawlog(hit, "app-logs-*")
+        self.assertIn("_source", str(ctx.exception))
+        self.assertIn("NoneType", str(ctx.exception))
+
+    def test_source_not_dict_raises_valueerror(self):
+        hit = _make_hit(source="this is a string, not a dict")
+        with self.assertRaises(ValueError) as ctx:
+            _hit_to_rawlog(hit, "app-logs-*")
+        self.assertIn("_source", str(ctx.exception))
+        self.assertIn("str", str(ctx.exception))
+
+    def test_source_is_list_raises_valueerror(self):
+        hit = _make_hit(source=["a", "b"])
+        with self.assertRaises(ValueError) as ctx:
+            _hit_to_rawlog(hit, "app-logs-*")
+        self.assertIn("list", str(ctx.exception))
+
+    def test_missing_id_raises_valueerror(self):
+        hit = _make_hit(include_id=False)
+        with self.assertRaises(ValueError) as ctx:
+            _hit_to_rawlog(hit, "app-logs-*")
+        self.assertIn("_id", str(ctx.exception))
+
+    def test_empty_string_id_raises_valueerror(self):
+        hit = _make_hit()
+        hit["_id"] = ""
+        with self.assertRaises(ValueError) as ctx:
+            _hit_to_rawlog(hit, "app-logs-*")
+        self.assertIn("_id", str(ctx.exception))
+
+    def test_missing_timestamp_uses_current_time(self):
+        """Missing @timestamp should fallback gracefully (existing behavior)."""
+        source = {"service": "auth", "level": "WARN", "message": "no ts"}
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertIsInstance(result.timestamp, float)
+        self.assertGreater(result.timestamp, 0)
+
+    def test_missing_optional_fields_use_defaults(self):
+        """Missing service/level/message should use defaults (existing behavior)."""
+        source = {"@timestamp": "2026-09-10T12:00:00Z"}
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertEqual(result.service, "unknown")
+        self.assertEqual(result.level, "INFO")
+        self.assertEqual(result.message, "")
+
+    def test_extra_fields_go_to_metadata(self):
+        """Extra fields in _source should end up in metadata (existing behavior)."""
+        source = {
+            "@timestamp": "2026-09-10T12:00:00Z",
+            "service": "api",
+            "level": "DEBUG",
+            "message": "hello",
+            "trace_id": "abc",
+            "host": "node-1",
+        }
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertEqual(result.metadata["trace_id"], "abc")
+        self.assertEqual(result.metadata["host"], "node-1")
+        self.assertNotIn("@timestamp", result.metadata)
+
+
+# ── Unit tests for _safe_hits_to_rawlogs ─────────────────────────────────
+
+class TestSafeHitsToRawlogs(unittest.TestCase):
+    """Verify batch-level malformed hit isolation."""
+
+    def test_all_valid_hits(self):
+        hits = _make_valid_hits(5)
+        result = _safe_hits_to_rawlogs(hits, "app-logs-*")
+        self.assertEqual(len(result), 5)
+        for r in result:
+            self.assertIsInstance(r, RawLog)
+
+    def test_malformed_hit_mid_batch_skipped(self):
+        """One bad hit in the middle: 9 good hits returned, 1 skipped."""
+        hits = _make_valid_hits(10)
+        # Corrupt hit #5: remove _source
+        del hits[5]["_source"]
+        result = _safe_hits_to_rawlogs(hits, "app-logs-*")
+        self.assertEqual(len(result), 9)
+        ids = {r.event_id for r in result}
+        self.assertNotIn("doc_5", ids)
+        for i in range(10):
+            if i != 5:
+                self.assertIn(f"doc_{i}", ids)
+
+    def test_missing_id_hit_skipped(self):
+        hits = _make_valid_hits(3)
+        del hits[1]["_id"]
+        result = _safe_hits_to_rawlogs(hits, "idx")
+        self.assertEqual(len(result), 2)
+        ids = {r.event_id for r in result}
+        self.assertIn("doc_0", ids)
+        self.assertIn("doc_2", ids)
+
+    def test_source_not_dict_skipped(self):
+        hits = _make_valid_hits(3)
+        hits[0]["_source"] = "not a dict"
+        result = _safe_hits_to_rawlogs(hits, "idx")
+        self.assertEqual(len(result), 2)
+
+    def test_all_hits_malformed_returns_empty(self):
+        hits = [
+            {"_id": "a"},                        # missing _source
+            {"_source": "string"},               # _source not dict
+            {"_source": {"msg": "x"}},           # missing _id
+        ]
+        for h in hits:
+            h["sort"] = [1, "x"]
+        result = _safe_hits_to_rawlogs(hits, "idx")
+        self.assertEqual(len(result), 0)
+
+    def test_non_dict_hit_element_skipped(self):
+        """A hit that is not a dict at all (extreme edge case)."""
+        hits = _make_valid_hits(2)
+        hits.insert(1, "this is not a dict")  # type: ignore
+        result = _safe_hits_to_rawlogs(hits, "idx")
+        # The string element should be skipped, 2 valid hits remain
+        self.assertEqual(len(result), 2)
+
+    def test_logs_warning_for_each_skipped_hit(self):
+        hits = _make_valid_hits(3)
+        del hits[0]["_source"]
+        del hits[2]["_id"]
+        with self.assertLogs("logai.collector", level="WARNING") as cm:
+            result = _safe_hits_to_rawlogs(hits, "idx")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(cm.output), 2)
+        self.assertIn("Skipping malformed", cm.output[0])
+        self.assertIn("Skipping malformed", cm.output[1])
+
+    def test_malformed_counter_incremented(self):
+        counter = MagicMock()
+        hits = _make_valid_hits(4)
+        del hits[1]["_source"]
+        del hits[3]["_id"]
+        result = _safe_hits_to_rawlogs(hits, "idx", malformed_counter=counter)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(counter.inc.call_count, 2)
+
+
+# ── Integration tests for poll_batch ─────────────────────────────────────
+
+class TestPollBatchMalformedHits(unittest.TestCase):
+    """Verify poll_batch() contract is preserved with malformed hit handling."""
+
+    def setUp(self):
+        self.config = ElasticsearchConfig()
+        self.config.batch_size = 10
+
+        # Use a fake checkpoint with in-memory state
+        self.checkpoint = MagicMock(spec=CheckpointStore)
+        self.checkpoint.get_search_after.return_value = None
+
+        self.collector = ElasticsearchCollector(self.config, self.checkpoint)
+
+    def _mock_search_response(self, hits: List[Dict[str, Any]]) -> Dict:
+        return {"hits": {"hits": hits}}
+
+    def test_valid_batch_returns_all_logs_and_cursor(self):
+        """Contract parity: valid batch returns (List[RawLog], sort)."""
+        hits = _make_valid_hits(5)
+        self.collector._search = MagicMock(
+            return_value=self._mock_search_response(hits)
+        )
+        raw_logs, cursor = self.collector.poll_batch()
+        self.assertEqual(len(raw_logs), 5)
+        self.assertEqual(cursor, hits[-1]["sort"])
+        for r in raw_logs:
+            self.assertIsInstance(r, RawLog)
+
+    def test_empty_response_returns_empty_and_none(self):
+        """Contract parity: no hits returns ([], None)."""
+        self.collector._search = MagicMock(
+            return_value={"hits": {"hits": []}}
+        )
+        raw_logs, cursor = self.collector.poll_batch()
+        self.assertEqual(raw_logs, [])
+        self.assertIsNone(cursor)
+
+    def test_malformed_hit_mid_batch_others_survive(self):
+        """1 bad hit in 10 → 9 RawLog, cursor from last hit."""
+        hits = _make_valid_hits(10)
+        del hits[4]["_source"]  # corrupt hit #4
+        self.collector._search = MagicMock(
+            return_value=self._mock_search_response(hits)
+        )
+        raw_logs, cursor = self.collector.poll_batch()
+        self.assertEqual(len(raw_logs), 9)
+        self.assertEqual(cursor, hits[-1]["sort"])
+
+    def test_last_hit_malformed_still_returns_cursor(self):
+        """Even if the last hit has bad _source, its sort must still be used."""
+        hits = _make_valid_hits(5)
+        del hits[-1]["_source"]  # last hit corrupt, but has sort
+        self.collector._search = MagicMock(
+            return_value=self._mock_search_response(hits)
+        )
+        raw_logs, cursor = self.collector.poll_batch()
+        self.assertEqual(len(raw_logs), 4)
+        # Cursor still comes from last hit's sort
+        self.assertEqual(cursor, hits[-1]["sort"])
+
+    def test_last_hit_missing_sort_returns_none_cursor(self):
+        """If last hit has no 'sort' field, cursor is None."""
+        hits = _make_valid_hits(3)
+        del hits[-1]["sort"]
+        self.collector._search = MagicMock(
+            return_value=self._mock_search_response(hits)
+        )
+        raw_logs, cursor = self.collector.poll_batch()
+        self.assertEqual(len(raw_logs), 3)  # all have valid _source/_id
+        self.assertIsNone(cursor)
+
+    def test_all_hits_malformed_returns_empty_with_cursor(self):
+        """All bad hits → empty list, cursor from last hit's sort."""
+        hits = [
+            {"_id": "a", "sort": [1, "a"]},                    # no _source
+            {"_source": "str", "_id": "b", "sort": [2, "b"]},  # bad _source
+            {"_source": {}, "sort": [3, "c"]},                  # no _id
+        ]
+        self.collector._search = MagicMock(
+            return_value=self._mock_search_response(hits)
+        )
+        raw_logs, cursor = self.collector.poll_batch()
+        self.assertEqual(len(raw_logs), 0)
+        self.assertEqual(cursor, [3, "c"])  # still advances
+
+
+# ── Integration tests for stream_historical_batches ──────────────────────
+
+class TestStreamHistoricalMalformedHits(unittest.TestCase):
+    """Verify stream_historical_batches() contract with malformed hits."""
+
+    def setUp(self):
+        self.config = ElasticsearchConfig()
+        self.config.batch_size = 5
+        self.checkpoint = MagicMock(spec=CheckpointStore)
+        self.checkpoint.get_search_after.return_value = None
+        self.collector = ElasticsearchCollector(self.config, self.checkpoint)
+
+    def test_valid_stream_returns_all(self):
+        hits = _make_valid_hits(5)
+        self.collector._search = MagicMock(
+            side_effect=[
+                {"hits": {"hits": hits}},
+                {"hits": {"hits": []}},  # second page: empty → stop
+            ]
+        )
+        batches = list(
+            self.collector.stream_historical_batches(start_ts=0.0, max_docs=10)
+        )
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0][0]), 5)
+        self.assertEqual(batches[0][1], hits[-1]["sort"])
+
+    def test_malformed_hit_skipped_in_stream(self):
+        hits = _make_valid_hits(5)
+        del hits[2]["_source"]
+        self.collector._search = MagicMock(
+            side_effect=[
+                {"hits": {"hits": hits}},
+                {"hits": {"hits": []}},  # second page: empty → stop
+            ]
+        )
+        batches = list(
+            self.collector.stream_historical_batches(start_ts=0.0, max_docs=10)
+        )
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0][0]), 4)
+
+    def test_missing_sort_stops_stream(self):
+        """If last hit has no sort, stream should stop (cannot paginate)."""
+        hits = _make_valid_hits(3)
+        del hits[-1]["sort"]
+        self.collector._search = MagicMock(
+            return_value={"hits": {"hits": hits}}
+        )
+        batches = list(
+            self.collector.stream_historical_batches(start_ts=0.0, max_docs=100)
+        )
+        # Stream yields nothing because it breaks before yield
+        self.assertEqual(len(batches), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

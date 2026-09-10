@@ -1,0 +1,491 @@
+# TASK: ES Error Handling — Sửa 4 kịch bản lỗi Elasticsearch
+
+**Ngày tạo**: 2026-09-10  
+**Trạng thái**: ✅ HOÀN THÀNH — 110/110 test pass  
+**Ảnh hưởng**: `es_collector.py`, `retry.py`, `realtime_pipeline.py`, `prometheus_exporter.py`
+
+> **Ghi chú triển khai**:
+> - Fix 2c dùng phương án instance-method cho `_search` (đọc `_ES_NON_RETRYABLE`
+>   ở runtime → testable qua patch module-global); giữ `retry_with_backoff`
+>   decorator cho caller khác.
+> - Fix 4b: wiring hooks đặt **sau** khi `self.metrics` được tạo (không thể đặt
+>   ngay sau collector vì metrics chưa tồn tại lúc đó).
+> - Fix 3 xóa contract generator của collector → 19 test legacy (mock
+>   `collector.run_forever`) được **port** sang mock `poll_batch` + sentinel
+>   `_StopLoop`, giữ nguyên mọi assertion. `ElasticsearchCollector.run_forever`
+>   giờ là dead code, giữ lại cho tương thích.
+
+---
+
+## Bối cảnh
+
+Phân tích code hiện tại phát hiện 4 kịch bản lỗi Elasticsearch mà hệ thống
+**không xử lý hoặc xử lý sai**, gây crash loop, retry vô nghĩa, hoặc mất
+toàn bộ batch dữ liệu hợp lệ:
+
+1. Một malformed hit nằm giữa batch → crash toàn batch
+2. ES 400/401/403/404 → retry 5 lần vô ích rồi crash
+3. ES timeout nhiều lần → 181 giây chờ rồi process crash
+4. ES unavailable rồi phục hồi → crash loop qua Docker restart
+
+---
+
+## Fix 1: Malformed hit isolation
+
+**File**: `logai/collector/es_collector.py`  
+**Mức độ**: 🔴 Critical — 1 hit bẩn giết 499 hit tốt + gây infinite crash loop
+
+### Vấn đề gốc
+
+`_hit_to_rawlog()` (L34-47) truy cập `hit["_source"]` và `hit["_id"]` trực
+tiếp không có try/catch. `poll_batch()` (L94) và `stream_historical_batches()`
+(L147) dùng list comprehension — 1 exception = toàn bộ batch mất. Retry gọi
+lại ES trả y hệt batch đó → 5 lần crash cùng chỗ → process crash → Docker
+restart → gặp lại hit bẩn → infinite crash loop.
+
+### Hướng sửa
+
+#### 1a. `_hit_to_rawlog()` — thêm validation rõ ràng
+
+Thay `hit["_source"]` bằng `hit.get("_source")` + kiểm tra `isinstance(src, dict)`.
+Thay `hit["_id"]` bằng `hit.get("_id")` + kiểm tra truthy.
+Raise `ValueError` với message mô tả cụ thể thay vì để `KeyError` mơ hồ.
+
+```python
+def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
+    src = hit.get("_source")
+    if not isinstance(src, dict):
+        raise ValueError(
+            f"Hit missing or invalid _source (got {type(src).__name__}): "
+            f"_id={hit.get('_id', '<no_id>')}"
+        )
+    hit_id = hit.get("_id")
+    if not hit_id:
+        raise ValueError(f"Hit missing _id, _source keys: {list(src.keys())[:5]}")
+
+    ts_raw = src.get("@timestamp")
+    ts = _parse_timestamp(ts_raw)
+    return RawLog(
+        timestamp=ts,
+        service=src.get("service", "unknown"),
+        level=src.get("level", "INFO"),
+        message=src.get("message", ""),
+        metadata={
+            k: v for k, v in src.items()
+            if k not in ("@timestamp", "service", "level", "message")
+        },
+        event_id=hit_id,
+        es_index=index,
+        es_doc_id=hit_id,
+    )
+```
+
+#### 1b. Thêm `_safe_hits_to_rawlogs()` — cô lập lỗi từng hit
+
+Thêm hàm mới ngay sau `_hit_to_rawlog()`:
+
+```python
+def _safe_hits_to_rawlogs(
+    hits: List[Dict[str, Any]],
+    index: str,
+    malformed_counter: Optional[Any] = None,
+) -> List[RawLog]:
+    """Convert hits to RawLog, skipping malformed ones individually.
+
+    A single bad hit must never crash the entire batch.
+    """
+    raw_logs: List[RawLog] = []
+    for hit in hits:
+        try:
+            raw_logs.append(_hit_to_rawlog(hit, index))
+        except Exception as exc:  # noqa: BLE001
+            hit_id = "<unknown>"
+            try:
+                hit_id = (
+                    hit.get("_id", "<no_id>")
+                    if isinstance(hit, dict)
+                    else repr(hit)[:80]
+                )
+            except Exception:
+                pass
+            logger.warning("Skipping malformed ES hit %s: %s", hit_id, exc)
+            if malformed_counter is not None:
+                malformed_counter.inc()
+    return raw_logs
+```
+
+#### 1c. `poll_batch()` — dùng `_safe_hits_to_rawlogs` + defensive sort
+
+Thay dòng 94:
+```python
+# TRƯỚC:
+raw_logs = [_hit_to_rawlog(h, self.config.index) for h in hits]
+return raw_logs, hits[-1]["sort"]
+
+# SAU:
+raw_logs = _safe_hits_to_rawlogs(hits, self.config.index, self._malformed_counter)
+
+last_sort = hits[-1].get("sort")
+if last_sort is None:
+    logger.error(
+        "Last hit in batch missing 'sort' field; cannot advance cursor. "
+        "Batch had %d hits, %d parsed successfully.",
+        len(hits), len(raw_logs),
+    )
+    return raw_logs, None
+
+return raw_logs, last_sort
+```
+
+#### 1d. `stream_historical_batches()` — cùng pattern
+
+Thay dòng 147:
+```python
+# TRƯỚC:
+batch = [_hit_to_rawlog(h, self.config.index) for h in hits]
+total_fetched += len(batch)
+search_after = hits[-1]["sort"]
+
+# SAU:
+batch = _safe_hits_to_rawlogs(hits, self.config.index, self._malformed_counter)
+total_fetched += len(batch)
+last_sort = hits[-1].get("sort")
+if last_sort is None:
+    logger.error("Historical hit missing 'sort'; stopping stream.")
+    break
+search_after = last_sort
+```
+
+#### 1e. Thêm attribute `_malformed_counter` vào `ElasticsearchCollector.__init__`
+
+```python
+def __init__(self, config: ElasticsearchConfig, checkpoint: CheckpointStore):
+    self.config = config
+    self.checkpoint = checkpoint
+    self.client = _build_client(config)
+    self._malformed_counter = None   # inject bởi pipeline cho Prometheus metric
+```
+
+---
+
+## Fix 2: Retry phân loại exception
+
+**Files**: `logai/reliability/retry.py`, `logai/collector/es_collector.py`  
+**Mức độ**: 🔴 Critical — retry 400/401/403/404 chờ 31 giây vô ích
+
+### Vấn đề gốc
+
+`@retry_with_backoff(exceptions=(Exception,))` bắt mọi exception, không phân
+biệt retryable hay non-retryable. ES Python client 8.x có exception hierarchy
+rõ ràng:
+
+| Exception | HTTP | Retryable? |
+|-----------|:----:|:----------:|
+| `ConnectionError` | — | ✅ Có |
+| `ConnectionTimeout` | — | ✅ Có |
+| `ApiError(429)` | 429 | ✅ Có |
+| `ApiError(5xx)` | 5xx | ✅ Có |
+| `BadRequestError` | 400 | ❌ Không |
+| `AuthenticationException` | 401 | ❌ Không |
+| `AuthorizationException` | 403 | ❌ Không |
+| `NotFoundError` | 404 | ❌ Không |
+
+### Hướng sửa
+
+#### 2a. Nâng cấp `retry_with_backoff()` — backward-compatible
+
+Thêm 2 tham số mới (default rỗng = behavior cũ 100%):
+
+```python
+def retry_with_backoff(
+    max_retries: int = 5,
+    base_seconds: float = 1.0,
+    max_seconds: float = 60.0,
+    exceptions: Tuple[Type[BaseException], ...] = (Exception,),
+    non_retryable_exceptions: Tuple[Type[BaseException], ...] = (),
+    on_retry: Optional[Callable[[int, BaseException], None]] = None,
+):
+    """Exponential backoff retry.
+
+    Parameters
+    ----------
+    non_retryable_exceptions:
+        Exception types raised immediately without retry, even if they
+        match ``exceptions``. Checked first via isinstance.
+    on_retry:
+        Optional callback ``(attempt, exc) -> None`` invoked before each
+        retry sleep. Use for metrics/observability.
+    """
+    def decorator(fn: Callable):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    return fn(*args, **kwargs)
+                except non_retryable_exceptions:
+                    raise  # fail-fast
+                except exceptions as exc:  # noqa: BLE001
+                    attempt += 1
+                    if attempt > max_retries:
+                        logger.error(
+                            "%s failed after %d attempts: %s",
+                            fn.__name__, attempt - 1, exc,
+                        )
+                        raise
+                    delay = min(base_seconds * (2 ** (attempt - 1)), max_seconds)
+                    delay += random.uniform(0, delay * 0.1)
+                    logger.warning(
+                        "%s attempt %d/%d failed (%s), retrying in %.2fs",
+                        fn.__name__, attempt, max_retries, exc, delay,
+                    )
+                    if on_retry is not None:
+                        on_retry(attempt, exc)
+                    time.sleep(delay)
+        return wrapper
+    return decorator
+```
+
+#### 2b. `_search()` — áp dụng phân loại
+
+```python
+from elasticsearch import (
+    AuthenticationException,
+    AuthorizationException,
+    BadRequestError,
+    NotFoundError,
+)
+
+_ES_NON_RETRYABLE = (
+    AuthenticationException,
+    AuthorizationException,
+    BadRequestError,
+    NotFoundError,
+)
+
+class ElasticsearchCollector:
+    ...
+
+    @retry_with_backoff(
+        exceptions=(Exception,),
+        non_retryable_exceptions=_ES_NON_RETRYABLE,
+    )
+    def _search(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        return self.client.search(index=self.config.index, body=body)
+```
+
+#### 2c. Hook `on_retry` — inject runtime từ pipeline
+
+Decorator level không có access vào instance metrics, nên dùng instance-level
+hook. Thêm vào `ElasticsearchCollector`:
+
+```python
+def __init__(self, config, checkpoint):
+    ...
+    self._on_retry_hook: Optional[Callable[[int, BaseException], None]] = None
+```
+
+Và trong `_search`, thay decorator bằng instance method để có quyền truy cập
+`self._on_retry_hook`:
+
+```python
+def _search(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    attempt = 0
+    while True:
+        try:
+            return self.client.search(index=self.config.index, body=body)
+        except _ES_NON_RETRYABLE:
+            raise
+        except Exception as exc:
+            attempt += 1
+            if attempt > 5:
+                logger.error("_search failed after %d attempts: %s", attempt - 1, exc)
+                raise
+            delay = min(1.0 * (2 ** (attempt - 1)), 60.0)
+            delay += random.uniform(0, delay * 0.1)
+            logger.warning(
+                "_search attempt %d/5 failed (%s), retrying in %.2fs",
+                attempt, exc, delay,
+            )
+            if self._on_retry_hook is not None:
+                self._on_retry_hook(attempt, exc)
+            time.sleep(delay)
+```
+
+> **Ghi chú**: Giữ `retry_with_backoff` decorator cho các caller khác trong
+> tương lai; `_search` chuyển sang instance method vì cần `self._on_retry_hook`.
+> Hai cách tiếp cận cùng tồn tại, không xung đột.
+
+---
+
+## Fix 3: Graceful ES unavailable
+
+**File**: `logai/realtime/realtime_pipeline.py`  
+**Mức độ**: 🟡 High — crash loop khi ES down, mất Prometheus state
+
+### Vấn đề gốc
+
+`run_forever()` (L87-116) lặp qua `self.collector.run_forever()` generator.
+Khi `_search()` throw exception (sau khi hết retry), exception nổ qua
+generator → `run_forever()` crash → process exit → Docker restart → retry ngay
+→ crash lại. Không có backoff ở vòng ngoài.
+
+Exception xảy ra NGOÀI `_process_one()`, nên không có DLQ fallback.
+
+### Hướng sửa
+
+Tái cấu trúc `run_forever()` — không dùng generator của collector nữa, gọi
+trực tiếp `poll_batch()` trong vòng while, bọc try/catch:
+
+```python
+def run_forever(self) -> None:
+    self.start_metrics_server()
+    logger.info("Realtime pipeline started, polling Elasticsearch...")
+    consecutive_poll_failures = 0
+    MAX_POLL_BACKOFF = 300.0  # 5 phút
+
+    while True:
+        # ── Phase 1: Poll ES ──────────────────────────────────
+        try:
+            batch, cursor = self.collector.poll_batch()
+            consecutive_poll_failures = 0
+        except Exception as exc:
+            consecutive_poll_failures += 1
+            backoff = min(
+                self.config.elasticsearch.poll_interval_seconds
+                * (2 ** consecutive_poll_failures),
+                MAX_POLL_BACKOFF,
+            )
+            logger.error(
+                "ES poll failed (%d consecutive): %s. Retrying in %.1fs...",
+                consecutive_poll_failures, exc, backoff,
+            )
+            self.metrics.logai_es_poll_errors_total.inc()
+            time.sleep(backoff)
+            continue
+
+        if not batch:
+            time.sleep(self.config.elasticsearch.poll_interval_seconds)
+            continue
+
+        # ── Phase 2: Process batch (logic cũ giữ nguyên) ──────
+        self.metrics.logai_queue_depth.set(len(batch))
+        try:
+            for raw in batch:
+                self.metrics.logai_events_received_total.inc()
+                if not self._process_one(raw):
+                    raise RuntimeError(
+                        f"Event {raw.event_id} did not reach a terminal state"
+                    )
+
+            self.template_registry.flush()
+            self.group_registry.flush()
+            self.dedup.gc()
+
+            if batch and cursor is not None:
+                self.checkpoint.commit(cursor, batch[-1].timestamp)
+        finally:
+            self.metrics.logai_queue_depth.set(0)
+```
+
+### Hành vi mới khi ES down
+
+| Lần fail | Backoff (poll_interval=5s) | Hành vi |
+|:--------:|:--------------------------:|---------|
+| 1 | 10s | log error, sleep, retry |
+| 2 | 20s | log error, sleep, retry |
+| 3 | 40s | log error, sleep, retry |
+| 4 | 80s | log error, sleep, retry |
+| 5 | 160s | log error, sleep, retry |
+| 6+ | 300s (cap) | log error, sleep, retry |
+| ES up | — | `consecutive = 0`, resume ngay |
+
+**Process KHÔNG crash, KHÔNG mất Prometheus metrics state, KHÔNG restart.**
+
+---
+
+## Fix 4: Metrics wiring
+
+**File**: `logai/metrics/prometheus_exporter.py`, `logai/realtime/realtime_pipeline.py`  
+**Mức độ**: 🟡 Medium
+
+### Vấn đề gốc
+
+- `logai_retry_total` đã khai báo nhưng chưa được nối vào retry helper → luôn = 0.
+- Không có metric cho ES poll errors hoặc malformed hits.
+
+### Hướng sửa
+
+#### 4a. Thêm 2 Counter mới vào `MetricsExporter.__init__()`
+
+Thêm sau `logai_queue_depth` (sau dòng 74):
+
+```python
+self.logai_es_poll_errors_total = Counter(
+    "logai_es_poll_errors_total",
+    "ES poll failures (transport errors, auth errors, etc.)",
+)
+self.logai_es_malformed_hits_total = Counter(
+    "logai_es_malformed_hits_total",
+    "ES hits skipped due to missing/invalid _source or _id",
+)
+```
+
+#### 4b. Inject hooks trong `RealtimePipeline.__init__()`
+
+Thêm sau dòng tạo collector (sau dòng 42):
+
+```python
+# Wire metrics hooks vào collector
+self.collector._on_retry_hook = lambda attempt, exc: self.metrics.logai_retry_total.inc()
+self.collector._malformed_counter = self.metrics.logai_es_malformed_hits_total
+```
+
+---
+
+## Ma trận file thay đổi
+
+| File | Thay đổi | Fix |
+|------|----------|-----|
+| `logai/reliability/retry.py` | Thêm `non_retryable_exceptions`, `on_retry` params | 2a |
+| `logai/collector/es_collector.py` | `_hit_to_rawlog` defensive, thêm `_safe_hits_to_rawlogs`, `poll_batch` + `stream_historical_batches` dùng safe converter, `_search` phân loại, thêm `_malformed_counter` + `_on_retry_hook` attrs | 1a–1e, 2b–2c |
+| `logai/realtime/realtime_pipeline.py` | `run_forever` bọc poll errors + backoff, inject hooks | 3, 4b |
+| `logai/metrics/prometheus_exporter.py` | Thêm `logai_es_poll_errors_total`, `logai_es_malformed_hits_total` | 4a |
+
+---
+
+## Test plan
+
+### Malformed hit tests
+
+| # | Test | Input | Expected |
+|---|------|-------|----------|
+| 1 | `test_malformed_hit_skipped_batch_continues` | 10 hits, hit #5 thiếu `_source` | 9 RawLog, 1 skip, log warning |
+| 2 | `test_missing_id_hit_skipped` | Hit có `_source` nhưng thiếu `_id` | skip, log warning |
+| 3 | `test_source_not_dict_skipped` | `_source: "string"` | skip, log warning |
+| 4 | `test_missing_sort_on_last_hit` | Hit cuối thiếu `sort` | `cursor = None` |
+| 5 | `test_all_hits_malformed_returns_empty` | 5 hits đều lỗi | `([], last_sort)` |
+| 6 | `test_malformed_hit_metric_incremented` | 3 hit lỗi | counter += 3 |
+
+### Retry classification tests
+
+| # | Test | Input | Expected |
+|---|------|-------|----------|
+| 7 | `test_400_bad_request_no_retry` | `BadRequestError` | raise ngay, 0 sleep |
+| 8 | `test_401_auth_no_retry` | `AuthenticationException` | raise ngay |
+| 9 | `test_403_forbidden_no_retry` | `AuthorizationException` | raise ngay |
+| 10 | `test_404_not_found_no_retry` | `NotFoundError` | raise ngay |
+| 11 | `test_connection_error_retries` | `ConnectionError` | retry 5 lần |
+| 12 | `test_timeout_retries` | `ConnectionTimeout` | retry 5 lần |
+| 13 | `test_retry_metric_incremented` | 3 retries | `logai_retry_total` += 3 |
+
+### Graceful ES unavailable tests
+
+| # | Test | Input | Expected |
+|---|------|-------|----------|
+| 14 | `test_run_forever_es_unavailable_no_crash` | `poll_batch` throws | pipeline không crash, sleep + retry |
+| 15 | `test_run_forever_backoff_increases` | 3 lần fail liên tiếp | backoff: 10s → 20s → 40s |
+| 16 | `test_run_forever_recovery_resets_backoff` | fail 3 lần → success | `consecutive = 0` |
+| 17 | `test_run_forever_backoff_caps_at_max` | 10 lần fail | backoff ≤ 300s |
+| 18 | `test_poll_error_metric_incremented` | 2 lần fail | counter += 2 |
+| 19 | `test_checkpoint_not_advanced_on_poll_failure` | poll fail | checkpoint unchanged |

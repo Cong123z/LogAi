@@ -643,3 +643,14 @@ Chỉ đánh dấu RESOLVED khi đạt đồng thời:
 4. Persist feature windows qua restart hay chấp nhận cold-start lại.
 5. Các clipping caps dựa trên phân phối dữ liệu thật.
 6. Alert latency mục tiêu để tune consecutive thresholds.
+
+
+Issues hiện tại :
+  - một malformed hit nằm giữa batch;
+  - ES 400/401/403/404;
+  - ES timeout nhiều lần;
+  - ES unavailable rồi phục hồi;
+  - query sort bằng _id trên Elasticsearch 8 thật;
+  - training xong rồi realtime bootstrap;
+  - training và realtime đồng thời;
+  - stale artifact generation.
