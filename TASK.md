@@ -580,3 +580,53 @@ curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[^"]*"'   # k�
    connect` thủ công.
 3. (Tùy chọn) Grafana dashboard: `docker compose -f docker-compose.reuse.yml
    --profile ui up -d grafana` (http://localhost:3000, admin/admin).
+4. **Fix Drain3 Generalized Template Persistence (Lưu template `<*>` chuẩn)**:
+   - **Vấn đề**: `template_registry.json` và `group_registry.json` (`representative_template`) hiện lưu chuỗi log thô nguyên bản của event đầu tiên (chứa tham số cụ thể: IP, Block ID, timestamp, size...), thay vì lưu template tổng quát hóa có wildcard `<*>` do Drain3 khai phá.
+   - **Gốc rễ**: Trong `logai/training/train_pipeline.py`, hàm `_rebuild_template_registry()` đọc từ `event_index` và chỉ gán `template_text = record.get("template_text")` ở bản ghi đầu tiên khi `state is None`. Tại thời điểm event đầu tiên tạo cluster, Drain3 chưa có mẫu thứ 2 để thay thế token biến thiên thành `<*>`. Khi Drain3 học thêm hàng chục ngàn mẫu và cập nhật `<*>` nội bộ (lưu trong `drain3_state.bin`), pipeline không hỏi lại Drain3 miner mà ghi nguyên chuỗi thô ban đầu ra JSON.
+   - **Giải pháp**:
+     - Trong `_rebuild_template_registry()`: Lấy `template_text` chính thức từ cluster của Drain3:
+       ```python
+       cluster_id = int(template_id[1:])  # T00001 -> 1
+       cluster = self.parser.miner.drain.id_to_cluster.get(cluster_id)
+       if cluster:
+           state.template_text = cluster.get_template()
+       ```
+     - Trong `realtime_pipeline.py`: Khi Drain3 cập nhật template của cluster (`change_type == "cluster_template_changed"`), đồng bộ lại `template_text` mới vào `TemplateRegistry`.
+   - **Mức độ**: 🟡 Medium — Ảnh hưởng trực quan hiển thị và độ sạch của vector embedding SentenceTransformer (loại bỏ nhiễu do IP/ID cụ thể gây ra).
+5. **Fix Stuck Alert via Periodic Sliding Window Tick (Cập nhật cửa sổ trượt định kỳ khi zero-event)**:
+   - **Files ảnh hưởng**: `logai/realtime/realtime_pipeline.py`, `logai/features/feature_engine.py`, `logai/alert/alert_state_machine.py`
+   - **Mức độ**: 🔴 High — Gây kẹt cảnh báo giả (Stuck False Alert) vĩnh viễn sau khi hệ thống phục hồi do thiếu cơ chế cập nhật định kỳ.
+   - **Bối cảnh & Vấn đề gốc**:
+     - Hiện tại pipeline đánh giá anomaly và alert hoàn toàn theo cơ chế hướng sự kiện per-event (`_process_one` $\rightarrow$ `_run_anomaly_and_alert`).
+     - Khi sự cố kết thúc (hệ thống phục hồi), các nhóm log lỗi (`G0001`, `G0002`, `G_SINGLE_0003`, `G_SINGLE_0004`, `G_SINGLE_0005`) **ngừng sinh log hoàn toàn (tần suất = 0, zero-event)**.
+     - Vì không có event mới nào thuộc các nhóm lỗi đi qua pipeline, hàm tính điểm `_run_anomaly_and_alert` không bao giờ được gọi lại cho các nhóm này.
+     - Cửa sổ trượt (sliding window) không được nạp giá trị rate = 0, điểm `log_anomaly_score` không được tính lại, và Gauge `log_alert_state{state="ALERTING"}` trong Prometheus bị kẹt vĩnh viễn ở mức `1.0` (Stale / Sticky Gauge).
+   - **Hướng sửa chi tiết**:
+     1. **Tận dụng `FeatureEngine.snapshot()` có sẵn**:
+        - Trong `logai/features/feature_engine.py` (dòng 61) đã có sẵn hàm `snapshot(group_id, timestamp)`:
+          ```python
+          def snapshot(self, group_id: str, timestamp: float) -> FeatureVector:
+              """Compute the current feature vector without adding a new event -
+              useful for periodic re-evaluation of idle groups."""
+              gw = self._windows[group_id]
+              self._prune(gw, timestamp)
+              return self._compute(group_id, gw, timestamp)
+          ```
+          Hàm này sẽ tự động loại bỏ (`_prune`) các timestamp cũ đã trôi qua khỏi khoảng retention (10s, 60s, 300s) và tính lại rate về 0 mà không cần thêm event mới.
+     2. **Thêm cơ chế Periodic Tick trong `RealtimePipeline`**:
+        - Thêm hàm `_evaluate_idle_alerting_groups(current_timestamp: float)`:
+          - Duyệt qua các nhóm trong `self.group_registry` đang có trạng thái khác `NORMAL` (tức là đang ở `ALERTING`, `WARMING`, hoặc `COOLING`).
+          - Nếu nhóm đó không nhận log mới trong vòng $\ge 5$ giây (`current_timestamp - last_seen >= 5.0`):
+            - Gọi `feature_vector = self.feature_engine.snapshot(group_id, current_timestamp)`.
+            - Đánh giá lại: `self._run_anomaly_and_alert(group_id, feature_vector)`.
+        - **Điểm kích hoạt Tick**:
+          - Gọi `_evaluate_idle_alerting_groups` định kỳ trong vòng lặp `run_forever()` sau mỗi lần poll Elasticsearch (cả khi batch có dữ liệu lẫn khi batch rỗng `not batch`).
+     3. **Kết quả đạt được**:
+        - Khi sự cố dứt, sau khi các timestamp lỗi cũ trôi khỏi cửa sổ 10s/60s, hàm tick sẽ tính ra `rate = 0` $\rightarrow$ điểm `anomaly_score` tụt dốc về `< 0.4` $\rightarrow$ máy trạng thái `AlertStateMachine` tự động chuyển từ `ALERTING` $\rightarrow$ `COOLING` $\rightarrow$ `NORMAL` $\rightarrow$ Prometheus Gauge hạ về `0.0` hoàn toàn tự động.
+   - **Test plan**:
+     - `test_alert_cools_down_when_events_stop`: Bơm 20 log lỗi liên tiếp để kích hoạt `ALERTING = 1` $\rightarrow$ giả lập thời gian trôi qua 30 giây (không gửi log nào nữa) $\rightarrow$ gọi periodic tick $\rightarrow$ xác nhận trạng thái chuyển sang `COOLING` rồi về `NORMAL = 1` và `ALERTING = 0`.
+     - `test_idle_groups_pruned_to_zero_rate`: Xác nhận `snapshot()` trả về vector rate = 0 khi toàn bộ timestamp cũ đã quá hạn retention.
+6. **Counter `log_alerts_total`**:
+   - Thêm metric Counter trong `prometheus_exporter.py` tăng khi chuyển trạng thái sang `ALERTING` để theo dõi tổng số lần cảnh báo lũy kế.
+
+
