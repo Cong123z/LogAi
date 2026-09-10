@@ -628,5 +628,54 @@ curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[^"]*"'   # k�
      - `test_idle_groups_pruned_to_zero_rate`: Xác nhận `snapshot()` trả về vector rate = 0 khi toàn bộ timestamp cũ đã quá hạn retention.
 6. **Counter `log_alerts_total`**:
    - Thêm metric Counter trong `prometheus_exporter.py` tăng khi chuyển trạng thái sang `ALERTING` để theo dõi tổng số lần cảnh báo lũy kế.
+7. **Fix Pipeline Bottleneck & High-Throughput Optimization (Tối ưu hóa điểm nghẽn chính & phụ để nâng thông lượng từ 70 lên > 1,500 logs/s)**:
+   - **Files ảnh hưởng**: 
+     - `logai/anomaly/isolation_forest_model.py`
+     - `logai/realtime/realtime_pipeline.py`
+     - `logai/metrics/prometheus_exporter.py`
+     - `logai/storage/registries.py`
+     - `logai/storage/base.py`
+   - **Mức độ**: 🔴 Critical / High — Giới hạn tốc độ xử lý ở mức 70–80 logs/s, gây tồn đọng hàng trăm ngàn log trong Elasticsearch khi ingest rate cao, dẫn đến độ trễ phát hiện cảnh báo lên tới hàng chục phút/tiếng.
+   - **Bối cảnh & Phân tích nguyên nhân gốc**:
+     1. **Điểm nghẽn chính (Chiếm > 90% CPU)**:
+        - Trong `logai/anomaly/isolation_forest_model.py` (L97-103), hàm `predict()` gọi liên tiếp:
+          `raw_score = float(model.decision_function(X)[0])` rồi lại gọi `is_outlier = model.predict(X)[0] == -1`.
+        - Trong Scikit-learn, `predict()` thực chất gọi lại `decision_function(X) < 0` $\rightarrow$ CPU phải duyệt qua 100 cây của rừng cô lập **2 lần** cho mỗi một event log.
+        - `_process_one` gọi inference từng dòng đơn lẻ ma trận `(1, 8)` lặp 500 lần/batch thay vì vector hóa ma trận `(500, 8)`.
+        - **Số liệu đo thực tế trên container**:
+          - Gọi 500 lần đơn lẻ: **3.0215s** (~6.04 ms/log $\rightarrow$ giới hạn trần lý thuyết ~165 logs/s).
+          - Chỉ gọi `decision_function` 1 lần: **1.5273s** (giảm 50% thời gian).
+          - Gọi batch 500 dòng cùng lúc `model.decision_function(X_batch)`: **0.0045s** (tương đương **111,343 logs/s**, nhanh hơn **670 lần**!).
+     2. **Điểm nghẽn phụ (Metrics Lock, Gauge Spam & Disk I/O)**:
+        - **Prometheus Histogram**: `logai_processing_latency_seconds.observe(...)` gọi ở từng event (500 lần/batch) chiếm lock luồng để duyệt bucket.
+        - **Alert State Gauge Spam**: `set_alert_state()` duyệt cả 4 trạng thái (`NORMAL`, `WARMING`, `ALERTING`, `COOLING`) và gọi `.set()` 4 lần cho mỗi event log $\rightarrow$ 2,000 lần gán gauge mỗi batch dù trạng thái nhóm không hề thay đổi.
+        - **Disk I/O Flush**: Ở cuối mỗi batch, `template_registry.flush()` và `group_registry.flush()` gọi `json.dump(indent=2)` ghi đè toàn bộ file JSON ra đĩa.
+        - **Dedup GC**: `self.dedup.gc()` chạy quét dọn hash map ở mọi batch.
+   - **Hướng sửa chi tiết**:
+     1. **Tối ưu hóa `GlobalAnomalyModel` (File: `logai/anomaly/isolation_forest_model.py`)**:
+        - Bỏ gọi `model.predict(X)` thừa, dùng trực tiếp `is_outlier = raw_score < 0`.
+        - Thêm hàm `predict_batch(feature_vectors: List[FeatureVector]) -> List[AnomalyResult]`:
+          - Gom toàn bộ vector thành 1 mảng NumPy 2D `X = np.array([fv.as_vector() for fv in feature_vectors])`.
+          - Gọi `raw_scores = model.decision_function(X)` đúng 1 lần duy nhất cho cả batch.
+          - Vector hóa tính toán `anomaly_scores = np.clip(0.5 - raw_scores, 0.0, 1.0)` và `anomalies = (raw_scores < 0) | (anomaly_scores >= threshold)`.
+     2. **Tái cấu trúc luồng xử lý Batch trong `RealtimePipeline` (File: `logai/realtime/realtime_pipeline.py`)**:
+        - Thay vì lặp `_process_one` khép kín từng event:
+          - **Phase 1 (Parse & Features)**: Parse Drain3 + phân loại nhóm + cập nhật `FeatureEngine` cho các event trong batch.
+          - **Phase 2 (Batch Anomaly Inference)**: Gom danh sách `FeatureVector` của batch gửi vào `anomaly_model.predict_batch()`.
+          - **Phase 3 (Alert & State Machine)**: Chuyển dịch trạng thái cảnh báo theo kết quả inference theo từng nhóm.
+     3. **Tối ưu hóa Metrics (File: `logai/metrics/prometheus_exporter.py`)**:
+        - **State-Change Only**: Thêm bộ nhớ đệm `_current_states: Dict[str, str]` lưu trạng thái cảnh báo hiện tại của mỗi group. Chỉ gọi loop gán 4 gauge khi trạng thái thực tế thay đổi (`new_state != old_state`).
+        - **Batch Counters**: Dùng `logai_events_processed_total.inc(len(batch))` thay vì gọi `.inc()` đơn lẻ 500 lần. Gom nhóm các đếm theo `service` và `error_code` rồi `.inc(count)` ở cuối batch.
+        - **Batch Latency**: Đo thời gian của cả batch `logai_batch_processing_latency_seconds.observe(batch_duration)` hoặc tính latency trung bình per-event `observe(batch_duration / len(batch))` 1 lần mỗi batch.
+     4. **Tối ưu hóa Disk I/O & Dedup (File: `logai/storage/registries.py`, `logai/realtime/realtime_pipeline.py`)**:
+        - Áp dụng Dirty Flag: Chỉ kích hoạt `flush()` tức thì khi có template mới hoặc group mới được tạo (`is_new=True`). Với cập nhật `last_seen` và `event_count`, chỉ flush định kỳ (ví dụ mỗi 10 giây hoặc sau 20 batch).
+        - Đặt chu kỳ cho `dedup.gc()`: Chỉ chạy sau mỗi 60 giây thay vì sau mỗi batch.
+   - **Kỳ vọng đạt được**:
+     - Thông lượng xử lý tăng từ **~70 logs/s lên > 1,500 – 3,000 logs/s**.
+     - Giảm tải CPU tiêu hao vô ích, loại bỏ triệt để hiện tượng backlog bị dồn ứ khi stream log với tốc độ cao.
+   - **Test plan**:
+     - Viết unit test cho `predict_batch()` đảm bảo kết quả trùng khớp 100% với `predict()` từng phần tử.
+     - Kiểm tra state-change metrics đảm bảo không bỏ sót việc chuyển trạng thái `NORMAL` $\leftrightarrow$ `ALERTING`.
+     - Chạy benchmark đo throughput trước và sau khi tối ưu.
 
 
