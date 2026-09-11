@@ -145,9 +145,15 @@ class TestStuckAlertIdleTick(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _drive_to_alerting(self, group_id: str) -> None:
-        """Feed high-scoring feature vectors until the group reaches ALERTING."""
+        """Feed high-scoring feature vectors until the group reaches ALERTING.
+
+        Scoring is batched now (TODO #7): buffer the vectors then flush once,
+        which scores them and applies the transitions in order."""
         for i in range(5):
-            self.pipeline._run_anomaly_and_alert(group_id, _fv(group_id, 1000.0 + i, z_score_10s=5.0))
+            self.pipeline._pending_predictions.append(
+                (group_id, _fv(group_id, 1000.0 + i, z_score_10s=5.0))
+            )
+        self.pipeline._flush_predictions()
         self.assertEqual(
             self.pipeline.alert_sm._load(group_id).alert_state,
             AlertStateEnum.ALERTING.value,
@@ -160,10 +166,11 @@ class TestStuckAlertIdleTick(unittest.TestCase):
         self._drive_to_alerting("G_AUTH")
 
         # No new events - only the periodic idle tick runs, well past the
-        # silence guard. snapshot() prunes to an empty window (cold-start), so
-        # the mock scores it normal and the state machine cools down.
+        # silence guard. Each tick appends a cold-start snapshot to the buffer;
+        # flushing scores it (normal) and cools the state machine down.
         for t in (9000.0, 9010.0, 9020.0, 9030.0):
             self.pipeline._evaluate_idle_alerting_groups(t)
+            self.pipeline._flush_predictions()
 
         self.assertEqual(
             self.pipeline.alert_sm._load("G_AUTH").alert_state,
@@ -187,14 +194,22 @@ class TestStuckAlertIdleTick(unittest.TestCase):
         fv = self.pipeline.feature_engine.snapshot("G_AUTH", far_future)
         self.assertEqual(fv.z_score_10s, 0.0)
 
-    def test_normal_groups_not_evaluated(self):
-        """A NORMAL group is not in groups_not_normal(), so the idle tick never
-        snapshots it."""
-        # G_AUTH is untouched -> no alert state stored -> NORMAL / not tracked.
+    def test_normal_idle_group_is_snapshotted(self):
+        """A NORMAL group that has gone silent IS snapshotted so its state is
+        re-evaluated each idle interval (TODO #7 extends the idle tick to NORMAL
+        groups, not just non-NORMAL ones), and the vector joins the same buffer
+        as live events."""
+        # G_AUTH is untouched -> NORMAL, but last_seen=1000 is well past the
+        # silence guard relative to t=9000.
         self.assertEqual(self.pipeline.alert_sm.groups_not_normal(), [])
-        with patch.object(self.pipeline.feature_engine, "snapshot") as snap:
+        with patch.object(
+            self.pipeline.feature_engine, "snapshot",
+            return_value=_fv("G_AUTH", 9000.0),
+        ) as snap:
             self.pipeline._evaluate_idle_alerting_groups(9000.0)
-            snap.assert_not_called()
+            snap.assert_called_once_with("G_AUTH", 9000.0)
+        self.assertEqual(len(self.pipeline._pending_predictions), 1)
+        self.assertEqual(self.pipeline._pending_predictions[0][0], "G_AUTH")
 
     def test_active_group_skipped_by_guard(self):
         """A non-NORMAL group that is still receiving logs (last_seen within the

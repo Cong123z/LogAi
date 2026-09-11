@@ -4,6 +4,190 @@ Tài liệu ghi nhận chi tiết các vấn đề kỹ thuật đã được gi
 
 ---
 
+## Issue 10: Pipeline Bottleneck — Micro-batch Inference ở Phase Predict (flush 500-hoặc-1s)
+
+- **Trạng thái**: ✅ **RESOLVED**
+- **Ngày hoàn thành**: 2026-09-11
+- **Kế hoạch gốc**: TASK.md mục #7 ("Fix Pipeline Bottleneck & High-Throughput Optimization")
+- **Files liên quan**:
+  - `logai/anomaly/isolation_forest_model.py`
+  - `logai/realtime/realtime_pipeline.py`
+  - `logai/config.py`
+  - `config.yaml`
+  - `logai/metrics/prometheus_exporter.py`
+  - `logai/storage/base.py`
+  - `tests/test_predict_batch_and_flush.py` (MỚI)
+  - `tests/test_alert_counter.py`, `tests/test_stuck_alert_tick.py`,
+    `tests/test_realtime_pipeline_end_to_end.py`,
+    `tests/test_realtime_crash_load_and_perf.py`,
+    `tests/test_realtime_es_resilience.py` (port sang batch-flush)
+
+---
+
+### 1. Vấn đề ban đầu (Root Cause & Bottlenecks)
+
+1. **Điểm nghẽn chính — inference từng-event (chiếm > 90% CPU)**:
+   - `_process_one` gọi `predict()` **từng log một** → ma trận `(1, 8)` lặp 500
+     lần/batch thay vì vector hóa một ma trận `(500, 8)`.
+   - `predict()` cũ gọi **cả** `decision_function(X)` **lẫn** `model.predict(X)`
+     → CPU duyệt qua 100 cây của Isolation Forest **2 lần** cho mỗi event.
+   - **Số liệu đo thực tế trên container** (500 log):
+     - 500 lần gọi đơn lẻ: **3.02s** (~6.04 ms/log → trần lý thuyết ~165 logs/s).
+     - Chỉ `decision_function` 1 lần (bỏ `predict` thừa): **1.53s** (giảm ~50%).
+     - Gom batch `(500, 8)` gọi `decision_function` **1 lần**: **0.0045s**
+       (~111.000 logs/s, nhanh hơn ~670 lần).
+2. **Điểm nghẽn phụ (lock / gauge spam / disk I/O)**:
+   - `set_alert_state()` ghi lại cả N gauge trạng thái cho **mỗi** event dù nhóm
+     không hề đổi trạng thái → hàng ngàn lần `.set()` vô nghĩa mỗi batch.
+   - `logai_events_received_total.inc()` gọi đơn lẻ 500 lần/batch.
+   - `template_registry.flush()` / `group_registry.flush()` ghi đè toàn bộ file
+     JSON ra đĩa ở mỗi batch dù không có template/group mới.
+
+---
+
+### 2. Kiến trúc giải pháp (Architecture Solution)
+
+#### 2.1. `GlobalAnomalyModel.predict_batch()` — inference vector hóa (một code path)
+
+- Thêm `predict_batch(feature_vectors) -> List[Optional[AnomalyResult]]`:
+  `_load()` **1 lần**, guard `n_features_in_` **1 lần**, validate độ dài từng
+  vector (vector sai chiều → chèn `None` **đúng vị trí**), gom vector hợp lệ thành
+  `X = np.array(rows, dtype=np.float64)`, gọi `decision_function(X)` **đúng 1 lần**.
+- Output **cùng thứ tự & cùng độ dài** input; phần tử = `None` khi model chưa
+  train, model sai số chiều, hoặc vector đó sai chiều — **giữ nguyên semantic của
+  `predict()`**.
+- Bỏ hẳn `model.predict(X)` thừa: `is_outlier = raw_score < 0` **tương đương chính
+  xác** `IsolationForest.predict() == -1` → giảm một lượt duyệt rừng.
+- `predict()` cũ refactor thành `return self.predict_batch([fv])[0]` → **một code
+  path duy nhất**, giữ nguyên chữ ký cho mọi caller/test hiện có.
+
+#### 2.2. Micro-batch buffer với 2 ngưỡng flush **config được** (whichever-first)
+
+- Tích lũy cặp `(group_id, FeatureVector)` qua các poll vào buffer instance
+  `self._pending_predictions`. `_process_one` chỉ **parse / group / feature /
+  append** (dời phần suy luận ra biên flush), giữ nguyên chữ ký `-> bool`.
+- **Flush khi**: `n >= predict_batch_size` **HOẶC** `waited >=
+  predict_max_wait_seconds` kể từ entry đầu tiên (whichever-first):
+
+  ```python
+  n = len(self._pending_predictions)
+  waited = monotonic() - self._buffer_started_at if self._buffer_started_at else 0.0
+  should_flush = n > 0 and (
+      n >= self.config.anomaly.predict_batch_size
+      or waited >= self.config.anomaly.predict_max_wait_seconds
+  )
+  ```
+- Vòng lặp ngủ `min(poll_interval, remaining_to_deadline)` khi buffer còn dở để
+  timer 1s có hiệu lực; ngủ trọn `poll_interval` khi buffer rỗng.
+
+#### 2.3. Tính đúng đắn: batch ≡ per-event 100% (các bất biến)
+
+- **Một entry / EVENT, KHÔNG collapse theo group**: N event của cùng group G →
+  N cặp `(G, fv_i)` → N kết quả → N `transition()` apply **tuần tự** → không mất
+  các transition trung gian (spike giữa batch vẫn kích hoạt alert).
+- **`predict` thuần túy**: `fv` đã tính & lưu tại `feature_engine.update()`
+  (hoặc `snapshot()`); nằm trong buffer bao lâu cũng không đổi kết quả. Model bất
+  biến trong batch → gom rồi predict một lượt cho kết quả y hệt.
+- **Gauge chỉ chốt ở biên flush**: Prometheus scrape định kỳ (~15s) nên giá trị
+  trung gian không quan sát được ở **cả hai** kiến trúc → không phải regression.
+
+#### 2.4. Idle-tick gộp CHUNG buffer (mở rộng Fix #5 sang cả nhóm NORMAL)
+
+- `_evaluate_idle_alerting_groups` duyệt các nhóm **idle ≥ `idle_eval_seconds`**
+  (cả non-NORMAL để cool-down **và** NORMAL để refresh state), lấy
+  `feature_engine.snapshot(gid, now)` và **append vào chính
+  `self._pending_predictions`** → được flush cùng fv-live trong **một
+  `predict_batch` duy nhất**.
+- **Silence guard** bỏ qua nhóm còn nhận log gần đây (`now - last_seen < gap`) →
+  một nhóm **không** thể vừa có fv-live vừa có fv-snapshot cùng lúc → không
+  double-count, không nhập nhằng thứ tự.
+- Bọc `try/except` quanh phần thu snapshot (bước idle-specific duy nhất) để một
+  nhóm lỗi không làm sập vòng lặp poll.
+
+#### 2.5. Crash-safety: cursor tách khỏi buffer, giữ nguyên thứ tự durability
+
+- `_flush_batch()` giữ **đúng thứ tự** cũ: `_flush_predictions()` →
+  `template_registry.flush()` → `group_registry.flush()` → `dedup.gc()` →
+  `checkpoint.commit(...)` **chỉ khi `_pending_cursor is not None`** → reset state.
+- Cursor lấy từ poll (`_pending_cursor`/`_pending_last_ts`), **không** từ buffer →
+  trộn fv-idle (vốn không advance cursor) **không hỏng checkpoint**. Flush chỉ-idle
+  (stream rỗng) vẫn predict + cool-down nhưng `commit` bị bỏ qua vì cursor `None`.
+- Mọi crash **trước** `commit` → cursor không advance; dedup mark là in-memory tới
+  `gc` → replay idempotent, không mất/nhân đôi alert.
+
+#### 2.6. Tối ưu phụ (chống lock / I-O spam, hỗ trợ > 1000 logs/s)
+
+- `set_alert_state()`: **return sớm khi `previous == state.alert_state`** → không
+  ghi lại N gauge mỗi event khi trạng thái không đổi (counter `log_alerts_total`
+  vẫn chỉ tăng đúng 1 lần mỗi lần escalate vào ALERTING).
+- `logai_events_received_total.inc(len(batch))` — **1 lần/batch** thay 500 lần.
+- `JSONStore` dùng cờ `_dirty` (bật ở `set/delete/bulk_set/replace_all`, `flush`
+  no-op khi sạch) → `template_registry.flush()`/`group_registry.flush()` ở biên
+  flush thành no-op khi không có template/group mới (theo pattern sẵn có của
+  `DedupIndex`).
+
+#### 2.7. Config — KHÔNG hardcode (`logai/config.py`, `config.yaml`)
+
+| Khóa | Default | Ý nghĩa |
+| :--- | :--- | :--- |
+| `anomaly.predict_batch_size` | `500` | Số entry trong buffer để flush theo count |
+| `anomaly.predict_max_wait_seconds` | `1.0` | Trần độ trễ flush theo thời gian (backstop) |
+| `elasticsearch.poll_interval_seconds` | `5.0 → 1.0` | Nhịp thức phải ≤ `max_wait` để backstop kịp |
+
+Nạp qua `_merge_dataclass` (có guard `hasattr` → phải khai báo field vào dataclass
+trước). Hạ `predict_max_wait_seconds` (vd 0.5s) nếu cần gauge tươi hơn.
+
+---
+
+### 3. Ngữ nghĩa timing của metrics (đánh đổi batching, KHÔNG phải regression)
+
+Gauge `anomaly_score`/`alert_state` chỉ cập nhật tại **biên flush**:
+- Độ trễ freshness có **chặn trên = `predict_max_wait_seconds` (≤ 1s), config
+  được** — nằm dưới nhịp scrape Prometheus (~15s) và cửa sổ `rate()`/rule (≥ 1m)
+  → vô hình trên dashboard/alert. Cửa sổ feature 10s/60s/300s → trễ 1s không ảnh
+  hưởng phát hiện.
+- Mỗi `{group_id}` là time series độc lập, `.set()` atomic; vòng set trong flush
+  là sub-ms → scrape lấy snapshot đồng nhất, không lệch giữa các series.
+- Counter tăng theo bậc tại flush nhưng `rate()` cửa sổ ≥ 1m làm mượt burst.
+
+---
+
+### 4. Kết quả kiểm thử & Nghiệm thu (Verification)
+
+Chạy `./.venv/bin/python -m pytest -q` → **132/132 tests PASS**.
+
+1. **Test mới** (`tests/test_predict_batch_and_flush.py`):
+   - `test_untrained_model_returns_all_none`: model chưa train → toàn `None`
+     (kể cả input rỗng → `[]`).
+   - `test_batch_matches_per_event`: `predict_batch([fv_i])` trùng khớp từng phần
+     tử với `predict(fv_i)` cho 60 vector (score, anomaly, group_id, timestamp).
+   - `test_bad_dimension_vectors_slot_back_none`: vector sai chiều → `None` **đúng
+     vị trí**, vector hợp lệ hai bên vẫn được chấm.
+   - `test_flush_by_count`: poll đúng `predict_batch_size` event → `predict_batch`
+     gọi **1 lần**, buffer rỗng sau flush, checkpoint commit cursor.
+   - `test_flush_by_time_below_count_threshold`: buffer < `predict_batch_size`,
+     giả lập `monotonic` trôi ≥ `predict_max_wait_seconds` → flush vẫn kích hoạt
+     và commit cursor của batch thật.
+2. **Test throttle gauge** (`tests/test_alert_counter.py`):
+   - `test_unchanged_state_writes_gauge_once`: state không đổi → chỉ ghi gauge 1
+     lần (N series), 5 lần lặp thêm 0.
+   - `test_state_change_rewrites_gauges`: transition thật → ghi lại đủ bộ gauge.
+3. **Idle gộp batch** (`tests/test_stuck_alert_tick.py`):
+   - `test_normal_idle_group_is_snapshotted`: nhóm NORMAL im lâu vẫn được
+     snapshot vào cùng buffer.
+   - `test_alert_cools_down_when_events_stop`: nhóm ALERTING im ≥ 5s → snapshot +
+     flush hạ được về NORMAL.
+4. **Crash-safety & load** (`tests/test_realtime_crash_load_and_perf.py`):
+   - Crash ở mọi stage (template/group flush, dedup gc, DLQ, terminal state)
+     trước `commit` → cursor không advance; mid-batch crash → dedup chặn replay,
+     không mất/nhân đôi; benchmark 10.000 log vẫn vượt 1.000 logs/s.
+5. **Regression**: các test end-to-end / ES-resilience được **port** sang
+   batch-flush (set `predict_batch_size = 1` ở setUp lái `run_forever`, hoặc gọi
+   `_flush_predictions()` sau khi buffer trong test đơn vị) — giữ nguyên mọi
+   assertion.
+
+---
+
 ## Issue 8: Streaming Historical Training và Resume Checkpoint
 
 - **Trạng thái**: ✅ **RESOLVED**

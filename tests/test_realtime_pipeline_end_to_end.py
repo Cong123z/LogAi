@@ -65,6 +65,10 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         self.cfg.storage.base_dir = self.temp_dir
         self.cfg.storage.model_dir = f"{self.temp_dir}/models"
         self.cfg.doc_matcher.corpus_path = f"{self.temp_dir}/non_existent.yaml"
+        # Flush the predict buffer after every event so run_forever-driven tests
+        # exercise the flush/commit machinery deterministically (TODO #7 defers
+        # scoring to the flush boundary; batch_size=1 makes each poll flush).
+        self.cfg.anomaly.predict_batch_size = 1
 
         self.pipeline = RealtimePipeline(self.cfg)
 
@@ -237,13 +241,16 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         )
         feature_vector = FeatureVector(group_id="G_AUTH", timestamp=raw.timestamp)
         self.pipeline.feature_engine.update = MagicMock(return_value=feature_vector)
-        self.pipeline.anomaly_model.predict = MagicMock(return_value=None)
 
         completed = self.pipeline._process_one(raw)
 
         self.assertTrue(completed)
         self.pipeline.feature_engine.update.assert_called_once()
-        self.pipeline.anomaly_model.predict.assert_called_once_with(feature_vector)
+        # Scoring is deferred (TODO #7): the vector is buffered for the next
+        # batch flush rather than scored inline in _process_one.
+        self.assertEqual(
+            self.pipeline._pending_predictions, [("G_AUTH", feature_vector)]
+        )
         self.assertTrue(self.pipeline.dedup.seen(raw.event_id))
         self.assertEqual(self.pipeline.dlq.count(), 0)
 
@@ -285,7 +292,6 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
                 group_id=group_id, timestamp=timestamp
             )
         )
-        self.pipeline.anomaly_model.predict = MagicMock(return_value=None)
 
         def parse(raw):
             return ParsedEvent(
@@ -311,7 +317,9 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
             self.assertTrue(completed)
 
         self.assertEqual(self.pipeline.feature_engine.update.call_count, event_count)
-        self.assertEqual(self.pipeline.anomaly_model.predict.call_count, event_count)
+        # Every grouped event's vector is buffered for batch scoring (deferred
+        # from _process_one to the flush boundary); none are dropped.
+        self.assertEqual(len(self.pipeline._pending_predictions), event_count)
         self.assertEqual(self.pipeline.dlq.count(), 0)
 
     def test_batch_execution_and_gc(self):
@@ -330,7 +338,15 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
             side_effect=[(batch_1, [1005.0, "b1_4"]), (batch_2, [1012.0, "b2_2"]), _StopLoop]
         )
         self.pipeline.start_metrics_server = MagicMock()
-        self.pipeline._process_one = MagicMock()
+        # _process_one is mocked out, so buffer the vector here to reproduce
+        # what the real path does; otherwise the deferred flush (and its GC)
+        # would never fire (predict_batch_size=1 flushes each non-empty poll).
+        self.pipeline._process_one = MagicMock(
+            side_effect=lambda raw: self.pipeline._pending_predictions.append(
+                (raw.event_id, FeatureVector(group_id="G_AUTH", timestamp=raw.timestamp))
+            )
+            or True
+        )
         self.pipeline.dedup.gc = MagicMock()
 
         with self.assertRaises(_StopLoop):
@@ -353,25 +369,25 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
             )
         )
 
-        # Mock anomaly model to return anomaly when feature vector indicates burst
-        def mock_predict(fv):
-            if fv.z_score_10s > 2.0 or fv.short_growth_rate > 3.0:
-                return AnomalyResult(
-                    group_id="G_AUTH",
-                    timestamp=fv.timestamp,
-                    anomaly=True,
-                    anomaly_score=0.85,
-                    model_version="if-global-v2",
-                )
-            return AnomalyResult(
-                group_id="G_AUTH",
-                timestamp=fv.timestamp,
-                anomaly=False,
-                anomaly_score=0.2,
-                model_version="if-global-v2",
-            )
+        # Mock batch inference to flag anomalies when a vector indicates a burst.
+        # Scoring is now batched (TODO #7), so the pipeline calls predict_batch;
+        # the per-row logic mirrors the old per-event predict exactly.
+        def mock_predict_batch(fvs):
+            results = []
+            for fv in fvs:
+                if fv.z_score_10s > 2.0 or fv.short_growth_rate > 3.0:
+                    results.append(AnomalyResult(
+                        group_id="G_AUTH", timestamp=fv.timestamp,
+                        anomaly=True, anomaly_score=0.85, model_version="if-global-v2",
+                    ))
+                else:
+                    results.append(AnomalyResult(
+                        group_id="G_AUTH", timestamp=fv.timestamp,
+                        anomaly=False, anomaly_score=0.2, model_version="if-global-v2",
+                    ))
+            return results
 
-        self.pipeline.anomaly_model.predict = MagicMock(side_effect=mock_predict)
+        self.pipeline.anomaly_model.predict_batch = MagicMock(side_effect=mock_predict_batch)
 
         base_ts = 2000.0
         # 1. Steady traffic: 30 events at 1 event/sec
@@ -381,6 +397,10 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
                 return_value=ParsedEvent(raw=raw, template="err", template_id="t_err", parameters=[], is_new_template=False)
             )
             self.pipeline._process_one(raw)
+
+        # Score the buffered steady traffic in one batch, applying transitions
+        # in event order (result-equivalent to the old per-event path).
+        self.pipeline._flush_predictions()
 
         # State should be NORMAL
         current_state = self.pipeline.alert_sm._load("G_AUTH")
@@ -396,6 +416,8 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
             )
             self.pipeline._process_one(raw)
 
+        self.pipeline._flush_predictions()
+
         # State should transition to ALERTING
         final_state = self.pipeline.alert_sm._load("G_AUTH")
         self.assertEqual(final_state.alert_state, AlertStateEnum.ALERTING.value)
@@ -410,11 +432,22 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
         self.cfg.storage.base_dir = self.temp_dir
         self.cfg.storage.model_dir = f"{self.temp_dir}/models"
         self.cfg.doc_matcher.corpus_path = f"{self.temp_dir}/missing.yaml"
+        # Flush per poll so the commit/durability sequence is exercised
+        # deterministically (TODO #7 defers commit to the flush boundary).
+        self.cfg.anomaly.predict_batch_size = 1
         self.pipeline = RealtimePipeline(self.cfg)
         self.pipeline.start_metrics_server = MagicMock()
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _buffering_process_one(self, raw):
+        """Stand-in for _process_one that buffers a vector (as the real path
+        does) so the deferred flush actually fires under predict_batch_size=1."""
+        self.pipeline._pending_predictions.append(
+            (raw.event_id, FeatureVector(group_id=raw.event_id, timestamp=raw.timestamp))
+        )
+        return True
 
     def _raw_batch(self, size):
         return [
@@ -455,7 +488,8 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
         order = []
         self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
         self.pipeline._process_one = MagicMock(
-            side_effect=lambda raw: order.append(f"process:{raw.event_id}") or True
+            side_effect=lambda raw: order.append(f"process:{raw.event_id}")
+            or self._buffering_process_one(raw)
         )
         self.pipeline.template_registry.flush = MagicMock(side_effect=lambda: order.append("templates"))
         self.pipeline.group_registry.flush = MagicMock(side_effect=lambda: order.append("groups"))
@@ -483,7 +517,7 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
     def test_flush_failure_does_not_commit(self):
         batch = self._raw_batch(2)
         self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, [1001, "rt_1"])])
-        self.pipeline._process_one = MagicMock(return_value=True)
+        self.pipeline._process_one = MagicMock(side_effect=self._buffering_process_one)
         self.pipeline.template_registry.flush = MagicMock(side_effect=OSError("disk full"))
         self.pipeline.checkpoint.commit = MagicMock()
 
@@ -496,7 +530,7 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
         batch = self._raw_batch(20_000)
         cursor = [20999, "rt_19999"]
         self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
-        self.pipeline._process_one = MagicMock(return_value=True)
+        self.pipeline._process_one = MagicMock(side_effect=self._buffering_process_one)
         self.pipeline.template_registry.flush = MagicMock()
         self.pipeline.group_registry.flush = MagicMock()
         self.pipeline.dedup.gc = MagicMock()
@@ -512,7 +546,7 @@ class TestRealtimeCheckpointRecovery(unittest.TestCase):
         batch = self._raw_batch(1)
         cursor = [1000, "rt_0"]
         self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
-        self.pipeline._process_one = MagicMock(return_value=True)  # event was persisted to DLQ
+        self.pipeline._process_one = MagicMock(side_effect=self._buffering_process_one)  # event was persisted to DLQ
         self.pipeline.template_registry.flush = MagicMock()
         self.pipeline.group_registry.flush = MagicMock()
         self.pipeline.dedup.gc = MagicMock()

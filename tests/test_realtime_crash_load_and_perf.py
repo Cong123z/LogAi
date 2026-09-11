@@ -118,6 +118,10 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         self.cfg.doc_matcher.corpus_path = f"{self.temp_dir}/missing.yaml"
         self.cfg.training.batch_size = 500
         self.cfg.reliability.dedup_max_size = 50_000
+        # Scoring is deferred to the flush boundary (TODO #7). Flushing once per
+        # poll (after the whole batch is buffered) reproduces the old per-batch
+        # commit/durability semantics these crash & load tests assert on.
+        self.cfg.anomaly.predict_batch_size = 1
 
         self.pipeline = RealtimePipeline(self.cfg)
         self.pipeline.start_metrics_server = MagicMock()
@@ -206,9 +210,16 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
 
         # -------------------------------------------------------------
         # Stage 4: Fatal error during TemplateRegistry.flush()
+        # Scoring is now deferred to the flush boundary, and flush only fires
+        # when the buffer is non-empty. Each flush-stage therefore needs a
+        # batch of NEW event_ids: reusing the same ids would let a prior stage's
+        # dedup marks skip every event, leaving an empty buffer that never
+        # flushes (so the mocked-to-raise flush would never fire).
         # -------------------------------------------------------------
+        batch_4 = self._generate_logs(10, start_idx=100)
+        cursor_4 = [batch_4[-1].timestamp, batch_4[-1].event_id]
         with patch.object(self.pipeline.template_registry, "flush", side_effect=IOError("Disk write failed on flush")):
-            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch_4, cursor_4)])
             with self.assertRaises(IOError):
                 self.pipeline.run_forever()
             self.assertIsNone(checkpoint.get_search_after())
@@ -216,8 +227,10 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # -------------------------------------------------------------
         # Stage 5: Fatal error during GroupRegistry.flush()
         # -------------------------------------------------------------
+        batch_5 = self._generate_logs(10, start_idx=200)
+        cursor_5 = [batch_5[-1].timestamp, batch_5[-1].event_id]
         with patch.object(self.pipeline.group_registry, "flush", side_effect=IOError("Group registry flush error")):
-            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch_5, cursor_5)])
             with self.assertRaises(IOError):
                 self.pipeline.run_forever()
             self.assertIsNone(checkpoint.get_search_after())
@@ -225,8 +238,10 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # -------------------------------------------------------------
         # Stage 6: Fatal error during DedupIndex.gc()
         # -------------------------------------------------------------
+        batch_6 = self._generate_logs(10, start_idx=300)
+        cursor_6 = [batch_6[-1].timestamp, batch_6[-1].event_id]
         with patch.object(self.pipeline.dedup, "gc", side_effect=IOError("Dedup GC error")):
-            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor)])
+            self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch_6, cursor_6)])
             with self.assertRaises(IOError):
                 self.pipeline.run_forever()
             self.assertIsNone(checkpoint.get_search_after())

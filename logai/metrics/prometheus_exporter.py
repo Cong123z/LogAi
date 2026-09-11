@@ -120,6 +120,12 @@ class MetricsExporter:
     def set_alert_state(self, state: AnomalyState) -> None:
         alerting = AlertStateEnum.ALERTING.value
         previous = self._last_alert_state.get(state.group_id)
+        # Nothing to do when the group stays in the same state: the gauges
+        # already hold the correct values and no fresh escalation occurred.
+        # Skipping avoids re-writing N gauge series on every event that keeps a
+        # group in its current state (hot-path lock/IO under high throughput).
+        if previous == state.alert_state:
+            return
         # Count only the phase transition into ALERTING, not each event that
         # keeps the group alerting. A recovery (-> NORMAL) followed by a new
         # escalation increments again, which is the intended behaviour.

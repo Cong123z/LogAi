@@ -95,5 +95,49 @@ class TestLogAlertsTotal(unittest.TestCase):
         self.assertEqual(self._count("G0005"), 0.0)
 
 
+class _FakeGauge:
+    """Minimal Gauge stand-in tracking how many times set() is called."""
+
+    def __init__(self):
+        self.set_calls = 0
+
+    def labels(self, **_kwargs):
+        parent = self
+
+        class _Child:
+            def set(self, _value):
+                parent.set_calls += 1
+
+        return _Child()
+
+
+class TestAlertStateGaugeWriteThrottle(unittest.TestCase):
+    """TODO #7 optimisation: set_alert_state returns early when a group stays in
+    the same state, so the N alert-state gauge series are not re-written on every
+    event that keeps a group where it already is (hot-path lock/IO under load)."""
+
+    def setUp(self):
+        self.exporter = MetricsExporter(MetricsConfig())
+        self.gauge = _FakeGauge()
+        self.exporter.log_alert_state = self.gauge
+
+    def test_unchanged_state_writes_gauge_once(self):
+        n_states = len(list(AlertStateEnum))
+        # First observation writes one gauge series per state (the full set).
+        self.exporter.set_alert_state(_state("G0001", AlertStateEnum.NORMAL))
+        self.assertEqual(self.gauge.set_calls, n_states)
+        # Repeats of the SAME state must not re-write any gauge series.
+        for _ in range(5):
+            self.exporter.set_alert_state(_state("G0001", AlertStateEnum.NORMAL))
+        self.assertEqual(self.gauge.set_calls, n_states)
+
+    def test_state_change_rewrites_gauges(self):
+        n_states = len(list(AlertStateEnum))
+        self.exporter.set_alert_state(_state("G0002", AlertStateEnum.NORMAL))
+        self.exporter.set_alert_state(_state("G0002", AlertStateEnum.WARMING))
+        # A genuine transition writes the full gauge set a second time.
+        self.assertEqual(self.gauge.set_calls, 2 * n_states)
+
+
 if __name__ == "__main__":
     unittest.main()

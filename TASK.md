@@ -677,5 +677,37 @@ curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[^"]*"'   # k�
      - Viết unit test cho `predict_batch()` đảm bảo kết quả trùng khớp 100% với `predict()` từng phần tử.
      - Kiểm tra state-change metrics đảm bảo không bỏ sót việc chuyển trạng thái `NORMAL` $\leftrightarrow$ `ALERTING`.
      - Chạy benchmark đo throughput trước và sau khi tối ưu.
+   - **Ghi chú triển khai (thiết kế đã duyệt — 2026-09-11)**:
+     - **Micro-batch cho giai đoạn PREDICT với 2 ngưỡng (whichever-first)**: tích luỹ
+       `(group_id, FeatureVector)` qua các poll và flush→predict khi **(a)** buffer ≥
+       `anomaly.predict_batch_size`, **hoặc (b)** poll trả `< elasticsearch.batch_size`
+       (ES cạn → predict ngay, độ trễ thấp khi tải nhẹ), **hoặc (c)** đã đợi ≥
+       `anomaly.predict_max_wait_seconds` kể từ event đầu trong buffer (backstop).
+     - **Con số config (KHÔNG hardcode, nạp qua `_merge_dataclass`)**:
+       `anomaly.predict_batch_size = 1024` (dải 512–2048),
+       `anomaly.predict_max_wait_seconds = 1.0` (dải 0.5–2.0),
+       `elasticsearch.poll_interval_seconds` đổi `5.0 → 1.0` (nhịp thức phải ≤ max_wait),
+       `elasticsearch.batch_size = 500` (giữ). Vòng lặp ngủ theo `min(poll_interval,
+       thời-gian-còn-lại-tới-max_wait)` để timer max_wait có hiệu lực.
+     - **Predict-aligned durability (giữ nguyên crash-safety khi gom qua nhiều poll)**:
+       dời `template_registry.flush()` → `group_registry.flush()` → `dedup.gc()` →
+       `checkpoint.commit()` xuống **đúng biên flush-predict**, giữ **nguyên thứ tự**.
+       Mọi crash trong Phase 1 (`_process_one`) hay trong `_flush_predictions` đều xảy
+       ra TRƯỚC `checkpoint.commit` → cursor không advance; dedup mark là in-memory tới
+       lúc flush nên replay được chặn idempotent, không mất/nhân bản alert.
+     - **Giữ `_process_one` per-event (không đổi chữ ký, trả `bool`)**: chỉ dời phần
+       *suy luận* ra biên flush qua buffer instance `self._pending_predictions`. Nhờ mọi
+       test hiện có dùng batch partial (`< batch_size`) hoặc ≥ `predict_batch_size` nên
+       chúng flush mỗi poll y như cũ → accumulator vô hình; chỉ **3 test** phải port
+       (predict tách khỏi `_process_one`). `_run_anomaly_and_alert` GIỮ NGUYÊN cho
+       idle-tick Fix #5; `predict()` đơn ủy quyền `predict_batch([fv])[0]`.
+     - **I/O & metrics phụ**: `JSONStore.flush()` thêm cờ `_dirty` (no-op khi sạch;
+       `DedupIndex` đã có sẵn); `set_alert_state()` return sớm khi trạng thái không đổi
+       (không ghi 4 gauge mỗi event); `logai_events_received_total.inc(len(batch))`.
+     - **Trạng thái**: ✅ HOÀN THÀNH (2026-09-11) — 132/132 test pass. Chi tiết
+       triển khai & nghiệm thu: xem `ISSUES_FIXED.md` mục "Issue 10", kiến trúc
+       cập nhật ở `ARCHITECTURE.md` §7.5 và §10.3. Con số chốt lại:
+       `predict_batch_size=500`, `predict_max_wait_seconds=1.0`,
+       `poll_interval_seconds=1.0` (đều config qua `config.yaml`).
 
 

@@ -91,6 +91,18 @@ class RealtimePipeline:
         self._event_clock_wall: float = time.monotonic()
         self._last_idle_tick: float = 0.0         # throttle marker for the tick
 
+        # Micro-batch predict buffer (TODO #7). Feature vectors accumulate here
+        # across polls - both live event vectors and idle-tick snapshots - and
+        # are scored in a single vectorized predict_batch when the buffer holds
+        # `predict_batch_size` entries OR `predict_max_wait_seconds` have passed
+        # since its first entry (whichever comes first). The cursor is tracked
+        # separately from the buffer so mixing idle snapshots (which advance no
+        # cursor) never corrupts the checkpoint.
+        self._pending_predictions: list[Tuple[str, FeatureVector]] = []
+        self._pending_cursor: Optional[Any] = None
+        self._pending_last_ts: Optional[float] = None
+        self._buffer_started_at: Optional[float] = None
+
     def start_metrics_server(self) -> None:
         self.metrics.start()
         logger.info(
@@ -124,39 +136,108 @@ class RealtimePipeline:
                 time.sleep(backoff)
                 continue
 
+            # ── Phase 2: Accumulate batch into the predict buffer ─────────
+            # Only parse/group/feature-extract/append here; scoring happens at
+            # the flush boundary so 500 events become one vectorized inference.
+            if batch:
+                self.metrics.logai_queue_depth.set(len(batch))
+                self.metrics.logai_events_received_total.inc(len(batch))
+                try:
+                    for raw in batch:
+                        if not self._process_one(raw):
+                            raise RuntimeError(
+                                f"Event {raw.event_id} did not reach a terminal state"
+                            )
+                    # Cursor advances only after a successful flush (Phase 5),
+                    # never here - a crash before commit replays idempotently.
+                    self._pending_cursor = cursor
+                    self._pending_last_ts = batch[-1].timestamp
+                    self._event_clock = max(self._event_clock, batch[-1].timestamp)
+                    self._event_clock_wall = time.monotonic()
+                finally:
+                    self.metrics.logai_queue_depth.set(0)
+
+            # ── Phase 3: Idle tick (throttled) ────────────────────────────
+            # Appends snapshot vectors for silent groups into the SAME buffer.
+            self._maybe_tick_idle(self._now_event_time())
+
+            # Start the buffer timer the moment it first becomes non-empty,
+            # regardless of whether the entry came from a live event or an
+            # idle snapshot, so the time-based flush criterion always applies.
+            if self._pending_predictions and self._buffer_started_at is None:
+                self._buffer_started_at = time.monotonic()
+
+            # ── Phase 4: Flush decision (count OR time, whichever first) ──
+            n = len(self._pending_predictions)
+            waited = (
+                time.monotonic() - self._buffer_started_at
+                if self._buffer_started_at is not None else 0.0
+            )
+            should_flush = n > 0 and (
+                n >= self.config.anomaly.predict_batch_size
+                or waited >= self.config.anomaly.predict_max_wait_seconds
+            )
+            if should_flush:
+                self._flush_batch()
+
+            # ── Phase 5: Sleep when the stream was empty this cycle ───────
             if not batch:
-                self._maybe_tick_idle(self._now_event_time())
-                time.sleep(self.config.elasticsearch.poll_interval_seconds)
-                continue
+                poll_interval = self.config.elasticsearch.poll_interval_seconds
+                if self._pending_predictions and self._buffer_started_at is not None:
+                    # Buffer still filling: wake in time to honour the 1s timer.
+                    remaining = (
+                        self.config.anomaly.predict_max_wait_seconds
+                        - (time.monotonic() - self._buffer_started_at)
+                    )
+                    time.sleep(max(0.0, min(poll_interval, remaining)))
+                else:
+                    time.sleep(poll_interval)
 
-            # ── Phase 2: Process batch ────────────────────────────────────
-            self.metrics.logai_queue_depth.set(len(batch))
-            try:
-                for raw in batch:
-                    self.metrics.logai_events_received_total.inc()
-                    if not self._process_one(raw):
-                        raise RuntimeError(
-                            f"Event {raw.event_id} did not reach a terminal state"
-                        )
+    def _flush_batch(self) -> None:
+        """Score the accumulated buffer, then run the durability sequence.
 
-                # Registry updates use flush=False in the event hot path.
-                # They must be durable before the cursor advances.
-                self.template_registry.flush()
-                self.group_registry.flush()
-                self.dedup.gc()
+        Ordering (unchanged crash-safety contract): predict+apply -> registry
+        flush -> dedup gc -> checkpoint.commit. The cursor advances only when a
+        real stream batch contributed to this flush (`_pending_cursor` set); an
+        idle-only flush (empty stream) scores snapshots but commits nothing.
+        """
+        self._flush_predictions()
 
-                if batch and cursor is not None:
-                    self.checkpoint.commit(cursor, batch[-1].timestamp)
+        # Registry updates used flush=False on the hot path; make them durable
+        # before the cursor advances (no-op when nothing new was written).
+        self.template_registry.flush()
+        self.group_registry.flush()
+        self.dedup.gc()
 
-                # Advance the event-clock to the newest event just processed,
-                # then re-evaluate idle non-NORMAL groups (throttled). Runs
-                # after checkpoint.commit so a tick failure can never block the
-                # cursor - preserving the crash-safety contract.
-                self._event_clock = max(self._event_clock, batch[-1].timestamp)
-                self._event_clock_wall = time.monotonic()
-                self._maybe_tick_idle(self._event_clock)
-            finally:
-                self.metrics.logai_queue_depth.set(0)
+        if self._pending_cursor is not None:
+            self.checkpoint.commit(self._pending_cursor, self._pending_last_ts)
+
+        self._pending_cursor = None
+        self._pending_last_ts = None
+        self._buffer_started_at = None
+
+    def _flush_predictions(self) -> None:
+        """Run one vectorized inference over the buffered feature vectors and
+        apply the resulting alert-state transitions in event order.
+
+        Batching is result-equivalent to per-event scoring: predict is a pure
+        function of each captured feature vector and the (immutable) model, and
+        applying transitions in buffer order reproduces the exact state-machine
+        evolution of the old per-event path. One entry is kept per EVENT (never
+        collapsed per group) so intermediate escalations are not lost.
+        """
+        buf = self._pending_predictions
+        if not buf:
+            return
+        results = self.anomaly_model.predict_batch([fv for _, fv in buf])
+        for (group_id, _fv), result in zip(buf, results):
+            if result is None:
+                continue  # global model not yet trained
+            group = self.group_registry.get(group_id) or GroupState(group_id=group_id)
+            self.metrics.set_anomaly_score(group, result.anomaly_score)
+            state = self.alert_sm.transition(result)
+            self.metrics.set_alert_state(state)
+        self._pending_predictions = []
 
     def _process_one(self, raw: RawLog) -> bool:
         start = time.time()
@@ -181,7 +262,9 @@ class RealtimePipeline:
                         exc,
                     )
                 fv = self.feature_engine.update(grouped.group_id, raw.timestamp)
-                self._run_anomaly_and_alert(grouped.group_id, fv)
+                # Defer scoring: buffer the (group, vector) pair for the next
+                # batch flush instead of calling predict() once per event.
+                self._pending_predictions.append((grouped.group_id, fv))
 
             self.dedup.mark(raw.event_id)
             self.metrics.logai_events_processed_total.inc()
@@ -275,15 +358,6 @@ class RealtimePipeline:
         group.error_code = match.error_code
         self.group_registry.upsert(group, flush=False)
 
-    def _run_anomaly_and_alert(self, group_id: str, feature_vector: FeatureVector) -> None:
-        result = self.anomaly_model.predict(feature_vector)
-        if result is None:
-            return  # global model not yet trained - wait for initial training run
-        group = self.group_registry.get(group_id) or GroupState(group_id=group_id)
-        self.metrics.set_anomaly_score(group, result.anomaly_score)
-        state = self.alert_sm.transition(result)
-        self.metrics.set_alert_state(state)
-
     # --- idle-alert tick ------------------------------------------------------
 
     def _now_event_time(self) -> float:
@@ -296,21 +370,32 @@ class RealtimePipeline:
         return self._event_clock + (time.monotonic() - self._event_clock_wall)
 
     def _evaluate_idle_alerting_groups(self, current_timestamp: float) -> None:
-        """Re-evaluate non-NORMAL groups that have gone silent so a stuck alert
-        can cool down to NORMAL on its own.
+        """Collect snapshot feature vectors for groups that have gone silent and
+        append them to the SAME predict buffer as live events, so they are
+        scored together in the next batch flush.
 
-        Uses FeatureEngine.snapshot() (time-based prune, no new event appended)
-        rather than update(), so it never double-counts events and never
-        conflicts with the per-event path: an active group is skipped by the
-        silence guard and handled by update() instead.
+        Covers both non-NORMAL groups (so a stuck ALERTING alert can cool down
+        to NORMAL with zero new events) and NORMAL groups (so every group's
+        state is refreshed at least once per idle interval). Uses
+        FeatureEngine.snapshot() (time-based prune, no new event appended) so it
+        never double-counts. The silence guard skips any group still receiving
+        logs: that group is owned by the per-event path and its live vector is
+        already buffered, so a group can never appear twice in one flush.
         """
         gap = self.config.alert.idle_eval_seconds
-        for group_id in self.alert_sm.groups_not_normal():
-            group = self.group_registry.get(group_id)
-            if group is not None and current_timestamp - group.last_seen < gap:
+        for group in self.group_registry.all_groups():
+            if current_timestamp - group.last_seen < gap:
                 continue  # still receiving logs -> the per-event path owns it
-            fv = self.feature_engine.snapshot(group_id, current_timestamp)
-            self._run_anomaly_and_alert(group_id, fv)
+            try:
+                fv = self.feature_engine.snapshot(group.group_id, current_timestamp)
+            except Exception as exc:  # noqa: BLE001
+                # Snapshot collection is the only idle-specific step; a single
+                # bad group must not abort the whole tick.
+                logger.warning(
+                    "idle snapshot failed for group %s: %s", group.group_id, exc
+                )
+                continue
+            self._pending_predictions.append((group.group_id, fv))
 
     def _maybe_tick_idle(self, current_timestamp: float) -> None:
         """Throttle the idle-alert tick to at most once per idle_eval_seconds so

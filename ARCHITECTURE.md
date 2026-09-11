@@ -333,6 +333,12 @@ không tìm thấy `models/global.pkl`.
 
 Entry point: `scripts/run_realtime.py`.
 
+Suy luận anomaly được **micro-batch** (TODO #7): mỗi event chỉ parse/group/feature
+rồi **append `(group_id, FeatureVector)`** vào buffer `_pending_predictions`; toàn
+bộ buffer được chấm bằng **một** `predict_batch` tại **biên flush** (xem §7.5).
+Luồng per-event (hộp liền) và luồng flush (hộp nét đứt bên dưới) là hai giai đoạn
+tách biệt trong cùng vòng lặp poll.
+
 ```mermaid
 flowchart TD
     A[Poll Elasticsearch batch]
@@ -349,9 +355,7 @@ flowchart TD
     L[Raw/template metrics]
     M[Documentation refresh + match]
     N[Feature update]
-    O[Global IF predict]
-    P[Alert state transition]
-    Q[Prometheus metrics]
+    U[Append fv vào buffer<br/>_pending_predictions]
     R[Mark dedup]
     S[DLQ on exception]
     T[Skip processing<br/>latency vẫn được observe]
@@ -363,13 +367,23 @@ flowchart TD
     E -->|no| G --> H --> I
     I -->|yes| J --> L
     I -->|no| K --> L --> R
-    L --> M --> N --> O --> P --> Q --> R
+    L --> M --> N --> U --> R
     D -. exception .-> S
     F -. exception .-> S
     G -. exception .-> S
     M -. exception .-> S
     N -. exception .-> S
-    O -. exception .-> S
+
+    R -.-> FL
+    subgraph FL[Biên flush - count OR time, whichever first]
+      direction TB
+      V[Idle tick: snapshot<br/>nhóm silent -> cùng buffer]
+      W[predict_batch<br/>một lượt duy nhất]
+      X[Alert state transition<br/>theo thứ tự event]
+      Y[Prometheus anomaly/alert gauge]
+      Z[registry flush -> dedup gc -><br/>checkpoint commit]
+      V --> W --> X --> Y --> Z
+    end
 ```
 
 ### 7.1 Known template path (Fast-path)
@@ -381,7 +395,10 @@ Nếu `TemplateRegistry` đã có template và `group_id`:
 3. Không tính toán lại template metrics (bỏ qua `_update_template_metrics`).
 4. Cập nhật template `last_seen`, `event_count`.
 5. Cập nhật group `last_seen`, `event_count`.
-6. Chạy documentation match, feature generation (8D dimensionless vector), prediction (`if-global-v2`) và alert.
+6. Chạy documentation match, feature generation (8D dimensionless vector) rồi
+   **append feature vector vào buffer** `_pending_predictions`. Prediction
+   (`if-global-v2`) và alert **không** chạy tại đây — được dời sang biên flush
+   theo batch (§7.5).
 
 `group_similarity` được đặt là `1.0` để biểu thị direct mapping, không phải
 cosine similarity được tính lại.
@@ -421,8 +438,9 @@ Engine chuyển thành:
 anomaly_score = clamp(0.5 - decision_function, 0, 1)
 ```
 
-`AnomalyResult.anomaly` là true nếu IF predict `-1` hoặc score đạt
-`score_alert_threshold`. Alert state machine dùng trực tiếp `score_high` và
+`AnomalyResult.anomaly` là true nếu `decision_function < 0` (tương đương chính xác
+IF `predict() == -1`, nên lời gọi `predict()` thừa đã bị bỏ — xem §7.5) hoặc score
+đạt `score_alert_threshold`. Alert state machine dùng trực tiếp `score_high` và
 `score_low`, không dùng boolean `anomaly` để transition.
 
 Với default config:
@@ -440,6 +458,34 @@ stateDiagram-v2
 
 Score nằm giữa `score_low` và `score_high` reset countdown tương ứng nhưng không
 luôn thay đổi state.
+
+### 7.5 Micro-batch inference ở phase predict (TODO #7)
+
+Per-event predict là điểm nghẽn CPU chính (~6 ms/log, trần ~165 logs/s), vì mỗi
+event chấm một ma trận `(1, 8)` và `predict()` cũ duyệt rừng **2 lần**
+(`decision_function` **và** `model.predict`). Giải pháp: gom feature vector qua các
+poll rồi chấm **một lượt**.
+
+- **`GlobalAnomalyModel.predict_batch(fvs) -> List[Optional[AnomalyResult]]`**: gom
+  các vector hợp lệ thành `X = (N, 8)`, gọi `decision_function(X)` **đúng 1 lần**;
+  output cùng thứ tự & độ dài input, chèn `None` cho vector chưa-train/sai-chiều.
+  `predict()` đơn ủy quyền `predict_batch([fv])[0]` (một code path). Đo thực tế:
+  batch 500 vector ~0.0045s (≈111.000 logs/s).
+- **Hai ngưỡng flush config được (whichever-first)**: flush khi buffer đạt
+  `anomaly.predict_batch_size` (mặc định 500) **HOẶC** đã đợi
+  `anomaly.predict_max_wait_seconds` (mặc định 1.0s) kể từ entry đầu. Vòng lặp ngủ
+  `min(poll_interval, thời-gian-còn-lại)` để timer 1s luôn hiệu lực;
+  `elasticsearch.poll_interval_seconds` hạ 5→1 để nhịp thức ≤ max_wait.
+- **Idle-tick gộp chung buffer**: mỗi `alert.idle_eval_seconds`, các nhóm silent
+  (cả non-NORMAL để cool-down lẫn NORMAL để refresh) được `snapshot()` và append
+  vào **cùng** buffer, chấm chung một `predict_batch`. Silence guard đảm bảo một
+  nhóm không vừa có fv-live vừa có fv-snapshot → không double-count.
+- **Tương đương per-event 100%**: giữ **một entry / EVENT** (không collapse theo
+  group), apply `transition()` theo **đúng thứ tự event**; `predict` thuần túy nên
+  vector nằm trong buffer bao lâu cũng không đổi kết quả.
+- **Crash-safety**: `_flush_batch()` giữ nguyên thứ tự durability — predict+apply
+  → registry flush → `dedup.gc()` → `checkpoint.commit()` (chỉ khi có cursor thật
+  từ stream). Chi tiết ở §10.3.
 
 ## 8. Module ownership và boundary mapping
 
@@ -480,9 +526,9 @@ Endpoint mặc định: `http://<host>:9108/metrics`.
 | `app_log_events_total` | Counter | `service` | Tăng sau parse/assign thành công |
 | `app_log_errors_total` | Counter | `service`, `error_code` | Tăng với level ERROR/CRITICAL/FATAL; `error_code` hiện là `template_id` |
 | `app_log_templates_total` | Gauge | `service` | Số template của service; hiện scan toàn registry mỗi event |
-| `log_anomaly_score` | Gauge | `group_id`, `documented` | Score gần nhất của group/label pair |
-| `log_alert_state` | Gauge | `group_id`, `state` | State hiện tại bằng 1, ba state còn lại bằng 0 |
-| `logai_events_received_total` | Counter | Không | Tăng trước khi xử lý mỗi raw event |
+| `log_anomaly_score` | Gauge | `group_id`, `documented` | Score gần nhất của group; ghi tại biên flush micro-batch (§7.5) |
+| `log_alert_state` | Gauge | `group_id`, `state` | State hiện tại bằng 1, ba state còn lại bằng 0; `set_alert_state` return sớm khi state không đổi |
+| `logai_events_received_total` | Counter | Không | Tăng `inc(len(batch))` một lần mỗi batch |
 | `logai_events_processed_total` | Counter | Không | Tăng sau khi event được mark dedup |
 | `logai_events_failed_total` | Counter | Không | Tăng khi event exception và được gửi DLQ |
 | `logai_retry_total` | Counter | Không | Đã khai báo nhưng retry helper chưa cập nhật metric này |
@@ -570,32 +616,34 @@ Realtime kiểm tra `DedupIndex.seen(event_id)` trước parse. Event thành cô
 ### 10.3 Checkpoint và crash recovery
 
 Realtime checkpoint gồm sort value cuối cùng và timestamp cuối cùng. Collector
-chỉ trả cursor; `RealtimePipeline` commit cả hai giá trị atomically sau khi
-batch đạt trạng thái hoàn tất.
+chỉ trả cursor; `RealtimePipeline` commit cả hai giá trị atomically tại **biên
+flush micro-batch** (§7.5), sau khi buffer đã được chấm và state đã bền vững.
 
 Realtime xử lý batch theo at-least-once semantics. Collector không advance
 checkpoint ngay sau khi fetch batch:
 
 ```text
 fetch [F, G, H, I, J]
-process F, G, H
+process F, G, H  (buffer feature vectors, chưa commit cursor)
 process crash
 restart và fetch lại [F, G, H, I, J]
 dedup skip F, G, H; xử lý I, J
-commit checkpoint after J
+flush -> commit checkpoint after J
 ```
 
-Checkpoint chỉ được commit sau khi toàn bộ event trong batch thành công hoặc đã
-được ghi DLQ thành công. Nếu processing, DLQ, registry flush, dedup flush hoặc
-checkpoint commit thất bại, process không advance cursor; batch sẽ được đọc lại.
+Vì suy luận đã batch hóa và tích lũy **qua nhiều poll**, cursor được tách khỏi
+buffer: `_pending_cursor`/`_pending_last_ts` lấy từ poll của stream, còn buffer có
+thể chứa cả fv-snapshot từ idle-tick (vốn không advance cursor). `_flush_batch()`
+giữ **đúng thứ tự** durability và chỉ commit khi có cursor thật:
 
-Realtime semantics hiện tại là:
+1. `_flush_predictions()` — `predict_batch` + apply transition theo thứ tự event.
+2. `template_registry.flush()` → `group_registry.flush()` (no-op nếu `_dirty` sạch).
+3. `dedup.gc()`.
+4. `checkpoint.commit(cursor, last_ts)` — **chỉ khi `_pending_cursor is not None`**.
+   Flush chỉ-idle (stream rỗng) vẫn cool-down nhưng không commit.
 
-1. Fetch batch nhưng chưa advance checkpoint.
-2. Xử lý từng event; success được dedup mark, failure được ghi DLQ theo policy.
-3. Flush state cần thiết.
-4. Chỉ commit checkpoint khi batch đạt điều kiện hoàn tất.
-5. Restart có thể refetch batch; dedup loại events đã commit thành công.
+Mọi crash TRƯỚC bước 4 → cursor không advance; dedup mark là in-memory tới `gc`
+nên batch được đọc lại và loại trùng idempotent, không mất/nhân đôi alert.
 
 Historical training có semantics riêng: `stream_historical_batches()` không tự
 ghi checkpoint. Training append và `fsync` event index trước, sau đó mới commit
@@ -620,10 +668,10 @@ record cuối có thể không bền vững nếu host mất điện đúng lúc
 
 | State | Durability hiện tại |
 |---|---|
-| Checkpoint | Flush ngay từng setter |
+| Checkpoint | Commit tại biên flush micro-batch (§7.5), chỉ khi có cursor stream |
 | Alert state | Flush mỗi transition |
-| Dedup | Flush cuối batch qua `gc()` |
-| Template/group metadata trong realtime | Nhiều update dùng `flush=False`; không có explicit registry flush cuối batch |
+| Dedup | Flush tại biên flush qua `gc()` |
+| Template/group metadata trong realtime | Update dùng `flush=False`; `flush()` tại biên flush micro-batch, no-op khi `_dirty` sạch |
 | Template embeddings | Save toàn embedding cache khi set |
 | Feature windows | Chỉ in-memory; reset khi restart |
 | Prometheus client counters/gauges | Chỉ in-memory; reset khi restart |
@@ -688,7 +736,7 @@ thiết kế tương lai:
 | Critical | Feature generation scan timestamps và giữ toàn bộ vectors | CPU/RAM tăng mạnh khi training lớn |
 | High | Template metric scan toàn registry mỗi event | Realtime CPU/object allocation tăng theo số template |
 | High | Feature windows không persist | Restart mất baseline ngắn hạn |
-| High | Realtime registry metadata không flush cuối batch | Có thể mất cập nhật metadata khi crash |
+| Resolved | Realtime registry metadata không flush cuối batch | Đã giải quyết (flush tại biên flush micro-batch với cờ `_dirty` - Issue 10) |
 | Resolved | `rolling_window_points` config chưa được dùng | Đã giải quyết (kết nối trực tiếp vào _GroupWindow - Issue 7) |
 | Medium | `logai_retry_total` không được nối với retry helper | Metric luôn không phản ánh retry thật |
 | Medium | Documentation cache chỉ ghi, chưa đọc reuse | Reload embed lại corpus |

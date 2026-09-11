@@ -7,7 +7,7 @@ elasticsearch:
   hosts:
     - "http://elasticsearch:9200"
   index: "hdfs-logs"
-  poll_interval_seconds: 5
+  poll_interval_seconds: 1
   batch_size: 500
   request_timeout_seconds: 30
 
@@ -44,6 +44,8 @@ anomaly:
   random_state: 42
   min_training_samples: 30
   score_alert_threshold: 0.6
+  predict_batch_size: 500
+  predict_max_wait_seconds: 1.0
 
 alert:
   warm_consecutive: 2

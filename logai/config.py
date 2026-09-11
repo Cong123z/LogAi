@@ -27,7 +27,7 @@ class ElasticsearchConfig:
     index: str = "app-logs-*"
     username: str | None = None
     password: str | None = None
-    poll_interval_seconds: float = 5.0
+    poll_interval_seconds: float = 1.0
     batch_size: int = 500
     request_timeout_seconds: float = 30.0
 
@@ -78,6 +78,12 @@ class AnomalyConfig:
     random_state: int = 42
     min_training_samples: int = 30
     score_alert_threshold: float = 0.6
+    # Micro-batch inference at the predict phase: accumulate feature vectors and
+    # flush->predict when the buffer reaches `predict_batch_size` events OR
+    # `predict_max_wait_seconds` has elapsed since the buffer's first event
+    # (whichever comes first). Both are configurable via the `anomaly:` section.
+    predict_batch_size: int = 500
+    predict_max_wait_seconds: float = 1.0
 
 
 @dataclass

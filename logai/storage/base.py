@@ -30,6 +30,10 @@ class JSONStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._data: Dict[str, Any] = {}
+        # Set on every mutation; lets _flush() short-circuit when nothing has
+        # changed since the last write (same pattern as DedupIndex.flush), so a
+        # per-batch registry flush is a no-op when no template/group was added.
+        self._dirty = False
         self._load()
 
     def _load(self) -> None:
@@ -46,10 +50,13 @@ class JSONStore:
 
     def _flush(self) -> None:
         with self._lock:
+            if not self._dirty and self.path.exists():
+                return
             tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2, default=str)
             os.replace(tmp_path, self.path)
+            self._dirty = False
 
     def get(self, key: str, default: Any = None) -> Any:
         with self._lock:
@@ -58,12 +65,14 @@ class JSONStore:
     def set(self, key: str, value: Any, flush: bool = True) -> None:
         with self._lock:
             self._data[key] = value
+            self._dirty = True
             if flush:
                 self._flush()
 
     def delete(self, key: str, flush: bool = True) -> None:
         with self._lock:
             self._data.pop(key, None)
+            self._dirty = True
             if flush:
                 self._flush()
 
@@ -74,11 +83,13 @@ class JSONStore:
     def bulk_set(self, mapping: Dict[str, Any]) -> None:
         with self._lock:
             self._data.update(mapping)
+            self._dirty = True
             self._flush()
 
     def replace_all(self, mapping: Dict[str, Any]) -> None:
         with self._lock:
             self._data = dict(mapping)
+            self._dirty = True
             self._flush()
 
     def flush(self) -> None:

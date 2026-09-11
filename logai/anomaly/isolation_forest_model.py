@@ -75,39 +75,84 @@ class GlobalAnomalyModel:
         return self.train(feature_vectors)
 
     def predict(self, feature_vector: FeatureVector) -> Optional[AnomalyResult]:
+        """Single-event convenience wrapper over predict_batch().
+
+        Kept for callers/tests that score one vector at a time; the realtime
+        pipeline batches events and calls predict_batch() directly.
+        """
+        return self.predict_batch([feature_vector])[0]
+
+    def predict_batch(
+        self, feature_vectors: List[FeatureVector]
+    ) -> List[Optional[AnomalyResult]]:
+        """Score a batch of feature vectors in a single vectorized inference.
+
+        Returns a list aligned 1:1 with `feature_vectors` (same order, same
+        length). An element is None when the model is not yet trained, when the
+        loaded model's feature count is incompatible, or when that specific
+        vector has the wrong dimension - preserving predict()'s semantics.
+
+        Batching is result-equivalent to per-event scoring: decision_function
+        is a pure function of each row, and `is_outlier = raw_score < 0` is
+        exactly IsolationForest.predict()==-1, so the redundant predict() call
+        is dropped (one tree traversal instead of two).
+        """
+        n = len(feature_vectors)
+        if n == 0:
+            return []
+
         model = self._load()
         if model is None:
-            return None
-        vec = feature_vector.as_vector()
-        if len(vec) != EXPECTED_NUM_FEATURES:
-            logger.error(
-                "Feature vector dimension mismatch: expected %d, got %d",
-                EXPECTED_NUM_FEATURES,
-                len(vec),
-            )
-            return None
+            return [None] * n  # global model not yet trained
         if hasattr(model, "n_features_in_") and model.n_features_in_ != EXPECTED_NUM_FEATURES:
             logger.warning(
-                "Loaded model expects %d features, but feature vector has %d. Please retrain model.",
+                "Loaded model expects %d features, but feature vectors have %d. "
+                "Please retrain model.",
                 model.n_features_in_,
                 EXPECTED_NUM_FEATURES,
             )
-            return None
+            return [None] * n
 
-        X = np.array([vec], dtype=np.float64)
-        # decision_function: higher = more normal. We flip + normalize to a
-        # 0..1 "anomaly score" so it reads naturally as a Prometheus gauge.
-        raw_score = float(model.decision_function(X)[0])
-        anomaly_score = max(0.0, min(1.0, 0.5 - raw_score))
-        is_outlier = model.predict(X)[0] == -1
-        anomaly = is_outlier or anomaly_score >= self.config.score_alert_threshold
-        return AnomalyResult(
-            group_id=feature_vector.group_id,
-            timestamp=feature_vector.timestamp,
-            anomaly_score=anomaly_score,
-            anomaly=anomaly,
-            model_version=MODEL_VERSION,
-        )
+        # Collect only correctly-dimensioned vectors, remembering their
+        # original positions so None can be slotted back for the bad ones.
+        rows: List[List[float]] = []
+        valid_indices: List[int] = []
+        for i, fv in enumerate(feature_vectors):
+            vec = fv.as_vector()
+            if len(vec) != EXPECTED_NUM_FEATURES:
+                logger.error(
+                    "Feature vector dimension mismatch: expected %d, got %d",
+                    EXPECTED_NUM_FEATURES,
+                    len(vec),
+                )
+                continue
+            rows.append(vec)
+            valid_indices.append(i)
+
+        results: List[Optional[AnomalyResult]] = [None] * n
+        if not rows:
+            return results
+
+        X = np.array(rows, dtype=np.float64)
+        # decision_function: higher = more normal. One vectorized call scores
+        # every row in a single pass over the forest (the batched speed-up); we
+        # then flip + normalize each score to a 0..1 "anomaly score" so it reads
+        # naturally as a Prometheus gauge. `raw_score < 0` is exactly
+        # IsolationForest.predict()==-1, so the redundant predict() is dropped.
+        raw_scores = model.decision_function(X)
+        threshold = self.config.score_alert_threshold
+        for j, i in enumerate(valid_indices):
+            raw = float(raw_scores[j])
+            score = max(0.0, min(1.0, 0.5 - raw))
+            fv = feature_vectors[i]
+            results[i] = AnomalyResult(
+                group_id=fv.group_id,
+                timestamp=fv.timestamp,
+                anomaly_score=score,
+                anomaly=raw < 0 or score >= threshold,
+                model_version=MODEL_VERSION,
+            )
+        return results
 
 
 # Backward compatibility alias

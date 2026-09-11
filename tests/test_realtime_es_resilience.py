@@ -60,6 +60,15 @@ class RunForeverResilienceTest(unittest.TestCase):
         p._event_clock = 0.0
         p._event_clock_wall = realtime_pipeline.time.monotonic()
         p._last_idle_tick = 0.0
+        # Micro-batch predict buffer state (TODO #7). run_forever's flush
+        # decision (Phase 4) reads these every cycle; without them the loop
+        # AttributeErrors before it can reach the poll/backoff path under test.
+        # They stay empty here because poll_batch never yields a batch, so the
+        # flush branch is never taken and this test stays focused on backoff.
+        p._pending_predictions = []
+        p._pending_cursor = None
+        p._pending_last_ts = None
+        p._buffer_started_at = None
         # start_metrics_server just needs to be a no-op here.
         p.start_metrics_server = MagicMock()
         return p
