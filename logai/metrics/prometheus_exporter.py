@@ -9,6 +9,7 @@ Exposes:
   Analysis metrics:
     log_anomaly_score{group_id, documented}
     log_alert_state{group_id, state}   (1 for the active state, 0 otherwise)
+    log_alerts_total{group_id}         (cumulative transitions into ALERTING)
 
   Engine health metrics:
     logai_events_received_total
@@ -19,6 +20,8 @@ Exposes:
     logai_queue_depth (Gauge)
 """
 from __future__ import annotations
+
+from typing import Dict
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
@@ -51,6 +54,15 @@ class MetricsExporter:
             "log_alert_state", "1 if this is the group's current alert state",
             ["group_id", "state"],
         )
+        self.log_alerts_total = Counter(
+            "log_alerts_total",
+            "Cumulative count of transitions into the ALERTING state",
+            ["group_id"],
+        )
+        # Last alert_state seen per group, so we only count a fresh escalation
+        # (X -> ALERTING) once instead of re-incrementing on every event that
+        # keeps a group in ALERTING.
+        self._last_alert_state: Dict[str, str] = {}
 
         # Engine health metrics
         self.logai_events_received_total = Counter(
@@ -106,6 +118,15 @@ class MetricsExporter:
         ).set(score)
 
     def set_alert_state(self, state: AnomalyState) -> None:
+        alerting = AlertStateEnum.ALERTING.value
+        previous = self._last_alert_state.get(state.group_id)
+        # Count only the phase transition into ALERTING, not each event that
+        # keeps the group alerting. A recovery (-> NORMAL) followed by a new
+        # escalation increments again, which is the intended behaviour.
+        if state.alert_state == alerting and previous != alerting:
+            self.log_alerts_total.labels(group_id=state.group_id).inc()
+        self._last_alert_state[state.group_id] = state.alert_state
+
         for candidate in AlertStateEnum:
             self.log_alert_state.labels(
                 group_id=state.group_id, state=candidate.value

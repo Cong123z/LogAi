@@ -84,6 +84,13 @@ class RealtimePipeline:
         for svc, count in self.template_registry.all_counts_by_service().items():
             self.metrics.set_template_count(svc, count)
 
+        # Event-clock for the idle-alert tick. Event timestamps and time.time()
+        # share the epoch-UTC scale, so the clock advances by real batch events
+        # and, while idle, drifts forward with wall-clock (monotonic) time.
+        self._event_clock: float = 0.0            # max event timestamp observed
+        self._event_clock_wall: float = time.monotonic()
+        self._last_idle_tick: float = 0.0         # throttle marker for the tick
+
     def start_metrics_server(self) -> None:
         self.metrics.start()
         logger.info(
@@ -118,6 +125,7 @@ class RealtimePipeline:
                 continue
 
             if not batch:
+                self._maybe_tick_idle(self._now_event_time())
                 time.sleep(self.config.elasticsearch.poll_interval_seconds)
                 continue
 
@@ -139,6 +147,14 @@ class RealtimePipeline:
 
                 if batch and cursor is not None:
                     self.checkpoint.commit(cursor, batch[-1].timestamp)
+
+                # Advance the event-clock to the newest event just processed,
+                # then re-evaluate idle non-NORMAL groups (throttled). Runs
+                # after checkpoint.commit so a tick failure can never block the
+                # cursor - preserving the crash-safety contract.
+                self._event_clock = max(self._event_clock, batch[-1].timestamp)
+                self._event_clock_wall = time.monotonic()
+                self._maybe_tick_idle(self._event_clock)
             finally:
                 self.metrics.logai_queue_depth.set(0)
 
@@ -267,6 +283,47 @@ class RealtimePipeline:
         self.metrics.set_anomaly_score(group, result.anomaly_score)
         state = self.alert_sm.transition(result)
         self.metrics.set_alert_state(state)
+
+    # --- idle-alert tick ------------------------------------------------------
+
+    def _now_event_time(self) -> float:
+        """Current time on the event-timestamp scale.
+
+        Anchored to the newest observed event timestamp and advanced by
+        monotonic wall-clock since that anchor, so the idle tick keeps making
+        progress while the stream is empty (no new events to move the clock).
+        """
+        return self._event_clock + (time.monotonic() - self._event_clock_wall)
+
+    def _evaluate_idle_alerting_groups(self, current_timestamp: float) -> None:
+        """Re-evaluate non-NORMAL groups that have gone silent so a stuck alert
+        can cool down to NORMAL on its own.
+
+        Uses FeatureEngine.snapshot() (time-based prune, no new event appended)
+        rather than update(), so it never double-counts events and never
+        conflicts with the per-event path: an active group is skipped by the
+        silence guard and handled by update() instead.
+        """
+        gap = self.config.alert.idle_eval_seconds
+        for group_id in self.alert_sm.groups_not_normal():
+            group = self.group_registry.get(group_id)
+            if group is not None and current_timestamp - group.last_seen < gap:
+                continue  # still receiving logs -> the per-event path owns it
+            fv = self.feature_engine.snapshot(group_id, current_timestamp)
+            self._run_anomaly_and_alert(group_id, fv)
+
+    def _maybe_tick_idle(self, current_timestamp: float) -> None:
+        """Throttle the idle-alert tick to at most once per idle_eval_seconds so
+        it never runs on the hot path under high throughput."""
+        if current_timestamp - self._last_idle_tick < self.config.alert.idle_eval_seconds:
+            return
+        self._last_idle_tick = current_timestamp
+        try:
+            self._evaluate_idle_alerting_groups(current_timestamp)
+        except Exception as exc:  # noqa: BLE001
+            # Idle-tick is enrichment; a failure here must not crash the poll
+            # loop or block checkpointing.
+            logger.warning("idle alert tick failed: %s", exc)
 
     def _update_template_metrics(self, service: str) -> None:
         svc = service or "unknown"

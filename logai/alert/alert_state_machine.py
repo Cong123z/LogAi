@@ -6,7 +6,7 @@ consecutive high/low scores before switching state.
 """
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, List, Set
 
 from logai.config import AlertConfig
 from logai.models import AlertStateEnum, AnomalyResult, AnomalyState
@@ -17,6 +17,16 @@ class AlertStateMachine:
     def __init__(self, config: AlertConfig, state_store: JSONStore):
         self.config = config
         self._store = state_store
+        # In-memory set of group_ids currently in a non-NORMAL alert state,
+        # kept in sync by transition(). Lets the realtime idle-tick enumerate
+        # groups needing re-evaluation in O(non-normal) instead of scanning /
+        # copying the whole store on every tick.
+        normal = AlertStateEnum.NORMAL.value
+        self._non_normal: Set[str] = {
+            gid
+            for gid, raw in state_store.all().items()
+            if isinstance(raw, dict) and raw.get("alert_state", normal) != normal
+        }
 
     def _load(self, group_id: str) -> AnomalyState:
         raw = self._store.get(group_id)
@@ -86,7 +96,21 @@ class AlertStateMachine:
             model_version=result.model_version,
         )
         self._save(new_state)
+        if state == AlertStateEnum.NORMAL.value:
+            self._non_normal.discard(result.group_id)
+        else:
+            self._non_normal.add(result.group_id)
         return new_state
+
+    def groups_not_normal(self) -> List[str]:
+        """group_ids of every group currently in a non-NORMAL alert state
+        (WARMING / ALERTING / COOLING).
+
+        O(number of anomalous groups) - reads an in-memory set, never scans or
+        copies the whole state store, so it stays cheap even with a very large
+        total number of groups.
+        """
+        return list(self._non_normal)
 
 
 def group_id_key(group_id: str) -> str:

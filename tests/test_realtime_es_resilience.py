@@ -44,6 +44,7 @@ class RunForeverResilienceTest(unittest.TestCase):
 
         config = MagicMock()
         config.elasticsearch.poll_interval_seconds = poll_interval
+        config.alert.idle_eval_seconds = 5.0
         p.config = config
 
         p.collector = MagicMock()
@@ -53,6 +54,12 @@ class RunForeverResilienceTest(unittest.TestCase):
         p.dedup = MagicMock()
         p.checkpoint = MagicMock()
         p._process_one = MagicMock(return_value=True)
+        # Idle-tick state. Anchoring the event-clock wall to "now" keeps
+        # _now_event_time() ~0, so the throttle keeps the idle tick dormant and
+        # this ES-resilience test stays focused on the poll/backoff path.
+        p._event_clock = 0.0
+        p._event_clock_wall = realtime_pipeline.time.monotonic()
+        p._last_idle_tick = 0.0
         # start_metrics_server just needs to be a no-op here.
         p.start_metrics_server = MagicMock()
         return p

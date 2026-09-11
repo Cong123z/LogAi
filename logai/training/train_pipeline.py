@@ -169,7 +169,17 @@ class TrainingPipeline:
         )
 
     def _rebuild_template_registry(self) -> None:
-        """Rebuild template aggregates from the durable event index."""
+        """Rebuild template aggregates from the durable event index.
+
+        ``template_text`` is taken from Drain3's *current* cluster template
+        rather than the per-event ``template_text`` captured at parse time.
+        The first event of a cluster is emitted before Drain3 has a second
+        sample to generalise against, so its recorded ``template_text`` is the
+        raw log line (concrete IPs/IDs/sizes). By the time this runs the miner
+        has consumed every historical event, so ``get_template()`` returns the
+        converged, wildcarded (``<*>``) template - cleaner for both the
+        registry display and the SentenceTransformer embeddings computed next.
+        """
         states: Dict[str, TemplateState] = {}
         seen_event_ids: Set[str] = set()
         for record in self.event_index.records():
@@ -186,9 +196,15 @@ class TrainingPipeline:
             seen_event_ids.add(event_id)
             state = states.get(template_id)
             if state is None:
+                generalized = self._generalized_template_text(template_id)
+                template_text = (
+                    generalized
+                    if generalized is not None
+                    else str(record.get("template_text") or "")
+                )
                 state = TemplateState(
                     template_id=template_id,
-                    template_text=str(record.get("template_text") or ""),
+                    template_text=template_text,
                     service=str(record.get("service") or "unknown"),
                     first_seen=float(timestamp),
                     last_seen=float(timestamp),
@@ -198,6 +214,24 @@ class TrainingPipeline:
             state.last_seen = max(state.last_seen, float(timestamp))
             state.event_count += 1
         self.template_registry.replace_all(list(states.values()))
+
+    def _generalized_template_text(self, template_id: str) -> Optional[str]:
+        """Return Drain3's current generalised template for ``template_id``.
+
+        ``template_id`` has the form ``T{cluster_id:05d}`` (e.g. ``T00001``).
+        Returns ``None`` when the id cannot be mapped to a live Drain3 cluster
+        (non-numeric id from a mocked parser, missing cluster, or any miner API
+        difference) so the caller can fall back to the recorded text.
+        """
+        try:
+            cluster_id = int(template_id[1:])
+            cluster = self.parser.miner.drain.id_to_cluster.get(cluster_id)
+            if cluster is None:
+                return None
+            template = cluster.get_template()
+            return template if isinstance(template, str) else None
+        except (ValueError, TypeError, AttributeError):
+            return None
 
     def _parse_all(self, raw_logs: List[RawLog]) -> List[ParsedEvent]:
         raw_logs_sorted = sorted(raw_logs, key=lambda r: r.timestamp)
