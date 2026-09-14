@@ -12,6 +12,7 @@ from typing import List
 
 from drain3 import TemplateMiner
 from drain3.file_persistence import FilePersistence
+from drain3.masking import MaskingInstruction
 from drain3.template_miner_config import TemplateMinerConfig
 
 from logai.config import Drain3Config
@@ -26,6 +27,13 @@ class Drain3Parser:
         tm_config.drain_depth = config.depth
         tm_config.drain_max_children = config.max_children
         tm_config.profiling_enabled = False
+
+        masking_rules = getattr(config, "masking_rules", [])
+        if masking_rules:
+            tm_config.masking_instructions = [
+                MaskingInstruction(pattern=rule["pattern"], mask_with=rule.get("mask_with", "*"))
+                for rule in masking_rules
+            ]
 
         persistence = FilePersistence(config.persistence_path)
         self.miner = TemplateMiner(persistence, config=tm_config)
@@ -58,4 +66,13 @@ class Drain3Parser:
         for t_tok, m_tok in zip(t_tokens, m_tokens):
             if t_tok == "<*>":
                 params.append(m_tok)
+            elif "<*>" in t_tok:
+                # Handle prefixes/suffixes attached to <*>, e.g. "<*>:Exception"
+                parts = t_tok.split("<*>")
+                val = m_tok
+                if parts[0] and val.startswith(parts[0]):
+                    val = val[len(parts[0]):]
+                if len(parts) > 1 and parts[1] and val.endswith(parts[1]):
+                    val = val[:-len(parts[1])]
+                params.append(val)
         return params

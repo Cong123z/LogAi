@@ -13,9 +13,18 @@ elasticsearch:
 
 drain3:
   persistence_path: "data/drain3_state.bin"
-  sim_threshold: 0.4
+  sim_threshold: 0.5
   depth: 4
   max_children: 100
+  masking_rules:
+    - pattern: '/?\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?'
+      mask_with: '*'
+    - pattern: '\bblk_-?\d+\b'
+      mask_with: '*'
+    - pattern: '/(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+'
+      mask_with: '*'
+    - pattern: '\b\d+\b'
+      mask_with: '*'
 
 embedding:
   model_name: "sentence-transformers/all-MiniLM-L6-v2"
@@ -54,7 +63,7 @@ alert:
   cool_consecutive: 3
   score_high: 0.6
   score_low: 0.4
-  min_events_1m: 3
+  min_events_1m: 8
 
 training:
   batch_size: 2000

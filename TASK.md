@@ -816,3 +816,96 @@ event trong batch và tổng số group đã persist.
 Benchmark 500 transitions: nhanh hơn khoảng 73x với 11 group, 218x với 100
 group và 200x trong workload 1.000 group. Không thay đổi model, config, thứ tự
 hysteresis hoặc metric `log_alerts_total`.
+
+---
+
+## 13. Khắc phục Bottleneck `_assign_group`: Fast-Path cho Pending/Unassigned Templates và Tối ưu Disk I/O
+
+**Ngày tạo**: 2026-09-14  
+**Trạng thái**: 🟡 ĐANG THỰC HIỆN  
+**Mức độ nghiêm trọng**: 🔴 Critical — Gây sập thông lượng 99% (từ 6.400 logs/s xuống 43 logs/s), CPU 200%, tích tụ backlog hàng trăm nghìn log và phá vỡ hoàn toàn tính realtime của pipeline.  
+**Files liên quan**:
+- `logai/realtime/realtime_pipeline.py` (`_assign_group`, `RealtimePipeline.__init__`)
+- `logai/storage/registries.py` (`TemplateRegistry.set_embedding`)
+- `tests/test_pending_template_fast_path.py` (MỚI)
+- `tests/test_realtime_pipeline_end_to_end.py`
+
+---
+
+### 13.1. Hiện trạng & Đo đạc Thực tế (Production Evidence)
+
+Khi generator stream log trực tiếp với tốc độ 200 logs/s:
+- **Tốc độ generator**: 200 logs/giây.
+- **Tốc độ xử lý của `logai-engine`**: chỉ đạt **~43 – 67.4 logs/giây**.
+- **Lag tích tụ**: Checkpoint engine (`08:46:08 UTC`) trễ hơn 16–23 phút so với log mới nhất trong Elasticsearch (`09:02:15 UTC`). Tồn đọng **> 193.400 logs backlog**.
+- **Thời gian ước tính nếu không sửa**: $\approx 193.400 / 67.4 \approx 2.869\text{s} \approx \mathbf{48\text{ phút}}$.
+
+**Kết quả cProfile và thời gian đo đạc trên 500 unseen logs thực tế**:
+- `parse` (Drain3): `0.0169s`
+- `doc` (Doc Matcher): `0.0177s`
+- `fe_update` (Feature Engine): `0.0627s`
+- `flush` (Anomaly predict + Checkpoint commit): `0.0169s`
+- **`assign` (`_assign_group`): `11.5021s` (Chiếm 99.0% tổng thời gian xử lý toàn batch!)**
+- **Tổng thời gian cho 500 logs**: `11.6164s` $\rightarrow$ Thông lượng thực tế chỉ đạt **43.0 logs/s**.
+
+---
+
+### 13.2. Phân tích Nguyên nhân Cốt lõi (Root Cause Analysis)
+
+1. **Vòng lặp Re-Embedding vô tận đối với Template Pending/Unassigned**:
+   - Khi có một template mới xuất hiện (ví dụ `T00031`: `<*>:Transmitted block <*> to <*>`), Drain3 parse và trả về `template_id`.
+   - Pipeline kiểm tra:
+     ```python
+     existing_template = self.template_registry.get(parsed.template_id)
+     if existing_template and existing_template.group_id:
+         # Fast path O(1) chỉ áp dụng khi group_id tồn tại!
+         return GroupedEvent(...)
+     ```
+   - Nếu template chưa có group hoặc độ tương đồng với các centroid không đủ ngưỡng (`similarity = 0.687 < threshold 0.80`), template được đánh dấu `state.group_id = None` (Pending).
+   - **Bug chí mạng**: Ở các log tiếp theo mang cùng template `T00031`, vì `existing_template.group_id` là `None`, điều kiện `if existing_template and existing_template.group_id:` **luôn trả về `False`**.
+   - Dẫn đến việc mỗi event log tiếp theo đều bị xem như template mới lạ:
+     - Gọi `self.embedder.embed_one(parsed.template)`: Chạy lại mô hình Transformer NLP trên CPU tốn **~250 – 300ms cho từng dòng log**.
+     - Gọi `assign_to_nearest_group()` quét lại toàn bộ centroids.
+     - Gọi `set_embedding()` ghi đè file pickle ra đĩa liên tục.
+   - Trong luồng HDFS, log `Transmitted block` chiếm ~8% tổng lượng log (~16 logs/giây). 
+     $$16 \text{ logs/s} \times 0.3\text{s CPU} \approx \mathbf{4.8\text{ giây CPU cho mỗi giây thực tế!}}$$
+     Khiến CPU luôn đạt mức trần 200% và thông lượng toàn hệ thống sụt giảm 99%.
+
+2. **Ghi đĩa Pickle đồng bộ trên hot path**:
+   - `TemplateRegistry.set_embedding()` hiện đang gọi trực tiếp `self._embeddings.save(self._embedding_cache)` (ghi ra đĩa bằng `tempfile` và `os.replace`) ngay trong vòng lặp per-event, tạo ra I/O disk stall không đáng có.
+
+---
+
+### 13.3. Kiến trúc Giải pháp (Architecture Solution)
+
+1. **Cơ chế Fast-Path 3 trạng thái trong `_assign_group`**:
+   - **Trạng thái 1 (Known & Grouped)**: `group_id` hợp lệ và khác `PENDING_GROUP_ID` $\rightarrow$ Fast-path $O(1)$ như hiện tại.
+   - **Trạng thái 2 (Known & Pending/Unassigned)**: Template đã có trong registry nhưng `group_id is None` hoặc `group_id == PENDING_GROUP_ID`:
+     - Cập nhật `last_seen = parsed.raw.timestamp`, tăng `event_count += 1`.
+     - `self.template_registry.upsert(existing_template, flush=False)`.
+     - **Return `None` ngay lập tức** trong $O(1)$ RAM, bỏ qua 100% việc gọi `embed_one()` và clustering.
+   - **Trạng thái 3 (Truly Unknown)**: Lần đầu tiên nhìn thấy template:
+     - Chạy `embed_one()` và `assign_to_nearest_group()` **đúng 1 lần duy nhất**.
+     - Nếu không đủ ngưỡng similarity: gán `state.group_id = PENDING_GROUP_ID` (hoặc `None`), lưu registry một lần.
+     - Đưa vào bộ nhớ đệm `self._pending_templates: set[str]` để các log sau đi thẳng vào Fast-path.
+
+2. **Tối ưu Disk I/O trong `TemplateRegistry.set_embedding`**:
+   - Thêm tham số `flush: bool = False` vào `set_embedding`.
+   - Trên hot path, chỉ cập nhật `self._embedding_cache` trong RAM.
+   - Việc ghi đĩa file pickle `template_embeddings.pkl` được gom lại và thực thi duy nhất 1 lần ở biên `_flush_batch()` (`TemplateRegistry.flush()`).
+
+3. **Kết quả kỳ vọng**:
+   - Thời gian xử lý 500 logs giảm từ **11.61s xuống 0.077s**.
+   - Thông lượng tăng từ **43 logs/s lên > 6.400 logs/s** (Tăng tốc **150 lần**).
+   - Xử lý sạch 193.400 logs tồn đọng chỉ trong **~30 giây**.
+
+---
+
+### 13.4. Kế hoạch Thực hiện & Checklist (Action Items)
+
+- [x] **Nhiệm vụ 1**: Sửa logic phân loại 3 trạng thái trong `_assign_group` tại `logai/realtime/realtime_pipeline.py`.
+- [x] **Nhiệm vụ 2**: Tối ưu `TemplateRegistry.set_embedding` trong `logai/storage/registries.py` (loại bỏ synchronous pickle save trên hot path).
+- [x] **Nhiệm vụ 3**: Viết Unit Test `tests/test_pending_template_fast_path.py` (kiểm tra 100 event lặp lại của pending template chỉ gọi `embed_one` đúng 1 lần - 3/3 pass).
+- [x] **Nhiệm vụ 4**: Chạy toàn bộ test suite hồi quy (148 tests passed 100% trong 8.84s).
+- [ ] **Nhiệm vụ 5**: Người dùng review Git diff trên branch `fix/assign-group-bottleneck`, xác nhận merge vào `master`, rebuild image và khởi động lại container để xả sạch backlog 193.400 logs trong ~30 giây.
+

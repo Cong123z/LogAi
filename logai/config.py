@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import yaml
 
@@ -38,6 +38,12 @@ class Drain3Config:
     sim_threshold: float = 0.4
     depth: int = 4
     max_children: int = 100
+    masking_rules: List[Dict[str, str]] = field(default_factory=lambda: [
+        {"pattern": r"/?\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?", "mask_with": "*"},
+        {"pattern": r"\bblk_-?\d+\b", "mask_with": "*"},
+        {"pattern": r"/(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+", "mask_with": "*"},
+        {"pattern": r"\b\d+\b", "mask_with": "*"},
+    ])
 
 
 @dataclass

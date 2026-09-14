@@ -81,9 +81,12 @@ class TemplateRegistry:
         with self._lock:
             return sum(self._counts_by_service.values())
 
-    def set_embedding(self, template_id: str, embedding: np.ndarray) -> None:
+    def set_embedding(
+        self, template_id: str, embedding: np.ndarray, flush: bool = True
+    ) -> None:
         self._embedding_cache[template_id] = embedding
-        self._embeddings.save(self._embedding_cache)
+        if flush:
+            self._embeddings.save(self._embedding_cache)
 
     def get_embedding(self, template_id: str) -> Optional[np.ndarray]:
         return self._embedding_cache.get(template_id)

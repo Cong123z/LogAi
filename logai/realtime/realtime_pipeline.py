@@ -284,39 +284,47 @@ class RealtimePipeline:
     def _assign_group(self, parsed: ParsedEvent) -> Optional[GroupedEvent]:
         existing_template = self.template_registry.get(parsed.template_id)
 
-        if existing_template and existing_template.group_id:
-            # Known Template -> direct group mapping (plan 4.3), no embedding needed.
+        if existing_template:
+            if existing_template.group_id and existing_template.group_id != PENDING_GROUP_ID:
+                # Known Template -> direct group mapping (plan 4.3), no embedding needed.
+                existing_template.last_seen = parsed.raw.timestamp
+                existing_template.event_count += 1
+                self.template_registry.upsert(existing_template, flush=False)
+                self._touch_group(existing_template.group_id, parsed.raw.timestamp)
+                return GroupedEvent(parsed=parsed, group_id=existing_template.group_id)
+
+            # Known Pending Template -> already attempted clustering and awaiting next training run.
+            # Fast-path bypass: update stats and return None immediately without re-embedding.
             existing_template.last_seen = parsed.raw.timestamp
             existing_template.event_count += 1
+            if existing_template.group_id != PENDING_GROUP_ID:
+                existing_template.group_id = PENDING_GROUP_ID
             self.template_registry.upsert(existing_template, flush=False)
-            self._touch_group(existing_template.group_id, parsed.raw.timestamp)
-            return GroupedEvent(parsed=parsed, group_id=existing_template.group_id)
+            return None
 
         # Unknown Template (new to drain3, or known but not yet grouped) -> embed & assign.
         embedding = self.embedder.embed_one(parsed.template)
         centroids = self.group_registry.all_centroids()
         group_id, similarity = self.clusterer.assign_to_nearest_group(embedding, centroids)
 
-        state = existing_template or TemplateState(
+        state = TemplateState(
             template_id=parsed.template_id,
             template_text=parsed.template,
             service=parsed.raw.service,
             first_seen=parsed.raw.timestamp,
             last_seen=parsed.raw.timestamp,
-            event_count=0,
+            event_count=1,
+            group_id=group_id if group_id is not None else PENDING_GROUP_ID,
         )
-        state.last_seen = parsed.raw.timestamp
-        state.event_count += 1
-        self.template_registry.set_embedding(parsed.template_id, embedding)
+        self.template_registry.set_embedding(parsed.template_id, embedding, flush=False)
+        is_new = self.template_registry.upsert(state, flush=False)
+        if is_new:
+            self._update_template_metrics(parsed.raw.service)
 
         if group_id is None:
             # Doesn't clear the similarity threshold against any existing
             # group -> leave ungrouped/pending; a future training run will
             # cluster it properly (plan 4.4).
-            state.group_id = None
-            is_new = self.template_registry.upsert(state, flush=False)
-            if is_new:
-                self._update_template_metrics(parsed.raw.service)
             logger.info(
                 "Template %s is Unknown/Pending (best similarity=%.2f) - "
                 "awaiting next training run to form/join a group.",
@@ -324,10 +332,6 @@ class RealtimePipeline:
             )
             return None
 
-        state.group_id = group_id
-        is_new = self.template_registry.upsert(state, flush=False)
-        if is_new:
-            self._update_template_metrics(parsed.raw.service)
         self._touch_group(group_id, parsed.raw.timestamp, new_template_id=parsed.template_id)
         return GroupedEvent(parsed=parsed, group_id=group_id, group_similarity=similarity)
 
