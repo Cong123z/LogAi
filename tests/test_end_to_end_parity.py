@@ -72,7 +72,12 @@ sys.modules["sklearn.ensemble"] = mock_sklearn_ensemble
 
 from logai.config import FeatureConfig, AnomalyConfig, AlertConfig
 from logai.features.feature_engine import FeatureEngine
-from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, MODEL_VERSION, EXPECTED_NUM_FEATURES
+from logai.anomaly.isolation_forest_model import (
+    EXPECTED_NUM_FEATURES,
+    GLOBAL_MODEL_KEY,
+    MODEL_VERSION,
+    GlobalAnomalyModel,
+)
 from logai.alert.alert_state_machine import AlertStateMachine
 from logai.models import FeatureVector, AlertStateEnum, AnomalyResult, AnomalyState
 
@@ -108,6 +113,7 @@ class TestEndToEndParityAndRealtimeAlert(unittest.TestCase):
         self.alert_store_data = {}
         self.alert_store.get.side_effect = lambda k: self.alert_store_data.get(k)
         self.alert_store.set.side_effect = lambda k, v: self.alert_store_data.update({k: v})
+        self.alert_store.bulk_set.side_effect = self.alert_store_data.update
 
     def test_train_and_realtime_parity_with_8_features_per_event(self):
         """Verify:
@@ -133,7 +139,8 @@ class TestEndToEndParityAndRealtimeAlert(unittest.TestCase):
         trained = model.train(train_vectors)
         self.assertTrue(trained)
         self.assertEqual(model._model.n_features_in_, 8)
-        self.assertEqual(MODEL_VERSION, "if-global-v2")
+        self.assertEqual(MODEL_VERSION, "if-global-v3")
+        self.assertIn(GLOBAL_MODEL_KEY, self.model_store_data)
 
         # ==========================================
         # 2. REALTIME PHASE (Per-event immediate evaluation)
@@ -152,7 +159,7 @@ class TestEndToEndParityAndRealtimeAlert(unittest.TestCase):
 
             result = realtime_model.predict(fv)
             self.assertIsNotNone(result)
-            self.assertEqual(result.model_version, "if-global-v2")
+            self.assertEqual(result.model_version, "if-global-v3")
 
             state = alert_sm.transition(result)
             # After 60 seconds of steady traffic, z_10s is around 0.0 and state is NORMAL
@@ -193,6 +200,89 @@ class TestEndToEndParityAndRealtimeAlert(unittest.TestCase):
             v1 = test_engine_1.update("G_CHECK", t).as_vector()
             v2 = test_engine_2.update("G_CHECK", t).as_vector()
             self.assertEqual(v1, v2)
+
+    def test_sparse_high_scores_do_not_escalate_alert(self):
+        alert_sm = AlertStateMachine(self.alert_cfg, self.alert_store)
+
+        for i in range(5):
+            state = alert_sm.transition(AnomalyResult(
+                group_id="G_SPARSE",
+                timestamp=1000.0 + i,
+                anomaly_score=0.75,
+                anomaly=True,
+                count_1m=2,
+            ))
+
+        self.assertEqual(state.alert_state, AlertStateEnum.NORMAL.value)
+        self.assertEqual(state.anomaly_score, 0.75)
+
+    def test_minimum_volume_boundary_can_alert(self):
+        alert_sm = AlertStateMachine(self.alert_cfg, self.alert_store)
+
+        for i in range(3):
+            state = alert_sm.transition(AnomalyResult(
+                group_id="G_BURST",
+                timestamp=1000.0 + i,
+                anomaly_score=0.75,
+                anomaly=True,
+                count_1m=3,
+            ))
+
+        self.assertEqual(state.alert_state, AlertStateEnum.ALERTING.value)
+
+    def test_sparse_noise_cools_existing_alert(self):
+        alert_sm = AlertStateMachine(self.alert_cfg, self.alert_store)
+        for i in range(3):
+            alert_sm.transition(AnomalyResult(
+                group_id="G_RECOVERY",
+                timestamp=1000.0 + i,
+                anomaly_score=0.75,
+                anomaly=True,
+                count_1m=3,
+            ))
+
+        for i in range(3):
+            state = alert_sm.transition(AnomalyResult(
+                group_id="G_RECOVERY",
+                timestamp=1010.0 + i,
+                anomaly_score=0.75,
+                anomaly=True,
+                count_1m=2,
+            ))
+
+        self.assertEqual(state.alert_state, AlertStateEnum.NORMAL.value)
+
+    def test_noise_rate_004_at_100_logs_per_second_stays_normal(self):
+        """0.4 sparse errors/s spread across five groups must not alert."""
+        engine = FeatureEngine(self.feat_cfg)
+        alert_sm = AlertStateMachine(self.alert_cfg, self.alert_store)
+        groups = [f"G_NOISE_{i}" for i in range(5)]
+
+        # noise_rate=0.004 at 100 logs/s yields one noise event every 2.5s.
+        # Round-robin distribution makes each error group emit every 12.5s.
+        for i in range(150):
+            group_id = groups[i % len(groups)]
+            fv = engine.update(group_id, 1000.0 + i * 2.5)
+            ratio_peak = max(
+                fv.short_growth_rate,
+                fv.burstiness_10s,
+                fv.spike_ratio_10s,
+            )
+            score = 0.75 if ratio_peak > 2.0 else 0.25
+            state = alert_sm.transition(AnomalyResult(
+                group_id=group_id,
+                timestamp=fv.timestamp,
+                anomaly_score=score,
+                anomaly=score >= self.alert_cfg.score_high,
+                count_1m=fv.count_1m,
+            ))
+            self.assertEqual(state.alert_state, AlertStateEnum.NORMAL.value)
+
+        for group_id in groups:
+            self.assertLessEqual(
+                engine.snapshot(group_id, 1375.0).spike_ratio_10s,
+                1.0,
+            )
 
 
 if __name__ == "__main__":

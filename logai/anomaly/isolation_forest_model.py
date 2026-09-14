@@ -12,8 +12,8 @@ from logai.models import AnomalyResult, FeatureVector
 from logai.storage.base import ModelStore
 
 logger = logging.getLogger(__name__)
-MODEL_VERSION = "if-global-v2"
-GLOBAL_MODEL_KEY = "global"
+MODEL_VERSION = "if-global-v3"
+GLOBAL_MODEL_KEY = "global_v3"
 EXPECTED_NUM_FEATURES = 8
 
 
@@ -151,6 +151,7 @@ class GlobalAnomalyModel:
                 anomaly_score=score,
                 anomaly=raw < 0 or score >= threshold,
                 model_version=MODEL_VERSION,
+                count_1m=fv.count_1m,
             )
         return results
 

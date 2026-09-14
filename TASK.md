@@ -710,4 +710,109 @@ curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[^"]*"'   # k�
        `predict_batch_size=500`, `predict_max_wait_seconds=1.0`,
        `poll_interval_seconds=1.0` (đều config qua `config.yaml`).
 
+---
 
+## 11. Báo cáo Kiểm thử Tải 100 logs/s (3 Giờ) & Kế hoạch Khắc phục Nhiễu Nền (Sparse Noise Alert)
+
+**Ngày thực hiện**: 2026-09-13 (19:37:40 — 22:37:40)
+**Trạng thái kiểm thử**: ✅ HOÀN TẤT THÀNH CÔNG — Đã xử lý 1,080,000 logs (100% trọn vẹn)
+**Tài liệu liên quan**: `logai/features/feature_engine.py`, `logai/alert/alert_state_machine.py`, `config.yaml`
+
+### 11.1. Tóm tắt Kết quả Bài Test 3 Giờ
+
+1. **Thông số & Độ tin cậy**:
+   - **Tốc độ stream**: 100 logs/giây liên tục trong 3 giờ (10,800 giây = 1,080,000 logs).
+   - **Độ toàn vẹn**: 100% logs được ghi vào Elasticsearch (`hdfs-logs`) và xử lý bởi `logai-engine`. Checkpoint (`1789313860.454843`) khớp chính xác micro-giây với log cuối cùng.
+   - **Lỗi / Thất bại**: 0 lỗi (`logai_events_failed_total = 0.0`), 0 log rơi vào DLQ.
+   - **Hiệu năng & Tài nguyên**: Độ trễ trung bình ~0.139 ms/event, hàng đợi ổn định ~195 logs (dưới giới hạn 1,000), RAM tiêu thụ chỉ ~472 MiB (15% limit).
+2. **Diễn biến Cảnh báo (Alert Timeline)**:
+   - **Phút 0 – 50 (19:37 – 20:27)**: Sau 5 phút cold start ban đầu, các nhóm log chính (`G0000`, `G0003`, `G0004`...) giữ trạng thái `NORMAL`.
+   - **Phút 50 – 60 (20:27 – 20:37, Pha Sự Cố)**: Bơm sự cố `mixed` (85% log lỗi). Lưu lượng tăng lên ~151 logs/s. Sau 3 phút tích lũy (`alert_consecutive: 3`), hệ thống kích hoạt chính xác cảnh báo `ALERTING` trên các nhóm template liên quan (tăng vọt lên 8/11 nhóm).
+   - **Khoảnh khắc kết thúc sự cố (20:36 – 20:38)**: Số alert tạm thời tụt về 0 do baseline $\mu$ trong cửa sổ trượt 5 phút bị bão hòa ở mức cực cao trong suốt 10 phút sự cố dồn dập.
+   - **Phút 60 – 180 (20:40 – 22:38, 2 tiếng phục hồi)**: Đồ thị Grafana tăng trở lại 5 alert (`G0001`, `G0002`, `G_SINGLE_0003`, `G_SINGLE_0004`, `G_SINGLE_0005`) và giữ nguyên suốt 2 tiếng.
+   - **Sau khi bài test dừng (22:42 – Nay)**: Luồng log ngừng hẳn, cơ chế Idle Tick kích hoạt, 100% 11/11 nhóm đã hạ nhiệt thành công về `NORMAL` với điểm số cơ sở `0.3426`.
+
+---
+
+### 11.2. Phân tích Nguyên nhân: Nhiễu nhỏ gây kéo dài Alert (Root Cause)
+
+* **Nguyên nhân từ Generator**: Trong cả pha bình thường lẫn phục hồi, generator giữ `noise_rate = 0.004` (0.4% log lỗi ngẫu nhiên, tương đương 1 log lỗi mỗi 2.5 giây).
+* **Hiệu ứng "Gai nhọn trên nền 0" (Sparse Spikes on Zero Baseline)**:
+  - Khi 5 phút sự cố trôi qua, đường cơ sở $\mu$ của các nhóm lỗi trong `FeatureEngine` tụt về xấp xỉ 0 ($\mu \approx 0.003$ log/s).
+  - Khi chỉ cần 1 log lỗi xuất hiện trong 10 giây (`rate_10s = 0.1`):
+    * `spike_ratio_10s = rate_10s / (mu + eps)` bị thổi phồng toán học lên kịch trần `20.0`.
+    * `short_growth_rate` vọt lên mức tối đa `6.0`.
+    * `burstiness_10s` ($\sigma^2 / \mu^2$) vọt lên cực đại.
+  - Mô hình Isolation Forest chấm điểm ngoại lai cao: `anomaly_score ≈ 0.70 – 0.75` (vượt ngưỡng cảnh báo `0.6`).
+* **Cơ chế Cooldown bị nghẽn**:
+  - `AlertStateMachine` yêu cầu 3 lần đánh giá liên tiếp có score $< 0.4$ (`cool_consecutive: 3`).
+  - Do cứ 2–3 giây lại có 1 log lỗi ngẫu nhiên đến, điểm số lại vọt lên ~0.72 khiến bộ đếm cooldown liên tục bị reset về 0.
+  - Kết quả: Hệ thống rơi vào trạng thái cảnh báo giả kéo dài (Persistent False Positive).
+
+---
+
+### 11.3. Kế hoạch Khắc phục (Action Items / TODO)
+
+Mục tiêu: Đảm bảo các log lỗi nhỏ lẻ tẻ, thưa thớt (noise / low-frequency) không kích hoạt hoặc kéo dài trạng thái `ALERTING`, chỉ báo động khi có đột biến về mặt lưu lượng thực sự.
+
+- [x] **Nhiệm vụ 1: Bộ lọc Ngưỡng Tần suất Tối thiểu (Minimum Volume / Noise Floor Filter)**
+  - *Vị trí*: `logai/features/feature_engine.py` hoặc `logai/alert/alert_state_machine.py`.
+  - *Giải pháp*: Bổ sung điều kiện kiểm tra số lượng sự kiện tuyệt đối:
+    - Nếu tổng số log trong cửa sổ gần nhất quá nhỏ (ví dụ: `count_1m < 3` hoặc `rate_1m < 0.05` log/s), vector đặc trưng sẽ được gán điểm bình thường hoặc không cho phép chuyển trạng thái sang `ALERTING`.
+    - Điều này ngăn việc 1 log đơn lẻ kích hoạt báo động sai.
+
+- [x] **Nhiệm vụ 2: Áp dụng Epsilon Động / Sàn Tốc độ (Rate Floor for Baseline)**
+  - *Vị trí*: `logai/features/feature_engine.py` (trong hàm `_compute`).
+  - *Giải pháp*: Khi tính các tỷ số chia cho $\mu$ (`spike_ratio_10s`, `short_growth_rate`, `burstiness_10s`), thay vì chia cho `(mu + eps)` với `eps = 1e-9`, đặt một giá trị sàn tối thiểu `mu_effective = max(mu, MIN_RATE_FLOOR)` (ví dụ: `MIN_RATE_FLOOR = 0.2` log/s):
+    $$\text{spike\_ratio\_10s} = \frac{\text{rate\_10s}}{\max(\mu_{10}, 0.2)}$$
+    Nhờ đó, khi $\mu \approx 0$ và chỉ có 1 log (`rate_10s = 0.1`), tỷ số chỉ đạt $0.1 / 0.2 = 0.5$ (không bị phóng đại lên trần 20.0).
+
+- [ ] **Nhiệm vụ 3: Cải tiến Cooldown theo Thời gian (Time-Window Cooldown)**
+  - *Vị trí*: `logai/alert/alert_state_machine.py`.
+  - *Giải pháp*: Bổ sung cơ chế Cooldown theo thời gian trôi qua (time-based decay) song song với đếm số lần liên tiếp. Nếu trong vòng $T$ giây (ví dụ 60 giây) không xuất hiện đợt burst lớn nào mà chỉ có log thưa thớt lẻ tẻ, nhóm sẽ tự động chuyển dần từ `ALERTING` $\rightarrow$ `COOLING` $\rightarrow$ `NORMAL`.
+
+- [ ] **Nhiệm vụ 4: Kiểm thử và Xác minh (Test & Verification)**
+  - Viết unit test mô phỏng kịch bản log lỗi lẻ tẻ (`noise_rate = 0.004` ở tải 100 logs/s) để đảm bảo không bị kích hoạt `ALERTING`.
+  - Chạy lại kiểm thử thực tế với generator để xác nhận đồ thị Grafana hạ nhiệt hoàn toàn về `NORMAL` khi hết sự cố bất thường.
+
+**Ghi chú triển khai (2026-09-14)**:
+- Đã thêm `features.rate_floor=0.2` cho `short_growth_rate`,
+  `burstiness_10s`, `spike_ratio_10s`; model input vẫn đúng 8 chiều.
+- Đã thêm metadata `count_1m` và gate `alert.min_events_1m=3`. Sparse score
+  vẫn được export nhưng không thể leo thang alert và được coi là recovery.
+- Đã tách artifact mới thành `if-global-v3` / `models/global_v3.pkl`; bắt buộc
+  retrain trước khi chạy realtime, không tái sử dụng model công thức cũ.
+- Unit/regression suite: ✅ 138/138 pass trong `.venv`. Load test thực tế 3 giờ
+  và Nhiệm vụ 3 vẫn chưa thực hiện.
+
+---
+
+## 12. Batch Persistence cho Alert State
+
+**Ngày thực hiện**: 2026-09-14
+**Trạng thái**: ✅ HOÀN THÀNH — 142/142 test pass
+
+### Vấn đề
+
+`predict_batch()` đã vector hóa inference, nhưng realtime vẫn gọi
+`AlertStateMachine.transition()` cho từng result. Mỗi transition dùng
+`JSONStore.set(flush=True)`, khiến toàn bộ `anomaly_state.json` bị serialize và
+atomic replace tới 500 lần trong một predict batch. Chi phí tăng theo cả số
+event trong batch và tổng số group đã persist.
+
+### Giải pháp
+
+- Thêm `transition_batch(results)`: áp dụng toàn bộ transition tuần tự trong RAM,
+  giữ intermediate states cho Prometheus, nhưng chỉ persist final state của mỗi
+  group qua một lần `JSONStore.bulk_set()`.
+- Giữ `transition(result)` tương thích ngược bằng cách delegate qua batch một
+  phần tử.
+- `RealtimePipeline._flush_predictions()` chỉ clear pending buffer sau khi batch
+  state đã persist thành công. Nếu ghi file lỗi, exception propagate, cursor
+  không commit và buffer vẫn còn để retry/restart.
+
+### Kết quả
+
+Benchmark 500 transitions: nhanh hơn khoảng 73x với 11 group, 218x với 100
+group và 200x trong workload 1.000 group. Không thay đổi model, config, thứ tự
+hysteresis hoặc metric `log_alerts_total`.

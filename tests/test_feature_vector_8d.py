@@ -42,6 +42,19 @@ class TestFeatureVector8D(unittest.TestCase):
             fv.as_vector(),
             [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         )
+        self.assertEqual(fv.count_1m, 1)
+
+    def test_sparse_rates_use_configured_floor(self):
+        """Near-zero traffic must not inflate ratio features to their caps."""
+        self.engine.update("G_SPARSE", 1000.0)
+        fv = self.engine.update("G_SPARSE", 1020.0)
+
+        # One event in the current 10-second window is 0.1 logs/s. With a
+        # 0.2 logs/s floor both ratios remain 0.5 instead of spiking.
+        self.assertEqual(fv.count_1m, 2)
+        self.assertAlmostEqual(fv.short_growth_rate, 0.5)
+        self.assertAlmostEqual(fv.spike_ratio_10s, 0.5)
+        self.assertLess(fv.burstiness_10s, 20.0)
 
     def test_window_maxlen_matches_config(self):
         """_GroupWindow should respect rolling_window_points from config."""
@@ -125,6 +138,7 @@ sys.modules["sklearn"] = mock_sklearn
 sys.modules["sklearn.ensemble"] = mock_ensemble
 
 from logai.anomaly.isolation_forest_model import (
+    GLOBAL_MODEL_KEY,
     GlobalAnomalyModel,
     MODEL_VERSION,
     EXPECTED_NUM_FEATURES,
@@ -139,8 +153,14 @@ class TestGlobalAnomalyModel8D(unittest.TestCase):
         self.anomaly_model = GlobalAnomalyModel(self.config, self.store)
 
     def test_model_version_and_expected_features(self):
-        self.assertEqual(MODEL_VERSION, "if-global-v2")
+        self.assertEqual(MODEL_VERSION, "if-global-v3")
+        self.assertEqual(GLOBAL_MODEL_KEY, "global_v3")
         self.assertEqual(EXPECTED_NUM_FEATURES, 8)
+
+    def test_v2_artifact_is_not_reused(self):
+        self.store.exists.side_effect = lambda key: key == "global"
+        self.assertFalse(self.anomaly_model.has_model())
+        self.store.exists.assert_called_once_with("global_v3")
 
     def test_predict_rejects_dimension_mismatch(self):
         mock_forest = MagicMock()
@@ -159,10 +179,9 @@ class TestGlobalAnomalyModel8D(unittest.TestCase):
         mock_forest.predict.return_value = [1]
         self.anomaly_model._model = mock_forest
 
-        fv = FeatureVector(group_id="G001", timestamp=1000.0)
+        fv = FeatureVector(group_id="G001", timestamp=1000.0, count_1m=7)
         res = self.anomaly_model.predict(fv)
         self.assertIsNotNone(res)
-        self.assertEqual(res.model_version, "if-global-v2")
+        self.assertEqual(res.model_version, "if-global-v3")
         self.assertEqual(res.group_id, "G001")
-
-
+        self.assertEqual(res.count_1m, 7)

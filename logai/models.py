@@ -115,6 +115,9 @@ class FeatureVector:
     rate_delta_norm: float = 0.0
     slope_norm: float = 0.0
     spike_ratio_10s: float = 1.0
+    # Alert eligibility metadata. This is deliberately excluded from
+    # as_vector() so the Isolation Forest input remains eight-dimensional.
+    count_1m: int | None = None
 
     def as_vector(self) -> List[float]:
         return [
@@ -155,7 +158,8 @@ class AnomalyResult:
     timestamp: float
     anomaly_score: float
     anomaly: bool
-    model_version: str = "if-global-v2"
+    model_version: str = "if-global-v3"
+    count_1m: int | None = None
 
 
 @dataclass
@@ -166,4 +170,4 @@ class AnomalyState:
     anomaly: bool = False
     consecutive_anomaly_count: int = 0
     alert_state: str = AlertStateEnum.NORMAL.value
-    model_version: str = "if-global-v2"
+    model_version: str = "if-global-v3"

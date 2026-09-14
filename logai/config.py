@@ -69,6 +69,8 @@ class FeatureConfig:
     windows_seconds: tuple = (10, 60, 300)  # 10s, 1m, 5m
     rolling_window_points: int = 30
     history_retention_seconds: float = 3600.0
+    # Stabilize ratio-based features when a group's baseline is near zero.
+    rate_floor: float = 0.2
 
 
 @dataclass
@@ -93,6 +95,9 @@ class AlertConfig:
     cool_consecutive: int = 3
     score_high: float = 0.6
     score_low: float = 0.4
+    # High anomaly scores need this many events in the current 1-minute
+    # window before they may escalate alert state.
+    min_events_1m: int = 3
     # Idle-tick threshold: a non-NORMAL group that has been silent for at least
     # this many seconds is periodically re-evaluated so a stuck ALERTING alert
     # can cool down to NORMAL even with zero new events. Also the tick throttle

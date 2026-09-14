@@ -93,7 +93,14 @@ class MockIsolationForest:
 sys.modules["sklearn.ensemble"].IsolationForest = MockIsolationForest
 
 from logai.config import AppConfig
-from logai.models import FeatureVector, GroupState, ParsedEvent, RawLog, TemplateState
+from logai.models import (
+    AnomalyResult,
+    FeatureVector,
+    GroupState,
+    ParsedEvent,
+    RawLog,
+    TemplateState,
+)
 from logai.realtime import realtime_pipeline
 from logai.realtime.realtime_pipeline import RealtimePipeline
 
@@ -161,6 +168,34 @@ class TestPredictBatchEquivalence(unittest.TestCase):
         self.assertIsNotNone(results[0])
         self.assertIsNone(results[1])  # wrong dimension -> None, in place
         self.assertIsNotNone(results[2])
+
+    def test_state_persist_failure_keeps_buffer_and_checkpoint(self):
+        vectors = self._vectors(3)
+        self.pipeline._pending_predictions = [
+            (fv.group_id, fv) for fv in vectors
+        ]
+        self.pipeline._pending_cursor = [1003.0, "e3"]
+        self.pipeline._pending_last_ts = 1003.0
+        self.pipeline.anomaly_model.predict_batch = MagicMock(return_value=[
+            AnomalyResult(
+                group_id=fv.group_id,
+                timestamp=fv.timestamp,
+                anomaly_score=0.8,
+                anomaly=True,
+                count_1m=10,
+            )
+            for fv in vectors
+        ])
+        self.pipeline.alert_sm.transition_batch = MagicMock(
+            side_effect=OSError("state write failed")
+        )
+
+        with self.assertRaisesRegex(OSError, "state write failed"):
+            self.pipeline._flush_batch()
+
+        self.assertEqual(len(self.pipeline._pending_predictions), 3)
+        self.assertEqual(self.pipeline._pending_cursor, [1003.0, "e3"])
+        self.assertIsNone(self.pipeline.checkpoint.get_search_after())
 
 
 class _StopLoop(BaseException):

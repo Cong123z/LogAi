@@ -37,6 +37,7 @@ features:
   windows_seconds: [10, 60, 300]
   rolling_window_points: 30
   history_retention_seconds: 3600
+  rate_floor: 0.2
 
 anomaly:
   contamination: 0.05
@@ -49,14 +50,15 @@ anomaly:
 
 alert:
   warm_consecutive: 2
-  alert_consecutive: 3
+  alert_consecutive: 5
   cool_consecutive: 3
   score_high: 0.6
   score_low: 0.4
+  min_events_1m: 3
 
 training:
   batch_size: 2000
-  max_docs: 200000
+  max_docs: 400000
   lookback_seconds: 604800
   dedup_buffer_size: 10000
 

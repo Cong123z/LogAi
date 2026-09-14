@@ -230,12 +230,16 @@ class RealtimePipeline:
         if not buf:
             return
         results = self.anomaly_model.predict_batch([fv for _, fv in buf])
+        scored = []
         for (group_id, _fv), result in zip(buf, results):
             if result is None:
                 continue  # global model not yet trained
             group = self.group_registry.get(group_id) or GroupState(group_id=group_id)
             self.metrics.set_anomaly_score(group, result.anomaly_score)
-            state = self.alert_sm.transition(result)
+            scored.append(result)
+
+        states = self.alert_sm.transition_batch(scored)
+        for state in states:
             self.metrics.set_alert_state(state)
         self._pending_predictions = []
 

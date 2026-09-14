@@ -72,6 +72,7 @@ class MockIsolationForest:
 sys.modules["sklearn.ensemble"].IsolationForest = MockIsolationForest
 
 from logai.config import AppConfig
+from logai.anomaly.isolation_forest_model import GLOBAL_MODEL_KEY
 from logai.models import FeatureVector, ParsedEvent, RawLog
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import LocalTrainingDedup
@@ -151,7 +152,7 @@ class TestTrainingPipelineStreaming(unittest.TestCase):
         self.assertTrue(len(groups) >= 1)
 
         # 3. Verify Global model was saved
-        self.assertTrue(self.pipeline.model_store.exists("global"))
+        self.assertTrue(self.pipeline.model_store.exists(GLOBAL_MODEL_KEY))
 
         # 4. Verify training checkpoint is cleared upon successful completion
         self.assertFalse(training_cp.path.exists())
@@ -260,7 +261,7 @@ class TestTrainingPipelineStreaming(unittest.TestCase):
         self.assertEqual(t_auth.event_count, 5)
         self.assertEqual(t_auth.first_seen, 1000.0)
         self.assertEqual(t_auth.last_seen, 1004.0)
-        self.assertTrue(self.pipeline.model_store.exists("global"))
+        self.assertTrue(self.pipeline.model_store.exists(GLOBAL_MODEL_KEY))
 
 
 if __name__ == "__main__":

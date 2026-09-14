@@ -136,7 +136,7 @@ Tất cả state nằm dưới `data/` (mount volume `logai-data` trong Docker):
 | `anomaly_state.json` | Alert state machine per group (mục 6) |
 | `dedup_index.json` | idempotency index theo `event_id` (mục 7) |
 | `dlq.jsonl` | events lỗi sau khi retry hết (mục 7) |
-| `models/global.pkl` | Global Isolation Forest chung cho mọi groups |
+| `models/global_v3.pkl` | Global Isolation Forest v3 với rate-floor features |
 | `drain3_state.bin` | state cây Drain3 (persist riêng, thư viện tự quản) |
 
 Ghi file dùng atomic write (`os.replace`) nên an toàn khi crash giữa

@@ -228,20 +228,21 @@ event. Với group chứa nhiều service, service của template đầu tiên �
 
 ### 5.6 FeatureVector
 
-Vector tám chiều, không chứa volume tuyệt đối và không dùng normalizer riêng.
-Bảo đảm cách ly baseline (tính baseline từ lịch sử trước khi append sample mới)
-và áp dụng numerical clipping guards.
+Vector model vẫn có tám chiều, không chứa volume tuyệt đối và không dùng
+normalizer riêng. `count_1m` đi kèm `FeatureVector` dưới dạng metadata để gate
+alert nhưng bị loại khỏi `as_vector()`. Baseline được tính từ lịch sử trước khi
+append sample mới và các tỷ lệ có numerical guards.
 
 | Field | Công thức/ý nghĩa | Clipping |
 |---|---|---|
 | `z_score_10s` | `(rate_10s - mu10) / (sigma10 + eps)`; độ lệch chuẩn hóa 10s | `[-10, 10]` |
 | `z_score_1m` | `(rate_1m - mu1m) / (sigma1m + eps)`; độ lệch chuẩn hóa 1m | `[-10, 10]` |
-| `short_growth_rate` | `rate_10s / (rate_1m + eps)`; tỷ lệ tăng trưởng tức thì 10s vs 1m | `[0, 6]` |
+| `short_growth_rate` | `rate_10s / max(rate_1m, rate_floor)`; tỷ lệ tăng trưởng tức thì 10s vs 1m | `[0, 6]` |
 | `growth_rate` | `rate_1m / (rate_5m + eps)`; tỷ lệ tăng trưởng 1m vs 5m | `[0, 5]` |
-| `burstiness_10s` | `sigma10^2 / (mu10^2 + eps)`; hệ số biến thiên bậc hai (CV^2) trên 10s | `[0, 20]` |
+| `burstiness_10s` | `sigma10^2 / max(mu10, rate_floor)^2`; CV^2 có sàn cho baseline thưa | `[0, 20]` |
 | `rate_delta_norm` | `(rate_1m - rate_5m) / (sigma1m + eps)` | `[-10, 10]` |
 | `slope_norm` | Linear slope của rate 1m history chia mu1m | `[-10, 10]` |
-| `spike_ratio_10s` | Max recent 10s rate chia mu10 | `[0, 20]` |
+| `spike_ratio_10s` | Max recent 10s rate chia `max(mu10, rate_floor)` | `[0, 20]` |
 
 `FeatureVector.as_vector()` luôn trả feature theo đúng thứ tự trên. Event đầu
 của group tạo neutral baseline `[0, 0, 1, 1, 0, 0, 0, 1]`.
@@ -256,11 +257,17 @@ của group tạo neutral baseline `[0, 0, 1, 1, 0, 0, 0, 1]`.
 | `timestamp` | `float` | Timestamp của feature vector |
 | `anomaly_score` | `float` | Score clamp trong `[0, 1]` |
 | `anomaly` | `bool` | IF outlier hoặc score vượt threshold |
-| `model_version` | `str` | Hiện là `if-global-v2` |
+| `model_version` | `str` | Hiện là `if-global-v3` |
+| `count_1m` | `int \| None` | Metadata volume; không phải chiều model |
 
 `AnomalyState` bổ sung `consecutive_anomaly_count` và `alert_state` để persist
 hysteresis theo group. Alert states gồm `NORMAL`, `WARMING`, `ALERTING`,
 `COOLING`.
+
+Điểm cao chỉ được phép leo thang alert khi `count_1m >=
+alert.min_events_1m`. Điểm từ mẫu thiếu volume vẫn được export để quan sát,
+nhưng state machine coi mẫu đó là tín hiệu phục hồi. `count_1m=None` giữ hành
+vi cũ cho caller không cung cấp metadata.
 
 `WindowState` cũng được khai báo trong models nhưng hiện không được pipeline sử
 dụng hoặc persist.
@@ -311,7 +318,7 @@ flowchart TD
 | 8 | `GroupClusterer.compute_centroid` | Embeddings trong group | L2-normalized centroid |
 | 9 | `DocumentationMatcher.match_all` | Group centroids | Match metadata trong Group Registry |
 | 10 | `FeatureEngine` | Events theo từng group, chronological | `FeatureVector` list |
-| 11 | `GlobalAnomalyModel.train` | Feature vectors replay từ event index | `models/global.pkl` |
+| 11 | `GlobalAnomalyModel.train` | Feature vectors replay từ event index | `models/global_v3.pkl` |
 
 ### 6.2 Group ID rules
 
@@ -327,7 +334,7 @@ flowchart TD
 Global model chỉ được fit khi tổng số feature vectors không nhỏ hơn
 `anomaly.min_training_samples`, mặc định 30. Nếu không đủ mẫu, training vẫn ghi
 registries nhưng không tạo model mới; realtime sẽ bỏ qua anomaly prediction nếu
-không tìm thấy `models/global.pkl`.
+không tìm thấy `models/global_v3.pkl`.
 
 ## 7. Realtime pipeline
 
@@ -379,7 +386,7 @@ flowchart TD
       direction TB
       V[Idle tick: snapshot<br/>nhóm silent -> cùng buffer]
       W[predict_batch<br/>một lượt duy nhất]
-      X[Alert state transition<br/>theo thứ tự event]
+      X[Alert transition tuần tự trong RAM<br/>bulk persist final states một lần]
       Y[Prometheus anomaly/alert gauge]
       Z[registry flush -> dedup gc -><br/>checkpoint commit]
       V --> W --> X --> Y --> Z
@@ -397,7 +404,7 @@ Nếu `TemplateRegistry` đã có template và `group_id`:
 5. Cập nhật group `last_seen`, `event_count`.
 6. Chạy documentation match, feature generation (8D dimensionless vector) rồi
    **append feature vector vào buffer** `_pending_predictions`. Prediction
-   (`if-global-v2`) và alert **không** chạy tại đây — được dời sang biên flush
+   (`if-global-v3`) và alert **không** chạy tại đây — được dời sang biên flush
    theo batch (§7.5).
 
 `group_similarity` được đặt là `1.0` để biểu thị direct mapping, không phải
@@ -481,8 +488,9 @@ poll rồi chấm **một lượt**.
   vào **cùng** buffer, chấm chung một `predict_batch`. Silence guard đảm bảo một
   nhóm không vừa có fv-live vừa có fv-snapshot → không double-count.
 - **Tương đương per-event 100%**: giữ **một entry / EVENT** (không collapse theo
-  group), apply `transition()` theo **đúng thứ tự event**; `predict` thuần túy nên
-  vector nằm trong buffer bao lâu cũng không đổi kết quả.
+  group), `transition_batch()` apply theo đúng thứ tự trong RAM và trả mọi state
+  trung gian cho metrics. Chỉ final state của mỗi group được `bulk_set()` một lần
+  xuống `anomaly_state.json`, tránh serialize toàn file cho từng event.
 - **Crash-safety**: `_flush_batch()` giữ nguyên thứ tự durability — predict+apply
   → registry flush → `dedup.gc()` → `checkpoint.commit()` (chỉ khi có cursor thật
   từ stream). Chi tiết ở §10.3.
@@ -499,7 +507,7 @@ poll rồi chấm **một lượt**.
 | `clustering/hdbscan_cluster.py` | Offline clustering, centroid, realtime nearest-group | IDs + vectors | Labels, centroid, assignment | Không |
 | `docmatch/doc_matcher.py` | Load corpus và cosine match | YAML + centroids | `MatchResult` | Corpus/embeddings in-memory + cache file |
 | `features/feature_engine.py` | Sliding-window aggregation | `group_id`, timestamp | `FeatureVector` | Per-group windows in-memory |
-| `anomaly/isolation_forest_model.py` | Train/load/predict global IF | Feature vectors | `AnomalyResult` | `models/global.pkl` + in-memory model |
+| `anomaly/isolation_forest_model.py` | Train/load/predict global IF | Feature vectors | `AnomalyResult` | `models/global_v3.pkl` + in-memory model |
 | `alert/alert_state_machine.py` | Hysteresis theo group | `AnomalyResult` | `AnomalyState` | `anomaly_state.json` |
 | `metrics/prometheus_exporter.py` | Expose/update metrics | Parsed/group/anomaly state | `/metrics` | Prometheus client in-memory |
 | `storage/base.py` | Atomic JSON/pickle/model persistence | Python objects | Files | File contents |
@@ -546,7 +554,7 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 | `data/template_embeddings.pkl` | Pickle | Training + realtime | Training + realtime | `template_id -> numpy vector` |
 | `data/group_registry.json` | JSON object | Training + realtime | Training + realtime | `group_id -> GroupState` |
 | `data/group_centroids.pkl` | Pickle | Training | Training + realtime | `group_id -> normalized centroid` |
-| `data/models/global.pkl` | Pickle | Training | Realtime | Global Isolation Forest |
+| `data/models/global_v3.pkl` | Pickle | Training | Realtime | Global Isolation Forest với rate-floor features |
 | `data/doc_embeddings.pkl` | Pickle | Doc matcher | Hiện chưa được reuse khi reload | Corpus entries + embeddings |
 | `data/drain3_state.bin` | Drain3 persistence | Parser | Parser | Drain tree/template clusters |
 | `data/checkpoint.json` | JSON object | Collector | Collector | `search_after`, `last_timestamp` |
@@ -636,7 +644,8 @@ buffer: `_pending_cursor`/`_pending_last_ts` lấy từ poll của stream, còn 
 thể chứa cả fv-snapshot từ idle-tick (vốn không advance cursor). `_flush_batch()`
 giữ **đúng thứ tự** durability và chỉ commit khi có cursor thật:
 
-1. `_flush_predictions()` — `predict_batch` + apply transition theo thứ tự event.
+1. `_flush_predictions()` — `predict_batch`, apply transition tuần tự trong RAM,
+   rồi atomic bulk persist final alert state của mỗi group đúng một lần.
 2. `template_registry.flush()` → `group_registry.flush()` (no-op nếu `_dirty` sạch).
 3. `dedup.gc()`.
 4. `checkpoint.commit(cursor, last_ts)` — **chỉ khi `_pending_cursor is not None`**.
@@ -669,7 +678,7 @@ record cuối có thể không bền vững nếu host mất điện đúng lúc
 | State | Durability hiện tại |
 |---|---|
 | Checkpoint | Commit tại biên flush micro-batch (§7.5), chỉ khi có cursor stream |
-| Alert state | Flush mỗi transition |
+| Alert state | Flush một lần tại biên predict batch; intermediate states giữ trong RAM cho metrics |
 | Dedup | Flush tại biên flush qua `gc()` |
 | Template/group metadata trong realtime | Update dùng `flush=False`; `flush()` tại biên flush micro-batch, no-op khi `_dirty` sạch |
 | Template embeddings | Save toàn embedding cache khi set |

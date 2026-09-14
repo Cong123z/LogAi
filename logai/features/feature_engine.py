@@ -110,9 +110,11 @@ class FeatureEngine:
                 rate_delta_norm=0.0,
                 slope_norm=0.0,
                 spike_ratio_10s=1.0,
+                count_1m=count_1m,
             )
 
         eps = 1e-9
+        rate_floor = max(float(self.config.rate_floor), eps)
 
         # 1. z_score_10s: short-term burst compared to 10s baseline
         z_score_10s = (rate_10s - mu_10) / (sigma_10 + eps) if sigma_10 > eps else 0.0
@@ -123,10 +125,7 @@ class FeatureEngine:
         z_score_1m = max(-10.0, min(10.0, z_score_1m))
 
         # 3. short_growth_rate: instant burst ratio between 10s and 1m (theoretical max ~6.0)
-        if rate_1m > eps:
-            short_growth_rate = rate_10s / (rate_1m + eps)
-        else:
-            short_growth_rate = 1.0 if rate_10s <= eps else 6.0
+        short_growth_rate = rate_10s / max(rate_1m, rate_floor)
         short_growth_rate = max(0.0, min(6.0, short_growth_rate))
 
         # 4. growth_rate: medium-term ratio between 1m and 5m (theoretical max ~5.0)
@@ -137,8 +136,8 @@ class FeatureEngine:
         growth_rate = max(0.0, min(5.0, growth_rate))
 
         # 5. burstiness_10s: relative variance (CV^2 = sigma^2 / mu^2) on 10s rate history
-        if len(hist_10s) > 1 and mu_10 > eps:
-            burstiness_10s = (sigma_10 ** 2) / (mu_10 ** 2 + eps)
+        if len(hist_10s) > 1:
+            burstiness_10s = (sigma_10 ** 2) / max(mu_10, rate_floor) ** 2
         else:
             burstiness_10s = 0.0
         burstiness_10s = max(0.0, min(20.0, burstiness_10s))
@@ -154,7 +153,7 @@ class FeatureEngine:
 
         # 8. spike_ratio_10s: peak recent 10s rate relative to baseline mu_10
         max_recent_r10 = max(gw.rate_10s_history) if gw.rate_10s_history else rate_10s
-        spike_ratio_10s = max_recent_r10 / (mu_10 + eps) if mu_10 > eps else 1.0
+        spike_ratio_10s = max_recent_r10 / max(mu_10, rate_floor)
         spike_ratio_10s = max(0.0, min(20.0, spike_ratio_10s))
 
         return FeatureVector(
@@ -168,6 +167,7 @@ class FeatureEngine:
             rate_delta_norm=rate_delta_norm,
             slope_norm=slope_norm,
             spike_ratio_10s=spike_ratio_10s,
+            count_1m=count_1m,
         )
 
     @staticmethod

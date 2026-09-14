@@ -3,7 +3,7 @@
 2. Log parsing and template assignment (Known vs Unknown/Pending)
 3. O(1) Template metric counting (No O(T) scanning)
 4. 8D FeatureVector per-event extraction
-5. Anomaly prediction with 'if-global-v2' and Alert State Machine
+5. Anomaly prediction with 'if-global-v3' and Alert State Machine
 6. Dead Letter Queue (DLQ) for failed events
 7. Batch collection and zero-stall GC
 """
@@ -378,12 +378,12 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
                 if fv.z_score_10s > 2.0 or fv.short_growth_rate > 3.0:
                     results.append(AnomalyResult(
                         group_id="G_AUTH", timestamp=fv.timestamp,
-                        anomaly=True, anomaly_score=0.85, model_version="if-global-v2",
+                        anomaly=True, anomaly_score=0.85, model_version="if-global-v3",
                     ))
                 else:
                     results.append(AnomalyResult(
                         group_id="G_AUTH", timestamp=fv.timestamp,
-                        anomaly=False, anomaly_score=0.2, model_version="if-global-v2",
+                        anomaly=False, anomaly_score=0.2, model_version="if-global-v3",
                     ))
             return results
 

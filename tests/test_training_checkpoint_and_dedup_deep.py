@@ -72,6 +72,7 @@ class MockIsolationForest:
 sys.modules["sklearn.ensemble"].IsolationForest = MockIsolationForest
 
 from logai.config import AppConfig
+from logai.anomaly.isolation_forest_model import GLOBAL_MODEL_KEY
 from logai.models import FeatureVector, ParsedEvent, RawLog
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import LocalTrainingDedup
@@ -196,7 +197,7 @@ class TestTrainingCheckpointAndDedupDeep(unittest.TestCase):
         self.assertEqual(t_inventory.event_count, 10)
 
         # Global model successfully saved
-        self.assertTrue(self.pipeline.model_store.exists("global"))
+        self.assertTrue(self.pipeline.model_store.exists(GLOBAL_MODEL_KEY))
 
         # Checkpoint and event index must be cleaned up on completion
         self.assertFalse(training_cp.path.exists())
@@ -237,7 +238,7 @@ class TestTrainingCheckpointAndDedupDeep(unittest.TestCase):
         t_auth = self.pipeline.template_registry.get("T_AUTH")
         self.assertIsNotNone(t_auth)
         self.assertEqual(t_auth.event_count, 15)
-        self.assertTrue(self.pipeline.model_store.exists("global"))
+        self.assertTrue(self.pipeline.model_store.exists(GLOBAL_MODEL_KEY))
 
         # Cleaned up after successful retry
         self.assertFalse(training_cp.path.exists())
@@ -292,7 +293,7 @@ class TestTrainingCheckpointAndDedupDeep(unittest.TestCase):
         self.assertGreater(throughput, 25000)
 
         # Artifacts exist and are valid
-        self.assertTrue(self.pipeline.model_store.exists("global"))
+        self.assertTrue(self.pipeline.model_store.exists(GLOBAL_MODEL_KEY))
         groups = self.pipeline.group_registry.all_groups()
         self.assertGreaterEqual(len(groups), 1)
 
