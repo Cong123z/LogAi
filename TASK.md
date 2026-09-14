@@ -907,5 +907,109 @@ Khi generator stream log trực tiếp với tốc độ 200 logs/s:
 - [x] **Nhiệm vụ 2**: Tối ưu `TemplateRegistry.set_embedding` trong `logai/storage/registries.py` (loại bỏ synchronous pickle save trên hot path).
 - [x] **Nhiệm vụ 3**: Viết Unit Test `tests/test_pending_template_fast_path.py` (kiểm tra 100 event lặp lại của pending template chỉ gọi `embed_one` đúng 1 lần - 3/3 pass).
 - [x] **Nhiệm vụ 4**: Chạy toàn bộ test suite hồi quy (148 tests passed 100% trong 8.84s).
-- [ ] **Nhiệm vụ 5**: Người dùng review Git diff trên branch `fix/assign-group-bottleneck`, xác nhận merge vào `master`, rebuild image và khởi động lại container để xả sạch backlog 193.400 logs trong ~30 giây.
+- [x] **Nhiệm vụ 5**: Xử lý và xác nhận trên nhánh riêng `fix/assign-group-bottleneck` (Commit `3f0d3f9`). Toàn bộ backlog 193.400 logs đã được xả sạch về 0, checkpoint engine đã đuổi kịp log cuối cùng tại `09:02:15 UTC` (`1789376535.671149`). Tốc độ nhàn rỗi về 0.00 logs/s và tổng event processed đạt 1.094.159.
+
+---
+
+## 14. Phương án Huấn luyện lại từ đầu (Retrain from Scratch) với Masking Rules mới
+
+**Ngày tạo**: 2026-09-14  
+**Mục tiêu**: Tái cấu trúc toàn bộ kho tri thức AIOps (Drain3 templates, MiniLM embeddings, HDBSCAN clusters, Isolation Forest anomaly models) dựa trên bộ luật `masking_rules` mới và `sim_threshold: 0.5` để đạt độ chính xác tối đa và zero pending templates khi realtime stream.
+
+---
+
+### 14.1. Tại sao cần Huấn luyện lại từ đầu?
+
+1. **Chuẩn hóa Template theo Masking mới**:
+   - Khi cấu hình regex `masking_rules` (mask IP/Port `/?\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?`, Block ID `blk_-?\d+`, đường dẫn và số), các chuỗi log thô như `10.250.10.4:50010:Transmitted...` được Drain3 phân tích chuẩn thành `<*>:Transmitted block <*> to <*>`.
+   - Dữ liệu `drain3_state.bin` cũ được huấn luyện trước đây chỉ biết 30 template cũ (không có token `*:Transmitted`).
+2. **Loại bỏ hoàn toàn trạng thái "Pending"**:
+   - Khi train lại từ đầu trên dữ liệu lịch sử phong phú, tất cả các dạng log (kể cả các log hiếm và log truyền tải) đều được Drain3 tạo template và HDBSCAN gom nhóm vào các cụm ngữ nghĩa `G0000`, `G0001`, ...
+   - Khi đưa vào Realtime, **100% log đến đều là Known Grouped Template**, đi qua Fast-Path $O(1)$ ngay lập tức, triệt tiêu hoàn toàn độ trễ nhúng NLP.
+3. **Huấn luyện lại Baseline Anomaly Detection (Isolation Forest)**:
+   - Feature engine 8D sẽ tính toán lại tần suất, tốc độ thay đổi và entropy của các group mới.
+   - Mô hình Isolation Forest sẽ học chính xác phân phối bình thường của các cụm theo luật template mới, tránh báo động giả (False Positives) hoặc bỏ sót bất thường (False Negatives).
+
+---
+
+### 14.2. Quy trình Thực hiện Huấn luyện lại từng bước (Step-by-Step Runbook)
+
+#### Bước 1: Merge branch và Rebuild Docker Image
+Đảm bảo mã nguồn mới nhất (đã vá `_assign_group`, cập nhật `masking_rules` trong `config.yaml` và `drain3_parser.py`) được đóng gói vào image:
+```bash
+git checkout master
+git merge fix/assign-group-bottleneck
+docker compose -f docker-compose.reuse.yml build logai-engine
+```
+
+#### Bước 2: Tạm dừng Service Realtime
+Dừng container realtime để giải phóng CPU/RAM cho tác vụ training và tránh xung đột truy cập file:
+```bash
+docker compose -f docker-compose.reuse.yml stop logai-engine
+```
+
+#### Bước 3: Sao lưu dữ liệu cũ và Dọn sạch State Volume
+Để mô hình mới được học hoàn toàn sạch sẽ, không bị lẫn các cluster cũ trong `drain3_state.bin` hay `group_registry.json`:
+
+1. **Tạo bản sao lưu (Backup) an toàn**:
+   ```bash
+   mkdir -p backup
+   docker run --rm -v logai-data:/data -v $(pwd)/backup:/backup alpine \
+       tar czf /backup/logai_data_backup_$(date +%Y%m%d_%H%M%S).tar.gz -C /data .
+   ```
+
+2. **Dọn dẹp các file state cũ trong Volume `logai-data`**:
+   ```bash
+   docker run --rm -v logai-data:/data alpine sh -c "\
+       rm -f /data/drain3_state.bin \
+             /data/template_registry.json \
+             /data/template_embeddings.pkl \
+             /data/group_registry.json \
+             /data/group_centroids.pkl \
+             /data/models/* \
+             /data/anomaly_state.json \
+             /data/window_state.json \
+             /data/training_checkpoint.json \
+             /data/training_event_index.jsonl"
+   ```
+   *(Lưu ý: Giữ lại `checkpoint.json` nếu muốn Realtime chỉ đọc các log mới sinh sau này, hoặc xóa luôn `checkpoint.json` nếu muốn Realtime replay lại từ log đầu tiên trong Elasticsearch).*
+
+#### Bước 4: Chạy Tác vụ Huấn luyện Độc lập (One-off Training Job)
+Khởi chạy container huấn luyện đọc dữ liệu lịch sử từ Elasticsearch:
+```bash
+# Huấn luyện trên 48 giờ (hoặc toàn bộ log hiện có trong ES)
+docker compose -f docker-compose.reuse.yml run --rm logai-training \
+    python scripts/run_training.py --lookback-hours 48
+```
+**Tiến trình huấn luyện tự động bao gồm:**
+1. **Drain3 Parsing**: Quét các log lịch sử, áp dụng regex masking và tạo các template chuẩn hóa.
+2. **MiniLM Embedding**: Nhúng ngữ nghĩa các template thành vector 384 chiều.
+3. **HDBSCAN Clustering**: Phân cụm các template thành các Semantic Groups (`G0000`, `G0001`, ...) và tính vector centroid cho từng nhóm.
+4. **Feature Extraction**: Tạo chuỗi Feature Vectors 8D cho từng group theo các cửa sổ thời gian.
+5. **Model Fitting**: Huấn luyện các mô hình Isolation Forest (`data/models/`) và lưu cấu hình trạng thái.
+
+#### Bước 5: Kiểm tra & Nghiệm thu Artifacts sau Training
+Chạy lệnh kiểm tra tính toàn vẹn của dữ liệu vừa train trong volume:
+```bash
+docker run --rm -v logai-data:/data alpine ls -la /data /data/models
+```
+Yêu cầu nghiệm thu:
+- `drain3_state.bin` > 0 bytes.
+- `template_registry.json` chứa các template mới (toàn bộ đều có `group_id` hợp lệ, không có `UNASSIGNED_PENDING`).
+- `group_registry.json` và `group_centroids.pkl` đã được cập nhật.
+- Thư mục `models/` chứa file artifact model `.joblib`.
+
+#### Bước 6: Khởi động lại Service Realtime
+Bật lại service realtime với tri thức mới đã được học hoàn chỉnh:
+```bash
+docker compose -f docker-compose.reuse.yml up -d logai-engine
+```
+
+#### Bước 7: Khởi động lại Log Generator và Giám sát trên Grafana
+1. Bật generator stream log (với tải 200 – 400 logs/s).
+2. Kiểm tra Grafana Dashboard:
+   - Thông lượng (`rate(logai_events_processed_total[1m])`) bám sát tốc độ generator.
+   - Thời gian xử lý (`logai_processing_latency_seconds`) ở mức dưới **1ms/event**.
+   - CPU usage của `logai-engine` duy trì ổn định ở mức thấp (< 15%).
+
 
