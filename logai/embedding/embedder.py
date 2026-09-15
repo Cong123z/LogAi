@@ -1,4 +1,4 @@
-"""Template embedding via sentence-transformers/all-MiniLM-L6-v2
+"""Template embedding via sentence-transformers/all-mpnet-base-v2
 (plan section 3.4 / 4.4)."""
 from __future__ import annotations
 

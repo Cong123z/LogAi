@@ -48,19 +48,21 @@ class Drain3Config:
 
 @dataclass
 class EmbeddingConfig:
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    model_name: str = "sentence-transformers/all-mpnet-base-v2"
     device: str = "cpu"
     batch_size: int = 64
 
 
 @dataclass
 class ClusteringConfig:
-    min_cluster_size: int = 3
-    min_samples: int = 1
+    # Conservative defaults: prefer compact, high-confidence groups over
+    # assigning borderline templates to an existing group.
+    min_cluster_size: int = 4
+    min_samples: int = 2
     metric: str = "euclidean"
     # cosine similarity threshold used at realtime to assign a new/unknown
     # template embedding to an existing group representation
-    assignment_similarity_threshold: float = 0.80
+    assignment_similarity_threshold: float = 0.88
 
 
 @dataclass

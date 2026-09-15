@@ -29,7 +29,7 @@ logai-engine/
     ├── models.py                 # RawLog, ParsedEvent, GroupState, FeatureVector...
     ├── storage/                  # JSON/pickle registries, checkpoint, dedup
     ├── parsing/drain3_parser.py  # Drain3 wrapper (3.2 / 4.2)
-    ├── embedding/embedder.py     # all-MiniLM-L6-v2 wrapper (3.4 / 4.4)
+    ├── embedding/embedder.py     # all-mpnet-base-v2 wrapper (3.4 / 4.4)
     ├── clustering/hdbscan_cluster.py   # HDBSCAN + centroid + nearest-group (3.5/3.6/4.4)
     ├── docmatch/doc_matcher.py   # cosine similarity vs doc corpus (3.7 / 4.5)
     ├── features/feature_engine.py     # sliding-window features (3.8 / 4.6)
@@ -187,5 +187,5 @@ logai_queue_depth
   ngang hoặc nhiều instance cùng ghi, cần chuyển `storage/` sang
   Postgres/Redis (interface `JSONStore`/`PickleStore`/`ModelStore` được
   thiết kế để swap được mà không đổi code gọi).
-- Embedding model (`all-MiniLM-L6-v2`) sẽ tự tải về từ HuggingFace lần
+- Embedding model (`all-mpnet-base-v2`) sẽ tự tải về từ HuggingFace lần
   chạy đầu — cần mạng ra ngoài lần đầu tiên (hoặc pre-cache trong image).

@@ -27,15 +27,16 @@ drain3:
       mask_with: '*'
 
 embedding:
-  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  model_name: "sentence-transformers/all-mpnet-base-v2"
   device: "cpu"
   batch_size: 64
 
 clustering:
-  min_cluster_size: 3
-  min_samples: 1
+  # Conservative grouping: only form/accept groups with strong local support.
+  min_cluster_size: 4
+  min_samples: 2
   metric: "euclidean"
-  assignment_similarity_threshold: 0.80
+  assignment_similarity_threshold: 0.88
 
 doc_matcher:
   corpus_path: "docs/documentation_corpus.yaml"

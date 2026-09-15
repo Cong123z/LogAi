@@ -914,7 +914,7 @@ Khi generator stream log trực tiếp với tốc độ 200 logs/s:
 ## 14. Phương án Huấn luyện lại từ đầu (Retrain from Scratch) với Masking Rules mới
 
 **Ngày tạo**: 2026-09-14  
-**Mục tiêu**: Tái cấu trúc toàn bộ kho tri thức AIOps (Drain3 templates, MiniLM embeddings, HDBSCAN clusters, Isolation Forest anomaly models) dựa trên bộ luật `masking_rules` mới và `sim_threshold: 0.5` để đạt độ chính xác tối đa và zero pending templates khi realtime stream.
+**Mục tiêu**: Tái cấu trúc toàn bộ kho tri thức AIOps (Drain3 templates, MPNet embeddings, HDBSCAN clusters, Isolation Forest anomaly models) dựa trên bộ luật `masking_rules` mới và `sim_threshold: 0.5` để đạt độ chính xác tối đa và zero pending templates khi realtime stream.
 
 ---
 
@@ -983,7 +983,7 @@ docker compose -f docker-compose.reuse.yml run --rm logai-training \
 ```
 **Tiến trình huấn luyện tự động bao gồm:**
 1. **Drain3 Parsing**: Quét các log lịch sử, áp dụng regex masking và tạo các template chuẩn hóa.
-2. **MiniLM Embedding**: Nhúng ngữ nghĩa các template thành vector 384 chiều.
+2. **MPNet Embedding**: Nhúng ngữ nghĩa các template thành vector 768 chiều.
 3. **HDBSCAN Clustering**: Phân cụm các template thành các Semantic Groups (`G0000`, `G0001`, ...) và tính vector centroid cho từng nhóm.
 4. **Feature Extraction**: Tạo chuỗi Feature Vectors 8D cho từng group theo các cửa sổ thời gian.
 5. **Model Fitting**: Huấn luyện các mô hình Isolation Forest (`data/models/`) và lưu cấu hình trạng thái.
@@ -1011,5 +1011,4 @@ docker compose -f docker-compose.reuse.yml up -d logai-engine
    - Thông lượng (`rate(logai_events_processed_total[1m])`) bám sát tốc độ generator.
    - Thời gian xử lý (`logai_processing_latency_seconds`) ở mức dưới **1ms/event**.
    - CPU usage của `logai-engine` duy trì ổn định ở mức thấp (< 15%).
-
 

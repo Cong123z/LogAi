@@ -704,7 +704,7 @@ IDs có thể thay đổi và làm lệch registries cũ.
 
 ### 11.3 Sentence Transformer cho semantic representation
 
-`all-MiniLM-L6-v2` tạo embedding 384 chiều và được L2 normalize. Dot product vì
+`all-mpnet-base-v2` tạo embedding 768 chiều và được L2 normalize. Dot product vì
 thế tương đương cosine similarity. Model phải được tải từ Hugging Face ở lần
 đầu hoặc pre-cache trong image; đây là dependency runtime lớn.
 
