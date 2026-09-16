@@ -73,6 +73,7 @@ class RealtimePipeline:
             config.storage,
             config.reliability.dedup_ttl_seconds,
             config.reliability.dedup_max_size,
+            flush_interval_seconds=config.reliability.dedup_flush_interval_seconds,
         )
         self.dlq = DeadLetterQueue(
             f"{config.storage.base_dir}/{config.storage.dlq_file}"
@@ -182,9 +183,12 @@ class RealtimePipeline:
                 time.monotonic() - self._buffer_started_at
                 if self._buffer_started_at is not None else 0.0
             )
-            should_flush = n > 0 and (
-                n >= self.config.anomaly.predict_batch_size
-                or waited >= self.config.anomaly.predict_max_wait_seconds
+            should_flush = (
+                (n > 0 and (
+                    n >= self.config.anomaly.predict_batch_size
+                    or waited >= self.config.anomaly.predict_max_wait_seconds
+                ))
+                or (bool(batch) and self._pending_cursor is not None)
             )
             if should_flush:
                 self._flush_batch()

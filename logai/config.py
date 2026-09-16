@@ -146,6 +146,7 @@ class ReliabilityConfig:
     backoff_max_seconds: float = 60.0
     dedup_ttl_seconds: float = 86400.0
     dedup_max_size: int = 200_000
+    dedup_flush_interval_seconds: float = 30.0
 
 
 @dataclass

@@ -94,6 +94,7 @@ reliability:
   backoff_max_seconds: 60
   dedup_ttl_seconds: 86400
   dedup_max_size: 200000
+  dedup_flush_interval_seconds: 30
 
 metrics:
   http_port: 9108

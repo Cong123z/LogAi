@@ -25,9 +25,20 @@ from logai.models import FeatureVector
 
 @dataclass
 class _GroupWindow:
-    timestamps: Deque[float] = field(default_factory=deque)
+    ts_10s: Deque[float] = field(default_factory=deque)
+    ts_1m: Deque[float] = field(default_factory=deque)
+    ts_5m: Deque[float] = field(default_factory=deque)
     rate_10s_history: Deque[float] = field(default_factory=deque)
     rate_1m_history: Deque[float] = field(default_factory=deque)
+
+    @property
+    def timestamps(self) -> Deque[float]:
+        """Backward compatibility alias for tests and inspection."""
+        return self.ts_5m
+
+    @timestamps.setter
+    def timestamps(self, val: Deque[float]) -> None:
+        self.ts_5m = val
 
 
 class FeatureEngine:
@@ -40,15 +51,21 @@ class FeatureEngine:
     def _create_window(self) -> _GroupWindow:
         maxlen = self.config.rolling_window_points
         return _GroupWindow(
-            timestamps=deque(),
+            ts_10s=deque(),
+            ts_1m=deque(),
+            ts_5m=deque(),
             rate_10s_history=deque(maxlen=maxlen),
             rate_1m_history=deque(maxlen=maxlen),
         )
 
     def _prune(self, gw: _GroupWindow, now: float) -> None:
-        retention = self.config.history_retention_seconds
-        while gw.timestamps and now - gw.timestamps[0] > retention:
-            gw.timestamps.popleft()
+        w10, w1m, w5m = self.config.windows_seconds
+        while gw.ts_10s and now - gw.ts_10s[0] > w10:
+            gw.ts_10s.popleft()
+        while gw.ts_1m and now - gw.ts_1m[0] > w1m:
+            gw.ts_1m.popleft()
+        while gw.ts_5m and now - gw.ts_5m[0] > w5m:
+            gw.ts_5m.popleft()
 
     def update(self, group_id: Tuple[str, str], timestamp: float) -> FeatureVector:
         """Record one event for window `group_id` = (service, group) at
@@ -56,11 +73,19 @@ class FeatureEngine:
         (service, group) cell. The param keeps the name `group_id` because it is
         echoed straight into FeatureVector.group_id; it now carries a tuple."""
         gw = self._windows[group_id]
-        gw.timestamps.append(timestamp)
-        # keep chronological order even if events arrive slightly out of
-        # order (small ES/network jitter) - cheap for the volumes involved.
-        if len(gw.timestamps) > 1 and gw.timestamps[-1] < gw.timestamps[-2]:
-            gw.timestamps = deque(sorted(gw.timestamps))
+
+        gw.ts_10s.append(timestamp)
+        if len(gw.ts_10s) > 1 and gw.ts_10s[-1] < gw.ts_10s[-2]:
+            gw.ts_10s = deque(sorted(gw.ts_10s))
+
+        gw.ts_1m.append(timestamp)
+        if len(gw.ts_1m) > 1 and gw.ts_1m[-1] < gw.ts_1m[-2]:
+            gw.ts_1m = deque(sorted(gw.ts_1m))
+
+        gw.ts_5m.append(timestamp)
+        if len(gw.ts_5m) > 1 and gw.ts_5m[-1] < gw.ts_5m[-2]:
+            gw.ts_5m = deque(sorted(gw.ts_5m))
+
         self._prune(gw, timestamp)
         return self._compute(group_id, gw, timestamp)
 
@@ -84,22 +109,18 @@ class FeatureEngine:
         cell, or None if no window exists yet. Uses .get() so querying never
         materializes a window via the defaultdict. O(1)."""
         gw = self._windows.get(group_id)
-        if gw is None or not gw.timestamps:
+        if gw is None or not gw.ts_5m:
             return None
-        return gw.timestamps[-1]
+        return gw.ts_5m[-1]
 
     def _compute(
         self, group_id: Tuple[str, str], gw: _GroupWindow, now: float
     ) -> FeatureVector:
         w10, w1m, w5m = self.config.windows_seconds
 
-        def count_since(seconds: float) -> int:
-            cutoff = now - seconds
-            return sum(1 for t in gw.timestamps if t >= cutoff)
-
-        count_10s = count_since(w10)
-        count_1m = count_since(w1m)
-        count_5m = count_since(w5m)
+        count_10s = len(gw.ts_10s)
+        count_1m = len(gw.ts_1m)
+        count_5m = len(gw.ts_5m)
 
         rate_10s = count_10s / w10
         rate_1m = count_1m / w1m
