@@ -21,7 +21,16 @@ from logai.docmatch.doc_matcher import DocumentationMatcher
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
 from logai.metrics.prometheus_exporter import MetricsExporter
-from logai.models import FeatureVector, GroupedEvent, GroupState, ParsedEvent, RawLog, TemplateState
+from logai.models import (
+    DEFAULT_LEVEL,
+    LEVEL_RANK,
+    FeatureVector,
+    GroupedEvent,
+    GroupState,
+    ParsedEvent,
+    RawLog,
+    TemplateState,
+)
 from logai.parsing.drain3_parser import Drain3Parser
 from logai.reliability.dlq import DeadLetterQueue
 from logai.storage.base import JSONStore, ModelStore
@@ -283,12 +292,23 @@ class RealtimePipeline:
 
     def _assign_group(self, parsed: ParsedEvent) -> Optional[GroupedEvent]:
         existing_template = self.template_registry.get(parsed.template_id)
+        # Normalise the incoming level once for all three branches below. Levels
+        # arrive free-form from Elasticsearch (casing/synonyms vary per app), so
+        # they are upper-cased for ranking; an empty value falls back to the
+        # collector's own default rather than poisoning the monotonic max.
+        event_level = str(parsed.raw.level or DEFAULT_LEVEL).strip().upper()
+        event_rank = LEVEL_RANK.get(event_level, LEVEL_RANK[DEFAULT_LEVEL])
 
         if existing_template:
             if existing_template.group_id and existing_template.group_id != PENDING_GROUP_ID:
                 # Known Template -> direct group mapping (plan 4.3), no embedding needed.
                 existing_template.last_seen = parsed.raw.timestamp
                 existing_template.event_count += 1
+                # Monotonic: a low-severity event never downgrades the template.
+                if event_rank > LEVEL_RANK.get(
+                    existing_template.level, LEVEL_RANK[DEFAULT_LEVEL]
+                ):
+                    existing_template.level = event_level
                 self.template_registry.upsert(existing_template, flush=False)
                 self._touch_group(existing_template.group_id, parsed.raw.timestamp)
                 return GroupedEvent(parsed=parsed, group_id=existing_template.group_id)
@@ -299,6 +319,10 @@ class RealtimePipeline:
             existing_template.event_count += 1
             if existing_template.group_id != PENDING_GROUP_ID:
                 existing_template.group_id = PENDING_GROUP_ID
+            if event_rank > LEVEL_RANK.get(
+                existing_template.level, LEVEL_RANK[DEFAULT_LEVEL]
+            ):
+                existing_template.level = event_level
             self.template_registry.upsert(existing_template, flush=False)
             return None
 
@@ -311,6 +335,7 @@ class RealtimePipeline:
             template_id=parsed.template_id,
             template_text=parsed.template,
             service=parsed.raw.service,
+            level=event_level,
             first_seen=parsed.raw.timestamp,
             last_seen=parsed.raw.timestamp,
             event_count=1,

@@ -21,7 +21,15 @@ from logai.clustering.hdbscan_cluster import GroupClusterer, NOISE_LABEL
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
 from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomalyModels
-from logai.models import FeatureVector, GroupState, ParsedEvent, RawLog, TemplateState
+from logai.models import (
+    DEFAULT_LEVEL,
+    LEVEL_RANK,
+    FeatureVector,
+    GroupState,
+    ParsedEvent,
+    RawLog,
+    TemplateState,
+)
 from logai.parsing.drain3_parser import Drain3Parser
 from logai.storage.base import ModelStore
 from logai.storage.checkpoint import CheckpointStore
@@ -194,6 +202,9 @@ class TrainingPipeline:
             ):
                 continue
             seen_event_ids.add(event_id)
+            # Normalise once per record; the same value feeds both the initial
+            # construction below and the promotion at the end of the iteration.
+            event_level = str(record.get("level") or DEFAULT_LEVEL).strip().upper()
             state = states.get(template_id)
             if state is None:
                 generalized = self._generalized_template_text(template_id)
@@ -206,6 +217,7 @@ class TrainingPipeline:
                     template_id=template_id,
                     template_text=template_text,
                     service=str(record.get("service") or "unknown"),
+                    level=event_level,
                     first_seen=float(timestamp),
                     last_seen=float(timestamp),
                 )
@@ -213,6 +225,12 @@ class TrainingPipeline:
             state.first_seen = min(state.first_seen, float(timestamp))
             state.last_seen = max(state.last_seen, float(timestamp))
             state.event_count += 1
+            # Keep the most severe level ever seen for this template (monotonic:
+            # a later low-severity event must never downgrade an ERROR template).
+            if LEVEL_RANK.get(event_level, LEVEL_RANK[DEFAULT_LEVEL]) > LEVEL_RANK.get(
+                state.level, LEVEL_RANK[DEFAULT_LEVEL]
+            ):
+                state.level = event_level
         self.template_registry.replace_all(list(states.values()))
 
     def _generalized_template_text(self, template_id: str) -> Optional[str]:

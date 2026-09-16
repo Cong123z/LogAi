@@ -187,11 +187,15 @@ Metadata persisted theo `template_id`.
 | `template_id` | `str` | bắt buộc | Registry key |
 | `template_text` | `str` | bắt buộc | Template mới nhất |
 | `service` | `str` | bắt buộc | Service gắn với template |
+| `level` | `str` | `"INFO"` | Level **nặng nhất từng ghi nhận** của template (monotonic, không bao giờ tụt cấp). Xếp hạng theo `LEVEL_RANK`; `WARN`/`WARNING` cùng hạng, `FATAL`/`CRITICAL` cùng hạng. Level lạ (không có trong `LEVEL_RANK`) được xử lý ở hạng `INFO` nên không bao giờ lấn át `ERROR`. Có default để `template_registry.json` cũ (sinh trước khi có field này) vẫn load được. |
 | `module` | `str` | `""` | Chưa được pipeline populate |
 | `first_seen` | `float` | current time | Event sớm nhất |
 | `last_seen` | `float` | current time | Event gần nhất |
 | `event_count` | `int` | `0` | Tổng event đã ghi nhận |
 | `group_id` | `Optional[str]` | `None` | Semantic group hoặc pending |
+
+`DEFAULT_LEVEL` và `LEVEL_RANK` là hằng số module-level trong `logai/models.py`;
+việc promote level được viết inline tại các call site (không có helper trung gian).
 
 ### 5.4 GroupState
 
@@ -310,7 +314,7 @@ flowchart TD
 |---:|---|---|---|
 | 1 | `ElasticsearchCollector.stream_historical_batches` | `start_ts`, `end_ts`, `max_docs`, `batch_size`, cursor | Iterator của `(List[RawLog], cursor)` |
 | 2 | `Drain3Parser` | Raw logs sorted theo timestamp, từng batch | Drain3 state + durable training event index |
-| 3 | `TrainingPipeline._rebuild_template_registry` | Durable event index | Template metadata |
+| 3 | `TrainingPipeline._rebuild_template_registry` | Durable event index | Template metadata (kèm `level` = max severity các event của template) |
 | 4 | `TemplateEmbedder` | Template texts | L2-normalized vectors |
 | 5 | `GroupClusterer.cluster` | Template IDs + embedding matrix | HDBSCAN labels |
 | 6 | `TrainingPipeline._cluster_templates` | Labels | `template_id -> group_id` |
@@ -400,7 +404,8 @@ Nếu `TemplateRegistry` đã có template và `group_id`:
 1. Không tạo embedding mới (bỏ qua SentenceTransformer).
 2. Không cluster hay so khớp centroids (bỏ qua HDBSCAN/Centroids).
 3. Không tính toán lại template metrics (bỏ qua `_update_template_metrics`).
-4. Cập nhật template `last_seen`, `event_count`.
+4. Cập nhật template `last_seen`, `event_count`, và promote `level` nếu event có
+   severity cao hơn (monotonic).
 5. Cập nhật group `last_seen`, `event_count`.
 6. Chạy documentation match, feature generation (8D dimensionless vector) rồi
    **append feature vector vào buffer** `_pending_predictions`. Prediction
@@ -422,9 +427,11 @@ Nếu template mới hoặc chưa có `group_id`:
 5. Khi lưu template vào `TemplateRegistry`, hàm `upsert()` xác định liệu đây có
    phải template mới toanh (`is_new=True`) hay không. Nếu `is_new=True`, pipeline
    kích hoạt `_update_template_metrics()` cập nhật Prometheus gauge
-   `app_log_templates_total{service}` thông qua bộ đếm $O(1)$ trong RAM.
+   `app_log_templates_total{service}` thông qua bộ đếm $O(1)$ trong RAM. Template
+   mới được khởi tạo `level` bằng level của chính event đó (đã `.upper()`).
 6. Nếu template đã tồn tại (ví dụ đã lưu Pending ở sự kiện trước), `is_new=False`
-   và không tăng đếm trùng lặp.
+   và không tăng đếm trùng lặp; `level` vẫn được promote nếu event mới có severity
+   cao hơn.
 
 Pending event vẫn được tính raw metrics và mark dedup processed, nhưng
 không có feature vector, anomaly score hoặc alert state.
@@ -559,7 +566,7 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 | `data/drain3_state.bin` | Drain3 persistence | Parser | Parser | Drain tree/template clusters |
 | `data/checkpoint.json` | JSON object | Collector | Collector | `search_after`, `last_timestamp` |
 | `data/training_checkpoint.json` | JSON object | Training pipeline | Training collector | Historical `search_after` cursor |
-| `data/training_event_index.jsonl` | Append-only JSONL | Training pipeline | Training pipeline | Lightweight parsed event records for replay |
+| `data/training_event_index.jsonl` | Append-only JSONL | Training pipeline | Training pipeline | Lightweight parsed event records for replay (kèm `level`, nguồn để dựng `TemplateState.level`) |
 | `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine | `group_id -> AnomalyState` |
 | `data/dedup_index.json` | JSON object | Dedup index | Dedup index | `event_id -> processed wall-clock time` |
 | `data/dlq.jsonl` | Append-only JSONL | Realtime | Manual replay API | Failed event records |

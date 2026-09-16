@@ -52,11 +52,35 @@ class ParsedEvent:
         }
 
 
+# Log-level severity ordering used to keep the most severe level seen for a
+# template. Levels arrive as free-form strings from Elasticsearch (app-dependent
+# casing and synonyms), so rank is looked up case-insensitively after .upper();
+# an unrecognised level falls back to the INFO rank, i.e. it is inert for
+# promotion instead of silently outranking ERROR. WARNING and WARN are
+# deliberately both present so either spelling ranks correctly.
+DEFAULT_LEVEL = "INFO"
+LEVEL_RANK = {
+    "TRACE": 0,
+    "DEBUG": 1,
+    "INFO": 2,
+    "WARN": 3,
+    "WARNING": 3,
+    "ERROR": 4,
+    "FATAL": 5,
+    "CRITICAL": 5,
+}
+
+
 @dataclass
 class TemplateState:
     template_id: str
     template_text: str
     service: str
+    # Most severe log level ever recorded for this template (monotonic - never
+    # downgraded by later low-severity events). The default keeps legacy
+    # template_registry.json files (which predate this field) loadable via
+    # TemplateState(**raw); it also matches the collector's own INFO fallback.
+    level: str = DEFAULT_LEVEL
     module: str = ""
     first_seen: float = field(default_factory=now_ts)
     last_seen: float = field(default_factory=now_ts)

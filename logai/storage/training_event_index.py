@@ -23,6 +23,7 @@ class TrainingEventIndex:
                 "template_id": event.template_id,
                 "template_text": event.template,
                 "service": event.raw.service,
+                "level": event.raw.level,
                 "timestamp": event.raw.timestamp,
             }
             for event in events
