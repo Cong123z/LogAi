@@ -119,8 +119,9 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         self.assertEqual(group.event_count, 1)
         self.assertIn("t_login", group.template_ids)
 
-        # 4. FeatureEngine updated with 8D vector
-        window = self.pipeline.feature_engine._windows["G_AUTH"]
+        # 4. FeatureEngine updated with 8D vector under the (service, group_id)
+        # window key.
+        window = self.pipeline.feature_engine._windows[("auth", "G_AUTH")]
         self.assertEqual(len(window.timestamps), 1)
 
         # 5. DLQ is empty
@@ -247,9 +248,10 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         self.assertTrue(completed)
         self.pipeline.feature_engine.update.assert_called_once()
         # Scoring is deferred (TODO #7): the vector is buffered for the next
-        # batch flush rather than scored inline in _process_one.
+        # batch flush rather than scored inline in _process_one. The buffer key is
+        # the (service, group_id) window key.
         self.assertEqual(
-            self.pipeline._pending_predictions, [("G_AUTH", feature_vector)]
+            self.pipeline._pending_predictions, [(("auth", "G_AUTH"), feature_vector)]
         )
         self.assertTrue(self.pipeline.dedup.seen(raw.event_id))
         self.assertEqual(self.pipeline.dlq.count(), 0)
@@ -371,18 +373,20 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
 
         # Mock batch inference to flag anomalies when a vector indicates a burst.
         # Scoring is now batched (TODO #7), so the pipeline calls predict_batch;
-        # the per-row logic mirrors the old per-event predict exactly.
+        # the per-row logic mirrors the real predict_batch exactly - including
+        # echoing fv.group_id (the (service, group_id) window key), which is what
+        # AnomalyResult must carry for the state machine and metrics to unpack.
         def mock_predict_batch(fvs):
             results = []
             for fv in fvs:
                 if fv.z_score_10s > 2.0 or fv.short_growth_rate > 3.0:
                     results.append(AnomalyResult(
-                        group_id="G_AUTH", timestamp=fv.timestamp,
+                        group_id=fv.group_id, timestamp=fv.timestamp,
                         anomaly=True, anomaly_score=0.85, model_version="if-global-v3",
                     ))
                 else:
                     results.append(AnomalyResult(
-                        group_id="G_AUTH", timestamp=fv.timestamp,
+                        group_id=fv.group_id, timestamp=fv.timestamp,
                         anomaly=False, anomaly_score=0.2, model_version="if-global-v3",
                     ))
             return results
@@ -402,8 +406,8 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         # in event order (result-equivalent to the old per-event path).
         self.pipeline._flush_predictions()
 
-        # State should be NORMAL
-        current_state = self.pipeline.alert_sm._load("G_AUTH")
+        # State should be NORMAL (cell = (service, group_id)).
+        current_state = self.pipeline.alert_sm._load(("auth", "G_AUTH"))
         self.assertEqual(current_state.alert_state, AlertStateEnum.NORMAL.value)
 
         # 2. Sudden burst: 15 events in 0.5 seconds
@@ -418,8 +422,8 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
 
         self.pipeline._flush_predictions()
 
-        # State should transition to ALERTING
-        final_state = self.pipeline.alert_sm._load("G_AUTH")
+        # State should transition to ALERTING (cell = (service, group_id)).
+        final_state = self.pipeline.alert_sm._load(("auth", "G_AUTH"))
         self.assertEqual(final_state.alert_state, AlertStateEnum.ALERTING.value)
 
 

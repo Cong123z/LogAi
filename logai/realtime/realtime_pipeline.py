@@ -240,11 +240,14 @@ class RealtimePipeline:
             return
         results = self.anomaly_model.predict_batch([fv for _, fv in buf])
         scored = []
-        for (group_id, _fv), result in zip(buf, results):
+        for (window_key, _fv), result in zip(buf, results):
             if result is None:
                 continue  # global model not yet trained
+            # window_key is (service, group_id); the group registry is keyed by the
+            # plain group_id, and set_anomaly_score needs the service separately.
+            service, group_id = window_key
             group = self.group_registry.get(group_id) or GroupState(group_id=group_id)
-            self.metrics.set_anomaly_score(group, result.anomaly_score)
+            self.metrics.set_anomaly_score(group, result.anomaly_score, service=service)
             scored.append(result)
 
         states = self.alert_sm.transition_batch(scored)
@@ -274,10 +277,15 @@ class RealtimePipeline:
                         grouped.group_id,
                         exc,
                     )
-                fv = self.feature_engine.update(grouped.group_id, raw.timestamp)
-                # Defer scoring: buffer the (group, vector) pair for the next
+                # Window/alert identity is (service, group_id): each service keeps
+                # its own rate baseline + alert state inside a shared semantic
+                # group. doc-match above stays group-level (grouped.group_id); only
+                # the feature/alert path is per-service. One update + one append.
+                window_key = (raw.service, grouped.group_id)
+                fv = self.feature_engine.update(window_key, raw.timestamp)
+                # Defer scoring: buffer the (window_key, vector) pair for the next
                 # batch flush instead of calling predict() once per event.
-                self._pending_predictions.append((grouped.group_id, fv))
+                self._pending_predictions.append((window_key, fv))
 
             self.dedup.mark(raw.event_id)
             self.metrics.logai_events_processed_total.inc()
@@ -403,32 +411,45 @@ class RealtimePipeline:
         return self._event_clock + (time.monotonic() - self._event_clock_wall)
 
     def _evaluate_idle_alerting_groups(self, current_timestamp: float) -> None:
-        """Collect snapshot feature vectors for groups that have gone silent and
-        append them to the SAME predict buffer as live events, so they are
-        scored together in the next batch flush.
+        """Collect snapshot feature vectors for windows (service, group_id) that
+        have gone silent and append them to the SAME predict buffer as live
+        events, so they are scored together in the next batch flush.
 
-        Covers both non-NORMAL groups (so a stuck ALERTING alert can cool down
-        to NORMAL with zero new events) and NORMAL groups (so every group's
-        state is refreshed at least once per idle interval). Uses
-        FeatureEngine.snapshot() (time-based prune, no new event appended) so it
-        never double-counts. The silence guard skips any group still receiving
-        logs: that group is owned by the per-event path and its live vector is
-        already buffered, so a group can never appear twice in one flush.
+        The set of windows to re-evaluate is the union of:
+          - (C) alert_sm.groups_not_normal() - persisted tuples (survive a
+            restart; a stuck ALERTING cell cools down even with zero new events),
+          - (B) feature_engine.live_window_keys() - every cell that has a live
+            window this process lifetime (keeps NORMAL cells' scores fresh).
+        Both yield (service, group_id) tuples, so the union is per-CELL, never
+        guessing a group's services from representative metadata (which would
+        miss a second service sharing a template).
+
+        The silence guard is PER-CELL via feature_engine.last_event_ts(): it
+        skips any cell still receiving logs (owned by the per-event path, whose
+        live vector is already buffered), so a cell can never appear twice in one
+        flush. A cell that is in the alert set but has no live window yet (e.g. a
+        pre-restart ALERTING cell with no traffic since boot) has last_event_ts()
+        == None, so it is still snapshotted - snapshot() materializes an empty
+        window via defaultdict and yields a neutral vector, cooling it to NORMAL.
+        This is why we do NOT drive the tick off live_window_keys() alone.
         """
         gap = self.config.alert.idle_eval_seconds
-        for group in self.group_registry.all_groups():
-            if current_timestamp - group.last_seen < gap:
+        cooling = self.alert_sm.groups_not_normal()
+        live = self.feature_engine.live_window_keys()
+        for window_key in set(cooling) | set(live):
+            last = self.feature_engine.last_event_ts(window_key)
+            if last is not None and current_timestamp - last < gap:
                 continue  # still receiving logs -> the per-event path owns it
             try:
-                fv = self.feature_engine.snapshot(group.group_id, current_timestamp)
+                fv = self.feature_engine.snapshot(window_key, current_timestamp)
             except Exception as exc:  # noqa: BLE001
                 # Snapshot collection is the only idle-specific step; a single
-                # bad group must not abort the whole tick.
+                # bad cell must not abort the whole tick.
                 logger.warning(
-                    "idle snapshot failed for group %s: %s", group.group_id, exc
+                    "idle snapshot failed for window %s: %s", window_key, exc
                 )
                 continue
-            self._pending_predictions.append((group.group_id, fv))
+            self._pending_predictions.append((window_key, fv))
 
     def _maybe_tick_idle(self, current_timestamp: float) -> None:
         """Throttle the idle-alert tick to at most once per idle_eval_seconds so

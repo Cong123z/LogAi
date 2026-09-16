@@ -21,7 +21,7 @@ Exposes:
 """
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Tuple
 
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
@@ -45,24 +45,27 @@ class MetricsExporter:
             "app_log_templates_total", "Distinct log templates seen", ["service"]
         )
 
-        # Analysis metrics
+        # Analysis metrics. All three are keyed by BOTH service and group_id:
+        # window/alert identity is per-(service, group), so a group shared by
+        # several services exposes one series per service. Cardinality therefore
+        # scales with (#services x #groups) - see ARCHITECTURE.md 9.1.
         self.log_anomaly_score = Gauge(
-            "log_anomaly_score", "Anomaly score for a log group",
-            ["group_id", "documented"],
+            "log_anomaly_score", "Anomaly score for a (service, group) window",
+            ["service", "group_id", "documented"],
         )
         self.log_alert_state = Gauge(
-            "log_alert_state", "1 if this is the group's current alert state",
-            ["group_id", "state"],
+            "log_alert_state", "1 if this is the window's current alert state",
+            ["service", "group_id", "state"],
         )
         self.log_alerts_total = Counter(
             "log_alerts_total",
             "Cumulative count of transitions into the ALERTING state",
-            ["group_id"],
+            ["service", "group_id"],
         )
-        # Last alert_state seen per group, so we only count a fresh escalation
-        # (X -> ALERTING) once instead of re-incrementing on every event that
-        # keeps a group in ALERTING.
-        self._last_alert_state: Dict[str, str] = {}
+        # Last alert_state seen per (service, group_id) tuple, so we only count a
+        # fresh escalation (X -> ALERTING) once instead of re-incrementing on
+        # every event that keeps a window in ALERTING.
+        self._last_alert_state: Dict[Tuple[str, str], str] = {}
 
         # Engine health metrics
         self.logai_events_received_total = Counter(
@@ -111,29 +114,36 @@ class MetricsExporter:
         self.app_log_templates_total.labels(service=service).set(count)
 
     def set_anomaly_score(
-        self, group: GroupState, score: float
+        self, group: GroupState, score: float, service: str
     ) -> None:
+        # service is passed explicitly: the GroupState is looked up by the plain
+        # group_id (wkey[1]) so group.group_id is NOT the (service, group) tuple.
         self.log_anomaly_score.labels(
-            group_id=group.group_id, documented=str(group.documented).lower()
+            service=service,
+            group_id=group.group_id,
+            documented=str(group.documented).lower(),
         ).set(score)
 
     def set_alert_state(self, state: AnomalyState) -> None:
+        # state.group_id is a (service, group_id) tuple; unpack once and feed the
+        # gauges as strings so no tuple ever reaches a Prometheus label value.
+        service, group_id = state.group_id
         alerting = AlertStateEnum.ALERTING.value
         previous = self._last_alert_state.get(state.group_id)
-        # Nothing to do when the group stays in the same state: the gauges
+        # Nothing to do when the window stays in the same state: the gauges
         # already hold the correct values and no fresh escalation occurred.
         # Skipping avoids re-writing N gauge series on every event that keeps a
-        # group in its current state (hot-path lock/IO under high throughput).
+        # window in its current state (hot-path lock/IO under high throughput).
         if previous == state.alert_state:
             return
         # Count only the phase transition into ALERTING, not each event that
-        # keeps the group alerting. A recovery (-> NORMAL) followed by a new
+        # keeps the window alerting. A recovery (-> NORMAL) followed by a new
         # escalation increments again, which is the intended behaviour.
         if state.alert_state == alerting and previous != alerting:
-            self.log_alerts_total.labels(group_id=state.group_id).inc()
+            self.log_alerts_total.labels(service=service, group_id=group_id).inc()
         self._last_alert_state[state.group_id] = state.alert_state
 
         for candidate in AlertStateEnum:
             self.log_alert_state.labels(
-                group_id=state.group_id, state=candidate.value
+                service=service, group_id=group_id, state=candidate.value
             ).set(1 if candidate.value == state.alert_state else 0)

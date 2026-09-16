@@ -108,8 +108,14 @@ from logai.models import AlertStateEnum, FeatureVector, GroupState
 from logai.realtime.realtime_pipeline import RealtimePipeline
 
 
-def _fv(group_id: str, timestamp: float, z_score_10s: float = 0.0) -> FeatureVector:
-    """A minimal feature vector; z_score_10s drives the mock anomaly decision."""
+# Window/alert identity is now (service, group_id). The group created in setUp is
+# service="auth", group_id="G_AUTH"; every cell in these tests is that tuple.
+AUTH_KEY = ("auth", "G_AUTH")
+
+
+def _fv(group_id, timestamp: float, z_score_10s: float = 0.0) -> FeatureVector:
+    """A minimal feature vector; z_score_10s drives the mock anomaly decision.
+    group_id is a (service, group_id) window key."""
     return FeatureVector(
         group_id=group_id,
         timestamp=timestamp,
@@ -144,26 +150,30 @@ class TestStuckAlertIdleTick(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _drive_to_alerting(self, group_id: str) -> None:
-        """Feed high-scoring feature vectors until the group reaches ALERTING.
+    def _drive_to_alerting(self, window_key) -> None:
+        """Feed high-scoring feature vectors until the cell reaches ALERTING.
 
-        Scoring is batched now (TODO #7): buffer the vectors then flush once,
-        which scores them and applies the transitions in order."""
+        Scoring is batched (TODO #7): buffer the vectors then flush once, which
+        scores them and applies the transitions in order. window_key is the
+        (service, group_id) tuple. This path does NOT touch feature_engine
+        windows (it buffers prebuilt vectors), mirroring how the idle tick's
+        cooling source (the alert set) is independent of live windows."""
         for i in range(5):
             self.pipeline._pending_predictions.append(
-                (group_id, _fv(group_id, 1000.0 + i, z_score_10s=5.0))
+                (window_key, _fv(window_key, 1000.0 + i, z_score_10s=5.0))
             )
         self.pipeline._flush_predictions()
         self.assertEqual(
-            self.pipeline.alert_sm._load(group_id).alert_state,
+            self.pipeline.alert_sm._load(window_key).alert_state,
             AlertStateEnum.ALERTING.value,
         )
-        self.assertIn(group_id, self.pipeline.alert_sm.groups_not_normal())
+        self.assertIn(window_key, self.pipeline.alert_sm.groups_not_normal())
 
     def test_alert_cools_down_when_events_stop(self):
-        """A stuck ALERTING group with no further events cools to NORMAL and the
-        alert-state gauge bookkeeping follows it down."""
-        self._drive_to_alerting("G_AUTH")
+        """A stuck ALERTING cell with no further events cools to NORMAL and the
+        alert-state gauge bookkeeping follows it down. Driven off the persisted
+        alert set (cooling source), so it needs no live window."""
+        self._drive_to_alerting(AUTH_KEY)
 
         # No new events - only the periodic idle tick runs, well past the
         # silence guard. Each tick appends a cold-start snapshot to the buffer;
@@ -173,53 +183,54 @@ class TestStuckAlertIdleTick(unittest.TestCase):
             self.pipeline._flush_predictions()
 
         self.assertEqual(
-            self.pipeline.alert_sm._load("G_AUTH").alert_state,
+            self.pipeline.alert_sm._load(AUTH_KEY).alert_state,
             AlertStateEnum.NORMAL.value,
         )
-        # set_alert_state's per-group bookkeeping recorded the recovery.
+        # set_alert_state's per-window bookkeeping recorded the recovery.
         self.assertEqual(
-            self.pipeline.metrics._last_alert_state["G_AUTH"],
+            self.pipeline.metrics._last_alert_state[AUTH_KEY],
             AlertStateEnum.NORMAL.value,
         )
-        # Self-terminating: once NORMAL, the group leaves the non-NORMAL set.
-        self.assertNotIn("G_AUTH", self.pipeline.alert_sm.groups_not_normal())
+        # Self-terminating: once NORMAL, the cell leaves the non-NORMAL set.
+        self.assertNotIn(AUTH_KEY, self.pipeline.alert_sm.groups_not_normal())
 
     def test_idle_groups_pruned_to_zero_rate(self):
         """snapshot() past the retention horizon empties the window and returns
         the neutral cold-start vector (z_score_10s == 0.0)."""
         for ts in (1000.0, 1000.5, 1001.0, 1001.5):
-            self.pipeline.feature_engine.update("G_AUTH", ts)
+            self.pipeline.feature_engine.update(AUTH_KEY, ts)
 
         far_future = 1000.0 + self.cfg.features.history_retention_seconds + 5000.0
-        fv = self.pipeline.feature_engine.snapshot("G_AUTH", far_future)
+        fv = self.pipeline.feature_engine.snapshot(AUTH_KEY, far_future)
         self.assertEqual(fv.z_score_10s, 0.0)
 
     def test_normal_idle_group_is_snapshotted(self):
-        """A NORMAL group that has gone silent IS snapshotted so its state is
-        re-evaluated each idle interval (TODO #7 extends the idle tick to NORMAL
-        groups, not just non-NORMAL ones), and the vector joins the same buffer
-        as live events."""
-        # G_AUTH is untouched -> NORMAL, but last_seen=1000 is well past the
-        # silence guard relative to t=9000.
+        """A NORMAL cell that has a live window but gone silent IS snapshotted so
+        its state is re-evaluated each idle interval, and the vector joins the
+        same buffer as live events. Under the (service,group) design the idle tick
+        reads from alert-set UNION live-window-keys, so a NORMAL cell must have a
+        live window to be refreshed - seed one with a stale timestamp."""
+        # Give G_AUTH a live window at t=1000 so live_window_keys() includes it.
+        self.pipeline.feature_engine.update(AUTH_KEY, 1000.0)
         self.assertEqual(self.pipeline.alert_sm.groups_not_normal(), [])
         with patch.object(
             self.pipeline.feature_engine, "snapshot",
-            return_value=_fv("G_AUTH", 9000.0),
+            return_value=_fv(AUTH_KEY, 9000.0),
         ) as snap:
             self.pipeline._evaluate_idle_alerting_groups(9000.0)
-            snap.assert_called_once_with("G_AUTH", 9000.0)
+            snap.assert_called_once_with(AUTH_KEY, 9000.0)
         self.assertEqual(len(self.pipeline._pending_predictions), 1)
-        self.assertEqual(self.pipeline._pending_predictions[0][0], "G_AUTH")
+        self.assertEqual(self.pipeline._pending_predictions[0][0], AUTH_KEY)
 
     def test_active_group_skipped_by_guard(self):
-        """A non-NORMAL group that is still receiving logs (last_seen within the
-        idle threshold of now) is skipped - the per-event path owns it."""
-        self._drive_to_alerting("G_AUTH")
+        """A non-NORMAL cell that is still receiving logs (its window's last event
+        is within the idle threshold of now) is skipped - the per-event path owns
+        it. The guard now reads the per-cell last_event_ts, not group.last_seen."""
+        self._drive_to_alerting(AUTH_KEY)
 
-        group = self.pipeline.group_registry.get("G_AUTH")
         now = 2000.0
-        group.last_seen = now - (self.cfg.alert.idle_eval_seconds / 2.0)  # < threshold
-        self.pipeline.group_registry.upsert(group)
+        # A recent event in the cell's window -> within idle_eval_seconds of now.
+        self.pipeline.feature_engine.update(AUTH_KEY, now - 0.5)
 
         with patch.object(self.pipeline.feature_engine, "snapshot") as snap:
             self.pipeline._evaluate_idle_alerting_groups(now)

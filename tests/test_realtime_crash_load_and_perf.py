@@ -387,7 +387,9 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         with self.assertRaises(_StopLoop):
             self.pipeline.run_forever()
 
-        state = self.pipeline.alert_sm._load("G_AUTH")
+        # Window/alert identity is (service, group_id); these events are service
+        # "auth" grouped into G_AUTH, so the cell is ("auth", "G_AUTH").
+        state = self.pipeline.alert_sm._load(("auth", "G_AUTH"))
         # Steady state should be NORMAL
         self.assertEqual(state.alert_state, AlertStateEnum.NORMAL.value)
 
@@ -410,7 +412,7 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
             self.pipeline.run_forever()
 
         # State machine should have transitioned to ALERTING
-        state = self.pipeline.alert_sm._load("G_AUTH")
+        state = self.pipeline.alert_sm._load(("auth", "G_AUTH"))
         self.assertEqual(state.alert_state, AlertStateEnum.ALERTING.value)
         self.assertTrue(state.anomaly)
 

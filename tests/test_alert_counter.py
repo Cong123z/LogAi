@@ -23,12 +23,16 @@ from logai.models import AlertStateEnum, AnomalyState
 
 
 class _FakeCounter:
-    """Minimal prometheus-Counter stand-in that tracks inc() per group_id."""
+    """Minimal prometheus-Counter stand-in that tracks inc() per (service,group_id).
+
+    log_alerts_total now carries a service label alongside group_id; we key the
+    counts by group_id because every test in this file uses a distinct group_id.
+    """
 
     def __init__(self):
         self.counts = defaultdict(float)
 
-    def labels(self, group_id):
+    def labels(self, service, group_id):
         parent = self
 
         class _Child:
@@ -39,7 +43,11 @@ class _FakeCounter:
 
 
 def _state(group_id: str, alert_state: AlertStateEnum) -> AnomalyState:
-    return AnomalyState(group_id=group_id, timestamp=0.0, alert_state=alert_state.value)
+    # group_id is now a (service, group_id) window key; the fake counter keys by
+    # the second element, so these tests keep addressing cells by their group id.
+    return AnomalyState(
+        group_id=("test-service", group_id), timestamp=0.0, alert_state=alert_state.value
+    )
 
 
 class TestLogAlertsTotal(unittest.TestCase):

@@ -373,25 +373,39 @@ class TrainingPipeline:
             self.group_registry.upsert(group, flush=False)
         self.group_registry.flush()
 
-    def _group_events(self, template_to_group: Dict[str, str]) -> Dict[str, List[float]]:
-        result: Dict[str, List[float]] = defaultdict(list)
+    def _group_events(
+        self, template_to_group: Dict[str, str]
+    ) -> Dict[Tuple[str, str], List[float]]:
+        """Bucket event timestamps by (service, group_id) window key.
+
+        The per-event `service` is already carried in each event-index record, so
+        splitting the training windows per service costs no extra data. This
+        mirrors the realtime pipeline's window key exactly - train/serve parity
+        requires both to bucket by (service, group), not by group alone.
+        """
+        result: Dict[Tuple[str, str], List[float]] = defaultdict(list)
         records = sorted(self.event_index.records(), key=lambda r: float(r["timestamp"]))
         for record in records:
             gid = template_to_group.get(str(record.get("template_id")))
             if gid:
-                result[gid].append(float(record["timestamp"]))
+                result[(str(record.get("service") or "unknown"), gid)].append(
+                    float(record["timestamp"])
+                )
         return result
 
-    def _train_anomaly_models(self, grouped: Dict[str, List[float]]) -> None:
+    def _train_anomaly_models(
+        self, grouped: Dict[Tuple[str, str], List[float]]
+    ) -> None:
         all_feature_vectors: List[FeatureVector] = []
-        for gid, timestamps in grouped.items():
+        for window_key, timestamps in grouped.items():
             engine = FeatureEngine(self.config.features)
             for timestamp in timestamps:
-                fv = engine.update(gid, timestamp)
+                fv = engine.update(window_key, timestamp)
                 all_feature_vectors.append(fv)
 
         logger.info(
-            "Collected %d total feature vectors across %d groups for global model training",
+            "Collected %d total feature vectors across %d (service, group) windows "
+            "for global model training",
             len(all_feature_vectors),
             len(grouped),
         )

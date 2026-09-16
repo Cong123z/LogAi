@@ -1,10 +1,12 @@
 """Feature generation (plan section 3.8 / 4.6).
 
-Maintains, per group_id, a bounded deque of recent event timestamps plus a
-rolling history of computed 1-minute rates (used for mean/std/z-score/slope).
-The same `FeatureEngine` is used by:
+Maintains, per (service, group_id) window, a bounded deque of recent event
+timestamps plus a rolling history of computed 1-minute rates (used for
+mean/std/z-score/slope). Keying the window by BOTH service and group keeps each
+service's rate baseline isolated - a group shared by several services no longer
+averages them into one blended baseline. The same `FeatureEngine` is used by:
   - training: fed historical events in timestamp order to build the feature
-    history used to fit each group's Isolation Forest.
+    history used to fit the global Isolation Forest.
   - realtime: fed one event at a time as it arrives.
 
 This keeps train/serve feature logic identical, which matters for anomaly
@@ -15,7 +17,7 @@ from __future__ import annotations
 import statistics
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List
+from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
 from logai.config import FeatureConfig
 from logai.models import FeatureVector
@@ -31,7 +33,9 @@ class _GroupWindow:
 class FeatureEngine:
     def __init__(self, config: FeatureConfig):
         self.config = config
-        self._windows: Dict[str, _GroupWindow] = defaultdict(self._create_window)
+        # Window key is (service, group_id). The body is key-agnostic (it only
+        # stores/reads by the key), so re-keying per service is a type change.
+        self._windows: Dict[Tuple[str, str], _GroupWindow] = defaultdict(self._create_window)
 
     def _create_window(self) -> _GroupWindow:
         maxlen = self.config.rolling_window_points
@@ -46,9 +50,11 @@ class FeatureEngine:
         while gw.timestamps and now - gw.timestamps[0] > retention:
             gw.timestamps.popleft()
 
-    def update(self, group_id: str, timestamp: float) -> FeatureVector:
-        """Record one event for `group_id` at `timestamp` and return the
-        freshly computed feature vector for that group."""
+    def update(self, group_id: Tuple[str, str], timestamp: float) -> FeatureVector:
+        """Record one event for window `group_id` = (service, group) at
+        `timestamp` and return the freshly computed feature vector for that
+        (service, group) cell. The param keeps the name `group_id` because it is
+        echoed straight into FeatureVector.group_id; it now carries a tuple."""
         gw = self._windows[group_id]
         gw.timestamps.append(timestamp)
         # keep chronological order even if events arrive slightly out of
@@ -58,15 +64,32 @@ class FeatureEngine:
         self._prune(gw, timestamp)
         return self._compute(group_id, gw, timestamp)
 
-    def snapshot(self, group_id: str, timestamp: float) -> FeatureVector:
+    def snapshot(self, group_id: Tuple[str, str], timestamp: float) -> FeatureVector:
         """Compute the current feature vector without adding a new event -
-        useful for periodic re-evaluation of idle groups."""
+        useful for periodic re-evaluation of idle (service, group) cells."""
         gw = self._windows[group_id]
         self._prune(gw, timestamp)
         return self._compute(group_id, gw, timestamp)
 
+    def live_window_keys(self) -> Iterable[Tuple[str, str]]:
+        """(service, group) keys that currently have a window (received at least
+        one event this process lifetime). Snapshot-safe list copy so the idle
+        tick can iterate while events append new keys. Memory-only: empty after a
+        restart until traffic repopulates - the idle tick unions this with the
+        persisted alert set for that reason."""
+        return list(self._windows.keys())
+
+    def last_event_ts(self, group_id: Tuple[str, str]) -> Optional[float]:
+        """Timestamp of the most recent event recorded for a (service, group)
+        cell, or None if no window exists yet. Uses .get() so querying never
+        materializes a window via the defaultdict. O(1)."""
+        gw = self._windows.get(group_id)
+        if gw is None or not gw.timestamps:
+            return None
+        return gw.timestamps[-1]
+
     def _compute(
-        self, group_id: str, gw: _GroupWindow, now: float
+        self, group_id: Tuple[str, str], gw: _GroupWindow, now: float
     ) -> FeatureVector:
         w10, w1m, w5m = self.config.windows_seconds
 

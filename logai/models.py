@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def now_ts() -> float:
@@ -129,7 +129,11 @@ class WindowState:
 
 @dataclass
 class FeatureVector:
-    group_id: str
+    # Window/alert identity: (service, group_id). Splitting the sliding window per
+    # service keeps each service's rate baseline in its own cell instead of
+    # averaging it across every service that shares the semantic group. Purely a
+    # label key - it is NOT part of as_vector(); the model stays 8-dimensional.
+    group_id: Tuple[str, str]
     timestamp: float
     z_score_10s: float = 0.0
     z_score_1m: float = 0.0
@@ -178,7 +182,8 @@ class AlertStateEnum(str, Enum):
 
 @dataclass
 class AnomalyResult:
-    group_id: str
+    # (service, group_id) - carried straight from FeatureVector.group_id.
+    group_id: Tuple[str, str]
     timestamp: float
     anomaly_score: float
     anomaly: bool
@@ -188,7 +193,10 @@ class AnomalyResult:
 
 @dataclass
 class AnomalyState:
-    group_id: str
+    # (service, group_id). On disk this is serialized as a JSON-list string KEY in
+    # anomaly_state.json; AnomalyState(**raw) therefore yields a list here when
+    # reloaded, and AlertStateMachine._load() coerces it back to a tuple.
+    group_id: Tuple[str, str]
     timestamp: float
     anomaly_score: float = 0.0
     anomaly: bool = False

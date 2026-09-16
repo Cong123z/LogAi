@@ -237,6 +237,13 @@ normalizer riêng. `count_1m` đi kèm `FeatureVector` dưới dạng metadata �
 alert nhưng bị loại khỏi `as_vector()`. Baseline được tính từ lịch sử trước khi
 append sample mới và các tỷ lệ có numerical guards.
 
+`FeatureVector.group_id` là **`Tuple[str, str]` = `(service, group_id)`**: cửa sổ
+trượt được tách theo từng service trong cùng một semantic group, để baseline rate
+của một service không bị trung bình lẫn với các service khác cùng group. Đây là
+nhãn định danh, **không** phải feature — `as_vector()` vẫn đúng 8 chiều. Khi ghi
+xuống `anomaly_state.json`, tuple được flatten thành chuỗi JSON-list duy nhất tại
+seam của `AlertStateMachine` (`group_id_key`), vì JSON object không cho key là tuple.
+
 | Field | Công thức/ý nghĩa | Clipping |
 |---|---|---|
 | `z_score_10s` | `(rate_10s - mu10) / (sigma10 + eps)`; độ lệch chuẩn hóa 10s | `[-10, 10]` |
@@ -257,7 +264,7 @@ của group tạo neutral baseline `[0, 0, 1, 1, 0, 0, 0, 1]`.
 
 | Field | Kiểu | Ý nghĩa |
 |---|---|---|
-| `group_id` | `str` | Group được predict |
+| `group_id` | `Tuple[str, str]` | Cửa sổ `(service, group_id)` được predict (echo từ FeatureVector) |
 | `timestamp` | `float` | Timestamp của feature vector |
 | `anomaly_score` | `float` | Score clamp trong `[0, 1]` |
 | `anomaly` | `bool` | IF outlier hoặc score vượt threshold |
@@ -265,13 +272,16 @@ của group tạo neutral baseline `[0, 0, 1, 1, 0, 0, 0, 1]`.
 | `count_1m` | `int \| None` | Metadata volume; không phải chiều model |
 
 `AnomalyState` bổ sung `consecutive_anomaly_count` và `alert_state` để persist
-hysteresis theo group. Alert states gồm `NORMAL`, `WARMING`, `ALERTING`,
-`COOLING`.
+hysteresis theo cửa sổ `(service, group_id)`. Alert states gồm `NORMAL`,
+`WARMING`, `ALERTING`, `COOLING`.
 
 Điểm cao chỉ được phép leo thang alert khi `count_1m >=
-alert.min_events_1m`. Điểm từ mẫu thiếu volume vẫn được export để quan sát,
-nhưng state machine coi mẫu đó là tín hiệu phục hồi. `count_1m=None` giữ hành
-vi cũ cho caller không cung cấp metadata.
+alert.min_events_1m`. **Vì cửa sổ giờ tách theo service, ngưỡng volume này áp
+dụng trên số event của RIÊNG service đó trong một phút**, không phải tổng group —
+một service ít log trong group nhiều service có thể dưới ngưỡng và không leo thang
+(ngưỡng `min_events_1m` cần tune lại theo tỉ lệ số service). Điểm từ mẫu thiếu
+volume vẫn được export để quan sát, nhưng state machine coi mẫu đó là tín hiệu phục
+hồi. `count_1m=None` giữ hành vi cũ cho caller không cung cấp metadata.
 
 `WindowState` cũng được khai báo trong models nhưng hiện không được pipeline sử
 dụng hoặc persist.
@@ -321,8 +331,15 @@ flowchart TD
 | 7 | `TrainingPipeline._build_group_registry` | Mapping + Template Registry | Group metadata |
 | 8 | `GroupClusterer.compute_centroid` | Embeddings trong group | L2-normalized centroid |
 | 9 | `DocumentationMatcher.match_all` | Group centroids | Match metadata trong Group Registry |
-| 10 | `FeatureEngine` | Events theo từng group, chronological | `FeatureVector` list |
-| 11 | `GlobalAnomalyModel.train` | Feature vectors replay từ event index | `models/global_v3.pkl` |
+| 10 | `TrainingPipeline._group_events` | Event index + `template_id -> group_id` | Bucket timestamps theo `(service, group_id)` |
+| 11 | `FeatureEngine` (per window) | Events của từng `(service, group)`, chronological | `FeatureVector` list (8 chiều) |
+| 12 | `GlobalAnomalyModel.train` | Feature vectors replay từ event index | `models/global_v3.pkl` |
+
+Toàn bộ cửa sổ feature/alert được tách theo service: `_group_events` gộp event theo
+`(service, group_id)` (service đã có sẵn trong mỗi event-index record, không cần dữ
+liệu mới) rồi `_train_anomaly_models` feed từng cửa sổ đó qua `FeatureEngine.update`.
+Nhánh clustering (`_cluster_templates`/`_build_group_registry`/centroids) **vẫn gom
+templates cross-service như cũ** - chỉ có đồng hồ rate là tách theo service.
 
 ### 6.2 Group ID rules
 
@@ -345,8 +362,9 @@ không tìm thấy `models/global_v3.pkl`.
 Entry point: `scripts/run_realtime.py`.
 
 Suy luận anomaly được **micro-batch** (TODO #7): mỗi event chỉ parse/group/feature
-rồi **append `(group_id, FeatureVector)`** vào buffer `_pending_predictions`; toàn
-bộ buffer được chấm bằng **một** `predict_batch` tại **biên flush** (xem §7.5).
+rồi **append `(window_key, FeatureVector)`** vào buffer `_pending_predictions`,
+trong đó `window_key = (service, group_id)`; toàn bộ buffer được chấm bằng **một**
+`predict_batch` tại **biên flush** (xem §7.5).
 Luồng per-event (hộp liền) và luồng flush (hộp nét đứt bên dưới) là hai giai đoạn
 tách biệt trong cùng vòng lặp poll.
 
@@ -490,14 +508,20 @@ poll rồi chấm **một lượt**.
   `anomaly.predict_max_wait_seconds` (mặc định 1.0s) kể từ entry đầu. Vòng lặp ngủ
   `min(poll_interval, thời-gian-còn-lại)` để timer 1s luôn hiệu lực;
   `elasticsearch.poll_interval_seconds` hạ 5→1 để nhịp thức ≤ max_wait.
-- **Idle-tick gộp chung buffer**: mỗi `alert.idle_eval_seconds`, các nhóm silent
-  (cả non-NORMAL để cool-down lẫn NORMAL để refresh) được `snapshot()` và append
-  vào **cùng** buffer, chấm chung một `predict_batch`. Silence guard đảm bảo một
-  nhóm không vừa có fv-live vừa có fv-snapshot → không double-count.
+- **Idle-tick gộp chung buffer**: mỗi `alert.idle_eval_seconds`, các **cửa sổ
+  `(service, group)`** cần re-evaluate được `snapshot()` và append vào **cùng**
+  buffer, chấm chung một `predict_batch`. Tập cửa sổ = `alert_sm.groups_not_normal()`
+  (non-NORMAL, **persist** qua restart) ∪ `feature_engine.live_window_keys()` (mọi
+  cửa sổ đang có window, để refresh NORMAL). **Silence guard là PER-CELL** qua
+  `feature_engine.last_event_ts(cell)`: chỉ bỏ qua cửa sổ còn nhận log (per-event
+  path đang sở hữu nó), nên một service im lặng nằm trong group có service khác vẫn
+  đang bắn vẫn được làm mát. Một cell non-NORMAL chưa có window sau restart có
+  `last_event_ts() is None` → vẫn được snapshot → vector trung tính → cool-down.
 - **Tương đương per-event 100%**: giữ **một entry / EVENT** (không collapse theo
   group), `transition_batch()` apply theo đúng thứ tự trong RAM và trả mọi state
-  trung gian cho metrics. Chỉ final state của mỗi group được `bulk_set()` một lần
-  xuống `anomaly_state.json`, tránh serialize toàn file cho từng event.
+  trung gian cho metrics. Chỉ final state của mỗi **cửa sổ** được `bulk_set()` một
+  lần xuống `anomaly_state.json` (key là tuple flatten), tránh serialize toàn file
+  cho từng event.
 - **Crash-safety**: `_flush_batch()` giữ nguyên thứ tự durability — predict+apply
   → registry flush → `dedup.gc()` → `checkpoint.commit()` (chỉ khi có cursor thật
   từ stream). Chi tiết ở §10.3.
@@ -513,7 +537,7 @@ poll rồi chấm **một lượt**.
 | `embedding/embedder.py` | Encode text thành normalized vector | Template/doc text | NumPy matrix/vector | Model in-memory/Hugging Face cache |
 | `clustering/hdbscan_cluster.py` | Offline clustering, centroid, realtime nearest-group | IDs + vectors | Labels, centroid, assignment | Không |
 | `docmatch/doc_matcher.py` | Load corpus và cosine match | YAML + centroids | `MatchResult` | Corpus/embeddings in-memory + cache file |
-| `features/feature_engine.py` | Sliding-window aggregation | `group_id`, timestamp | `FeatureVector` | Per-group windows in-memory |
+| `features/feature_engine.py` | Sliding-window aggregation | `(service, group_id)`, timestamp | `FeatureVector` | Per-`(service, group)` windows in-memory |
 | `anomaly/isolation_forest_model.py` | Train/load/predict global IF | Feature vectors | `AnomalyResult` | `models/global_v3.pkl` + in-memory model |
 | `alert/alert_state_machine.py` | Hysteresis theo group | `AnomalyResult` | `AnomalyState` | `anomaly_state.json` |
 | `metrics/prometheus_exporter.py` | Expose/update metrics | Parsed/group/anomaly state | `/metrics` | Prometheus client in-memory |
@@ -541,8 +565,9 @@ Endpoint mặc định: `http://<host>:9108/metrics`.
 | `app_log_events_total` | Counter | `service` | Tăng sau parse/assign thành công |
 | `app_log_errors_total` | Counter | `service`, `error_code` | Tăng với level ERROR/CRITICAL/FATAL; `error_code` hiện là `template_id` |
 | `app_log_templates_total` | Gauge | `service` | Số template của service; hiện scan toàn registry mỗi event |
-| `log_anomaly_score` | Gauge | `group_id`, `documented` | Score gần nhất của group; ghi tại biên flush micro-batch (§7.5) |
-| `log_alert_state` | Gauge | `group_id`, `state` | State hiện tại bằng 1, ba state còn lại bằng 0; `set_alert_state` return sớm khi state không đổi |
+| `log_anomaly_score` | Gauge | `service`, `group_id`, `documented` | Score gần nhất của cửa sổ `(service, group)`; ghi tại biên flush micro-batch (§7.5) |
+| `log_alert_state` | Gauge | `service`, `group_id`, `state` | State hiện tại bằng 1, ba state còn lại bằng 0; `set_alert_state` return sớm khi state không đổi |
+| `log_alerts_total` | Counter | `service`, `group_id` | Tăng một lần cho mỗi chuyển tiếp INTO `ALERTING` |
 | `logai_events_received_total` | Counter | Không | Tăng `inc(len(batch))` một lần mỗi batch |
 | `logai_events_processed_total` | Counter | Không | Tăng sau khi event được mark dedup |
 | `logai_events_failed_total` | Counter | Không | Tăng khi event exception và được gửi DLQ |
@@ -567,10 +592,16 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 | `data/checkpoint.json` | JSON object | Collector | Collector | `search_after`, `last_timestamp` |
 | `data/training_checkpoint.json` | JSON object | Training pipeline | Training collector | Historical `search_after` cursor |
 | `data/training_event_index.jsonl` | Append-only JSONL | Training pipeline | Training pipeline | Lightweight parsed event records for replay (kèm `level`, nguồn để dựng `TemplateState.level`) |
-| `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine | `group_id -> AnomalyState` |
+| `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine | `"[service, group_id]" -> AnomalyState` (tuple được flatten thành chuỗi JSON-list tại seam; key thường `group_id` cũ vẫn đọc được nhưng là ô mồ côi) |
 | `data/dedup_index.json` | JSON object | Dedup index | Dedup index | `event_id -> processed wall-clock time` |
 | `data/dlq.jsonl` | Append-only JSONL | Realtime | Manual replay API | Failed event records |
 | `data/window_state.json` | Chưa dùng | Không | Không | Config placeholder |
+
+> Lưu ý: vì `anomaly_state.json` giờ lưu theo key flatten của tuple
+> `(service, group_id)`, các key `group_id` đơn thuần (trước refactor) sẽ không map
+> vào cửa sổ mới. Khi deploy, **xóa `data/anomaly_state.json`** để tránh các ô cũ
+> mồ côi (hàm parse giữ nguyên key chuỗi cũ nên file không crash khi đọc, nhưng
+> state cũ sẽ không bao giờ được làm mát).
 
 Pickle files chỉ được load từ nguồn tin cậy. Pickle không phải format an toàn
 cho artifact do bên không tin cậy cung cấp.
@@ -685,11 +716,11 @@ record cuối có thể không bền vững nếu host mất điện đúng lúc
 | State | Durability hiện tại |
 |---|---|
 | Checkpoint | Commit tại biên flush micro-batch (§7.5), chỉ khi có cursor stream |
-| Alert state | Flush một lần tại biên predict batch; intermediate states giữ trong RAM cho metrics |
+| Alert state | Flush một lần tại biên predict batch; key là `(service, group_id)` flatten; intermediate states giữ trong RAM cho metrics |
 | Dedup | Flush tại biên flush qua `gc()` |
 | Template/group metadata trong realtime | Update dùng `flush=False`; `flush()` tại biên flush micro-batch, no-op khi `_dirty` sạch |
 | Template embeddings | Save toàn embedding cache khi set |
-| Feature windows | Chỉ in-memory; reset khi restart |
+| Feature windows | Chỉ in-memory, key `(service, group_id)`; reset khi restart (idle-tick bù bằng cách union với alert state đã persist) |
 | Prometheus client counters/gauges | Chỉ in-memory; reset khi restart |
 
 Feature history reset làm group quay về cold-start/neutral behavior sau restart,
