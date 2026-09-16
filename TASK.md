@@ -1012,3 +1012,84 @@ docker compose -f docker-compose.reuse.yml up -d logai-engine
    - Thời gian xử lý (`logai_processing_latency_seconds`) ở mức dưới **1ms/event**.
    - CPU usage của `logai-engine` duy trì ổn định ở mức thấp (< 15%).
 
+---
+
+## 15. Tối ưu Thông lượng Realtime: FeatureEngine O(1) Sliding Window & Throttling DedupIndex Flush
+
+**Ngày tạo**: 2026-09-16  
+**Trạng thái**: 🟡 READY FOR IMPLEMENTATION  
+**Ảnh hưởng**: `logai/features/feature_engine.py`, `logai/storage/dedup.py`, `logai/config.py`, `config.yaml`, `logai/realtime/realtime_pipeline.py`, `tests/test_feature_vector_8d.py`, `tests/test_dedup_index.py`
+
+---
+
+### 15.1. Bối cảnh & Điểm nghẽn từ Thực nghiệm Chịu tải
+
+Khi chạy đồng thời 2 hệ thống sinh log (`hdfs_log_generator` và `log_generator_2`) với tổng tải nạp đạt **~1.046 logs/giây** (sinh ~1.883.304 logs trong 30 phút):
+- **Độ ổn định**: Engine chạy liên tục, không crash, không OOM, 0 log lỗi (`logai_events_failed_total = 0`).
+- **Nghẽn thông lượng**: Tốc độ xử lý thực tế chỉ đạt **~120 – 140 logs/giây**, dẫn đến tích tụ backlog hơn **1.368.000 logs** trong Elasticsearch.
+- **Phân tích 2 nguyên nhân cốt lõi**:
+  1. **Nghẽn CPU trong `FeatureEngine` ($O(N)$ linear scan)**:
+     - Hàm `_compute()` trong `logai/features/feature_engine.py` thực hiện 3 lần quét tuyến tính `sum(1 for t in gw.timestamps if t >= cutoff)` trên một deque chứa tới 3.600 giây (1 giờ) lịch sử.
+     - Khi số lượng log tích tụ lên hàng trăm ngàn phần tử, 3 vòng lặp `sum()` ngốn toàn bộ CPU 1 core (~96%), làm throughput tụt dần theo thời gian.
+  2. **Nghẽn Disk I/O và CPU Serialization trong `DedupIndex`**:
+     - Mỗi khi hoàn thành micro-batch 500 logs (`predict_batch_size = 500`), hàm `_flush_batch()` gọi `dedup.gc()`, thực hiện `json.dump` toàn bộ 200.000 ID (~4.4 MB) và ghi đè file đĩa `dedup_index.json`.
+     - Với tốc độ 500 logs/s, tiến trình thực hiện ghi 4.4 MB mỗi giây (tổng cộng ghi **>10.9 GB Block I/O** chỉ trong 1 giờ), gây lãng phí chu kỳ CPU và nghẽn I/O đĩa.
+
+---
+
+### 15.2. Chi tiết Giải pháp Kỹ thuật
+
+#### Bước 1: Tối ưu `FeatureEngine` từ $O(N)$ về $O(1)$
+- Cấu trúc lại `_GroupWindow` để quản lý 3 deques riêng biệt tương ứng với các cửa sổ thời gian (`ts_10s`, `ts_1m`, `ts_5m`).
+- Khi tiếp nhận log mới (`update`):
+  - Append timestamp vào cả 3 deques.
+  - Xén phần tử cũ ở đầu hàng đợi (`popleft()`) theo từng ngưỡng thời gian tương ứng (`w10`, `w1m`, `w5m`). Chi phí thao tác là $O(1)$ amortized.
+- Khi tính toán đặc trưng (`_compute`):
+  - Lấy số lượng sự kiện tức thì qua `len(gw.ts_10s)`, `len(gw.ts_1m)`, `len(gw.ts_5m)` với độ phức tạp $O(1)$ tuyệt đối (thao tác trực tiếp trên C struct field của Python `collections.deque`).
+  - Triệt tiêu hoàn toàn các vòng lặp `sum(1 for t in ...)`.
+  - Giữ thuộc tính `timestamps = ts_5m` để tương thích ngược với các test case hiện có.
+
+#### Bước 2: Throttling Flush cho `DedupIndex`
+- Bổ sung cấu hình `dedup_flush_interval_seconds` (mặc định 30 giây) trong `ReliabilityConfig` và `config.yaml`.
+- Thêm cờ `force: bool = False` vào `DedupIndex.flush()` và `DedupIndex.gc()`.
+- Trong chu trình chạy thông thường (`_flush_batch`), `dedup.gc()` chỉ thực hiện ghi đĩa nếu `_dirty` và đã trôi qua ít nhất 30 giây kể từ lần ghi gần nhất.
+- Khi pipeline dừng (`shutdown` / graceful stop) hoặc khi có yêu cầu ép buộc, gọi `dedup.flush(force=True)` để ghi đĩa ngay lập tức.
+- Giảm tần suất ghi đĩa 4.4 MB từ 1-2 lần/giây xuống còn 1 lần mỗi 30 giây (giảm **97% Disk I/O**).
+
+---
+
+### 15.3. Phân tích Thay đổi Input, Output & Hợp đồng Dữ liệu (Contracts)
+
+| Hạng mục | Trạng thái cũ | Trạng thái mới | Ghi chú tương thích |
+|---|---|---|---|
+| **API `FeatureEngine.update()`** | `(group_id, ts) -> FeatureVector` | `(group_id, ts) -> FeatureVector` | Không đổi signature, tính toán 8D vector tương đương toán học 100% |
+| **API `FeatureEngine.snapshot()`** | `(group_id, ts) -> FeatureVector` | `(group_id, ts) -> FeatureVector` | Không đổi signature |
+| **API `DedupIndex.flush()`** | `flush()` | `flush(force: bool = False)` | Tương thích ngược, `force=True` khi shutdown |
+| **API `DedupIndex.gc()`** | `gc() -> int` | `gc(force: bool = False) -> int` | Tương thích ngược |
+| **Cấu hình `ReliabilityConfig`** | 5 fields | Thêm `dedup_flush_interval_seconds: float = 30.0` | Có giá trị mặc định, không phá vỡ code cũ |
+| **File `dedup_index.json`** | JSON list 200k IDs | JSON list 200k IDs | Không đổi schema dữ liệu |
+
+---
+
+### 15.4. Danh sách File Tác động
+
+1. `logai/features/feature_engine.py`: Refactor `_GroupWindow` và phương thức tính `_compute` sang $O(1)$.
+2. `logai/storage/dedup.py`: Thêm cơ chế kiểm tra `flush_interval_seconds` và tham số `force`.
+3. `logai/config.py`: Thêm `dedup_flush_interval_seconds: float = 30.0` vào `ReliabilityConfig`.
+4. `config.yaml`: Thêm `dedup_flush_interval_seconds: 30` vào section `reliability`.
+5. `logai/realtime/realtime_pipeline.py`: Truyền config vào `DedupIndex` và gọi `dedup.flush(force=True)` khi dừng.
+6. `tests/test_feature_vector_8d.py`: Thêm unit test kiểm tra $O(1)$ performance và tính nhất quán toán học.
+7. `tests/test_dedup_index.py`: Thêm unit test kiểm tra cơ chế throttling flush và force flush.
+
+---
+
+### 15.5. Kế hoạch Thực hiện & Checklist (Action Items)
+
+- [ ] **Nhiệm vụ 1**: Sửa `logai/features/feature_engine.py` chuyển sliding window sang 3 deques $O(1)$.
+- [ ] **Nhiệm vụ 2**: Sửa `logai/storage/dedup.py` bổ sung throttling flush và tham số `force`.
+- [ ] **Nhiệm vụ 3**: Cập nhật `logai/config.py`, `config.yaml` và `logai/realtime/realtime_pipeline.py` để kết nối cấu hình `dedup_flush_interval_seconds`.
+- [ ] **Nhiệm vụ 4**: Viết unit test mới trong `tests/test_feature_vector_8d.py` và `tests/test_dedup_index.py`.
+- [ ] **Nhiệm vụ 5**: Chạy toàn bộ test suite hồi quy (`PYTHONPATH=. .venv/bin/pytest -v`) đảm bảo 100% tests pass.
+- [ ] **Nhiệm vụ 6**: Rebuild Docker image và nghiệm thu thông lượng xử lý backlog thực tế (> 1.500 logs/s).
+
+
