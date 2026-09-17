@@ -35,6 +35,8 @@ services:
       - hf-cache:/root/.cache/huggingface   # persist embedding model (~90MB)
     networks:
       - aiops-net
+    depends_on:
+      - logai-web
     restart: unless-stopped
 
   # ── Training (one-off job; NOT started by `up`, only via `run`) ─────────
@@ -50,6 +52,23 @@ services:
     networks:
       - aiops-net
     command: ["python", "scripts/run_training.py", "--lookback-hours", "24"]
+
+  # ── Template Explorer Web UI (started automatically with logai-engine) ──
+  logai-web:
+    build: .
+    image: logai-engine
+    container_name: logai-web
+    ports:
+      - "5555:5555"
+    volumes:
+      # Read the live engine state; the explorer must never mutate it.
+      - logai-data:/app/data:ro
+    networks:
+      - aiops-net
+    environment:
+      - LOGAI_WEB_DATA_DIR=/app/data
+      - PYTHONPATH=/app
+    command: ["python", "scripts/run_web.py", "--host", "0.0.0.0", "--port", "5555", "--data-dir", "/app/data"]
 
   # ── Grafana (optional; only with `--profile ui`) ────────────────────────
   grafana:

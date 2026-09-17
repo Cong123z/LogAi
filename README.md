@@ -94,6 +94,34 @@ curl http://localhost:9108/metrics | grep log_anomaly_score
 
 Prometheus: http://localhost:9090 · Grafana: http://localhost:3000 (admin/admin)
 
+### Template Explorer web UI
+
+The optional Flask Template Explorer reads the same persisted registry files as
+the engine (`template_registry.json` and `group_registry.json`). In Docker it
+mounts the shared `logai-data` volume at `/app/data`, so it displays the actual
+templates produced by training/realtime rather than demo data.
+
+Start it with:
+
+```bash
+docker compose up -d logai-engine
+```
+
+The realtime engine starts the web UI automatically via `depends_on`. Then open
+http://localhost:5555. The UI supports known/unknown status tabs,
+service and level filters, free-text search, sortable columns, pagination,
+auto-refresh, and a detail view for each template.
+The page also includes a Semantic Groups table showing every entry currently
+stored in the live `group_registry.json`, including its group ID, service,
+representative template, documentation status, and event count. The same data
+is available from `GET /api/groups`.
+
+For a local run against a mounted/copied data directory:
+
+```bash
+LOGAI_WEB_DATA_DIR=data python scripts/run_web.py
+```
+
 ### Chạy local không cần Docker
 
 ```bash

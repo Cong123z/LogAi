@@ -13,3 +13,5 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+=3.0.0
+*.log

@@ -8,6 +8,8 @@ __pycache__/
 # ===== Version Control =====
 .git/
 .gitignore
+.agents/
+.codex/
 
 # ===== Runtime State (volume-mounted, not baked into image) =====
 data/
@@ -36,3 +38,7 @@ prometheus.yml
 
 # ===== Gemini =====
 .gemini/
+
+# Accidental package-install output / local artifacts
+=3.0.0
+*.log

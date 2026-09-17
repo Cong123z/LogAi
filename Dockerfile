@@ -2,6 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app
+
 COPY requirements.txt .
 
 # Single layer: install build tools -> compile packages -> remove build tools & all caches.
@@ -24,7 +26,7 @@ COPY . .
 
 RUN mkdir -p /app/data/models
 
-EXPOSE 9108
+EXPOSE 9108 5555
 
 # Default: run the realtime pipeline. Training is a one-off job, run via:
 #   docker compose run --rm logai-engine python scripts/run_training.py

@@ -70,7 +70,8 @@ class TrainingPipeline:
         checkpoint_store: Optional[CheckpointStore] = None,
         dedup_buffer_size: Optional[int] = None,
     ) -> None:
-        logger.info("Training pipeline started...")
+        t_start_total = time.time()
+        logger.info("=== Training pipeline started ===")
         # Phase 1: Stream parse batches into Drain3 with LocalTrainingDedup & Checkpoint
         if checkpoint_store is None or checkpoint_store.get_search_after() is None:
             self.event_index.clear()
@@ -88,12 +89,15 @@ class TrainingPipeline:
         self._match_documentation()
         grouped_by_group = self._group_events(template_to_group)
         self._train_anomaly_models(grouped_by_group)
+
+        logger.info("Phase 10: Persisting all registries and cleaning temporary indexes...")
         self._flush_all()
         if checkpoint_store is not None:
             checkpoint_store.clear()
         self.event_index.clear()
         logger.info(
-            "Training pipeline complete: %d templates, %d groups",
+            "=== Training pipeline complete in %.2fs: %d templates, %d groups successfully saved ===",
+            time.time() - t_start_total,
             len(self.template_registry.all_templates()),
             len(self.group_registry.all_groups()),
         )
@@ -137,6 +141,7 @@ class TrainingPipeline:
 
         total_batches = 0
         parsed_count = 0
+        t_phase1 = time.time()
 
         for item in batch_stream:
             if isinstance(item, tuple) and len(item) == 2:
@@ -164,30 +169,29 @@ class TrainingPipeline:
             self.event_index.append_batch(parsed_batch)
             parsed_count += len(parsed_batch)
 
+            if total_batches % 100 == 0:
+                logger.info(
+                    "Phase 1 progress: Parsed %d events across %d batches...",
+                    parsed_count,
+                    total_batches,
+                )
+
             # Advance isolated training checkpoint only after durable index.
             if checkpoint_store is not None and cursor is not None:
                 checkpoint_store.set_search_after(cursor, flush=True)
 
         logger.info(
-            "Phase 1 complete: parsed %d events across %d batches (dropped %d duplicates, %d templates)",
+            "Phase 1 complete in %.2fs: Parsed %d events across %d batches (dropped %d duplicates)",
+            time.time() - t_phase1,
             parsed_count,
             total_batches,
             dedup_buffer.duplicates_dropped,
-            len({record.get("template_id") for record in self.event_index.records()}),
         )
 
     def _rebuild_template_registry(self) -> None:
-        """Rebuild template aggregates from the durable event index.
-
-        ``template_text`` is taken from Drain3's *current* cluster template
-        rather than the per-event ``template_text`` captured at parse time.
-        The first event of a cluster is emitted before Drain3 has a second
-        sample to generalise against, so its recorded ``template_text`` is the
-        raw log line (concrete IPs/IDs/sizes). By the time this runs the miner
-        has consumed every historical event, so ``get_template()`` returns the
-        converged, wildcarded (``<*>``) template - cleaner for both the
-        registry display and the SentenceTransformer embeddings computed next.
-        """
+        """Rebuild template aggregates from the durable event index."""
+        logger.info("Phase 2: Rebuilding template registry from event index...")
+        t_phase2 = time.time()
         states: Dict[str, TemplateState] = {}
         seen_event_ids: Set[str] = set()
         for record in self.event_index.records():
@@ -232,6 +236,11 @@ class TrainingPipeline:
             ):
                 state.level = event_level
         self.template_registry.replace_all(list(states.values()))
+        logger.info(
+            "Phase 2 complete in %.2fs: Rebuilt %d unique templates",
+            time.time() - t_phase2,
+            len(states),
+        )
 
     def _generalized_template_text(self, template_id: str) -> Optional[str]:
         """Return Drain3's current generalised template for ``template_id``.
@@ -278,17 +287,27 @@ class TrainingPipeline:
 
     def _embed_templates(self) -> None:
         templates = self.template_registry.all_templates()
+        logger.info("Phase 3: Generating embeddings for %d templates...", len(templates))
+        t_phase3 = time.time()
         ids = [t.template_id for t in templates]
         texts = [t.template_text for t in templates]
         embeddings = self.embedder.embed(texts)
         for tid, emb in zip(ids, embeddings):
             self.template_registry.set_embedding(tid, emb)
+        logger.info(
+            "Phase 3 complete in %.2fs: Generated embeddings for %d templates",
+            time.time() - t_phase3,
+            len(templates),
+        )
 
     def _cluster_templates(self) -> Dict[str, str]:
         embeddings_map = self.template_registry.all_embeddings()
         ids = list(embeddings_map.keys())
         if not ids:
+            logger.info("Phase 4: No template embeddings to cluster")
             return {}
+        logger.info("Phase 4: Clustering %d templates using HDBSCAN...", len(ids))
+        t_phase4 = time.time()
         matrix = np.array([embeddings_map[i] for i in ids])
         raw_labels = self.clusterer.cluster(ids, matrix)
 
@@ -302,6 +321,12 @@ class TrainingPipeline:
                 group_id = f"G{label:04d}"
             template_to_group[tid] = group_id
             self.template_registry.set_group(tid, group_id)
+        logger.info(
+            "Phase 4 complete in %.2fs: Clustered %d templates into %d groups",
+            time.time() - t_phase4,
+            len(ids),
+            len(set(template_to_group.values())),
+        )
         return template_to_group
 
     def _build_group_registry(self, template_to_group: Dict[str, str]) -> None:
@@ -311,6 +336,8 @@ class TrainingPipeline:
         every template, so rebuilding an event-to-group index here would add a
         full O(N) pass and duplicate event references unnecessarily.
         """
+        logger.info("Phase 5: Building group registry...")
+        t_phase5 = time.time()
         group_templates: Dict[str, List[str]] = defaultdict(list)
         for tid, gid in template_to_group.items():
             group_templates[gid].append(tid)
@@ -337,17 +364,33 @@ class TrainingPipeline:
             )
             self.group_registry.upsert(state, flush=False)
         self.group_registry.flush()
+        logger.info(
+            "Phase 5 complete in %.2fs: Saved %d groups",
+            time.time() - t_phase5,
+            len(group_templates),
+        )
 
     def _compute_centroids(self) -> None:
+        logger.info("Phase 6: Computing cluster centroids for groups...")
+        t_phase6 = time.time()
         embeddings_map = self.template_registry.all_embeddings()
+        count = 0
         for group in self.group_registry.all_groups():
             vecs = [embeddings_map[t] for t in group.template_ids if t in embeddings_map]
             if not vecs:
                 continue
             centroid = self.clusterer.compute_centroid(np.array(vecs))
             self.group_registry.set_centroid(group.group_id, centroid)
+            count += 1
+        logger.info(
+            "Phase 6 complete in %.2fs: Computed centroids for %d groups",
+            time.time() - t_phase6,
+            count,
+        )
 
     def _match_documentation(self) -> None:
+        logger.info("Phase 7: Matching documentation with cluster centroids...")
+        t_phase7 = time.time()
         if not self.doc_matcher.ready:
             logger.warning(
                 "Documentation matcher is unavailable; training will keep groups undocumented"
@@ -372,6 +415,11 @@ class TrainingPipeline:
             group.error_code = match.error_code
             self.group_registry.upsert(group, flush=False)
         self.group_registry.flush()
+        logger.info(
+            "Phase 7 complete in %.2fs: Matched documentation for %d groups",
+            time.time() - t_phase7,
+            len(matches),
+        )
 
     def _group_events(
         self, template_to_group: Dict[str, str]
@@ -383,6 +431,8 @@ class TrainingPipeline:
         mirrors the realtime pipeline's window key exactly - train/serve parity
         requires both to bucket by (service, group), not by group alone.
         """
+        logger.info("Phase 8: Grouping and sorting event timestamps by (service, group)...")
+        t_phase8 = time.time()
         result: Dict[Tuple[str, str], List[float]] = defaultdict(list)
         records = sorted(self.event_index.records(), key=lambda r: float(r["timestamp"]))
         for record in records:
@@ -391,11 +441,19 @@ class TrainingPipeline:
                 result[(str(record.get("service") or "unknown"), gid)].append(
                     float(record["timestamp"])
                 )
+        logger.info(
+            "Phase 8 complete in %.2fs: Grouped %d events into %d (service, group) windows",
+            time.time() - t_phase8,
+            len(records),
+            len(result),
+        )
         return result
 
     def _train_anomaly_models(
         self, grouped: Dict[Tuple[str, str], List[float]]
     ) -> None:
+        logger.info("Phase 9: Extracting feature vectors and training global anomaly model...")
+        t_phase9 = time.time()
         all_feature_vectors: List[FeatureVector] = []
         for window_key, timestamps in grouped.items():
             engine = FeatureEngine(self.config.features)
@@ -404,11 +462,11 @@ class TrainingPipeline:
                 all_feature_vectors.append(fv)
 
         logger.info(
-            "Collected %d total feature vectors across %d (service, group) windows "
-            "for global model training",
+            "Phase 9: Collected %d total feature vectors across %d (service, group) windows for global model training",
             len(all_feature_vectors),
             len(grouped),
         )
+        t_fit = time.time()
         trained = self.anomaly_model.train(all_feature_vectors)
         if not trained:
             logger.warning(
@@ -416,6 +474,10 @@ class TrainingPipeline:
                 len(all_feature_vectors),
                 self.config.anomaly.min_training_samples,
             )
+        else:
+            logger.info("Phase 9: Model fitting complete in %.2fs", time.time() - t_fit)
+
+        logger.info("Phase 9 complete in %.2fs", time.time() - t_phase9)
 
     def _flush_all(self) -> None:
         self.template_registry.flush()
