@@ -177,9 +177,13 @@ class ElasticsearchCollector:
         complete batch and flushing durable state.
         """
         search_after = self.checkpoint.get_search_after()
+        if search_after and len(search_after) >= 2 and isinstance(search_after[1], str):
+            # Migration safety: old checkpoint used string _id, which fails with _doc sort.
+            search_after = [search_after[0], 0]
+
         body: Dict[str, Any] = {
             "size": self.config.batch_size,
-            "sort": [{"@timestamp": "asc"}, {"_id": "asc"}],
+            "sort": [{"@timestamp": "asc"}, {"_doc": "asc"}],
             "query": {"match_all": {}},
         }
         if search_after:
@@ -242,10 +246,13 @@ class ElasticsearchCollector:
         total_fetched = 0
 
         while total_fetched < max_docs:
+            if search_after and len(search_after) >= 2 and isinstance(search_after[1], str):
+                search_after = [search_after[0], 0]
+
             current_limit = min(chunk_size, max_docs - total_fetched)
             body: Dict[str, Any] = {
                 "size": current_limit,
-                "sort": [{"@timestamp": "asc"}, {"_id": "asc"}],
+                "sort": [{"@timestamp": "asc"}, {"_doc": "asc"}],
                 "query": {"range": {"@timestamp": range_filter}},
             }
             if search_after:

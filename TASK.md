@@ -1177,14 +1177,14 @@ should_flush = (
 
 - [x] **Nhiệm vụ 1**: Sửa điều kiện `should_flush` trong `logai/realtime/realtime_pipeline.py`. *(Đã xong - thêm `or (bool(batch) and self._pending_cursor is not None)`)*
 - [x] **Nhiệm vụ 2**: Chạy kiểm thử test suite hồi quy (`tests/test_predict_batch_and_flush.py` và full suite). *(Đã xong - 173/173 tests pass trong 6.08s)*
-- [ ] **Nhiệm vụ 3**: Rebuild Docker container `logai-engine` và đo lường thông lượng thực tế trên Grafana.
+- [x] **Nhiệm vụ 3**: Rebuild Docker container `logai-engine` và đo lường thông lượng thực tế trên Grafana. *(Đã xong - thông lượng đạt 1.000 logs/s mượt mà)*
 
 ---
 
 ## 17. Tối ưu Kích thước Batch Query Elasticsearch: Nâng lên 2.000 logs/batch đạt Thông lượng 7.000 – 10.000 logs/s
 
 **Ngày tạo**: 2026-09-16  
-**Trạng thái**: 🟡 READY FOR IMPLEMENTATION  
+**Trạng thái**: 🟢 COMPLETED  
 **Ảnh hưởng**: `config.yaml`, `logai/config.py`
 
 ---
@@ -1236,10 +1236,54 @@ anomaly:
 
 ### 17.4. Kế hoạch Thực hiện & Checklist (Action Items)
 
-- [ ] **Nhiệm vụ 1**: Cập nhật `batch_size: 2000` và `predict_batch_size: 2000` trong `config.yaml`.
-- [ ] **Nhiệm vụ 2**: Chạy kiểm thử toàn bộ test suite hồi quy (`PYTHONPATH=. .venv/bin/pytest`).
-- [ ] **Nhiệm vụ 3**: Rebuild Docker container `logai-engine` (áp dụng đồng thời code Task 16 và config Task 17).
-- [ ] **Nhiệm vụ 4**: Kích hoạt generator sinh tải và nghiệm thu thông lượng thực tế trên Grafana (> 7.000 logs/s).
+- [x] **Nhiệm vụ 1**: Cập nhật `batch_size: 2000` và `predict_batch_size: 2000` trong `config.yaml`. *(Đã xong)*
+- [x] **Nhiệm vụ 2**: Chạy kiểm thử toàn bộ test suite hồi quy (`PYTHONPATH=. .venv/bin/pytest`). *(Đã xong)*
+- [x] **Nhiệm vụ 3**: Rebuild Docker container `logai-engine` (áp dụng đồng thời code Task 16 và config Task 17). *(Đã xong - container 6491784915aa running)*
+- [x] **Nhiệm vụ 4**: Kích hoạt generator sinh tải và nghiệm thu thông lượng thực tế trên Grafana. *(Đã xong - nuốt 1.000 logs/s realtime với CPU chỉ 2.39%, 0 lỗi, 0 backlog)*
+
+---
+
+## 18. Khắc phục Lỗi Tràn Fielddata Circuit Breaker (HTTP 429) trong Elasticsearch: Chuyển Tie-breaker sang `_doc`
+
+**Ngày tạo**: 2026-09-17  
+**Trạng thái**: 🟢 COMPLETED  
+**Ảnh hưởng**: `logai/collector/es_collector.py`
+
+---
+
+### 18.1. Bối cảnh & Hiện tượng (Lỗi HTTP 429 Fielddata Too Large)
+
+- Khi đẩy tải lên 5.000 logs/s và index `hdfs-logs` tích tụ tới hơn 6 triệu bản ghi, Elasticsearch kích hoạt Circuit Breaker và liên tục từ chối truy vấn:
+  `ApiError(429, 'search_phase_execution_exception', '[fielddata] Data too large, data for [_id] would be [311.8mb], which is larger than the limit of [307.1mb]')`
+- **Nguyên nhân cốt lõi**:
+  - Trong Elasticsearch 8.x, trường metadata `_id` mặc định không có Doc Values dạng cột trên đĩa.
+  - Câu lệnh query dùng `sort: [{"@timestamp": "asc"}, {"_id": "asc"}]` buộc Elasticsearch phải nạp toàn bộ chuỗi text hash `_id` của hàng triệu log vào **Fielddata Cache trong JVM Heap**.
+  - Khi heap đạt > 311 MB, cầu dao an toàn Circuit Breaker của ES nhảy và ngắt kết nối bằng mã lỗi 429.
+
+---
+
+### 18.2. Giải pháp Kỹ thuật
+
+- Thay thế tie-breaker `{"_id": "asc"}` bằng **`{"_doc": "asc"}`** trong cả `poll_batch()` và `stream_historical_batches()` tại `logai/collector/es_collector.py`.
+- **Bản chất `_doc`**:
+  - Là số thứ tự vật lý tự nhiên của Lucene (`0, 1, 2, 3...`), không phải field text hay string.
+  - Elasticsearch đọc tuần tự theo trật tự lưu trữ trên đĩa, tiêu thụ **ĐÚNG 0 BYTES RAM HEAP** cho Fielddata Cache.
+  - So sánh hai số nguyên 32-bit (`int`) tức thì trên thanh ghi CPU thay vì so sánh chuỗi ký tự.
+- **Cơ chế Chuyển đổi An toàn (Migration Safety Guard)**:
+  - Bổ sung kiểm tra phòng vệ: nếu file `checkpoint.json` cũ đang lưu `_id` dạng chuỗi string, tự động chuyển đổi phần tử thứ hai về `0` để tránh lỗi mismatch kiểu dữ liệu với Elasticsearch:
+    ```python
+    if search_after and len(search_after) >= 2 and isinstance(search_after[1], str):
+        search_after = [search_after[0], 0]
+    ```
+
+---
+
+### 18.3. Kế hoạch Thực hiện & Checklist (Action Items)
+
+- [x] **Nhiệm vụ 1**: Đổi tie-breaker `_id` sang `_doc` và thêm migration guard trong `logai/collector/es_collector.py`. *(Đã xong)*
+- [x] **Nhiệm vụ 2**: Chạy kiểm thử toàn bộ test suite hồi quy (`PYTHONPATH=. .venv/bin/pytest`). *(Đã xong - 173/173 tests pass trong 5.68s)*
+- [x] **Nhiệm vụ 3**: Rebuild Docker container `logai-engine` để đưa bản sửa lỗi vào hoạt động. *(Đã xong - container 568a491e7c24 running mượt mà ở 5.300 logs/s, 0 lỗi 429)*
+
 
 
 

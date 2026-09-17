@@ -8,7 +8,7 @@ elasticsearch:
     - "http://elasticsearch:9200"
   index: "hdfs-logs"
   poll_interval_seconds: 1
-  batch_size: 500
+  batch_size: 2000
   request_timeout_seconds: 30
 
 drain3:
@@ -27,7 +27,7 @@ drain3:
       mask_with: '*'
 
 embedding:
-  model_name: "sentence-transformers/all-mpnet-base-v2"
+  model_name: "sentence-transformers/all-minilm-l6-v2"
   device: "cpu"
   batch_size: 64
 
@@ -55,7 +55,7 @@ anomaly:
   random_state: 42
   min_training_samples: 30
   score_alert_threshold: 0.6
-  predict_batch_size: 500
+  predict_batch_size: 2000
   predict_max_wait_seconds: 1.0
 
 alert:

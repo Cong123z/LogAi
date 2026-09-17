@@ -1,0 +1,38 @@
+# ===== Python / Virtual Environments =====
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ===== Version Control =====
+.git/
+.gitignore
+
+# ===== Runtime State (volume-mounted, not baked into image) =====
+data/
+
+# ===== Tests & Test Caches =====
+tests/
+.pytest_cache/
+
+# ===== Documentation (not used by application code) =====
+ARCHITECTURE.md
+README.md
+TASK.md
+ISSUES_FIXED.md
+KNOWN_ISSUES.md
+
+# ===== Docker & Orchestration (not needed inside image) =====
+Dockerfile
+docker-compose.yml
+prometheus.yml
+
+# ===== IDE / Tool Settings =====
+.claude/
+.vscode/
+.idea/
+.DS_Store
+
+# ===== Gemini =====
+.gemini/

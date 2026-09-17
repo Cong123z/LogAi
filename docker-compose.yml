@@ -1,33 +1,30 @@
-version: "3.8"
+# Deploy LogAI engine ALONGSIDE an already-running stack (Elasticsearch +
+# Prometheus + log generator) that lives on the external `aiops-net` network.
+#
+# This file does NOT start its own Elasticsearch or Prometheus — it reuses the
+# ones already running. It only builds/runs the LogAI engine and (optionally)
+# Grafana, attaching them to `aiops-net` so `http://elasticsearch:9200` and the
+# `logai-engine` hostname resolve across the shared network.
+#
+# Usage:
+#   1) Build once:      docker compose -f docker-compose.reuse.yml build
+#   2) Train (one-off): docker compose -f docker-compose.reuse.yml run --rm logai-training
+#        custom range:  docker compose -f docker-compose.reuse.yml run --rm logai-training \
+#                           python scripts/run_training.py --lookback-hours 48
+#   3) Realtime:        docker compose -f docker-compose.reuse.yml up -d logai-engine
+#   4) Grafana (opt):   docker compose -f docker-compose.reuse.yml --profile ui up -d grafana
+#
+# Named volumes use explicit `name:` so they match the bare volumes created by
+# any `docker run -v logai-data ...` commands (no project-name prefixing) — the
+# training job and the realtime service therefore share the same data + model.
+name: logai
 
 services:
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-    ports:
-      - "9200:9200"
-    volumes:
-      - es-data:/usr/share/elasticsearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-  # Your own log-generator app should write documents into `app-logs-*`
-  # indices in Elasticsearch, e.g.:
-  #   POST /app-logs-2026.09.07/_doc
-  #   { "@timestamp": "...", "service": "payment", "level": "ERROR",
-  #     "message": "DB connection timeout host=10.0.0.1" }
-
+  # ── Realtime pipeline (long-running; default `up` target) ───────────────
   logai-engine:
     build: .
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
+    image: logai-engine
+    container_name: logai-engine
     environment:
       - LOGAI_ES_HOSTS=http://elasticsearch:9200
       - LOGAI_METRICS_PORT=9108
@@ -35,33 +32,47 @@ services:
       - "9108:9108"
     volumes:
       - logai-data:/app/data
-      - hf-cache:/root/.cache/huggingface   # persist downloaded embedding model (~90MB)
+      - hf-cache:/root/.cache/huggingface   # persist embedding model (~90MB)
+    networks:
+      - aiops-net
     restart: unless-stopped
 
-  prometheus:
-    image: prom/prometheus:v2.54.1
-    depends_on:
-      - logai-engine
+  # ── Training (one-off job; NOT started by `up`, only via `run`) ─────────
+  logai-training:
+    build: .
+    image: logai-engine
+    profiles: ["training"]
+    environment:
+      - LOGAI_ES_HOSTS=http://elasticsearch:9200
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prom-data:/prometheus
-    ports:
-      - "9090:9090"
+      - logai-data:/app/data
+      - hf-cache:/root/.cache/huggingface
+    networks:
+      - aiops-net
+    command: ["python", "scripts/run_training.py", "--lookback-hours", "24"]
 
+  # ── Grafana (optional; only with `--profile ui`) ────────────────────────
   grafana:
     image: grafana/grafana:11.2.0
-    depends_on:
-      - prometheus
+    profiles: ["ui"]
+    container_name: logai-grafana
     ports:
       - "3000:3000"
-    volumes:
-      - grafana-data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - aiops-net
+
+networks:
+  aiops-net:
+    external: true
 
 volumes:
-  es-data:
   logai-data:
+    name: logai-data
   hf-cache:
-  prom-data:
+    name: hf-cache
   grafana-data:
+    name: logai-grafana-data
