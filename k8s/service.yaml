@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: logai-web
+  labels:
+    app.kubernetes.io/name: logai
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP  # Change to NodePort or LoadBalancer if direct external access is needed
+  selector:
+    app.kubernetes.io/name: logai
+  ports:
+    - name: http-web
+      port: 5555
+      targetPort: web
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logai-metrics
+  labels:
+    app.kubernetes.io/name: logai
+    app.kubernetes.io/component: metrics
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9108"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: logai
+  ports:
+    - name: metrics
+      port: 9108
+      targetPort: metrics
+      protocol: TCP

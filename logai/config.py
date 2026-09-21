@@ -205,5 +205,14 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         cfg.elasticsearch.password = os.environ["LOGAI_ES_PASSWORD"]
     if os.environ.get("LOGAI_METRICS_PORT"):
         cfg.metrics.http_port = int(os.environ["LOGAI_METRICS_PORT"])
+    if os.environ.get("LOGAI_METRICS_HOST"):
+        cfg.metrics.http_host = os.environ["LOGAI_METRICS_HOST"]
+    if os.environ.get("LOGAI_STORAGE_BASE_DIR"):
+        base_dir = os.environ["LOGAI_STORAGE_BASE_DIR"]
+        cfg.storage.base_dir = base_dir
+        cfg.storage.model_dir = str(Path(base_dir) / "models")
+        cfg.drain3.persistence_path = str(Path(base_dir) / "drain3_state.bin")
+    if os.environ.get("LOGAI_EMBEDDING_MODEL"):
+        cfg.embedding.model_name = os.environ["LOGAI_EMBEDDING_MODEL"]
 
     return cfg

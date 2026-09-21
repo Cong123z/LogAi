@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logai
+  labels:
+    app.kubernetes.io/name: logai
+spec:
+  # Exactly 1 replica: ensures a single writer to logai-data-pvc
+  replicas: 1
+  strategy:
+    type: Recreate  # Detach PVC from old pod before attaching to new pod on update
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logai
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logai
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9108"
+        prometheus.io/path: "/metrics"
+    spec:
+      volumes:
+        # ── Shared Data Volume ────────────────────────────────────────────────
+        # Holds template_registry.json, group_registry.json, checkpoints, models.
+        # Shared by both the engine container (RW) and web UI container (RO).
+        - name: logai-data
+          persistentVolumeClaim:
+            claimName: logai-data-pvc
+
+        # ── Hugging Face Model Cache Volume ───────────────────────────────────
+        # Persists sentence-transformers weights across pod restarts (~90MB).
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: logai-hf-cache-pvc
+
+      containers:
+        # ── Container 1: Realtime LogAI Engine ────────────────────────────────
+        - name: logai-engine
+          image: logai-engine:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "scripts/run_realtime.py"]
+          envFrom:
+            - secretRef:
+                name: logai-env
+          ports:
+            - name: metrics
+              containerPort: 9108
+              protocol: TCP
+          volumeMounts:
+            # Read-Write access: writes discovered templates & models to /app/data
+            - name: logai-data
+              mountPath: /app/data
+            # Hugging Face model cache
+            - name: hf-cache
+              mountPath: /app/hf-cache
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          readinessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 20
+
+        # ── Container 2: Template Explorer Web UI (Sidecar) ───────────────────
+        - name: logai-web
+          image: logai-engine:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "scripts/run_web.py"]
+          envFrom:
+            - secretRef:
+                name: logai-env
+          ports:
+            - name: web
+              containerPort: 5555
+              protocol: TCP
+          volumeMounts:
+            # Read-Only access: reads the EXACT same files written by the engine
+            - name: logai-data
+              mountPath: /app/data
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /api/stats
+              port: web
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/stats
+              port: web
+            initialDelaySeconds: 10
+            periodSeconds: 15

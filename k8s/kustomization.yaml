@@ -1,0 +1,96 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+
+# 1. Generates the Kubernetes Secret `logai-env` injected into all containers.
+secretGenerator:
+  - name: logai-env
+    envs:
+      - .env
+
+# 2. Generates parameter map used by Kustomize replacements to dynamically
+#    substitute ports, images, and volume sizes across all Kubernetes manifests.
+configMapGenerator:
+  - name: logai-manifest-params
+    envs:
+      - .env
+
+replacements:
+  # ── Container Image Substitution ────────────────────────────────────────────
+  # Dynamically sets container images in deployment from LOGAI_IMAGE in .env
+  - source:
+      kind: ConfigMap
+      name: logai-manifest-params
+      fieldPath: data.LOGAI_IMAGE
+    targets:
+      - select:
+          kind: Deployment
+          name: logai
+        fieldPaths:
+          - spec.template.spec.containers.[name=logai-engine].image
+          - spec.template.spec.containers.[name=logai-web].image
+
+  # ── Prometheus Metrics Port Substitution ────────────────────────────────────
+  # Dynamically updates containerPort, Service port, and Prometheus annotation
+  - source:
+      kind: ConfigMap
+      name: logai-manifest-params
+      fieldPath: data.LOGAI_METRICS_PORT
+    targets:
+      - select:
+          kind: Deployment
+          name: logai
+        fieldPaths:
+          - spec.template.metadata.annotations.[prometheus.io/port]
+          - spec.template.spec.containers.[name=logai-engine].ports.[name=metrics].containerPort
+      - select:
+          kind: Service
+          name: logai-metrics
+        fieldPaths:
+          - metadata.annotations.[prometheus.io/port]
+          - spec.ports.[name=metrics].port
+
+  # ── Template Explorer Web UI Port Substitution ──────────────────────────────
+  # Dynamically updates containerPort and Service port from LOGAI_WEB_PORT in .env
+  - source:
+      kind: ConfigMap
+      name: logai-manifest-params
+      fieldPath: data.LOGAI_WEB_PORT
+    targets:
+      - select:
+          kind: Deployment
+          name: logai
+        fieldPaths:
+          - spec.template.spec.containers.[name=logai-web].ports.[name=web].containerPort
+      - select:
+          kind: Service
+          name: logai-web
+        fieldPaths:
+          - spec.ports.[name=http-web].port
+
+  # ── Persistent Storage Sizes Substitution ───────────────────────────────────
+  # Dynamically updates PVC storage requests from .env
+  - source:
+      kind: ConfigMap
+      name: logai-manifest-params
+      fieldPath: data.LOGAI_DATA_STORAGE_SIZE
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+          name: logai-data-pvc
+        fieldPaths:
+          - spec.resources.requests.storage
+  - source:
+      kind: ConfigMap
+      name: logai-manifest-params
+      fieldPath: data.LOGAI_HF_STORAGE_SIZE
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+          name: logai-hf-cache-pvc
+        fieldPaths:
+          - spec.resources.requests.storage

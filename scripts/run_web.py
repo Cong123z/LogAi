@@ -12,11 +12,14 @@ from logai.web.app import create_app
 
 def main():
     parser = argparse.ArgumentParser(description="LogAI Template Explorer")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=5555, help="Port")
+    parser.add_argument("--host", default=os.environ.get("LOGAI_WEB_HOST", "0.0.0.0"), help="Bind address")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("LOGAI_WEB_PORT", "5555")), help="Port")
     parser.add_argument(
         "--data-dir",
-        default=os.environ.get("LOGAI_WEB_DATA_DIR", "data"),
+        default=os.environ.get(
+            "LOGAI_WEB_DATA_DIR",
+            os.environ.get("LOGAI_STORAGE_BASE_DIR", "data"),
+        ),
         help="Directory containing template_registry.json and group_registry.json",
     )
     parser.add_argument("--log-level", default="INFO")

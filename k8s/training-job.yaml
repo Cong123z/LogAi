@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: logai-training
+  labels:
+    app.kubernetes.io/name: logai
+    app.kubernetes.io/component: training
+spec:
+  # Do not keep running if failed multiple times
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: logai
+        app.kubernetes.io/component: training
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+        # Mount the same PVC so trained models and template registries are stored
+        # where the realtime engine and web UI can access them.
+        - name: logai-data
+          persistentVolumeClaim:
+            claimName: logai-data-pvc
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: logai-hf-cache-pvc
+      containers:
+        - name: logai-training
+          image: logai-engine:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - "python"
+            - "scripts/run_training.py"
+            - "--lookback-hours"
+            - "24"
+          envFrom:
+            - secretRef:
+                name: logai-env
+          volumeMounts:
+            - name: logai-data
+              mountPath: /app/data
+            - name: hf-cache
+              mountPath: /app/hf-cache
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"

@@ -1,7 +1,11 @@
 # LogAI Engine configuration.
 # Any value here can be overridden at runtime; ES credentials are best set
 # via environment variables instead (see logai/config.py):
-#   LOGAI_ES_HOSTS, LOGAI_ES_USER, LOGAI_ES_PASSWORD, LOGAI_METRICS_PORT
+#   LOGAI_ES_HOSTS, LOGAI_ES_USER, LOGAI_ES_PASSWORD,
+#   LOGAI_METRICS_PORT, LOGAI_METRICS_HOST,
+#   LOGAI_STORAGE_BASE_DIR,
+#   LOGAI_WEB_PORT, LOGAI_WEB_HOST, LOGAI_WEB_DATA_DIR
+# See .env.example for the full list of supported variables.
 
 elasticsearch:
   hosts:

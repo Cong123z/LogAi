@@ -7,12 +7,12 @@
 # `logai-engine` hostname resolve across the shared network.
 #
 # Usage:
-#   1) Build once:      docker compose -f docker-compose.reuse.yml build
-#   2) Train (one-off): docker compose -f docker-compose.reuse.yml run --rm logai-training
-#        custom range:  docker compose -f docker-compose.reuse.yml run --rm logai-training \
+#   1) Build once:      docker compose -f docker-compose.yml build
+#   2) Train (one-off): docker compose -f docker-compose.yml run --rm logai-training
+#        custom range:  docker compose -f docker-compose.yml run --rm logai-training \
 #                           python scripts/run_training.py --lookback-hours 48
-#   3) Realtime:        docker compose -f docker-compose.reuse.yml up -d logai-engine
-#   4) Grafana (opt):   docker compose -f docker-compose.reuse.yml --profile ui up -d grafana
+#   3) Realtime:        docker compose -f docker-compose.yml up -d logai-engine
+#   4) Grafana (opt):   docker compose -f docker-compose.yml --profile ui up -d grafana
 #
 # Named volumes use explicit `name:` so they match the bare volumes created by
 # any `docker run -v logai-data ...` commands (no project-name prefixing) — the
@@ -26,10 +26,14 @@ services:
     image: logai-engine
     container_name: logai-engine
     environment:
-      - LOGAI_ES_HOSTS=http://elasticsearch:9200
-      - LOGAI_METRICS_PORT=9108
+      - LOGAI_ES_HOSTS=${LOGAI_ES_HOSTS:-http://elasticsearch:9200}
+      - LOGAI_ES_USER=${LOGAI_ES_USER:-}
+      - LOGAI_ES_PASSWORD=${LOGAI_ES_PASSWORD:-}
+      - LOGAI_METRICS_PORT=${LOGAI_METRICS_PORT:-9108}
+      - LOGAI_METRICS_HOST=${LOGAI_METRICS_HOST:-0.0.0.0}
+      - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
     ports:
-      - "9108:9108"
+      - "${LOGAI_METRICS_PORT:-9108}:${LOGAI_METRICS_PORT:-9108}"
     volumes:
       - logai-data:/app/data
       - hf-cache:/root/.cache/huggingface   # persist embedding model (~90MB)
@@ -45,7 +49,10 @@ services:
     image: logai-engine
     profiles: ["training"]
     environment:
-      - LOGAI_ES_HOSTS=http://elasticsearch:9200
+      - LOGAI_ES_HOSTS=${LOGAI_ES_HOSTS:-http://elasticsearch:9200}
+      - LOGAI_ES_USER=${LOGAI_ES_USER:-}
+      - LOGAI_ES_PASSWORD=${LOGAI_ES_PASSWORD:-}
+      - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
     volumes:
       - logai-data:/app/data
       - hf-cache:/root/.cache/huggingface
@@ -59,16 +66,18 @@ services:
     image: logai-engine
     container_name: logai-web
     ports:
-      - "5555:5555"
+      - "${LOGAI_WEB_PORT:-5555}:${LOGAI_WEB_PORT:-5555}"
     volumes:
       # Read the live engine state; the explorer must never mutate it.
       - logai-data:/app/data:ro
     networks:
       - aiops-net
     environment:
-      - LOGAI_WEB_DATA_DIR=/app/data
+      - LOGAI_WEB_PORT=${LOGAI_WEB_PORT:-5555}
+      - LOGAI_WEB_HOST=${LOGAI_WEB_HOST:-0.0.0.0}
+      - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
       - PYTHONPATH=/app
-    command: ["python", "scripts/run_web.py", "--host", "0.0.0.0", "--port", "5555", "--data-dir", "/app/data"]
+    command: ["python", "scripts/run_web.py"]
 
   # ── Grafana (optional; only with `--profile ui`) ────────────────────────
   grafana:
@@ -76,9 +85,9 @@ services:
     profiles: ["ui"]
     container_name: logai-grafana
     ports:
-      - "3000:3000"
+      - "${GRAFANA_PORT:-3000}:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
     volumes:
       - grafana-data:/var/lib/grafana
     networks:
@@ -86,6 +95,7 @@ services:
 
 networks:
   aiops-net:
+    name: ${LOGAI_NETWORK:-aiops-net}
     external: true
 
 volumes:

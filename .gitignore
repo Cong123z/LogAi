@@ -2,6 +2,9 @@
 data/
 !data/.gitkeep
 
+# Environment overrides (may contain secrets) — see .env.example
+.env
+
 # Python
 __pycache__/
 *.pyc
