@@ -52,6 +52,9 @@ nano k8s/.env
 
 **Inside `k8s/.env`:**
 ```ini
+# Container image (change to your registry path if using a private registry)
+LOGAI_IMAGE=logai-engine:latest
+
 # Elasticsearch URL (in-cluster or external)
 LOGAI_ES_HOSTS=http://elasticsearch.default.svc.cluster.local:9200
 LOGAI_ES_USER=elastic
@@ -63,9 +66,11 @@ LOGAI_METRICS_PORT=9108
 # Web UI port
 LOGAI_WEB_PORT=5555
 
-# Storage paths
+# Storage paths & sizes
 LOGAI_STORAGE_BASE_DIR=/app/data
 HF_HOME=/app/hf-cache
+LOGAI_DATA_STORAGE_SIZE=10Gi
+LOGAI_HF_STORAGE_SIZE=5Gi
 ```
 
 ---

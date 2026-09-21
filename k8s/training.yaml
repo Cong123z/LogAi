@@ -1,0 +1,83 @@
+# LogAI environment, persistent storage, and historical training Job.
+# Apply this file first. Apply k8s/logai.yaml only after the Job completes.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logai-env
+type: Opaque
+stringData:
+  LOGAI_ES_HOSTS: "http://elasticsearch.logging.svc:9200"
+  LOGAI_ES_USER: "elastic"
+  LOGAI_ES_PASSWORD: "password"
+  LOGAI_METRICS_PORT: "9108"
+  LOGAI_METRICS_HOST: "0.0.0.0"
+  LOGAI_STORAGE_BASE_DIR: "/app/data"
+  HF_HOME: "/app/hf-cache"
+  LOGAI_WEB_PORT: "5555"
+  LOGAI_WEB_HOST: "0.0.0.0"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logai-data-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logai-hf-cache-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: logai-training
+  labels:
+    app: logai
+    component: training
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: logai
+        component: training
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+        - name: logai-data
+          persistentVolumeClaim:
+            claimName: logai-data-pvc
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: logai-hf-cache-pvc
+      containers:
+        - name: logai-training
+          image: congdock123/logai-engine:latest
+          imagePullPolicy: Always
+          command: ["python", "scripts/run_training.py", "--lookback-hours", "24"]
+          envFrom:
+            - secretRef:
+                name: logai-env
+          volumeMounts:
+            - name: logai-data
+              mountPath: /app/data
+            - name: hf-cache
+              mountPath: /app/hf-cache
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
