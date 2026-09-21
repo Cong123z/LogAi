@@ -47,7 +47,7 @@ doc_matcher:
   seed_corpus_path: "docs/documentation_corpus.yaml"
   overrides_path: "data/documentation_overrides.json"
   status_path: "data/documentation_status.json"
-  similarity_threshold: 0.75
+  similarity_threshold: 0.5
   refresh_interval_seconds: 5
 
 features:
@@ -66,12 +66,12 @@ anomaly:
   predict_max_wait_seconds: 1.0
 
 alert:
-  warm_consecutive: 3
-  alert_consecutive: 8
+  warm_consecutive: 10
+  alert_consecutive: 15
   cool_consecutive: 3
-  score_high: 0.62
+  score_high: 0.65
   score_low: 0.52
-  min_events_1m: 20
+  min_events_1m: 100
 
 training:
   batch_size: 2000
