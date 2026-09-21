@@ -123,6 +123,7 @@ class GroupRegistry:
 
     def __init__(self, storage: StorageConfig):
         base = Path(storage.base_dir)
+        self._lock = threading.RLock()
         self._meta = JSONStore(base / storage.group_registry_file)
         self._centroids = PickleStore(base / storage.group_centroids_file)
         self._centroid_cache: Dict[str, np.ndarray] = self._centroids.load({})
@@ -132,7 +133,40 @@ class GroupRegistry:
         return GroupState(**raw) if raw else None
 
     def upsert(self, state: GroupState, flush: bool = True) -> None:
-        self._meta.set(state.group_id, asdict(state), flush=flush)
+        with self._lock:
+            self._meta.set(state.group_id, asdict(state), flush=flush)
+
+    def touch(
+        self, group_id: str, timestamp: float, new_template_id: Optional[str] = None
+    ) -> GroupState:
+        """Atomically update activity fields without racing documentation refresh."""
+        with self._lock:
+            state = self.get(group_id)
+            if state is None:
+                state = GroupState(group_id=group_id, first_seen=timestamp, last_seen=timestamp)
+            state.last_seen = timestamp
+            state.event_count += 1
+            if new_template_id and new_template_id not in state.template_ids:
+                state.template_ids.append(new_template_id)
+            self._meta.set(group_id, asdict(state), flush=False)
+            return state
+
+    def apply_documentation_updates(self, updates: Dict[str, Dict[str, object]]) -> None:
+        """Update only documentation fields, preserving concurrent activity data."""
+        allowed = {
+            "documented", "documentation_id", "confidence", "error_code",
+            "documentation_source",
+        }
+        with self._lock:
+            for group_id, fields in updates.items():
+                state = self.get(group_id)
+                if state is None:
+                    continue
+                for key, value in fields.items():
+                    if key in allowed:
+                        setattr(state, key, value)
+                self._meta.set(group_id, asdict(state), flush=False)
+            self._meta.flush()
 
     def set_centroid(self, group_id: str, centroid: np.ndarray) -> None:
         self._centroid_cache[group_id] = centroid
@@ -148,5 +182,6 @@ class GroupRegistry:
         return dict(self._centroid_cache)
 
     def flush(self) -> None:
-        self._meta.flush()
-        self._centroids.save(self._centroid_cache)
+        with self._lock:
+            self._meta.flush()
+            self._centroids.save(self._centroid_cache)

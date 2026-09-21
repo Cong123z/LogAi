@@ -137,6 +137,21 @@ class TestDocumentationMatcherResilience(unittest.TestCase):
         self.assertTrue(refreshed)
         self.assertEqual(embedder.calls, 1)
 
+    def test_metadata_only_change_reuses_document_embeddings(self):
+        self._write_valid_corpus()
+        embedder = FakeEmbedder([[1.0, 0.0], [0.0, 1.0]])
+        matcher = DocumentationMatcher(self.config, embedder, self.cache_path)
+        self.corpus_path.write_text(
+            "- id: DOC-1\n  title: Renamed timeout\n"
+            "  text: Database connection timeout\n  error_code: NEW_CODE\n"
+            "- id: DOC-2\n  title: Renamed auth\n"
+            "  text: User authentication failed\n",
+            encoding="utf-8",
+        )
+
+        self.assertTrue(matcher.reload())
+        self.assertEqual(embedder.calls, 1)
+
     def test_repeated_group_centroid_uses_cached_match(self):
         self._write_valid_corpus()
         matcher = DocumentationMatcher(

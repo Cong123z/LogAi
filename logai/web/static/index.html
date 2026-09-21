@@ -48,12 +48,15 @@
     .app { display: flex; min-height: 100vh; }
     .sidebar {
       width: 220px;
+      height: 100vh;
       background: var(--bg-card);
       border-right: 1px solid var(--border);
       padding: 20px 0;
       flex-shrink: 0;
       display: flex;
       flex-direction: column;
+      position: sticky;
+      top: 0;
     }
     .sidebar-logo {
       padding: 0 20px 24px;
@@ -78,9 +81,15 @@
     .sidebar-nav a:hover { background: var(--bg-row-hover); color: var(--text); }
     .sidebar-nav a.active { background: var(--bg-row-hover); color: var(--accent); border-right: 2px solid var(--accent); }
     .sidebar-nav a svg { width: 18px; height: 18px; opacity: 0.7; }
+    .sidebar-reload { margin: 12px 14px 0; display:flex; align-items:center; justify-content:center; gap:8px; }
+    .sidebar-reload svg { width:16px; height:16px; }
 
     .main { flex: 1; padding: 28px 32px; overflow-x: auto; min-width: 0; }
-    .page-title { font-size: 22px; font-weight: 700; margin-bottom: 24px; }
+    .page-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:24px; }
+    .page-title { font-size: 22px; font-weight: 700; }
+    .view { display:none; }
+    .view.active { display:block; }
+    .connection-status { color:var(--orange); font-size:12px; margin-left:auto; }
 
     /* ── Stats Cards ──────────────────────────────────────────────── */
     .stats-row {
@@ -382,10 +391,38 @@
     .groups-section { margin-top: 28px; }
     .groups-section h2 { font-size: 18px; margin-bottom: 12px; }
     .group-table { width: 100%; }
+    .section-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .section-heading h2 { margin:0; }
+    .btn { border:1px solid var(--border); background:var(--bg-input); color:var(--text); padding:7px 11px; border-radius:var(--radius-sm); cursor:pointer; font-size:12px; }
+    .btn:hover { border-color:var(--accent); }
+    .btn-primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+    .btn-danger { color:var(--red); }
+    .btn-row { display:flex; gap:6px; white-space:nowrap; }
+    .doc-text { max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-dim); }
+    .sync-status { font-size:12px; color:var(--text-dim); }
+    .form-field { margin-bottom:14px; }
+    .form-field label { display:block; color:var(--text-dim); font-size:12px; font-weight:600; margin-bottom:5px; }
+    .form-field input, .form-field textarea, .form-field select { width:100%; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text); padding:9px 10px; font:inherit; }
+    .form-field textarea { min-height:150px; resize:vertical; }
+    .form-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
+    .form-error { min-height:20px; color:var(--red); font-size:12px; margin-top:8px; }
+    .live-status { display:flex; align-items:center; gap:7px; color:var(--text-dim); font-size:12px; }
+    .live-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 0 3px var(--green-bg); }
+    .alert-state-alerting { background:var(--red-bg); color:var(--red); }
+    .alert-state-warming { background:var(--yellow-bg); color:var(--yellow); }
+    .alert-state-cooling { background:var(--blue-bg); color:var(--blue); }
+    .alert-state-normal { background:var(--green-bg); color:var(--green); }
 
     /* ── Responsive ───────────────────────────────────────────────── */
     @media (max-width: 768px) {
-      .sidebar { display: none; }
+      .app { display:block; }
+      .sidebar { width:100%; height:auto; padding:8px; border-right:0; border-bottom:1px solid var(--border); position:sticky; top:0; z-index:900; flex-direction:row; align-items:center; }
+      .sidebar-logo { display:none; }
+      .sidebar-nav { display:flex; min-width:0; overflow-x:auto; }
+      .sidebar-nav a { padding:9px 11px; white-space:nowrap; }
+      .sidebar-nav a.active { border-right:0; border-bottom:2px solid var(--accent); }
+      .sidebar-reload { margin:0 0 0 auto; padding:8px; }
+      .sidebar-reload span { display:none; }
       .main { padding: 16px; }
       .stats-row { grid-template-columns: 1fr 1fr; }
       .filter-bar { flex-direction: column; align-items: stretch; }
@@ -402,16 +439,33 @@
         LogAI Explorer
       </div>
       <nav class="sidebar-nav">
-        <a href="#" class="active">
+        <a href="#templates" class="active" data-view="templates">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
-          Template Explorer
+          Templates
+        </a>
+        <a href="#groups" data-view="groups">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M8.6 7.5l2.1 7M15.4 7.5l-2.1 7"/></svg>
+          Groups
+        </a>
+        <a href="#alerting" data-view="alerting">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+          Alerting
+        </a>
+        <a href="#documentation" data-view="documentation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          Documentation
         </a>
       </nav>
+      <button class="btn sidebar-reload" id="reload-app" title="Reload application">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>Reload</span>
+      </button>
     </aside>
 
     <!-- Main Content -->
     <main class="main">
-      <h1 class="page-title">Template Explorer</h1>
+      <div class="page-header"><h1 class="page-title" id="page-title">Templates</h1><span class="connection-status" id="connection-status" hidden>Reconnecting...</span></div>
+
+      <section class="view active" id="view-templates">
 
       <!-- Stats -->
       <div class="stats-row" id="stats-row">
@@ -488,17 +542,95 @@
           <div class="pagination-btns" id="page-btns"></div>
         </div>
       </div>
+      </section>
 
-      <section class="groups-section">
-        <h2>Semantic Groups</h2>
+      <section class="view groups-section" id="view-groups">
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-icon total"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M8.6 7.5l2.1 7M15.4 7.5l-2.1 7"/></svg></div>
+            <div><div class="stat-label">Total Groups</div><div class="stat-value" id="group-stat-total">—</div></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon known"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg></div>
+            <div><div class="stat-label">Documented</div><div class="stat-value" id="group-stat-documented">—</div></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon unknown"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></div>
+            <div><div class="stat-label">Undocumented</div><div class="stat-value" id="group-stat-undocumented">—</div></div>
+          </div>
+        </div>
+        <div class="section-heading"><span></span><label class="refresh-toggle"><input type="checkbox" id="undocumented-groups-only"> Undocumented only</label></div>
         <div class="table-wrap">
           <table class="group-table">
-            <thead><tr><th>Group ID</th><th>Service</th><th>Representative Template</th><th>Documented</th><th>Events</th></tr></thead>
-            <tbody id="groups-tbody"><tr><td colspan="5" class="loading">Loading groups...</td></tr></tbody>
+            <thead><tr><th data-group-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-group-sort="service">Service <span class="sort-arrow"></span></th><th data-group-sort="representative_template">Representative Template <span class="sort-arrow"></span></th><th data-group-sort="error_code" class="sorted">Error code <span class="sort-arrow">▲</span></th><th data-group-sort="documentation_source">Source <span class="sort-arrow"></span></th><th data-group-sort="event_count">Events <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
+            <tbody id="groups-tbody"><tr><td colspan="7" class="loading">Loading groups...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view groups-section" id="view-alerting">
+        <div class="stats-row">
+          <div class="stat-card"><div class="stat-icon total"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg></div><div><div class="stat-label">Monitored</div><div class="stat-value" id="alert-stat-total">—</div></div></div>
+          <div class="stat-card"><div class="stat-icon unknown"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 2.9L1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0z"/></svg></div><div><div class="stat-label">Alerting</div><div class="stat-value" id="alert-stat-alerting">—</div></div></div>
+          <div class="stat-card"><div class="stat-icon services"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v10l4 2"/><circle cx="12" cy="12" r="9"/></svg></div><div><div class="stat-label">Warming</div><div class="stat-value" id="alert-stat-warming">—</div></div></div>
+          <div class="stat-card"><div class="stat-icon services"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg></div><div><div class="stat-label">Cooling</div><div class="stat-value" id="alert-stat-cooling">—</div></div></div>
+          <div class="stat-card"><div class="stat-icon known"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg></div><div><div class="stat-label">Normal</div><div class="stat-value" id="alert-stat-normal">—</div></div></div>
+        </div>
+        <div class="filter-bar">
+          <div class="toggle-group" id="alert-status-toggle">
+            <button class="toggle-btn active" data-alert-status="all">All</button>
+            <button class="toggle-btn" data-alert-status="ALERTING">Alerting</button>
+            <button class="toggle-btn" data-alert-status="WARMING">Warming</button>
+            <button class="toggle-btn" data-alert-status="COOLING">Cooling</button>
+            <button class="toggle-btn" data-alert-status="NORMAL">Normal</button>
+          </div>
+          <div class="live-status"><span class="live-dot"></span><span id="alert-last-updated">Waiting for alert state...</span></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-alert-sort="alert_state" class="sorted">State <span class="sort-arrow">▼</span></th><th data-alert-sort="level">Level <span class="sort-arrow"></span></th><th data-alert-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-alert-sort="service">Service <span class="sort-arrow"></span></th><th data-alert-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-alert-sort="anomaly_score">Score <span class="sort-arrow"></span></th><th data-alert-sort="consecutive_anomaly_count">Consecutive <span class="sort-arrow"></span></th><th data-alert-sort="timestamp">Last evaluation <span class="sort-arrow"></span></th><th>Representative Template</th></tr></thead>
+            <tbody id="alerts-tbody"><tr><td colspan="9" class="loading">Loading alert state...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view groups-section" id="view-documentation">
+        <div class="section-heading">
+          <div class="sync-status" id="doc-sync-status">Loading corpus...</div>
+          <button class="btn btn-primary" id="add-document-btn">Add document</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-document-sort="id">ID <span class="sort-arrow"></span></th><th data-document-sort="title">Title <span class="sort-arrow"></span></th><th>Documentation text</th><th data-document-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-document-sort="group_count" class="sorted">Groups <span class="sort-arrow">▼</span></th><th>Actions</th></tr></thead>
+            <tbody id="documentation-tbody"><tr><td colspan="6" class="loading">Loading documentation...</td></tr></tbody>
           </table>
         </div>
       </section>
     </main>
+  </div>
+
+  <div class="modal-overlay" id="document-modal">
+    <div class="modal">
+      <div class="modal-header"><h2 id="document-modal-title">Add document</h2><button class="modal-close" data-close="document-modal">&times;</button></div>
+      <form id="document-form">
+        <input type="hidden" id="document-id">
+        <div class="form-field"><label for="document-title">Title</label><input id="document-title" maxlength="200"></div>
+        <div class="form-field"><label for="document-text">Documentation text</label><textarea id="document-text" maxlength="20000" required></textarea></div>
+        <div class="form-field"><label for="document-error-code">Error code</label><input id="document-error-code" maxlength="100"></div>
+        <div class="form-error" id="document-error"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close="document-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="assignment-modal">
+    <div class="modal">
+      <div class="modal-header"><h2>Assign documentation</h2><button class="modal-close" data-close="assignment-modal">&times;</button></div>
+      <div class="form-field"><label>Semantic group</label><div class="detail-value mono" id="assignment-group"></div></div>
+      <div class="form-field"><label for="assignment-document">Document</label><select id="assignment-document"></select></div>
+      <div class="form-error" id="assignment-error"></div>
+      <div class="form-actions"><button type="button" class="btn" id="assignment-edit">Edit selected</button><button type="button" class="btn" data-close="assignment-modal">Cancel</button><button type="button" class="btn btn-primary" id="assignment-save">Assign</button></div>
+    </div>
   </div>
 
   <!-- Detail Modal -->
@@ -525,6 +657,24 @@
       perPage: 50,
       autoRefresh: false,
       refreshTimer: null,
+      documents: [],
+      documentRevision: null,
+      overrideRevision: null,
+      assignmentGroup: null,
+      undocumentedGroupsOnly: false,
+      groups: [],
+      groupSort: 'error_code',
+      groupOrder: 'asc',
+      documentSort: 'group_count',
+      documentOrder: 'desc',
+      documentSynchronization: {},
+      alerts: [],
+      alertFilter: 'all',
+      alertSort: 'alert_state',
+      alertOrder: 'desc',
+      alertRefreshTimer: null,
+      activeView: 'templates',
+      reconnectTimer: null,
     };
 
     // ── DOM refs ─────────────────────────────────────────────────────
@@ -540,6 +690,10 @@
     const $modalClose = document.getElementById('modal-close');
     const $detailGrid = document.getElementById('detail-grid');
     const $groupsTbody = document.getElementById('groups-tbody');
+    const $alertsTbody = document.getElementById('alerts-tbody');
+    const $documentationTbody = document.getElementById('documentation-tbody');
+    const $documentModal = document.getElementById('document-modal');
+    const $assignmentModal = document.getElementById('assignment-modal');
 
     // ── Helpers ──────────────────────────────────────────────────────
     function formatTs(epoch) {
@@ -598,27 +752,192 @@
       params.set('per_page', state.perPage);
 
       const resp = await fetch(`/api/templates?${params}`);
+      if (!resp.ok) throw new Error('Unable to load templates');
       return resp.json();
     }
 
     async function fetchGroups() {
       const resp = await fetch('/api/groups');
+      if (!resp.ok) throw new Error('Unable to load groups');
+      return resp.json();
+    }
+
+    async function fetchDocumentation() {
+      const resp = await fetch('/api/documentation');
+      if (!resp.ok) throw new Error('Unable to load documentation');
+      return resp.json();
+    }
+
+    async function fetchAlerts() {
+      const resp = await fetch('/api/alerts');
+      if (!resp.ok) throw new Error('Unable to load alert state');
       return resp.json();
     }
 
     function renderGroups(items) {
+      const total = items.length;
+      const documented = items.filter(group => group.documented).length;
+      document.getElementById('group-stat-total').textContent = total;
+      document.getElementById('group-stat-documented').textContent = documented;
+      document.getElementById('group-stat-undocumented').textContent = total - documented;
+      if (state.undocumentedGroupsOnly) items = items.filter(group => !group.documented);
       if (!items.length) {
-        $groupsTbody.innerHTML = '<tr><td colspan="5" class="empty-state">No groups found.</td></tr>';
+        $groupsTbody.innerHTML = '<tr><td colspan="7" class="empty-state">No groups found.</td></tr>';
         return;
       }
-      $groupsTbody.innerHTML = items.map(g => `
-        <tr>
-          <td><span class="group-id">${escapeHtml(g.group_id || '—')}</span></td>
-          <td>${escapeHtml(g.service || 'unknown')}</td>
-          <td><div class="tmpl-text" title="${escapeHtml(g.representative_template || '')}">${highlightWildcards(escapeHtml(g.representative_template || '—'))}</div></td>
-          <td><span class="badge ${g.documented ? 'badge-known' : 'badge-unknown'}">${g.documented ? 'Yes' : 'No'}</span></td>
-          <td>${formatCount(g.event_count || 0)}</td>
+      const documentsById = new Map(state.documents.map(doc => [doc.id, doc]));
+      items = [...items].sort((left, right) => {
+        const value = group => {
+          if (state.groupSort === 'error_code') {
+            const document = documentsById.get(group.documentation_id);
+            return group.error_code || (document && document.error_code) || '';
+          }
+          return group[state.groupSort] ?? '';
+        };
+        const a = value(left);
+        const b = value(right);
+        const comparison = typeof a === 'number' && typeof b === 'number'
+          ? a - b
+          : String(a).localeCompare(String(b), undefined, {numeric:true, sensitivity:'base'});
+        return state.groupOrder === 'asc' ? comparison : -comparison;
+      });
+      $groupsTbody.innerHTML = items.map(g => {
+        const document = documentsById.get(g.documentation_id);
+        const errorCode = g.error_code || (document && document.error_code) || '—';
+        return `
+          <tr data-group-id="${escapeHtml(g.group_id)}">
+            <td><span class="group-id">${escapeHtml(g.group_id || '—')}</span></td>
+            <td>${escapeHtml(g.service || 'unknown')}</td>
+            <td><div class="tmpl-text" title="${escapeHtml(g.representative_template || '')}">${highlightWildcards(escapeHtml(g.representative_template || '—'))}</div></td>
+            <td>${g.documentation_id ? `<span class="tmpl-id">${escapeHtml(errorCode)}</span>` : '<span class="badge badge-unknown">Undocumented</span>'}</td>
+            <td><span class="badge ${g.documentation_source === 'manual' ? 'badge-info' : (g.documentation_source === 'stale_override' ? 'badge-warn' : (g.documented ? 'badge-known' : 'badge-unknown'))}">${escapeHtml(g.documentation_source || (g.documented ? 'automatic' : 'none'))}</span></td>
+            <td>${formatCount(g.event_count || 0)}</td>
+            <td><div class="btn-row"><button class="btn assign-doc">${g.manual_documentation_id ? 'Change' : 'Assign'}</button>${g.manual_documentation_id ? '<button class="btn clear-doc">Clear</button>' : ''}</div></td>
+          </tr>`;
+      }).join('');
+      $groupsTbody.querySelectorAll('.assign-doc').forEach(btn => btn.addEventListener('click', () => openAssignment(btn.closest('tr').dataset.groupId)));
+      $groupsTbody.querySelectorAll('.clear-doc').forEach(btn => btn.addEventListener('click', () => clearAssignment(btn.closest('tr').dataset.groupId)));
+    }
+
+    function renderDocumentation(data) {
+      state.documents = data.items;
+      state.documentRevision = data.revision;
+      state.documentSynchronization = data.synchronization || {};
+      const sync = data.synchronization || {};
+      document.getElementById('doc-sync-status').textContent = `Corpus: ${data.total} entries · Engine: ${sync.state || 'unknown'}${sync.error ? ` · ${sync.error}` : ''}`;
+      if (!data.items.length) {
+        $documentationTbody.innerHTML = '<tr><td colspan="6" class="empty-state">No documentation entries.</td></tr>';
+        return;
+      }
+      const items = [...data.items].sort((left, right) => {
+        const a = left[state.documentSort] ?? '';
+        const b = right[state.documentSort] ?? '';
+        const comparison = typeof a === 'number' && typeof b === 'number'
+          ? a - b
+          : String(a).localeCompare(String(b), undefined, {numeric:true, sensitivity:'base'});
+        return state.documentOrder === 'asc' ? comparison : -comparison;
+      });
+      $documentationTbody.innerHTML = items.map(doc => `
+        <tr data-doc-id="${escapeHtml(doc.id)}">
+          <td><span class="tmpl-id">${escapeHtml(doc.id)}</span></td>
+          <td>${escapeHtml(doc.title || 'Untitled')}</td>
+          <td><div class="doc-text" title="${escapeHtml(doc.text)}">${escapeHtml(doc.text)}</div></td>
+          <td><span class="tmpl-id">${escapeHtml(doc.error_code || '—')}</span></td>
+          <td>${doc.group_count || 0}</td>
+          <td><div class="btn-row"><button class="btn edit-document">Edit</button><button class="btn btn-danger delete-document">Delete</button></div></td>
         </tr>`).join('');
+      $documentationTbody.querySelectorAll('.edit-document').forEach(btn => btn.addEventListener('click', () => openDocumentEditor(btn.closest('tr').dataset.docId)));
+      $documentationTbody.querySelectorAll('.delete-document').forEach(btn => btn.addEventListener('click', () => deleteDocument(btn.closest('tr').dataset.docId)));
+    }
+
+    function renderAlerts(data) {
+      state.alerts = data.items;
+      const counts = data.counts || {};
+      document.getElementById('alert-stat-total').textContent = data.total;
+      document.getElementById('alert-stat-alerting').textContent = counts.ALERTING || 0;
+      document.getElementById('alert-stat-warming').textContent = counts.WARMING || 0;
+      document.getElementById('alert-stat-cooling').textContent = counts.COOLING || 0;
+      document.getElementById('alert-stat-normal').textContent = counts.NORMAL || 0;
+      document.getElementById('alert-last-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+
+      let items = state.alertFilter === 'all'
+        ? [...data.items]
+        : data.items.filter(item => item.alert_state === state.alertFilter);
+      const stateRank = {NORMAL:0, COOLING:1, WARMING:2, ALERTING:3};
+      const levelRank = {TRACE:0, DEBUG:1, INFO:2, WARN:3, WARNING:3, ERROR:4, FATAL:5, CRITICAL:5};
+      items.sort((left, right) => {
+        const value = item => {
+          if (state.alertSort === 'alert_state') return stateRank[item.alert_state] ?? -1;
+          if (state.alertSort === 'level') return levelRank[item.level] ?? levelRank.INFO;
+          return item[state.alertSort] ?? '';
+        };
+        const a = value(left);
+        const b = value(right);
+        const comparison = typeof a === 'number' && typeof b === 'number'
+          ? a - b
+          : String(a).localeCompare(String(b), undefined, {numeric:true, sensitivity:'base'});
+        return state.alertOrder === 'asc' ? comparison : -comparison;
+      });
+      if (!items.length) {
+        $alertsTbody.innerHTML = '<tr><td colspan="9" class="empty-state">No groups match this alert state.</td></tr>';
+        return;
+      }
+      $alertsTbody.innerHTML = items.map(item => `
+        <tr>
+          <td><span class="badge alert-state-${escapeHtml(item.alert_state.toLowerCase())}">${escapeHtml(item.alert_state)}</span></td>
+          <td><span class="badge ${levelBadgeClass(item.level)}">${escapeHtml(item.level)}</span></td>
+          <td><span class="group-id" title="${escapeHtml(item.group_id)}">${escapeHtml(item.group_id)}</span></td>
+          <td>${escapeHtml(item.service)}</td>
+          <td><span class="tmpl-id">${escapeHtml(item.error_code || '—')}</span></td>
+          <td>${Number(item.anomaly_score || 0).toFixed(3)}</td>
+          <td>${formatCount(item.consecutive_anomaly_count || 0)}</td>
+          <td title="${formatFullTs(item.timestamp)}">${formatTs(item.timestamp)}</td>
+          <td><div class="tmpl-text" title="${escapeHtml(item.representative_template || '')}">${highlightWildcards(escapeHtml(item.representative_template || '—'))}</div></td>
+        </tr>`).join('');
+    }
+
+    function openDocumentEditor(docId = null) {
+      const doc = state.documents.find(item => item.id === docId);
+      document.getElementById('document-modal-title').textContent = doc ? 'Edit document' : 'Add document';
+      document.getElementById('document-id').value = doc ? doc.id : '';
+      document.getElementById('document-title').value = doc ? doc.title : '';
+      document.getElementById('document-text').value = doc ? doc.text : '';
+      document.getElementById('document-error-code').value = doc ? doc.error_code : '';
+      document.getElementById('document-error').textContent = '';
+      $documentModal.classList.add('open');
+    }
+
+    async function apiMutation(url, method, body) {
+      const resp = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.message || data.error || 'Request failed');
+      return data;
+    }
+
+    async function deleteDocument(docId) {
+      if (!confirm('Delete this documentation entry?')) return;
+      try {
+        await apiMutation(`/api/documentation/${encodeURIComponent(docId)}`, 'DELETE', {revision:state.documentRevision});
+        await loadData();
+      } catch (err) { alert(err.message); }
+    }
+
+    function openAssignment(groupId) {
+      state.assignmentGroup = groupId;
+      document.getElementById('assignment-group').textContent = groupId;
+      const select = document.getElementById('assignment-document');
+      select.innerHTML = state.documents.map(doc => `<option value="${escapeHtml(doc.id)}">${escapeHtml(doc.title || doc.id)} (${escapeHtml(doc.id)})</option>`).join('');
+      document.getElementById('assignment-error').textContent = state.documents.length ? '' : 'Create a document first.';
+      document.getElementById('assignment-save').disabled = !state.documents.length;
+      $assignmentModal.classList.add('open');
+    }
+
+    async function clearAssignment(groupId) {
+      try {
+        const result = await apiMutation(`/api/groups/${encodeURIComponent(groupId)}/documentation`, 'DELETE', {override_revision:state.overrideRevision});
+        state.overrideRevision = result.override_revision;
+        await loadData();
+      } catch (err) { alert(err.message); }
     }
 
     // ── Render ───────────────────────────────────────────────────────
@@ -752,6 +1071,86 @@
       });
     }
 
+    document.querySelectorAll('#view-groups th[data-group-sort]').forEach(th => {
+      th.addEventListener('click', () => {
+        const field = th.dataset.groupSort;
+        if (state.groupSort === field) {
+          state.groupOrder = state.groupOrder === 'desc' ? 'asc' : 'desc';
+        } else {
+          state.groupSort = field;
+          state.groupOrder = 'asc';
+        }
+        updateGroupSortUI();
+        renderGroups(state.groups);
+      });
+    });
+
+    function updateGroupSortUI() {
+      document.querySelectorAll('#view-groups th[data-group-sort]').forEach(th => {
+        const arrow = th.querySelector('.sort-arrow');
+        const active = th.dataset.groupSort === state.groupSort;
+        th.classList.toggle('sorted', active);
+        arrow.textContent = active ? (state.groupOrder === 'desc' ? '▼' : '▲') : '';
+      });
+    }
+
+    document.querySelectorAll('#view-documentation th[data-document-sort]').forEach(th => {
+      th.addEventListener('click', () => {
+        const field = th.dataset.documentSort;
+        if (state.documentSort === field) {
+          state.documentOrder = state.documentOrder === 'desc' ? 'asc' : 'desc';
+        } else {
+          state.documentSort = field;
+          state.documentOrder = field === 'group_count' ? 'desc' : 'asc';
+        }
+        updateDocumentSortUI();
+        renderDocumentation({
+          items: state.documents,
+          total: state.documents.length,
+          revision: state.documentRevision,
+          synchronization: state.documentSynchronization,
+        });
+      });
+    });
+
+    function updateDocumentSortUI() {
+      document.querySelectorAll('#view-documentation th[data-document-sort]').forEach(th => {
+        const arrow = th.querySelector('.sort-arrow');
+        const active = th.dataset.documentSort === state.documentSort;
+        th.classList.toggle('sorted', active);
+        arrow.textContent = active ? (state.documentOrder === 'desc' ? '▼' : '▲') : '';
+      });
+    }
+
+    document.querySelectorAll('#view-alerting th[data-alert-sort]').forEach(th => {
+      th.addEventListener('click', () => {
+        const field = th.dataset.alertSort;
+        if (state.alertSort === field) {
+          state.alertOrder = state.alertOrder === 'desc' ? 'asc' : 'desc';
+        } else {
+          state.alertSort = field;
+          state.alertOrder = field === 'group_id' || field === 'service' || field === 'error_code' ? 'asc' : 'desc';
+        }
+        updateAlertSortUI();
+        renderAlerts(alertDataFromState());
+      });
+    });
+
+    function updateAlertSortUI() {
+      document.querySelectorAll('#view-alerting th[data-alert-sort]').forEach(th => {
+        const arrow = th.querySelector('.sort-arrow');
+        const active = th.dataset.alertSort === state.alertSort;
+        th.classList.toggle('sorted', active);
+        arrow.textContent = active ? (state.alertOrder === 'desc' ? '▼' : '▲') : '';
+      });
+    }
+
+    function alertDataFromState() {
+      const counts = {};
+      state.alerts.forEach(item => { counts[item.alert_state] = (counts[item.alert_state] || 0) + 1; });
+      return {items:state.alerts, total:state.alerts.length, counts};
+    }
+
     // ── Detail Modal ─────────────────────────────────────────────────
     async function showDetail(templateId) {
       const resp = await fetch(`/api/templates/${encodeURIComponent(templateId)}`);
@@ -792,6 +1191,55 @@
     $modalClose.addEventListener('click', () => $modalOverlay.classList.remove('open'));
     $modalOverlay.addEventListener('click', (e) => {
       if (e.target === $modalOverlay) $modalOverlay.classList.remove('open');
+    });
+
+    document.querySelectorAll('[data-close]').forEach(button => {
+      button.addEventListener('click', () => document.getElementById(button.dataset.close).classList.remove('open'));
+    });
+    document.getElementById('add-document-btn').addEventListener('click', () => openDocumentEditor());
+    document.getElementById('document-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const docId = document.getElementById('document-id').value;
+      const payload = {
+        revision: state.documentRevision,
+        title: document.getElementById('document-title').value,
+        text: document.getElementById('document-text').value,
+        error_code: document.getElementById('document-error-code').value,
+      };
+      try {
+        await apiMutation(docId ? `/api/documentation/${encodeURIComponent(docId)}` : '/api/documentation', docId ? 'PUT' : 'POST', payload);
+        $documentModal.classList.remove('open');
+        await loadData();
+      } catch (err) { document.getElementById('document-error').textContent = err.message; }
+    });
+    document.getElementById('assignment-save').addEventListener('click', async () => {
+      try {
+        const result = await apiMutation(`/api/groups/${encodeURIComponent(state.assignmentGroup)}/documentation`, 'PUT', {
+          documentation_id: document.getElementById('assignment-document').value,
+          override_revision: state.overrideRevision,
+        });
+        state.overrideRevision = result.override_revision;
+        $assignmentModal.classList.remove('open');
+        await loadData();
+      } catch (err) { document.getElementById('assignment-error').textContent = err.message; }
+    });
+    document.getElementById('assignment-edit').addEventListener('click', () => {
+      const docId = document.getElementById('assignment-document').value;
+      if (!docId) return;
+      $assignmentModal.classList.remove('open');
+      openDocumentEditor(docId);
+    });
+    document.getElementById('undocumented-groups-only').addEventListener('change', event => {
+      state.undocumentedGroupsOnly = event.target.checked;
+      loadData();
+    });
+    document.querySelectorAll('#alert-status-toggle .toggle-btn').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('#alert-status-toggle .toggle-btn').forEach(item => item.classList.remove('active'));
+        button.classList.add('active');
+        state.alertFilter = button.dataset.alertStatus;
+        renderAlerts(alertDataFromState());
+      });
     });
 
     // ── Event Listeners ──────────────────────────────────────────────
@@ -837,23 +1285,76 @@
       }
     });
 
+    const viewTitles = {
+      templates: 'Templates',
+      groups: 'Semantic Groups',
+      alerting: 'Alerting',
+      documentation: 'Documentation',
+    };
+
+    function setView(view, updateHash = true) {
+      if (!viewTitles[view]) view = 'templates';
+      state.activeView = view;
+      document.querySelectorAll('.view').forEach(section => section.classList.toggle('active', section.id === `view-${view}`));
+      document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => link.classList.toggle('active', link.dataset.view === view));
+      document.getElementById('page-title').textContent = viewTitles[view];
+      if (updateHash && window.location.hash !== `#${view}`) history.pushState(null, '', `#${view}`);
+      if (state.alertRefreshTimer) {
+        clearInterval(state.alertRefreshTimer);
+        state.alertRefreshTimer = null;
+      }
+      loadData();
+      if (view === 'alerting') state.alertRefreshTimer = setInterval(loadData, 2000);
+    }
+
+    document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => {
+      link.addEventListener('click', event => {
+        event.preventDefault();
+        setView(link.dataset.view);
+      });
+    });
+    window.addEventListener('hashchange', () => setView(window.location.hash.slice(1), false));
+    document.getElementById('reload-app').addEventListener('click', () => window.location.reload());
+
     // ── Main Load ────────────────────────────────────────────────────
     async function loadData() {
       try {
-        const data = await fetchTemplates();
-        renderStats(data.stats);
-        renderTable(data.items);
-        renderPagination(data.total, data.page, data.pages);
-        const groups = await fetchGroups();
-        renderGroups(groups.items);
+        if (state.activeView === 'templates') {
+          const data = await fetchTemplates();
+          renderStats(data.stats);
+          renderTable(data.items);
+          renderPagination(data.total, data.page, data.pages);
+        } else if (state.activeView === 'groups') {
+          const [documentation, groups] = await Promise.all([fetchDocumentation(), fetchGroups()]);
+          state.documents = documentation.items;
+          state.documentRevision = documentation.revision;
+          state.overrideRevision = groups.override_revision;
+          state.groups = groups.items;
+          renderGroups(state.groups);
+        } else if (state.activeView === 'alerting') {
+          renderAlerts(await fetchAlerts());
+        } else {
+          renderDocumentation(await fetchDocumentation());
+        }
+        document.getElementById('connection-status').hidden = true;
+        if (state.reconnectTimer) {
+          clearTimeout(state.reconnectTimer);
+          state.reconnectTimer = null;
+        }
       } catch (err) {
-        console.error('Failed to load templates:', err);
-        $tbody.innerHTML = `<tr><td colspan="9" class="empty-state"><p>Failed to load templates. Is the API running?</p></td></tr>`;
+        console.error('Failed to load data:', err);
+        document.getElementById('connection-status').hidden = false;
+        if (!state.reconnectTimer) {
+          state.reconnectTimer = setTimeout(() => {
+            state.reconnectTimer = null;
+            loadData();
+          }, 2000);
+        }
       }
     }
 
     // ── Init ─────────────────────────────────────────────────────────
-    loadData();
+    setView(window.location.hash.slice(1) || 'templates', false);
   </script>
 </body>
 </html>

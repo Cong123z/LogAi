@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from logai.web.app import create_app
+from logai.config import load_config
 
 
 def main():
@@ -23,10 +24,18 @@ def main():
         help="Directory containing template_registry.json and group_registry.json",
     )
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument("--config", default=None, help="Path to config.yaml")
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper()))
-    app = create_app(data_dir=args.data_dir)
+    config = load_config(args.config)
+    app = create_app(
+        data_dir=args.data_dir,
+        corpus_path=config.doc_matcher.corpus_path,
+        overrides_path=config.doc_matcher.overrides_path,
+        status_path=config.doc_matcher.status_path,
+        seed_path=config.doc_matcher.seed_corpus_path,
+    )
     print(f"Template Explorer running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
 

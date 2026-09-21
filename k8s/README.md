@@ -33,7 +33,10 @@ The deployment runs **both the Realtime Engine and the Template Explorer Web UI 
 ### Why this guarantees data consistency:
 - Both containers run in the **same Pod**, sharing the exact same `logai-data-pvc` mounted at `/app/data`.
 - When the engine discovers and flushes new templates to `template_registry.json`, the web UI immediately serves them from that exact same file.
-- The web container mounts `/app/data` as `readOnly: true`, preventing accidental state corruption.
+- The web container writes only `documentation_corpus.json` and
+  `documentation_overrides.json`; engine registries remain engine-owned.
+- Port 5555 exposes unauthenticated mutation endpoints. Restrict it with an
+  ingress authentication layer or a trusted-network policy.
 - Works with standard Kubernetes `ReadWriteOnce` storage (AWS EBS, GKE Persistent Disk, Azure Disk, local-path). No complex NFS required!
 
 ---
@@ -68,6 +71,7 @@ LOGAI_WEB_PORT=5555
 
 # Storage paths & sizes
 LOGAI_STORAGE_BASE_DIR=/app/data
+LOGAI_DOCUMENTATION_CORPUS_PATH=/app/data/documentation_corpus.json
 HF_HOME=/app/hf-cache
 LOGAI_DATA_STORAGE_SIZE=10Gi
 LOGAI_HF_STORAGE_SIZE=5Gi

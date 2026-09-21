@@ -18,6 +18,7 @@ from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomal
 from logai.clustering.hdbscan_cluster import GroupClusterer
 from logai.collector.es_collector import ElasticsearchCollector
 from logai.docmatch.doc_matcher import DocumentationMatcher
+from logai.docmatch.refresh_worker import DocumentationRefreshWorker
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
 from logai.metrics.prometheus_exporter import MetricsExporter
@@ -36,6 +37,7 @@ from logai.reliability.dlq import DeadLetterQueue
 from logai.storage.base import JSONStore, ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import DedupIndex
+from logai.storage.documentation import DocumentationCorpusStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
 logger = logging.getLogger("logai.realtime")
@@ -56,6 +58,8 @@ class RealtimePipeline:
         self.template_registry = TemplateRegistry(config.storage)
         self.group_registry = GroupRegistry(config.storage)
 
+        self.documentation_store = DocumentationCorpusStore.from_config(config)
+        config.doc_matcher.corpus_path = str(self.documentation_store.corpus_path)
         self.doc_matcher = DocumentationMatcher(
             config.doc_matcher, self.embedder,
             f"{config.storage.base_dir}/{config.storage.doc_embeddings_file}",
@@ -64,6 +68,13 @@ class RealtimePipeline:
         self.model_store = ModelStore(config.storage.model_dir)
         self.anomaly_model = GlobalAnomalyModel(config.anomaly, self.model_store)
         self.anomaly_models = self.anomaly_model  # backward compatibility alias
+        self.documentation_worker = DocumentationRefreshWorker(
+            self.documentation_store,
+            self.doc_matcher,
+            self.group_registry,
+            self.template_registry,
+            config.doc_matcher.refresh_interval_seconds,
+        )
 
         alert_state_store = JSONStore(
             f"{config.storage.base_dir}/{config.storage.anomaly_state_file}"
@@ -89,7 +100,6 @@ class RealtimePipeline:
 
         # DocumentationMatcher already attempted its initial load in __init__.
         # Avoid encoding the same corpus again on the first realtime event.
-        self._doc_refresh_at = time.time()
         self._template_counts: dict[str, int] = {}
         for svc, count in self.template_registry.all_counts_by_service().items():
             self.metrics.set_template_count(svc, count)
@@ -122,6 +132,12 @@ class RealtimePipeline:
 
     def run_forever(self) -> None:
         self.start_metrics_server()
+        documentation_worker = getattr(self, "documentation_worker", None)
+        if (
+            documentation_worker is not None
+            and self.documentation_store.corpus_path.suffix.lower() == ".json"
+        ):
+            documentation_worker.start()
         logger.info("Realtime pipeline started, polling Elasticsearch...")
         consecutive_poll_failures = 0
         MAX_POLL_BACKOFF = 300.0  # 5 minutes
@@ -270,17 +286,6 @@ class RealtimePipeline:
             self.metrics.record_raw_event(parsed)
 
             if grouped is not None:
-                # Documentation is optional enrichment. A malformed corpus or
-                # incompatible embedding must not suppress anomaly detection.
-                try:
-                    self._match_documentation_if_stale(grouped.group_id)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Documentation enrichment failed for group %s; "
-                        "continuing with the previous match: %s",
-                        grouped.group_id,
-                        exc,
-                    )
                 # Window/alert identity is (service, group_id): each service keeps
                 # its own rate baseline + alert state inside a shared semantic
                 # group. doc-match above stays group-level (grouped.group_id); only
@@ -375,24 +380,15 @@ class RealtimePipeline:
     def _touch_group(
         self, group_id: str, timestamp: float, new_template_id: Optional[str] = None
     ) -> None:
-        group = self.group_registry.get(group_id)
-        if group is None:
-            group = GroupState(group_id=group_id, first_seen=timestamp, last_seen=timestamp)
-        group.last_seen = timestamp
-        group.event_count += 1
-        if new_template_id and new_template_id not in group.template_ids:
-            group.template_ids.append(new_template_id)
-        self.group_registry.upsert(group, flush=False)
+        self.group_registry.touch(group_id, timestamp, new_template_id)
 
     def _match_documentation_if_stale(self, group_id: str) -> None:
-        now = time.time()
-        if now - self._doc_refresh_at > self.config.doc_matcher.refresh_interval_seconds:
-            self.doc_matcher.reload()
-            self._doc_refresh_at = now
-
+        """Compatibility helper; global refresh is owned by the background worker."""
         if not self.doc_matcher.ready:
             return
         group = self.group_registry.get(group_id)
+        if group is not None and group.documentation_source == "manual":
+            return
         centroid = self.group_registry.get_centroid(group_id)
         if group is None or centroid is None:
             return
@@ -401,6 +397,7 @@ class RealtimePipeline:
         group.documentation_id = match.documentation_id
         group.confidence = match.similarity
         group.error_code = match.error_code
+        group.documentation_source = "automatic" if match.documented else "none"
         self.group_registry.upsert(group, flush=False)
 
     # --- idle-alert tick ------------------------------------------------------

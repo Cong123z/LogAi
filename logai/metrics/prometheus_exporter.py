@@ -66,6 +66,7 @@ class MetricsExporter:
         # fresh escalation (X -> ALERTING) once instead of re-incrementing on
         # every event that keeps a window in ALERTING.
         self._last_alert_state: Dict[Tuple[str, str], str] = {}
+        self._last_documented_label: Dict[Tuple[str, str], str] = {}
 
         # Engine health metrics
         self.logai_events_received_total = Counter(
@@ -118,10 +119,16 @@ class MetricsExporter:
     ) -> None:
         # service is passed explicitly: the GroupState is looked up by the plain
         # group_id (wkey[1]) so group.group_id is NOT the (service, group) tuple.
+        key = (service, group.group_id)
+        documented = str(group.documented).lower()
+        previous = self._last_documented_label.get(key)
+        if previous is not None and previous != documented:
+            self.log_anomaly_score.remove(service, group.group_id, previous)
+        self._last_documented_label[key] = documented
         self.log_anomaly_score.labels(
             service=service,
             group_id=group.group_id,
-            documented=str(group.documented).lower(),
+            documented=documented,
         ).set(score)
 
     def set_alert_state(self, state: AnomalyState) -> None:

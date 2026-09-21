@@ -99,6 +99,7 @@ class GroupState:
     documented: bool = False
     documentation_id: Optional[str] = None
     confidence: float = 0.0
+    documentation_source: str = "automatic"
     severity: str = "unknown"
     first_seen: float = field(default_factory=now_ts)
     last_seen: float = field(default_factory=now_ts)

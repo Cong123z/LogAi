@@ -86,10 +86,9 @@ spec:
               containerPort: 5555
               protocol: TCP
           volumeMounts:
-            # Read-Only access: reads the EXACT same files written by the engine
+            # Web reads registries and atomically writes documentation corpus/overrides.
             - name: logai-data
               mountPath: /app/data
-              readOnly: true
           resources:
             requests:
               cpu: "100m"

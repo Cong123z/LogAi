@@ -43,9 +43,12 @@ clustering:
   assignment_similarity_threshold: 0.88
 
 doc_matcher:
-  corpus_path: "docs/documentation_corpus.yaml"
+  corpus_path: "data/documentation_corpus.json"
+  seed_corpus_path: "docs/documentation_corpus.yaml"
+  overrides_path: "data/documentation_overrides.json"
+  status_path: "data/documentation_status.json"
   similarity_threshold: 0.75
-  refresh_interval_seconds: 300
+  refresh_interval_seconds: 5
 
 features:
   windows_seconds: [10, 60, 300]

@@ -1,7 +1,7 @@
 """Template Explorer Web API.
 
-Reads template_registry.json and group_registry.json (read-only)
-to serve a browsable UI for discovered log templates.
+Reads engine registries and manages the shared documentation corpus/overrides.
+The web process never writes engine-owned template or group registry files.
 """
 from __future__ import annotations
 
@@ -12,14 +12,36 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from logai.models import DEFAULT_LEVEL, LEVEL_RANK
+from logai.storage.documentation import (
+    DocumentInUse,
+    DocumentationCorpusStore,
+    DocumentationStoreError,
+    RevisionConflict,
+    group_fingerprint,
+)
+
 logger = logging.getLogger("logai.web")
 
 PENDING_GROUP_ID = "UNASSIGNED_PENDING"
 
 
-def create_app(data_dir: str = "data") -> Flask:
+def create_app(
+    data_dir: str = "data",
+    corpus_path: str | None = None,
+    overrides_path: str | None = None,
+    status_path: str | None = None,
+    seed_path: str | None = None,
+) -> Flask:
     app = Flask(__name__, static_folder=None)
     base = Path(data_dir)
+    root = Path(__file__).resolve().parents[2]
+    documentation = DocumentationCorpusStore(
+        corpus_path or base / "documentation_corpus.json",
+        overrides_path or base / "documentation_overrides.json",
+        status_path or base / "documentation_status.json",
+        seed_path or root / "docs" / "documentation_corpus.yaml",
+    )
 
     def _load_json(filename: str) -> Dict[str, Any]:
         path = base / filename
@@ -30,6 +52,26 @@ def create_app(data_dir: str = "data") -> Flask:
 
     def _is_known(group_id: Optional[str]) -> bool:
         return group_id is not None and group_id != PENDING_GROUP_ID
+
+    def _mutation_error(exc: Exception):
+        if isinstance(exc, RevisionConflict):
+            return jsonify({
+                "error": "revision_conflict",
+                "message": str(exc),
+                "current_revision": exc.current_revision,
+            }), 409
+        if isinstance(exc, DocumentInUse):
+            return jsonify({
+                "error": "document_in_use",
+                "message": str(exc),
+                "group_ids": exc.group_ids,
+            }), 409
+        if isinstance(exc, KeyError):
+            return jsonify({"error": "not_found", "message": str(exc.args[0])}), 404
+        if isinstance(exc, DocumentationStoreError):
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        logger.exception("Documentation mutation failed")
+        return jsonify({"error": "storage_error", "message": str(exc)}), 500
 
     # ── API Routes ────────────────────────────────────────────────────
 
@@ -188,8 +230,24 @@ def create_app(data_dir: str = "data") -> Flask:
         documented = request.args.get("documented", "").strip().lower()
         search = request.args.get("search", "").strip().lower()
         items = []
+        override_snapshot = documentation.load_overrides()
+        overrides = override_snapshot["overrides"]
+        templates = _load_json("template_registry.json")
         for gid, group in groups.items():
             item = {"group_id": gid, **group}
+            override = overrides.get(gid)
+            texts = [
+                templates.get(template_id, {}).get("template_text", "")
+                for template_id in item.get("template_ids", [])
+            ]
+            current_fingerprint = group_fingerprint(item.get("template_ids", []), texts)
+            item["manual_documentation_id"] = (
+                override.get("documentation_id") if isinstance(override, dict) else None
+            )
+            item["override_stale"] = bool(
+                isinstance(override, dict)
+                and override.get("group_fingerprint") != current_fingerprint
+            )
             if service and service not in str(item.get("service", "")).lower():
                 continue
             if documented in ("true", "false") and bool(item.get("documented", False)) != (documented == "true"):
@@ -199,7 +257,204 @@ def create_app(data_dir: str = "data") -> Flask:
                 continue
             items.append(item)
         items.sort(key=lambda item: (item.get("event_count", 0), item["group_id"]), reverse=True)
-        return jsonify({"items": items, "total": len(items)})
+        return jsonify({
+            "items": items,
+            "total": len(items),
+            "override_revision": override_snapshot["revision"],
+        })
+
+    @app.route("/api/alerts")
+    def list_alerts():
+        """Return the latest persisted alert condition for every current group."""
+        groups = _load_json("group_registry.json")
+        templates = _load_json("template_registry.json")
+        persisted = _load_json("anomaly_state.json")
+
+        def group_level(group: Dict[str, Any], service: str) -> str:
+            candidates = [
+                templates.get(template_id, {})
+                for template_id in group.get("template_ids", [])
+            ]
+            service_candidates = [
+                template for template in candidates
+                if str(template.get("service", "")).lower() == service.lower()
+            ]
+            if service_candidates:
+                candidates = service_candidates
+            levels = [str(template.get("level") or DEFAULT_LEVEL).upper() for template in candidates]
+            return max(levels, key=lambda level: LEVEL_RANK.get(level, LEVEL_RANK[DEFAULT_LEVEL]), default=DEFAULT_LEVEL)
+
+        def identity(key: str, raw: Dict[str, Any]) -> tuple[str, str]:
+            value = raw.get("group_id")
+            if not (isinstance(value, (list, tuple)) and len(value) == 2):
+                try:
+                    decoded = json.loads(key)
+                except (json.JSONDecodeError, TypeError):
+                    decoded = None
+                value = decoded if isinstance(decoded, list) and len(decoded) == 2 else value
+            if isinstance(value, (list, tuple)) and len(value) == 2:
+                return str(value[0]), str(value[1])
+            group_id = str(value or key)
+            group = groups.get(group_id, {})
+            return str(group.get("service") or "unknown"), group_id
+
+        items: List[Dict[str, Any]] = []
+        represented_groups = set()
+        for key, raw in persisted.items():
+            if not isinstance(raw, dict):
+                continue
+            service, group_id = identity(key, raw)
+            group = groups.get(group_id, {})
+            represented_groups.add(group_id)
+            items.append({
+                "group_id": group_id,
+                "service": service,
+                "level": group_level(group, service),
+                "alert_state": str(raw.get("alert_state") or "NORMAL").upper(),
+                "anomaly_score": float(raw.get("anomaly_score") or 0.0),
+                "anomaly": bool(raw.get("anomaly", False)),
+                "consecutive_anomaly_count": int(raw.get("consecutive_anomaly_count") or 0),
+                "timestamp": float(raw.get("timestamp") or 0.0),
+                "representative_template": group.get("representative_template", ""),
+                "error_code": group.get("error_code", ""),
+                "documentation_id": group.get("documentation_id"),
+            })
+
+        for group_id, group in groups.items():
+            if group_id in represented_groups:
+                continue
+            service = str(group.get("service") or "unknown")
+            items.append({
+                "group_id": group_id,
+                "service": service,
+                "level": group_level(group, service),
+                "alert_state": "NORMAL",
+                "anomaly_score": 0.0,
+                "anomaly": False,
+                "consecutive_anomaly_count": 0,
+                "timestamp": 0.0,
+                "representative_template": group.get("representative_template", ""),
+                "error_code": group.get("error_code", ""),
+                "documentation_id": group.get("documentation_id"),
+            })
+
+        state_priority = {"NORMAL": 0, "COOLING": 1, "WARMING": 2, "ALERTING": 3}
+        items.sort(
+            key=lambda item: (
+                state_priority.get(item["alert_state"], -1),
+                LEVEL_RANK.get(item["level"], LEVEL_RANK[DEFAULT_LEVEL]),
+                item["anomaly_score"],
+            ),
+            reverse=True,
+        )
+        counts = {state: 0 for state in ("NORMAL", "WARMING", "ALERTING", "COOLING")}
+        for item in items:
+            counts[item["alert_state"]] = counts.get(item["alert_state"], 0) + 1
+        return jsonify({"items": items, "total": len(items), "counts": counts})
+
+    @app.route("/api/documentation", methods=["GET"])
+    def list_documentation():
+        corpus = documentation.load_corpus()
+        overrides = documentation.load_overrides()["overrides"]
+        manual_usage: Dict[str, int] = {}
+        for override in overrides.values():
+            if isinstance(override, dict) and override.get("documentation_id"):
+                doc_id = str(override["documentation_id"])
+                manual_usage[doc_id] = manual_usage.get(doc_id, 0) + 1
+        group_usage: Dict[str, int] = {}
+        for group in _load_json("group_registry.json").values():
+            doc_id = group.get("documentation_id")
+            if doc_id:
+                key = str(doc_id)
+                group_usage[key] = group_usage.get(key, 0) + 1
+        items = [
+            {
+                **entry,
+                "group_count": group_usage.get(entry["id"], 0),
+                "manual_group_count": manual_usage.get(entry["id"], 0),
+            }
+            for entry in corpus["entries"]
+        ]
+        return jsonify({
+            "items": items,
+            "total": len(items),
+            "revision": corpus["revision"],
+            "synchronization": documentation.synchronization_status(),
+        })
+
+    @app.route("/api/documentation", methods=["POST"])
+    def create_documentation():
+        payload = request.get_json(silent=True) or {}
+        try:
+            item, corpus = documentation.create_document(payload, payload.get("revision"))
+            return jsonify({"item": item, "revision": corpus["revision"]}), 201
+        except Exception as exc:  # noqa: BLE001
+            return _mutation_error(exc)
+
+    @app.route("/api/documentation/<doc_id>", methods=["PUT"])
+    def update_documentation(doc_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            item, corpus = documentation.update_document(doc_id, payload, payload.get("revision"))
+            return jsonify({"item": item, "revision": corpus["revision"]})
+        except Exception as exc:  # noqa: BLE001
+            return _mutation_error(exc)
+
+    @app.route("/api/documentation/<doc_id>", methods=["DELETE"])
+    def delete_documentation(doc_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            corpus = documentation.delete_document(doc_id, payload.get("revision"))
+            return jsonify({"deleted_id": doc_id, "revision": corpus["revision"]})
+        except Exception as exc:  # noqa: BLE001
+            return _mutation_error(exc)
+
+    @app.route("/api/groups/<group_id>/documentation", methods=["PUT"])
+    def assign_group_documentation(group_id: str):
+        payload = request.get_json(silent=True) or {}
+        groups = _load_json("group_registry.json")
+        group = groups.get(group_id)
+        if group is None:
+            return jsonify({"error": "not_found", "message": group_id}), 404
+        templates = _load_json("template_registry.json")
+        texts = [
+            templates.get(template_id, {}).get("template_text", "")
+            for template_id in group.get("template_ids", [])
+        ]
+        fingerprint = group_fingerprint(group.get("template_ids", []), texts)
+        try:
+            snapshot = documentation.set_override(
+                group_id,
+                str(payload.get("documentation_id") or ""),
+                fingerprint,
+                payload.get("override_revision"),
+            )
+            return jsonify({
+                "group_id": group_id,
+                "documentation_id": payload.get("documentation_id"),
+                "override_revision": snapshot["revision"],
+                "state": "pending",
+            })
+        except Exception as exc:  # noqa: BLE001
+            return _mutation_error(exc)
+
+    @app.route("/api/groups/<group_id>/documentation", methods=["DELETE"])
+    def clear_group_documentation(group_id: str):
+        payload = request.get_json(silent=True) or {}
+        groups = _load_json("group_registry.json")
+        if group_id not in groups:
+            return jsonify({"error": "not_found", "message": group_id}), 404
+        try:
+            snapshot = documentation.clear_override(
+                group_id, payload.get("override_revision")
+            )
+            return jsonify({
+                "group_id": group_id,
+                "override_revision": snapshot["revision"],
+                "state": "pending",
+            })
+        except Exception as exc:  # noqa: BLE001
+            return _mutation_error(exc)
 
     # ── Serve the frontend ────────────────────────────────────────────
 

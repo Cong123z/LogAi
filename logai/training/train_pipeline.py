@@ -17,6 +17,7 @@ import numpy as np
 from logai.config import AppConfig
 from logai.collector.es_collector import ElasticsearchCollector
 from logai.docmatch.doc_matcher import DocumentationMatcher
+from logai.docmatch.refresh_worker import DocumentationRefreshWorker
 from logai.clustering.hdbscan_cluster import GroupClusterer, NOISE_LABEL
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
@@ -34,6 +35,7 @@ from logai.parsing.drain3_parser import Drain3Parser
 from logai.storage.base import ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import LocalTrainingDedup
+from logai.storage.documentation import DocumentationCorpusStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 from logai.storage.training_event_index import TrainingEventIndex
 
@@ -52,6 +54,8 @@ class TrainingPipeline:
         self.model_store = ModelStore(config.storage.model_dir)
         self.anomaly_model = GlobalAnomalyModel(config.anomaly, self.model_store)
         self.anomaly_models = self.anomaly_model  # backward compatibility alias
+        self.documentation_store = DocumentationCorpusStore.from_config(config)
+        config.doc_matcher.corpus_path = str(self.documentation_store.corpus_path)
         self.doc_matcher = DocumentationMatcher(
             config.doc_matcher, self.embedder,
             f"{config.storage.base_dir}/{config.storage.doc_embeddings_file}",
@@ -87,6 +91,13 @@ class TrainingPipeline:
         self._build_group_registry(template_to_group)
         self._compute_centroids()
         self._match_documentation()
+        DocumentationRefreshWorker(
+            self.documentation_store,
+            self.doc_matcher,
+            self.group_registry,
+            self.template_registry,
+            self.config.doc_matcher.refresh_interval_seconds,
+        ).refresh_once()
         grouped_by_group = self._group_events(template_to_group)
         self._train_anomaly_models(grouped_by_group)
 
@@ -413,6 +424,7 @@ class TrainingPipeline:
             group.documentation_id = match.documentation_id
             group.confidence = match.similarity
             group.error_code = match.error_code
+            group.documentation_source = "automatic" if match.documented else "none"
             self.group_registry.upsert(group, flush=False)
         self.group_registry.flush()
         logger.info(

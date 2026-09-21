@@ -32,6 +32,7 @@ services:
       - LOGAI_METRICS_PORT=${LOGAI_METRICS_PORT:-9108}
       - LOGAI_METRICS_HOST=${LOGAI_METRICS_HOST:-0.0.0.0}
       - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
+      - LOGAI_DOCUMENTATION_CORPUS_PATH=${LOGAI_DOCUMENTATION_CORPUS_PATH:-/app/data/documentation_corpus.json}
     ports:
       - "${LOGAI_METRICS_PORT:-9108}:${LOGAI_METRICS_PORT:-9108}"
     volumes:
@@ -53,6 +54,7 @@ services:
       - LOGAI_ES_USER=${LOGAI_ES_USER:-}
       - LOGAI_ES_PASSWORD=${LOGAI_ES_PASSWORD:-}
       - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
+      - LOGAI_DOCUMENTATION_CORPUS_PATH=${LOGAI_DOCUMENTATION_CORPUS_PATH:-/app/data/documentation_corpus.json}
     volumes:
       - logai-data:/app/data
       - hf-cache:/root/.cache/huggingface
@@ -69,13 +71,14 @@ services:
       - "${LOGAI_WEB_PORT:-5555}:${LOGAI_WEB_PORT:-5555}"
     volumes:
       # Read the live engine state; the explorer must never mutate it.
-      - logai-data:/app/data:ro
+      - logai-data:/app/data
     networks:
       - aiops-net
     environment:
       - LOGAI_WEB_PORT=${LOGAI_WEB_PORT:-5555}
       - LOGAI_WEB_HOST=${LOGAI_WEB_HOST:-0.0.0.0}
       - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
+      - LOGAI_DOCUMENTATION_CORPUS_PATH=${LOGAI_DOCUMENTATION_CORPUS_PATH:-/app/data/documentation_corpus.json}
       - PYTHONPATH=/app
     command: ["python", "scripts/run_web.py"]
 

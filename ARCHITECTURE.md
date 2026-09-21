@@ -36,14 +36,19 @@ flowchart LR
     TRAIN[Training Pipeline<br/>one-off / scheduled]
     RT[Realtime Pipeline<br/>long-running]
     DATA[(File-based state<br/>data/)]
+    WEB[Desktop Web UI<br/>:5555]
     METRICS[Prometheus endpoint<br/>:9108/metrics]
     PROM[(Prometheus)]
     GRAF[Grafana]
-    DOCS[Documentation corpus<br/>YAML]
+    SEED[Documentation seed<br/>YAML]
+    DOCS[Runtime documentation corpus<br/>JSON]
 
     APP -->|index documents| ES
     ES -->|historical range| TRAIN
     ES -->|poll + search_after| RT
+    SEED -->|initialize once| DOCS
+    WEB -->|edit corpus / overrides| DOCS
+    WEB -->|read registries / alert state| DATA
     DOCS --> TRAIN
     DOCS --> RT
     TRAIN -->|registries, centroids, model| DATA
@@ -73,6 +78,10 @@ Environment overrides hiện có:
 | `LOGAI_ES_USER` | `elasticsearch.username` |
 | `LOGAI_ES_PASSWORD` | `elasticsearch.password` |
 | `LOGAI_METRICS_PORT` | `metrics.http_port` |
+| `LOGAI_METRICS_HOST` | `metrics.http_host` |
+| `LOGAI_STORAGE_BASE_DIR` | Storage base, model directory, Drain3 path và ba documentation runtime paths |
+| `LOGAI_DOCUMENTATION_CORPUS_PATH` | Override riêng `doc_matcher.corpus_path` sau storage base |
+| `LOGAI_EMBEDDING_MODEL` | `embedding.model_name` |
 
 Các cấu hình khác chỉ thay đổi qua YAML hoặc code. `ReliabilityConfig` có các
 giá trị retry, nhưng decorator của Elasticsearch collector hiện dùng trực tiếp
@@ -125,7 +134,12 @@ Quy ước quan trọng:
 
 ### 4.2 Documentation corpus
 
-`docs/documentation_corpus.yaml` là input của Documentation Matcher.
+`docs/documentation_corpus.yaml` là seed chỉ dùng ở lần khởi tạo đầu tiên.
+Runtime source of truth là `data/documentation_corpus.json`, được quản lý qua
+Template Explorer. `data/documentation_overrides.json` lưu lựa chọn document
+thủ công theo group; lựa chọn này thắng automatic cosine match cho tới khi bị
+xóa. Engine kiểm tra revision mỗi 5 giây và cập nhật Group Registry mà không
+restart hay retrain anomaly model.
 
 ```yaml
 - id: DOC-DB-001
@@ -143,6 +157,13 @@ Quy ước quan trọng:
 
 Corpus hiện là dữ liệu demo và phải được thay bằng runbook/knowledge base thật
 trước production.
+
+Web mutation dùng optimistic revision. Hai browser cùng sửa một snapshot sẽ
+nhận HTTP 409 thay vì ghi đè lẫn nhau. Mọi file được ghi qua temporary file và
+`os.replace`. Document đang được manual-assign không thể bị xóa cho tới khi các
+assignment được đổi hoặc clear. Override lưu fingerprint của group membership;
+sau retraining, fingerprint lệch sẽ suspend override để tránh gán nhầm document
+cho một group ID được HDBSCAN tái sử dụng.
 
 ## 5. Core data contracts
 
@@ -212,6 +233,7 @@ Metadata persisted theo `group_id`.
 | `documented` | `bool` | `false` | Có vượt doc similarity threshold |
 | `documentation_id` | `Optional[str]` | `None` | ID tài liệu match tốt nhất |
 | `confidence` | `float` | `0.0` | Cosine similarity với documentation |
+| `documentation_source` | `str` | `"automatic"` | Nguồn match: `automatic`, `manual`, `stale_override`, hoặc `none` |
 | `severity` | `str` | `"unknown"` | Chưa được pipeline populate |
 | `first_seen` | `float` | current time | Mốc sớm nhất của group |
 | `last_seen` | `float` | current time | Mốc gần nhất của group |
@@ -536,19 +558,22 @@ poll rồi chấm **một lượt**.
 | `parsing/drain3_parser.py` | Mine template và extract parameters | `RawLog` | `ParsedEvent` | `drain3_state.bin` |
 | `embedding/embedder.py` | Encode text thành normalized vector | Template/doc text | NumPy matrix/vector | Model in-memory/Hugging Face cache |
 | `clustering/hdbscan_cluster.py` | Offline clustering, centroid, realtime nearest-group | IDs + vectors | Labels, centroid, assignment | Không |
-| `docmatch/doc_matcher.py` | Load corpus và cosine match | YAML + centroids | `MatchResult` | Corpus/embeddings in-memory + cache file |
+| `docmatch/doc_matcher.py` | Load runtime corpus và cosine match | JSON corpus + centroids | `MatchResult` | Corpus/embeddings in-memory + cache file |
+| `docmatch/refresh_worker.py` | Theo dõi revision và refresh group documentation | Corpus + overrides + registries | Group documentation updates | `documentation_status.json` |
 | `features/feature_engine.py` | Sliding-window aggregation | `(service, group_id)`, timestamp | `FeatureVector` | Per-`(service, group)` windows in-memory |
 | `anomaly/isolation_forest_model.py` | Train/load/predict global IF | Feature vectors | `AnomalyResult` | `models/global_v3.pkl` + in-memory model |
 | `alert/alert_state_machine.py` | Hysteresis theo group | `AnomalyResult` | `AnomalyState` | `anomaly_state.json` |
 | `metrics/prometheus_exporter.py` | Expose/update metrics | Parsed/group/anomaly state | `/metrics` | Prometheus client in-memory |
 | `storage/base.py` | Atomic JSON/pickle/model persistence | Python objects | Files | File contents |
 | `storage/registries.py` | Template/group metadata và vectors | State dataclasses/vectors | Registry lookup/list | Registry files + caches |
+| `storage/documentation.py` | Validate/revision/persist corpus và manual overrides | JSON mutation payloads + YAML seed | Versioned corpus/override snapshots | Documentation JSON files |
 | `storage/checkpoint.py` | Persist Elasticsearch cursor | sort values/timestamp | Current checkpoint | `checkpoint.json` hoặc `training_checkpoint.json` |
 | `storage/dedup.py` | Event idempotency theo TTL | `event_id` | seen/not seen | `dedup_index.json` |
 | `reliability/retry.py` | Exponential backoff + jitter | Callable | Result hoặc re-raised error | Không |
 | `reliability/dlq.py` | Ghi và đọc failed events | Payload + error | JSONL records | `dlq.jsonl` |
 | `training/train_pipeline.py` | Orchestrate batch training | Historical `RawLog` list | Training artifacts | Qua registries/model stores |
 | `realtime/realtime_pipeline.py` | Orchestrate streaming processing | Realtime batches | Metrics + updated state/DLQ | Qua component stores |
+| `web/app.py` | Desktop UI API và documentation mutations | Registry/state files + HTTP requests | JSON API + static UI | Corpus/override files qua `DocumentationCorpusStore` |
 
 Ownership rule: orchestrator quyết định thứ tự và nhánh xử lý; module chuyên
 biệt không được tự gọi ngược orchestrator. `models.py` và `config.py` là shared
@@ -578,7 +603,29 @@ Endpoint mặc định: `http://<host>:9108/metrics`.
 Prometheus scrape mỗi 10 giây theo `prometheus.yml`. Metrics client state nằm
 trong memory và reset khi process restart; Prometheus giữ time series đã scrape.
 
-### 9.2 Persistent artifacts
+### 9.2 Web UI và HTTP API
+
+Flask web process là reader của template/group/anomaly state và là writer duy
+nhất của editable documentation corpus/overrides. Bốn view dùng hash route:
+`#templates`, `#groups`, `#alerting`, `#documentation`. Sidebar và Reload luôn
+hiện trên desktop; request lỗi được retry mỗi 2 giây để browser tự reconnect sau
+web process restart.
+
+`GET /api/alerts` merge `anomaly_state.json` với group/template registries. Alert
+condition lấy trực tiếp từ `AnomalyState.alert_state`. Cột Level của Alerting UI
+không phải field của group và không tham gia state machine; API derive nó từ
+template level nặng nhất trong service/group cell để cung cấp display context.
+Alerting view chỉ poll mỗi 2 giây khi đang active.
+
+Documentation mutations dùng optimistic revision và trả 409 khi client ghi từ
+snapshot cũ. Assignment endpoint ghi override với fingerprint của group rồi trả
+`state: pending`; refresh worker áp dụng revision bất đồng bộ. API không có auth,
+vì vậy deployment phải chặn write routes bằng ingress/network policy.
+
+Chi tiết endpoint, payload, response và hành vi UI nằm tại
+[`docs/WEB_UI.md`](docs/WEB_UI.md).
+
+### 9.3 Persistent artifacts
 
 | Artifact | Format | Writer | Reader | Nội dung |
 |---|---|---|---|---|
@@ -592,7 +639,10 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 | `data/checkpoint.json` | JSON object | Collector | Collector | `search_after`, `last_timestamp` |
 | `data/training_checkpoint.json` | JSON object | Training pipeline | Training collector | Historical `search_after` cursor |
 | `data/training_event_index.jsonl` | Append-only JSONL | Training pipeline | Training pipeline | Lightweight parsed event records for replay (kèm `level`, nguồn để dựng `TemplateState.level`) |
-| `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine | `"[service, group_id]" -> AnomalyState` (tuple được flatten thành chuỗi JSON-list tại seam; key thường `group_id` cũ vẫn đọc được nhưng là ô mồ côi) |
+| `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine + web API | `"[service, group_id]" -> AnomalyState` (tuple được flatten thành chuỗi JSON-list tại seam; key thường `group_id` cũ vẫn đọc được nhưng là ô mồ côi) |
+| `data/documentation_corpus.json` | Versioned JSON object | Web API (seed lần đầu từ YAML) | Matcher + web API | Editable documentation source of truth |
+| `data/documentation_overrides.json` | Versioned JSON object | Web API | Refresh worker + web API | Manual group assignment + group fingerprint |
+| `data/documentation_status.json` | JSON object | Refresh worker | Web API | Applied/attempted revisions, stale groups, refresh error |
 | `data/dedup_index.json` | JSON object | Dedup index | Dedup index | `event_id -> processed wall-clock time` |
 | `data/dlq.jsonl` | Append-only JSONL | Realtime | Manual replay API | Failed event records |
 | `data/window_state.json` | Chưa dùng | Không | Không | Config placeholder |
@@ -606,7 +656,7 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 Pickle files chỉ được load từ nguồn tin cậy. Pickle không phải format an toàn
 cho artifact do bên không tin cậy cung cấp.
 
-### 9.3 DLQ record
+### 9.4 DLQ record
 
 ```json
 {

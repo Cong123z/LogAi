@@ -67,9 +67,12 @@ class ClusteringConfig:
 
 @dataclass
 class DocMatcherConfig:
-    corpus_path: str = "docs/documentation_corpus.yaml"
+    corpus_path: str = "data/documentation_corpus.json"
+    seed_corpus_path: str = "docs/documentation_corpus.yaml"
+    overrides_path: str = "data/documentation_overrides.json"
+    status_path: str = "data/documentation_status.json"
     similarity_threshold: float = 0.75
-    refresh_interval_seconds: float = 300.0
+    refresh_interval_seconds: float = 5.0
 
 
 @dataclass
@@ -212,6 +215,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         cfg.storage.base_dir = base_dir
         cfg.storage.model_dir = str(Path(base_dir) / "models")
         cfg.drain3.persistence_path = str(Path(base_dir) / "drain3_state.bin")
+        cfg.doc_matcher.corpus_path = str(Path(base_dir) / "documentation_corpus.json")
+        cfg.doc_matcher.overrides_path = str(Path(base_dir) / "documentation_overrides.json")
+        cfg.doc_matcher.status_path = str(Path(base_dir) / "documentation_status.json")
+    if os.environ.get("LOGAI_DOCUMENTATION_CORPUS_PATH"):
+        cfg.doc_matcher.corpus_path = os.environ["LOGAI_DOCUMENTATION_CORPUS_PATH"]
     if os.environ.get("LOGAI_EMBEDDING_MODEL"):
         cfg.embedding.model_name = os.environ["LOGAI_EMBEDDING_MODEL"]
 

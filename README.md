@@ -116,6 +116,29 @@ stored in the live `group_registry.json`, including its group ID, service,
 representative template, documentation status, and event count. The same data
 is available from `GET /api/groups`.
 
+Templates, Semantic Groups, Alerting, and Documentation are separate sidebar
+views. The Reload control performs a full browser refresh, while automatic
+reconnect keeps retrying the API after a web-service restart, so the Chrome
+process does not need to be restarted.
+
+The Alerting sidebar view reads `anomaly_state.json` every two seconds while it
+is open. It lists the current `NORMAL`, `WARMING`, `ALERTING`, and `COOLING`
+condition for each service/group cell, with status filtering and sortable log
+level, anomaly score, and evaluation time columns. Groups do not own a log
+level: this column is derived from the highest template level in that group and
+is display context only. `AnomalyState.alert_state` is the alert condition.
+
+The Documentation view is writable. Users can add, edit, and delete corpus
+entries, then assign one entry to an undocumented semantic group. Manual
+assignments override cosine matching until cleared. Changes are persisted in
+`documentation_corpus.json` and `documentation_overrides.json` on the shared
+data volume and are applied by the realtime engine within the configured
+refresh interval (5 seconds by default). The write API has no built-in
+authentication; restrict port 5555 with your ingress or network policy.
+
+See [docs/WEB_UI.md](docs/WEB_UI.md) for page behavior, API request/response
+contracts, synchronization states, persistence files, and operational limits.
+
 For a local run against a mounted/copied data directory:
 
 ```bash
@@ -161,9 +184,12 @@ Tất cả state nằm dưới `data/` (mount volume `logai-data` trong Docker):
 | `checkpoint.json` | `search_after` cursor của ES collector (mục 7) |
 | `training_checkpoint.json` | cursor riêng cho historical training; xóa sau khi training hoàn tất |
 | `training_event_index.jsonl` | event index nhẹ để resume/replay training trước các phase grouping và model |
-| `anomaly_state.json` | Alert state machine per group (mục 6) |
+| `anomaly_state.json` | Alert state machine per `(service, group)` cell (mục 6) |
 | `dedup_index.json` | idempotency index theo `event_id` (mục 7) |
 | `dlq.jsonl` | events lỗi sau khi retry hết (mục 7) |
+| `documentation_corpus.json` | Editable documentation entries; seeded once from `docs/documentation_corpus.yaml` |
+| `documentation_overrides.json` | Persistent manual group-to-document assignments |
+| `documentation_status.json` | Last corpus/override revisions applied by the engine |
 | `models/global_v3.pkl` | Global Isolation Forest v3 với rate-floor features |
 | `drain3_state.bin` | state cây Drain3 (persist riêng, thư viện tự quản) |
 
@@ -204,8 +230,8 @@ logai_queue_depth
 
 ## 8. Những điểm cần bạn tinh chỉnh trước khi coi là "production"
 
-- `docs/documentation_corpus.yaml` hiện chỉ là dữ liệu demo — thay bằng
-  nguồn documentation/runbook thật của bạn.
+- `docs/documentation_corpus.yaml` hiện chỉ là seed demo. Thay seed trước lần
+  khởi tạo đầu tiên, hoặc quản lý runtime corpus sau đó qua Documentation view.
 - Các ngưỡng (`clustering.assignment_similarity_threshold`,
   `doc_matcher.similarity_threshold`, `anomaly.*`, `alert.*`) đều đặt giá
   trị mặc định hợp lý nhưng **cần tune lại bằng dữ liệu log thật** của bạn
