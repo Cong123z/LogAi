@@ -57,19 +57,19 @@ spec:
               mountPath: /app/hf-cache
           resources:
             requests:
-              cpu: "500m"
-              memory: "1Gi"
+              cpu: "1"
+              memory: "2Gi"
             limits:
               cpu: "2"
               memory: "4Gi"
           readinessProbe:
             tcpSocket:
-              port: metrics
+              port: 9108
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
             tcpSocket:
-              port: metrics
+              port: 9108
             initialDelaySeconds: 30
             periodSeconds: 20
 
@@ -86,9 +86,10 @@ spec:
               containerPort: 5555
               protocol: TCP
           volumeMounts:
-            # Web reads registries and atomically writes documentation corpus/overrides.
+            # Read-Only access: reads the EXACT same files written by the engine
             - name: logai-data
               mountPath: /app/data
+              readOnly: true
           resources:
             requests:
               cpu: "100m"
@@ -99,12 +100,12 @@ spec:
           readinessProbe:
             httpGet:
               path: /api/stats
-              port: web
+              port: 5555
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /api/stats
-              port: web
+              port: 5555
             initialDelaySeconds: 10
             periodSeconds: 15
