@@ -66,9 +66,9 @@ anomaly:
   predict_max_wait_seconds: 1.0
 
 alert:
-  warm_consecutive: 20
-  alert_consecutive: 65
-  cool_consecutive: 15
+  warm_consecutive: 10
+  alert_consecutive: 30
+  cool_consecutive: 10
   score_high: 0.65
   score_low: 0.52
   min_events_1m: 150
@@ -94,6 +94,8 @@ storage:
   dlq_file: "dlq.jsonl"
   model_dir: "data/models"
   doc_embeddings_file: "doc_embeddings.pkl"
+  grouping_overrides_file: "grouping_overrides.json"
+  grouping_status_file: "grouping_status.json"
 
 reliability:
   max_retries: 5
