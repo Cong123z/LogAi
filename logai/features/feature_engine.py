@@ -113,6 +113,13 @@ class FeatureEngine:
             return None
         return gw.ts_5m[-1]
 
+    def drop_group(self, group_id: str) -> int:
+        """Remove every service window for a deleted semantic group."""
+        keys = [key for key in self._windows.keys() if key[1] == group_id]
+        for key in keys:
+            self._windows.pop(key, None)
+        return len(keys)
+
     def _compute(
         self, group_id: Tuple[str, str], gw: _GroupWindow, now: float
     ) -> FeatureVector:

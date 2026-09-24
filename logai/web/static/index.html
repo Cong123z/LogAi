@@ -294,6 +294,41 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .group-cell { display:flex; flex-direction:column; align-items:flex-start; gap:5px; }
+    .group-expand {
+      display:inline-flex;
+      align-items:center;
+      gap:5px;
+      min-height:24px;
+      padding:2px 4px;
+      border:0;
+      background:transparent;
+      color:var(--accent);
+      font:inherit;
+      font-size:11px;
+      cursor:pointer;
+    }
+    .group-expand:hover { color:var(--text); }
+    .group-expand:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .group-expand-icon { display:inline-block; width:10px; transition:transform 0.15s ease; }
+    .group-expand.expanded .group-expand-icon { transform:rotate(90deg); }
+    .group-members-row[hidden] { display:none; }
+    .group-members-row:hover { background:transparent; }
+    .group-members-row > td { padding:0 14px 14px 36px; background:var(--bg-table); }
+    .group-members-panel { border-left:2px solid var(--accent); padding-left:12px; overflow-x:auto; }
+    .group-member-list { min-width:680px; }
+    .group-member {
+      display:grid;
+      grid-template-columns:120px minmax(260px, 1fr) 120px 90px 80px;
+      gap:12px;
+      align-items:start;
+      padding:8px 6px;
+      border-bottom:1px solid var(--border);
+    }
+    .group-member:last-child { border-bottom:0; }
+    .group-member-header { color:var(--text-dim); font-size:11px; font-weight:600; text-transform:uppercase; }
+    .group-member-text { font-family:'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', monospace; font-size:12px; overflow-wrap:anywhere; }
+    .group-member-events { text-align:right; }
 
     /* ── Pagination ───────────────────────────────────────────────── */
     .pagination {
@@ -400,6 +435,11 @@
     .btn-row { display:flex; gap:6px; white-space:nowrap; }
     .doc-text { max-width:420px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-dim); }
     .sync-status { font-size:12px; color:var(--text-dim); }
+    .operation-status { display:none; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; margin-bottom:14px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-input); font-size:13px; }
+    .operation-status.visible { display:flex; }
+    .operation-status.failed { border-color:var(--red); color:var(--red); }
+    .operation-status.applied { border-color:var(--green); color:var(--green); }
+    .modal-command { display:flex; justify-content:flex-end; margin-top:20px; }
     .form-field { margin-bottom:14px; }
     .form-field label { display:block; color:var(--text-dim); font-size:12px; font-weight:600; margin-bottom:5px; }
     .form-field input, .form-field textarea, .form-field select { width:100%; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); color:var(--text); padding:9px 10px; font:inherit; }
@@ -464,6 +504,7 @@
     <!-- Main Content -->
     <main class="main">
       <div class="page-header"><h1 class="page-title" id="page-title">Templates</h1><span class="connection-status" id="connection-status" hidden>Reconnecting...</span></div>
+      <div class="operation-status" id="grouping-operation-status"><span id="grouping-operation-message"></span><button class="btn" id="grouping-operation-dismiss">Dismiss</button></div>
 
       <section class="view active" id="view-templates">
 
@@ -633,6 +674,23 @@
     </div>
   </div>
 
+  <div class="modal-overlay" id="group-assignment-modal">
+    <div class="modal">
+      <div class="modal-header"><h2>Assign semantic group</h2><button class="modal-close" data-close="group-assignment-modal">&times;</button></div>
+      <div class="toggle-group" id="group-assignment-mode">
+        <button class="toggle-btn active" data-mode="existing">Existing</button>
+        <button class="toggle-btn" data-mode="new">New</button>
+      </div>
+      <div id="group-assignment-existing" style="margin-top:16px">
+        <div class="form-field"><label for="group-assignment-search">Find group</label><input id="group-assignment-search" autocomplete="off"></div>
+        <div class="form-field"><label for="group-assignment-target">Semantic group</label><select id="group-assignment-target"></select></div>
+      </div>
+      <div id="group-assignment-new" class="sync-status" style="display:none;margin-top:16px">The next stable sequential ID, such as G_MANUAL_001, will be generated when submitted.</div>
+      <div class="form-error" id="group-assignment-error"></div>
+      <div class="form-actions"><button type="button" class="btn" data-close="group-assignment-modal">Cancel</button><button type="button" class="btn btn-primary" id="group-assignment-save">Assign</button></div>
+    </div>
+  </div>
+
   <!-- Detail Modal -->
   <div class="modal-overlay" id="modal-overlay">
     <div class="modal">
@@ -641,6 +699,7 @@
         <button class="modal-close" id="modal-close">&times;</button>
       </div>
       <div class="detail-grid" id="detail-grid"></div>
+      <div class="modal-command"><button class="btn btn-primary" id="assign-group-command">Assign group</button></div>
     </div>
   </div>
 
@@ -675,6 +734,12 @@
       alertRefreshTimer: null,
       activeView: 'templates',
       reconnectTimer: null,
+      groupingRevision: null,
+      groupingSynchronization: {},
+      groupingTemplate: null,
+      groupingMode: 'existing',
+      groupingPollTimer: null,
+      expandedGroups: new Set(),
     };
 
     // ── DOM refs ─────────────────────────────────────────────────────
@@ -694,6 +759,7 @@
     const $documentationTbody = document.getElementById('documentation-tbody');
     const $documentModal = document.getElementById('document-modal');
     const $assignmentModal = document.getElementById('assignment-modal');
+    const $groupAssignmentModal = document.getElementById('group-assignment-modal');
 
     // ── Helpers ──────────────────────────────────────────────────────
     function formatTs(epoch) {
@@ -780,6 +846,10 @@
       document.getElementById('group-stat-total').textContent = total;
       document.getElementById('group-stat-documented').textContent = documented;
       document.getElementById('group-stat-undocumented').textContent = total - documented;
+      const availableGroupIds = new Set(items.map(group => group.group_id));
+      state.expandedGroups.forEach(groupId => {
+        if (!availableGroupIds.has(groupId)) state.expandedGroups.delete(groupId);
+      });
       if (state.undocumentedGroupsOnly) items = items.filter(group => !group.documented);
       if (!items.length) {
         $groupsTbody.innerHTML = '<tr><td colspan="7" class="empty-state">No groups found.</td></tr>';
@@ -801,20 +871,46 @@
           : String(a).localeCompare(String(b), undefined, {numeric:true, sensitivity:'base'});
         return state.groupOrder === 'asc' ? comparison : -comparison;
       });
-      $groupsTbody.innerHTML = items.map(g => {
+      $groupsTbody.innerHTML = items.map((g, index) => {
         const document = documentsById.get(g.documentation_id);
         const errorCode = g.error_code || (document && document.error_code) || '—';
+        const templates = Array.isArray(g.templates) ? g.templates : [];
+        const expanded = state.expandedGroups.has(g.group_id);
+        const memberRowId = `group-members-${index}`;
+        const templateLabel = `${templates.length} template${templates.length === 1 ? '' : 's'}`;
+        const memberRows = templates.length ? templates.map(template => `
+          <div class="group-member">
+            <span class="tmpl-id">${escapeHtml(template.template_id || '—')}</span>
+            <span class="group-member-text">${highlightWildcards(escapeHtml(template.template_text || '—'))}</span>
+            <span>${escapeHtml(template.service || 'unknown')}</span>
+            <span><span class="badge ${levelBadgeClass(template.level)}">${escapeHtml(template.level || 'INFO')}</span></span>
+            <span class="group-member-events">${formatCount(template.event_count || 0)}</span>
+          </div>
+        `).join('') : '<div class="group-member"><span class="sync-status">No templates recorded.</span></div>';
         return `
           <tr data-group-id="${escapeHtml(g.group_id)}">
-            <td><span class="group-id">${escapeHtml(g.group_id || '—')}</span></td>
+            <td><div class="group-cell"><span class="group-id">${escapeHtml(g.group_id || '—')}</span><button type="button" class="group-expand${expanded ? ' expanded' : ''}" aria-expanded="${expanded}" aria-controls="${memberRowId}" title="${expanded ? 'Hide' : 'Show'} group templates"><span class="group-expand-icon" aria-hidden="true">&#9656;</span><span>${templateLabel}</span></button></div></td>
             <td>${escapeHtml(g.service || 'unknown')}</td>
             <td><div class="tmpl-text" title="${escapeHtml(g.representative_template || '')}">${highlightWildcards(escapeHtml(g.representative_template || '—'))}</div></td>
             <td>${g.documentation_id ? `<span class="tmpl-id">${escapeHtml(errorCode)}</span>` : '<span class="badge badge-unknown">Undocumented</span>'}</td>
             <td><span class="badge ${g.documentation_source === 'manual' ? 'badge-info' : (g.documentation_source === 'stale_override' ? 'badge-warn' : (g.documented ? 'badge-known' : 'badge-unknown'))}">${escapeHtml(g.documentation_source || (g.documented ? 'automatic' : 'none'))}</span></td>
             <td>${formatCount(g.event_count || 0)}</td>
             <td><div class="btn-row"><button class="btn assign-doc">${g.manual_documentation_id ? 'Change' : 'Assign'}</button>${g.manual_documentation_id ? '<button class="btn clear-doc">Clear</button>' : ''}</div></td>
+          </tr>
+          <tr class="group-members-row" id="${memberRowId}" data-members-for="${escapeHtml(g.group_id)}"${expanded ? '' : ' hidden'}>
+            <td colspan="7"><div class="group-members-panel"><div class="group-member-list"><div class="group-member group-member-header"><span>Template ID</span><span>Template</span><span>Service</span><span>Level</span><span class="group-member-events">Events</span></div>${memberRows}</div></div></td>
           </tr>`;
       }).join('');
+      $groupsTbody.querySelectorAll('.group-expand').forEach(button => button.addEventListener('click', () => {
+        const groupId = button.closest('tr').dataset.groupId;
+        const isExpanded = button.getAttribute('aria-expanded') === 'true';
+        if (isExpanded) state.expandedGroups.delete(groupId);
+        else state.expandedGroups.add(groupId);
+        button.setAttribute('aria-expanded', String(!isExpanded));
+        button.classList.toggle('expanded', !isExpanded);
+        button.title = `${isExpanded ? 'Show' : 'Hide'} group templates`;
+        button.closest('tr').nextElementSibling.hidden = isExpanded;
+      }));
       $groupsTbody.querySelectorAll('.assign-doc').forEach(btn => btn.addEventListener('click', () => openAssignment(btn.closest('tr').dataset.groupId)));
       $groupsTbody.querySelectorAll('.clear-doc').forEach(btn => btn.addEventListener('click', () => clearAssignment(btn.closest('tr').dataset.groupId)));
     }
@@ -910,8 +1006,72 @@
     async function apiMutation(url, method, body) {
       const resp = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
       const data = await resp.json();
-      if (!resp.ok) throw new Error(data.message || data.error || 'Request failed');
+      if (!resp.ok) {
+        const error = new Error(data.message || data.error || 'Request failed');
+        error.status = resp.status;
+        error.payload = data;
+        throw error;
+      }
       return data;
+    }
+
+    function showGroupingOperation(stateName, message) {
+      const container = document.getElementById('grouping-operation-status');
+      container.className = `operation-status visible ${stateName === 'applied' ? 'applied' : (stateName === 'failed' ? 'failed' : '')}`;
+      document.getElementById('grouping-operation-message').textContent = message;
+    }
+
+    function renderGroupAssignmentOptions(query = '') {
+      const current = state.groupingTemplate && state.groupingTemplate.group_id;
+      const normalized = query.trim().toLowerCase();
+      const groups = state.groups.filter(group => group.group_id !== current && (
+        !normalized || `${group.group_id} ${group.representative_template || ''}`.toLowerCase().includes(normalized)
+      ));
+      document.getElementById('group-assignment-target').innerHTML = groups.map(group =>
+        `<option value="${escapeHtml(group.group_id)}">${escapeHtml(group.group_id)} — ${escapeHtml(group.representative_template || '')}</option>`
+      ).join('');
+      document.getElementById('group-assignment-save').disabled = state.groupingMode === 'existing' && !groups.length;
+    }
+
+    async function openGroupAssignment() {
+      if (!state.groupingTemplate) return;
+      const data = await fetchGroups();
+      state.groups = data.items;
+      state.groupingRevision = data.grouping_revision;
+      state.groupingSynchronization = data.grouping_synchronization || {};
+      state.groupingMode = 'existing';
+      document.querySelectorAll('#group-assignment-mode .toggle-btn').forEach(button => button.classList.toggle('active', button.dataset.mode === 'existing'));
+      document.getElementById('group-assignment-existing').style.display = '';
+      document.getElementById('group-assignment-new').style.display = 'none';
+      document.getElementById('group-assignment-search').value = '';
+      document.getElementById('group-assignment-error').textContent = '';
+      renderGroupAssignmentOptions();
+      $groupAssignmentModal.classList.add('open');
+    }
+
+    async function pollGroupingResult(revision, templateId) {
+      clearTimeout(state.groupingPollTimer);
+      try {
+        const resp = await fetch('/api/grouping/status');
+        const status = await resp.json();
+        const result = (status.results || {})[templateId];
+        const reason = result && (result.message || result.reason_code);
+        if (status.revision !== revision || status.state === 'pending' || status.state === 'engine_unavailable') {
+          showGroupingOperation(status.state, `${templateId}: ${status.state}`);
+        } else if (status.state === 'applied') {
+          showGroupingOperation('applied', `${templateId}: assignment applied`);
+          await loadData();
+          return;
+        } else if (status.state === 'failed' || (result && result.retryable === false)) {
+          showGroupingOperation('failed', `${templateId}: ${reason || 'assignment failed'}`);
+          return;
+        } else {
+          showGroupingOperation(status.state, `${templateId}: ${reason || status.state}`);
+        }
+      } catch (error) {
+        showGroupingOperation('engine_unavailable', `${templateId}: engine unavailable`);
+      }
+      state.groupingPollTimer = setTimeout(() => pollGroupingResult(revision, templateId), 1000);
     }
 
     async function deleteDocument(docId) {
@@ -1156,6 +1316,9 @@
       const resp = await fetch(`/api/templates/${encodeURIComponent(templateId)}`);
       const data = await resp.json();
       if (data.error) return;
+      state.groupingTemplate = data;
+      state.groupingRevision = data.grouping_revision;
+      state.groupingSynchronization = data.grouping_synchronization || {};
 
       const fields = [
         ['Template ID', data.template_id, true],
@@ -1178,6 +1341,12 @@
         if (data.group_info.documentation_id) {
           fields.push(['Documentation ID', data.group_info.documentation_id, true]);
         }
+      }
+      if (data.manual_assignment) {
+        fields.push(['Requested Group', `${data.manual_assignment.target_kind}: ${data.manual_assignment.target_id}`, true]);
+      }
+      if (data.grouping_result) {
+        fields.push(['Assignment Result', data.grouping_result.message || data.grouping_result.state]);
       }
 
       $detailGrid.innerHTML = fields.map(([label, value, mono]) => `
@@ -1223,6 +1392,37 @@
         await loadData();
       } catch (err) { document.getElementById('assignment-error').textContent = err.message; }
     });
+    document.getElementById('assign-group-command').addEventListener('click', async () => {
+      $modalOverlay.classList.remove('open');
+      try { await openGroupAssignment(); } catch (error) { showGroupingOperation('failed', error.message); }
+    });
+    document.querySelectorAll('#group-assignment-mode .toggle-btn').forEach(button => {
+      button.addEventListener('click', () => {
+        state.groupingMode = button.dataset.mode;
+        document.querySelectorAll('#group-assignment-mode .toggle-btn').forEach(item => item.classList.toggle('active', item === button));
+        document.getElementById('group-assignment-existing').style.display = state.groupingMode === 'existing' ? '' : 'none';
+        document.getElementById('group-assignment-new').style.display = state.groupingMode === 'new' ? '' : 'none';
+        renderGroupAssignmentOptions(document.getElementById('group-assignment-search').value);
+      });
+    });
+    document.getElementById('group-assignment-search').addEventListener('input', event => renderGroupAssignmentOptions(event.target.value));
+    document.getElementById('group-assignment-save').addEventListener('click', async () => {
+      const templateId = state.groupingTemplate.template_id;
+      const payload = {expected_revision: state.groupingRevision};
+      if (state.groupingMode === 'new') payload.create_new = true;
+      else payload.target_group_id = document.getElementById('group-assignment-target').value;
+      try {
+        const result = await apiMutation(`/api/templates/${encodeURIComponent(templateId)}/group`, 'PUT', payload);
+        state.groupingRevision = result.revision;
+        $groupAssignmentModal.classList.remove('open');
+        showGroupingOperation(result.state, `${templateId}: ${result.state}`);
+        if (result.state !== 'applied') pollGroupingResult(result.revision, templateId);
+      } catch (error) {
+        document.getElementById('group-assignment-error').textContent = error.status === 409 ? 'Grouping changed. Reload and submit again.' : error.message;
+        if (error.status === 409) loadData();
+      }
+    });
+    document.getElementById('grouping-operation-dismiss').addEventListener('click', () => document.getElementById('grouping-operation-status').classList.remove('visible'));
     document.getElementById('assignment-edit').addEventListener('click', () => {
       const docId = document.getElementById('assignment-document').value;
       if (!docId) return;
@@ -1321,6 +1521,8 @@
       try {
         if (state.activeView === 'templates') {
           const data = await fetchTemplates();
+          state.groupingRevision = data.grouping_revision;
+          state.groupingSynchronization = data.grouping_synchronization || {};
           renderStats(data.stats);
           renderTable(data.items);
           renderPagination(data.total, data.page, data.pages);
@@ -1330,6 +1532,8 @@
           state.documentRevision = documentation.revision;
           state.overrideRevision = groups.override_revision;
           state.groups = groups.items;
+          state.groupingRevision = groups.grouping_revision;
+          state.groupingSynchronization = groups.grouping_synchronization || {};
           renderGroups(state.groups);
         } else if (state.activeView === 'alerting') {
           renderAlerts(await fetchAlerts());

@@ -51,8 +51,8 @@ spec:
               cpu: "2"
               memory: "4Gi"
           readinessProbe:
-            tcpSocket:
-              port: metrics
+            exec:
+              command: ["python", "scripts/healthcheck.py"]
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
@@ -74,7 +74,6 @@ spec:
           volumeMounts:
             - name: logai-data
               mountPath: /app/data
-              readOnly: true
           resources:
             requests:
               cpu: "100m"
@@ -84,7 +83,7 @@ spec:
               memory: "512Mi"
           readinessProbe:
             httpGet:
-              path: /api/stats
+              path: /api/health
               port: web
             initialDelaySeconds: 5
             periodSeconds: 10

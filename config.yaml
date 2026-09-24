@@ -97,6 +97,10 @@ storage:
   grouping_overrides_file: "grouping_overrides.json"
   grouping_status_file: "grouping_status.json"
 
+grouping:
+  heartbeat_interval_seconds: 5
+  engine_status_stale_seconds: 45
+
 reliability:
   max_retries: 5
   backoff_base_seconds: 1

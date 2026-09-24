@@ -21,6 +21,11 @@ from logai.docmatch.doc_matcher import DocumentationMatcher
 from logai.docmatch.refresh_worker import DocumentationRefreshWorker
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
+from logai.grouping import PENDING_GROUP_ID
+from logai.grouping.assignment_manager import (
+    GroupAssignmentError,
+    GroupAssignmentManager,
+)
 from logai.metrics.prometheus_exporter import MetricsExporter
 from logai.models import (
     DEFAULT_LEVEL,
@@ -38,12 +43,10 @@ from logai.storage.base import JSONStore, ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import DedupIndex
 from logai.storage.documentation import DocumentationCorpusStore
+from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
 logger = logging.getLogger("logai.realtime")
-
-PENDING_GROUP_ID = "UNASSIGNED_PENDING"
-
 
 class RealtimePipeline:
     def __init__(self, config: AppConfig):
@@ -57,6 +60,12 @@ class RealtimePipeline:
 
         self.template_registry = TemplateRegistry(config.storage)
         self.group_registry = GroupRegistry(config.storage)
+        self.grouping_store = GroupingOverrideStore.from_config(config)
+        self.grouping_manager = GroupAssignmentManager(
+            self.template_registry,
+            self.group_registry,
+            self.embedder.embed_one,
+        )
 
         self.documentation_store = DocumentationCorpusStore.from_config(config)
         config.doc_matcher.corpus_path = str(self.documentation_store.corpus_path)
@@ -122,6 +131,15 @@ class RealtimePipeline:
         self._pending_cursor: Optional[Any] = None
         self._pending_last_ts: Optional[float] = None
         self._buffer_started_at: Optional[float] = None
+        self._grouping_initialized = False
+        self._grouping_retry_needed = False
+        self._last_grouping_template_generation = (
+            self.template_registry.mutation_generation
+        )
+        self._last_grouping_heartbeat = 0.0
+        self._last_successful_poll_at: Optional[float] = None
+        self._last_processed_event_at: Optional[float] = None
+        self._last_checkpoint_commit_at: Optional[float] = None
 
     def start_metrics_server(self) -> None:
         self.metrics.start()
@@ -143,10 +161,18 @@ class RealtimePipeline:
         MAX_POLL_BACKOFF = 300.0  # 5 minutes
 
         while True:
+            self._refresh_grouping_if_needed()
             # ── Phase 1: Poll ES ──────────────────────────────────────────
             try:
                 batch, cursor = self.collector.poll_batch()
                 consecutive_poll_failures = 0
+                self._last_successful_poll_at = time.time()
+                self.metrics.logai_engine_heartbeat_timestamp_seconds.set(
+                    self._last_successful_poll_at
+                )
+                self.metrics.logai_last_successful_poll_timestamp_seconds.set(
+                    self._last_successful_poll_at
+                )
             except Exception as exc:  # noqa: BLE001
                 consecutive_poll_failures += 1
                 backoff = min(
@@ -159,8 +185,15 @@ class RealtimePipeline:
                     consecutive_poll_failures, exc, backoff,
                 )
                 self.metrics.logai_es_poll_errors_total.inc()
+                self.metrics.logai_pipeline_errors_total.labels(
+                    stage="elasticsearch", reason_code="poll_failed"
+                ).inc()
                 time.sleep(backoff)
                 continue
+
+            # A command accepted while the ES request was in flight applies to
+            # the fetched batch as a whole, before its first event is processed.
+            self._refresh_grouping_if_needed()
 
             # ── Phase 2: Accumulate batch into the predict buffer ─────────
             # Only parse/group/feature-extract/append here; scoring happens at
@@ -208,6 +241,10 @@ class RealtimePipeline:
             )
             if should_flush:
                 self._flush_batch()
+                # A fetched batch is no longer queued only after prediction and
+                # durability work has completed.
+                if batch:
+                    self.metrics.logai_queue_depth.set(0)
 
             # ── Phase 5: Sleep when the stream was empty this cycle ───────
             if not batch:
@@ -230,16 +267,50 @@ class RealtimePipeline:
         real stream batch contributed to this flush (`_pending_cursor` set); an
         idle-only flush (empty stream) scores snapshots but commits nothing.
         """
-        self._flush_predictions()
+        try:
+            self._flush_predictions()
+        except Exception:
+            self.metrics.logai_pipeline_errors_total.labels(
+                stage="prediction", reason_code="prediction_failed"
+            ).inc()
+            raise
 
         # Registry updates used flush=False on the hot path; make them durable
         # before the cursor advances (no-op when nothing new was written).
-        self.template_registry.flush()
-        self.group_registry.flush()
-        self.dedup.gc()
+        try:
+            self.template_registry.flush()
+        except Exception:
+            self.metrics.logai_pipeline_errors_total.labels(
+                stage="storage", reason_code="template_registry_write_failed"
+            ).inc()
+            raise
+        try:
+            self.group_registry.flush()
+        except Exception:
+            self.metrics.logai_pipeline_errors_total.labels(
+                stage="storage", reason_code="group_registry_write_failed"
+            ).inc()
+            raise
+        try:
+            self.dedup.gc()
+        except Exception:
+            self.metrics.logai_pipeline_errors_total.labels(
+                stage="dedup", reason_code="dedup_flush_failed"
+            ).inc()
+            raise
 
         if self._pending_cursor is not None:
-            self.checkpoint.commit(self._pending_cursor, self._pending_last_ts)
+            try:
+                self.checkpoint.commit(self._pending_cursor, self._pending_last_ts)
+            except Exception:
+                self.metrics.logai_pipeline_errors_total.labels(
+                    stage="checkpoint", reason_code="checkpoint_write_failed"
+                ).inc()
+                raise
+            self._last_checkpoint_commit_at = time.time()
+            self.metrics.logai_last_checkpoint_commit_timestamp_seconds.set(
+                self._last_checkpoint_commit_at
+            )
 
         self._pending_cursor = None
         self._pending_last_ts = None
@@ -298,11 +369,21 @@ class RealtimePipeline:
 
             self.dedup.mark(raw.event_id)
             self.metrics.logai_events_processed_total.inc()
+            self._last_processed_event_at = raw.timestamp
+            self.metrics.logai_last_processed_event_timestamp_seconds.set(
+                self._last_processed_event_at
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to process event %s: %s", raw.event_id, exc)
             self.metrics.logai_events_failed_total.inc()
+            self.metrics.logai_pipeline_errors_total.labels(
+                stage="event", reason_code="processing_failed"
+            ).inc()
             self.dlq.push(raw.to_dict(), str(exc))
+            self.metrics.logai_dlq_records_total.labels(
+                reason_code="processing_failed"
+            ).inc()
             return True  # durable DLQ is a terminal outcome for this event
         finally:
             self.metrics.logai_processing_latency_seconds.observe(time.time() - start)
@@ -362,6 +443,7 @@ class RealtimePipeline:
         is_new = self.template_registry.upsert(state, flush=False)
         if is_new:
             self._update_template_metrics(parsed.raw.service)
+            self._grouping_retry_needed = True
 
         if group_id is None:
             # Doesn't clear the similarity threshold against any existing
@@ -469,3 +551,192 @@ class RealtimePipeline:
         svc = service or "unknown"
         count = self.template_registry.count_by_service(svc)
         self.metrics.set_template_count(svc, count)
+
+    # --- grouping revision activation ---------------------------------------
+
+    def _heartbeat_grouping(self) -> None:
+        now = time.time()
+        if (
+            now - self._last_grouping_heartbeat
+            < self.config.grouping.heartbeat_interval_seconds
+        ):
+            return
+        self.grouping_store.update_heartbeat(now, runtime={
+            "last_successful_poll_at": self._last_successful_poll_at,
+            "last_processed_event_at": self._last_processed_event_at,
+            "last_checkpoint_commit_at": self._last_checkpoint_commit_at,
+        })
+        self._last_grouping_heartbeat = now
+
+    @staticmethod
+    def _derive_grouping_state(results: dict[str, dict[str, Any]]) -> str:
+        if any(
+            value.get("state") == "unresolved" and not value.get("retryable", False)
+            for value in results.values()
+        ):
+            return "failed"
+        applied = sum(value.get("state") == "applied" for value in results.values())
+        unresolved = sum(
+            value.get("state") == "unresolved" for value in results.values()
+        )
+        if unresolved and applied:
+            return "partial"
+        if unresolved:
+            return "pending"
+        return "applied"
+
+    def _refresh_grouping_if_needed(self) -> bool:
+        # Some embedders/tests construct a lightweight pipeline object without
+        # calling __init__. Grouping is optional for that compatibility path.
+        if not hasattr(self, "grouping_store"):
+            return False
+        self._heartbeat_grouping()
+        try:
+            if not self._grouping_initialized:
+                snapshot = self.grouping_store.load_overrides()
+                self._grouping_initialized = True
+            else:
+                generation_changed = (
+                    self.template_registry.mutation_generation
+                    != self._last_grouping_template_generation
+                )
+                if self._grouping_retry_needed and generation_changed:
+                    snapshot = self.grouping_store.cached_overrides()
+                else:
+                    snapshot = self.grouping_store.load_if_changed()
+            if snapshot is None:
+                return False
+        except GroupingStoreError as exc:
+            logger.error("Invalid grouping override: %s", exc)
+            self.metrics.logai_pipeline_errors_total.labels(
+                stage="grouping", reason_code="invalid_override_schema"
+            ).inc()
+            self.grouping_store.write_status({
+                "applied_revision": None,
+                "attempted_revision": None,
+                "last_attempt_at": time.time(),
+                "last_applied_at": None,
+                "last_heartbeat_at": time.time(),
+                "state": "failed",
+                "error": {
+                    "reason_code": "invalid_override_schema",
+                    "message": str(exc)[:500],
+                    "retryable": False,
+                },
+                "results": {},
+                "unresolved": {},
+            })
+            return False
+
+        started = time.monotonic()
+        previous = self.grouping_store.load_status()
+        attempt_at = time.time()
+        pending_status = {
+            "applied_revision": previous.get("applied_revision"),
+            "attempted_revision": snapshot["revision"],
+            "last_attempt_at": attempt_at,
+            "last_applied_at": previous.get("last_applied_at"),
+            "last_heartbeat_at": attempt_at,
+            "state": "pending",
+            "error": None,
+            "results": previous.get("results", {}),
+            "unresolved": previous.get("unresolved", {}),
+            "runtime": previous.get("runtime", {}),
+        }
+        self.grouping_store.write_status(pending_status)
+        self.metrics.set_grouping_revision(snapshot["revision"], "pending")
+
+        # Every buffered vector and real cursor belongs to the pre-change map.
+        if self._pending_predictions or self._pending_cursor is not None:
+            self._flush_batch()
+        try:
+            outcome = self.grouping_manager.apply_realtime(snapshot)
+            for group_id in outcome.deleted_groups:
+                self.feature_engine.drop_group(group_id)
+                self.alert_sm.drop_group(group_id)
+                self.metrics.drop_group(group_id)
+            if outcome.resolution.affected_groups:
+                self.documentation_worker.invalidate_groups(
+                    outcome.resolution.affected_groups
+                )
+
+            results = outcome.resolution.results
+            state = self._derive_grouping_state(results)
+            nonretryable = next(
+                (
+                    value for value in results.values()
+                    if value.get("state") == "unresolved"
+                    and not value.get("retryable", False)
+                ),
+                None,
+            )
+            applied_revision = (
+                snapshot["revision"]
+                if state == "applied"
+                else previous.get("applied_revision")
+            )
+            status = {
+                "applied_revision": applied_revision,
+                "attempted_revision": snapshot["revision"],
+                "last_attempt_at": attempt_at,
+                "last_applied_at": (
+                    time.time() if state == "applied" else previous.get("last_applied_at")
+                ),
+                "last_heartbeat_at": time.time(),
+                "state": state,
+                "error": (
+                    {
+                        "reason_code": nonretryable.get("reason_code"),
+                        "message": nonretryable.get("message", "Grouping assignment failed"),
+                        "retryable": False,
+                    }
+                    if nonretryable else None
+                ),
+                "results": results,
+                "unresolved": outcome.resolution.unresolved,
+                "runtime": previous.get("runtime", {}),
+            }
+            self.grouping_store.write_status(status)
+            self.metrics.set_grouping_revision(snapshot["revision"], state)
+            self._grouping_retry_needed = any(
+                value.get("state") == "unresolved" and value.get("retryable", False)
+                for value in results.values()
+            )
+            self._last_grouping_template_generation = (
+                self.template_registry.mutation_generation
+            )
+            reason = "none" if state == "applied" else state
+            self.metrics.logai_grouping_apply_total.labels(
+                result=state, reason_code=reason
+            ).inc()
+            return True
+        except GroupAssignmentError as exc:
+            logger.error("Grouping revision %s failed: %s", snapshot["revision"], exc)
+            self.metrics.logai_pipeline_errors_total.labels(
+                stage="grouping", reason_code=exc.reason_code
+            ).inc()
+            if not exc.rollback_succeeded:
+                # A restart must reconcile the pending durable marker before any
+                # further event can observe a partially persisted mapping.
+                raise
+            self.grouping_store.write_status({
+                **pending_status,
+                "last_heartbeat_at": time.time(),
+                "state": "failed",
+                "error": {
+                    "reason_code": exc.reason_code,
+                    "message": str(exc)[:500],
+                    "retryable": False,
+                },
+                "results": {},
+                "unresolved": {},
+            })
+            self.metrics.set_grouping_revision(snapshot["revision"], "failed")
+            self.metrics.logai_grouping_apply_total.labels(
+                result="failed", reason_code=exc.reason_code
+            ).inc()
+            return False
+        finally:
+            self.metrics.logai_grouping_apply_duration_seconds.observe(
+                time.monotonic() - started
+            )

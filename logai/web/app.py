@@ -20,6 +20,14 @@ from logai.storage.documentation import (
     RevisionConflict,
     group_fingerprint,
 )
+from logai.storage.grouping import (
+    MANUAL_GROUP_RE,
+    GroupingCycleError,
+    GroupingOverrideStore,
+    GroupingRevisionConflict,
+    GroupingStoreError,
+    GroupingTargetError,
+)
 
 logger = logging.getLogger("logai.web")
 
@@ -32,6 +40,9 @@ def create_app(
     overrides_path: str | None = None,
     status_path: str | None = None,
     seed_path: str | None = None,
+    grouping_overrides_path: str | None = None,
+    grouping_status_path: str | None = None,
+    grouping_stale_seconds: float = 45.0,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     base = Path(data_dir)
@@ -41,6 +52,10 @@ def create_app(
         overrides_path or base / "documentation_overrides.json",
         status_path or base / "documentation_status.json",
         seed_path or root / "docs" / "documentation_corpus.yaml",
+    )
+    grouping = GroupingOverrideStore(
+        grouping_overrides_path or base / "grouping_overrides.json",
+        grouping_status_path or base / "grouping_status.json",
     )
 
     def _load_json(filename: str) -> Dict[str, Any]:
@@ -54,6 +69,14 @@ def create_app(
         return group_id is not None and group_id != PENDING_GROUP_ID
 
     def _mutation_error(exc: Exception):
+        if isinstance(exc, GroupingRevisionConflict):
+            return jsonify({
+                "error": "revision_conflict",
+                "message": str(exc),
+                "current_revision": exc.current_revision,
+            }), 409
+        if isinstance(exc, GroupingCycleError):
+            return jsonify({"error": "anchor_cycle", "message": str(exc)}), 409
         if isinstance(exc, RevisionConflict):
             return jsonify({
                 "error": "revision_conflict",
@@ -70,8 +93,33 @@ def create_app(
             return jsonify({"error": "not_found", "message": str(exc.args[0])}), 404
         if isinstance(exc, DocumentationStoreError):
             return jsonify({"error": "invalid_request", "message": str(exc)}), 400
-        logger.exception("Documentation mutation failed")
+        if isinstance(exc, (GroupingTargetError, GroupingStoreError)):
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        logger.exception("Web mutation failed")
         return jsonify({"error": "storage_error", "message": str(exc)}), 500
+
+    def _grouping_context() -> tuple[Dict[str, Any], Dict[str, Any]]:
+        synchronization = grouping.synchronization_status(
+            stale_seconds=grouping_stale_seconds
+        )
+        try:
+            overrides = grouping.load_overrides()
+        except GroupingStoreError:
+            overrides = {"revision": synchronization.get("revision"), "assignments": {}}
+        return overrides, synchronization
+
+    @staticmethod
+    def _template_grouping_fields(
+        template_id: str,
+        effective_group_id: Optional[str],
+        overrides: Dict[str, Any],
+        synchronization: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "manual_assignment": overrides.get("assignments", {}).get(template_id),
+            "effective_group_id": effective_group_id,
+            "grouping_result": synchronization.get("results", {}).get(template_id),
+        }
 
     # ── API Routes ────────────────────────────────────────────────────
 
@@ -91,6 +139,7 @@ def create_app(
         """
         templates = _load_json("template_registry.json")
         groups = _load_json("group_registry.json")
+        grouping_overrides, grouping_sync = _grouping_context()
 
         # Build response list with enrichment from group registry
         result: List[Dict[str, Any]] = []
@@ -113,6 +162,9 @@ def create_app(
                 "group_name": group.get("representative_template", ""),
                 "documented": group.get("documented", False),
                 "error_code": group.get("error_code", ""),
+                **_template_grouping_fields(
+                    tid, gid, grouping_overrides, grouping_sync
+                ),
             })
 
         # ── Filters ──
@@ -180,6 +232,8 @@ def create_app(
                 "services": sorted(all_services),
                 "levels": sorted(all_levels),
             },
+            "grouping_revision": grouping_overrides.get("revision"),
+            "grouping_synchronization": grouping_sync,
         })
 
     @app.route("/api/templates/<template_id>")
@@ -193,12 +247,161 @@ def create_app(
         gid = tmpl.get("group_id")
         groups = _load_json("group_registry.json")
         group = groups.get(gid, {}) if gid and _is_known(gid) else {}
+        grouping_overrides, grouping_sync = _grouping_context()
 
         return jsonify({
             **tmpl,
             "status": "known" if _is_known(gid) else "unknown",
             "group_info": group,
+            **_template_grouping_fields(
+                template_id, gid, grouping_overrides, grouping_sync
+            ),
+            "grouping_revision": grouping_overrides.get("revision"),
+            "grouping_synchronization": grouping_sync,
         })
+
+    @app.route("/api/grouping/status")
+    def grouping_status():
+        return jsonify(grouping.synchronization_status(
+            stale_seconds=grouping_stale_seconds
+        ))
+
+    @app.route("/api/health")
+    def health():
+        grouping_sync = grouping.synchronization_status(
+            stale_seconds=grouping_stale_seconds
+        )
+        documentation_sync = documentation.synchronization_status()
+        if grouping_sync.get("state") == "engine_unavailable":
+            state = "unavailable"
+        elif grouping_sync.get("state") in {"failed", "partial"} or documentation_sync.get("state") == "failed":
+            state = "degraded"
+        else:
+            state = "healthy"
+        return jsonify({
+            "state": state,
+            "engine_alive": grouping_sync.get("state") != "engine_unavailable",
+            "last_heartbeat_at": grouping_sync.get("last_heartbeat_at"),
+            **grouping_sync.get("runtime", {}),
+            "grouping": grouping_sync,
+            "documentation": documentation_sync,
+        }), (503 if state == "unavailable" else 200)
+
+    @app.route("/api/templates/<template_id>/group", methods=["PUT"])
+    def assign_template_group(template_id: str):
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "invalid_request", "message": "JSON body is required"}), 400
+        templates = _load_json("template_registry.json")
+        source = templates.get(template_id)
+        if source is None:
+            return jsonify({"error": "not_found", "message": template_id}), 404
+        groups = _load_json("group_registry.json")
+        target_group_id = payload.get("target_group_id")
+        create_new = payload.get("create_new") is True
+        if create_new == bool(target_group_id):
+            return jsonify({
+                "error": "invalid_request",
+                "message": "Provide exactly one of target_group_id or create_new=true",
+            }), 400
+        expected_revision = payload.get("expected_revision")
+        if not isinstance(expected_revision, str) or not expected_revision:
+            return jsonify({
+                "error": "invalid_request", "message": "expected_revision is required"
+            }), 400
+
+        try:
+            current_overrides = grouping.load_overrides()
+        except Exception as exc:  # noqa: BLE001
+            return _mutation_error(exc)
+        if expected_revision != current_overrides["revision"]:
+            return _mutation_error(
+                GroupingRevisionConflict(current_overrides["revision"])
+            )
+
+        current_group_id = source.get("group_id")
+        current_sync = grouping.synchronization_status(
+            stale_seconds=grouping_stale_seconds
+        )
+        if (
+            not create_new
+            and target_group_id == current_group_id
+            and current_sync.get("applied_revision") == current_overrides["revision"]
+        ):
+            return jsonify({
+                "template_id": template_id,
+                "requested_target": {
+                    "kind": "effective_group",
+                    "id": target_group_id,
+                    "current_group_id": current_group_id,
+                },
+                "revision": current_sync.get("revision"),
+                "state": "applied",
+            })
+
+        # The old manual group can be pruned immediately when this source is its
+        # only effective member and no remaining assignment references it.
+        effective_group_ids = set(groups)
+        old_group = groups.get(current_group_id, {})
+        if old_group.get("template_ids") == [template_id]:
+            effective_group_ids.discard(current_group_id)
+        try:
+            if create_new:
+                manual_group_id, snapshot = grouping.create_manual_group_assignment(
+                    template_id,
+                    expected_revision,
+                    effective_group_ids=effective_group_ids,
+                )
+                requested = {
+                    "kind": "manual_group",
+                    "id": manual_group_id,
+                    "current_group_id": current_group_id,
+                }
+            else:
+                if not isinstance(target_group_id, str) or target_group_id == PENDING_GROUP_ID:
+                    raise GroupingTargetError("target_group_id is invalid or pending")
+                target_group = groups.get(target_group_id)
+                if target_group is None:
+                    return jsonify({"error": "not_found", "message": target_group_id}), 404
+                if MANUAL_GROUP_RE.fullmatch(target_group_id):
+                    if target_group_id not in current_overrides.get("manual_groups", {}):
+                        raise GroupingTargetError(f"Unknown manual group: {target_group_id}")
+                    target_kind = "manual_group"
+                    target_id = target_group_id
+                else:
+                    candidates = [
+                        tid for tid in target_group.get("template_ids", [])
+                        if tid != template_id and tid in templates
+                    ]
+                    if not candidates:
+                        raise GroupingTargetError(
+                            "The target group has no eligible anchor template"
+                        )
+                    candidates.sort(
+                        key=lambda tid: (-int(templates[tid].get("event_count", 0)), tid)
+                    )
+                    target_kind = "anchor"
+                    target_id = candidates[0]
+                snapshot = grouping.replace_assignment(
+                    template_id,
+                    target_kind,
+                    target_id,
+                    expected_revision,
+                    effective_group_ids=effective_group_ids,
+                )
+                requested = {
+                    "kind": target_kind,
+                    "id": target_id,
+                    "current_group_id": target_group_id,
+                }
+            return jsonify({
+                "template_id": template_id,
+                "requested_target": requested,
+                "revision": snapshot["revision"],
+                "state": "pending",
+            }), 202
+        except Exception as exc:  # noqa: BLE001
+            return _mutation_error(exc)
 
     @app.route("/api/stats")
     def get_stats():
@@ -226,6 +429,7 @@ def create_app(
     def list_groups():
         """List every persisted semantic group from group_registry.json."""
         groups = _load_json("group_registry.json")
+        grouping_overrides, grouping_sync = _grouping_context()
         service = request.args.get("service", "").strip().lower()
         documented = request.args.get("documented", "").strip().lower()
         search = request.args.get("search", "").strip().lower()
@@ -235,6 +439,20 @@ def create_app(
         templates = _load_json("template_registry.json")
         for gid, group in groups.items():
             item = {"group_id": gid, **group}
+            item["templates"] = []
+            for template_id in item.get("template_ids", []):
+                template = templates.get(template_id, {})
+                if not isinstance(template, dict):
+                    template = {}
+                item["templates"].append({
+                    "template_id": template_id,
+                    "template_text": template.get("template_text", ""),
+                    "service": template.get("service", "unknown"),
+                    "level": template.get("level", DEFAULT_LEVEL),
+                    "event_count": template.get("event_count", 0),
+                    "first_seen": template.get("first_seen", 0),
+                    "last_seen": template.get("last_seen", 0),
+                })
             override = overrides.get(gid)
             texts = [
                 templates.get(template_id, {}).get("template_text", "")
@@ -261,6 +479,8 @@ def create_app(
             "items": items,
             "total": len(items),
             "override_revision": override_snapshot["revision"],
+            "grouping_revision": grouping_overrides.get("revision"),
+            "grouping_synchronization": grouping_sync,
         })
 
     @app.route("/api/alerts")
@@ -304,6 +524,8 @@ def create_app(
             if not isinstance(raw, dict):
                 continue
             service, group_id = identity(key, raw)
+            if group_id not in groups:
+                continue
             group = groups.get(group_id, {})
             represented_groups.add(group_id)
             items.append({
@@ -356,9 +578,10 @@ def create_app(
     def list_documentation():
         corpus = documentation.load_corpus()
         overrides = documentation.load_overrides()["overrides"]
+        active_group_ids = set(_load_json("group_registry.json"))
         manual_usage: Dict[str, int] = {}
-        for override in overrides.values():
-            if isinstance(override, dict) and override.get("documentation_id"):
+        for group_id, override in overrides.items():
+            if group_id in active_group_ids and isinstance(override, dict) and override.get("documentation_id"):
                 doc_id = str(override["documentation_id"])
                 manual_usage[doc_id] = manual_usage.get(doc_id, 0) + 1
         group_usage: Dict[str, int] = {}
@@ -404,7 +627,11 @@ def create_app(
     def delete_documentation(doc_id: str):
         payload = request.get_json(silent=True) or {}
         try:
-            corpus = documentation.delete_document(doc_id, payload.get("revision"))
+            corpus = documentation.delete_document(
+                doc_id,
+                payload.get("revision"),
+                active_group_ids=set(_load_json("group_registry.json")),
+            )
             return jsonify({"deleted_id": doc_id, "revision": corpus["revision"]})
         except Exception as exc:  # noqa: BLE001
             return _mutation_error(exc)

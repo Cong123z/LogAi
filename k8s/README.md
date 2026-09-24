@@ -33,8 +33,11 @@ The deployment runs **both the Realtime Engine and the Template Explorer Web UI 
 ### Why this guarantees data consistency:
 - Both containers run in the **same Pod**, sharing the exact same `logai-data-pvc` mounted at `/app/data`.
 - When the engine discovers and flushes new templates to `template_registry.json`, the web UI immediately serves them from that exact same file.
-- The web container writes only `documentation_corpus.json` and
-  `documentation_overrides.json`; engine registries remain engine-owned.
+- The web container writes only documentation files and
+  `grouping_overrides.json`; engine registries and `grouping_status.json` remain
+  engine-owned.
+- Readiness executes `scripts/healthcheck.py`, which requires a fresh engine
+  heartbeat instead of treating an open TCP port as pipeline progress.
 - Port 5555 exposes unauthenticated mutation endpoints. Restrict it with an
   ingress authentication layer or a trusted-network policy.
 - Works with standard Kubernetes `ReadWriteOnce` storage (AWS EBS, GKE Persistent Disk, Azure Disk, local-path). No complex NFS required!

@@ -140,6 +140,14 @@ class StorageConfig:
     dlq_file: str = "dlq.jsonl"
     model_dir: str = "data/models"
     doc_embeddings_file: str = "doc_embeddings.pkl"
+    grouping_overrides_file: str = "grouping_overrides.json"
+    grouping_status_file: str = "grouping_status.json"
+
+
+@dataclass
+class GroupingConfig:
+    heartbeat_interval_seconds: float = 5.0
+    engine_status_stale_seconds: float = 45.0
 
 
 @dataclass
@@ -172,6 +180,7 @@ class AppConfig:
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    grouping: GroupingConfig = field(default_factory=GroupingConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:

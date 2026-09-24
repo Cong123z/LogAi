@@ -96,6 +96,47 @@ class MetricsExporter:
             "logai_es_malformed_hits_total",
             "ES hits skipped due to missing/invalid _source or _id",
         )
+        self.logai_engine_heartbeat_timestamp_seconds = Gauge(
+            "logai_engine_heartbeat_timestamp_seconds",
+            "Unix timestamp of the latest realtime loop heartbeat",
+        )
+        self.logai_last_successful_poll_timestamp_seconds = Gauge(
+            "logai_last_successful_poll_timestamp_seconds",
+            "Unix timestamp of the latest successful Elasticsearch poll",
+        )
+        self.logai_last_processed_event_timestamp_seconds = Gauge(
+            "logai_last_processed_event_timestamp_seconds",
+            "Event timestamp of the latest successfully processed log",
+        )
+        self.logai_last_checkpoint_commit_timestamp_seconds = Gauge(
+            "logai_last_checkpoint_commit_timestamp_seconds",
+            "Unix timestamp of the latest successful checkpoint commit",
+        )
+        self.logai_pipeline_errors_total = Counter(
+            "logai_pipeline_errors_total",
+            "Pipeline failures by stage and stable reason",
+            ["stage", "reason_code"],
+        )
+        self.logai_grouping_apply_total = Counter(
+            "logai_grouping_apply_total",
+            "Grouping revision application attempts",
+            ["result", "reason_code"],
+        )
+        self.logai_grouping_apply_duration_seconds = Histogram(
+            "logai_grouping_apply_duration_seconds",
+            "Time spent applying a grouping revision",
+        )
+        self.logai_grouping_revision_info = Gauge(
+            "logai_grouping_revision_info",
+            "Current grouping revision and engine synchronization state",
+            ["revision", "state"],
+        )
+        self.logai_dlq_records_total = Counter(
+            "logai_dlq_records_total",
+            "Events durably written to the dead-letter queue",
+            ["reason_code"],
+        )
+        self._last_grouping_revision_labels: Tuple[str, str] | None = None
 
     def start(self) -> None:
         start_http_server(self.config.http_port, addr=self.config.http_host)
@@ -154,3 +195,43 @@ class MetricsExporter:
             self.log_alert_state.labels(
                 service=service, group_id=group_id, state=candidate.value
             ).set(1 if candidate.value == state.alert_state else 0)
+
+    def drop_group(self, group_id: str) -> None:
+        """Remove live gauge/counter children for a deleted group."""
+        keys = {
+            key for key in self._last_documented_label if key[1] == group_id
+        } | {
+            key for key in self._last_alert_state if key[1] == group_id
+        }
+        for service, current_group_id in keys:
+            documented = self._last_documented_label.pop(
+                (service, current_group_id), None
+            )
+            if documented is not None:
+                self.log_anomaly_score.remove(service, current_group_id, documented)
+            self._last_alert_state.pop((service, current_group_id), None)
+            for candidate in AlertStateEnum:
+                try:
+                    self.log_alert_state.remove(
+                        service, current_group_id, candidate.value
+                    )
+                except KeyError:
+                    pass
+            try:
+                self.log_alerts_total.remove(service, current_group_id)
+            except KeyError:
+                pass
+
+    def set_grouping_revision(self, revision: str, state: str) -> None:
+        labels = (revision or "none", state)
+        if self._last_grouping_revision_labels not in (None, labels):
+            try:
+                self.logai_grouping_revision_info.remove(
+                    *self._last_grouping_revision_labels
+                )
+            except KeyError:
+                pass
+        self.logai_grouping_revision_info.labels(
+            revision=labels[0], state=labels[1]
+        ).set(1)
+        self._last_grouping_revision_labels = labels

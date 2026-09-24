@@ -24,7 +24,7 @@ spec:
       volumes:
         # ── Shared Data Volume ────────────────────────────────────────────────
         # Holds template_registry.json, group_registry.json, checkpoints, models.
-        # Shared by both the engine container (RW) and web UI container (RO).
+        # Shared by both containers. Web code writes only web-owned intent files.
         - name: logai-data
           persistentVolumeClaim:
             claimName: logai-data-pvc
@@ -63,8 +63,8 @@ spec:
               cpu: "2"
               memory: "4Gi"
           readinessProbe:
-            tcpSocket:
-              port: 9108
+            exec:
+              command: ["python", "scripts/healthcheck.py"]
             initialDelaySeconds: 15
             periodSeconds: 10
           livenessProbe:
@@ -86,10 +86,9 @@ spec:
               containerPort: 5555
               protocol: TCP
           volumeMounts:
-            # Read-Only access: reads the EXACT same files written by the engine
+            # Web writes documentation and grouping override files only.
             - name: logai-data
               mountPath: /app/data
-              readOnly: true
           resources:
             requests:
               cpu: "100m"
@@ -99,7 +98,7 @@ spec:
               memory: "512Mi"
           readinessProbe:
             httpGet:
-              path: /api/stats
+              path: /api/health
               port: 5555
             initialDelaySeconds: 5
             periodSeconds: 10

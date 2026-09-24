@@ -164,6 +164,26 @@ class AlertStateMachine:
         """
         return list(self._non_normal)
 
+    def drop_group(self, group_id: str) -> int:
+        """Delete all persisted service cells for an empty semantic group."""
+        keys = []
+        for key in self._store.all():
+            identity = _parse_group_id_key(key)
+            if isinstance(identity, tuple) and len(identity) == 2 and identity[1] == group_id:
+                keys.append(key)
+            elif identity == group_id:
+                keys.append(key)
+        for key in keys:
+            self._store.delete(key, flush=False)
+        if keys:
+            self._store.flush()
+        self._non_normal = {
+            identity
+            for identity in self._non_normal
+            if not (isinstance(identity, tuple) and len(identity) == 2 and identity[1] == group_id)
+        }
+        return len(keys)
+
 
 def _state_payload(state: AnomalyState) -> dict:
     """Serialize an AnomalyState for the JSON store, storing a tuple group_id as a

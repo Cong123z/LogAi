@@ -21,6 +21,7 @@ from logai.docmatch.refresh_worker import DocumentationRefreshWorker
 from logai.clustering.hdbscan_cluster import GroupClusterer, NOISE_LABEL
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
+from logai.grouping.assignment_manager import GroupAssignmentManager
 from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomalyModels
 from logai.models import (
     DEFAULT_LEVEL,
@@ -36,6 +37,7 @@ from logai.storage.base import ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import LocalTrainingDedup
 from logai.storage.documentation import DocumentationCorpusStore
+from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 from logai.storage.training_event_index import TrainingEventIndex
 
@@ -50,6 +52,11 @@ class TrainingPipeline:
         self.clusterer = GroupClusterer(config.clustering)
         self.template_registry = TemplateRegistry(config.storage)
         self.group_registry = GroupRegistry(config.storage)
+        self.grouping_store = GroupingOverrideStore.from_config(config)
+        self.grouping_manager = GroupAssignmentManager(
+            self.template_registry, self.group_registry, self.embedder.embed_one
+        )
+        self._active_grouping_snapshot: Optional[Dict[str, Any]] = None
         self.feature_engine = FeatureEngine(config.features)
         self.model_store = ModelStore(config.storage.model_dir)
         self.anomaly_model = GlobalAnomalyModel(config.anomaly, self.model_store)
@@ -74,6 +81,49 @@ class TrainingPipeline:
         checkpoint_store: Optional[CheckpointStore] = None,
         dedup_buffer_size: Optional[int] = None,
     ) -> None:
+        try:
+            self._run_impl(
+                historical_logs,
+                checkpoint_store=checkpoint_store,
+                dedup_buffer_size=dedup_buffer_size,
+            )
+        except Exception as exc:
+            if self._active_grouping_snapshot is not None:
+                previous = {}
+                try:
+                    previous = self.grouping_store.load_status()
+                except GroupingStoreError:
+                    pass
+                try:
+                    self.grouping_store.write_status({
+                        "applied_revision": previous.get("applied_revision"),
+                        "attempted_revision": self._active_grouping_snapshot["revision"],
+                        "last_attempt_at": time.time(),
+                        "last_applied_at": previous.get("last_applied_at"),
+                        "last_heartbeat_at": time.time(),
+                        "state": "failed",
+                        "error": {
+                            "reason_code": "engine_exception",
+                            "message": str(exc)[:500],
+                            "retryable": False,
+                        },
+                        "results": {},
+                        "unresolved": {},
+                    })
+                except Exception:  # noqa: BLE001
+                    logger.exception("Unable to persist failed grouping training status")
+            raise
+
+    def _run_impl(
+        self,
+        historical_logs: Union[
+            List[RawLog],
+            Iterable[List[RawLog]],
+            Iterable[Tuple[List[RawLog], Optional[List[Any]]]],
+        ],
+        checkpoint_store: Optional[CheckpointStore] = None,
+        dedup_buffer_size: Optional[int] = None,
+    ) -> None:
         t_start_total = time.time()
         logger.info("=== Training pipeline started ===")
         # Phase 1: Stream parse batches into Drain3 with LocalTrainingDedup & Checkpoint
@@ -87,9 +137,56 @@ class TrainingPipeline:
         )
         self._rebuild_template_registry()
         self._embed_templates()
+        try:
+            self._active_grouping_snapshot = self.grouping_store.load_overrides()
+        except GroupingStoreError as exc:
+            now = time.time()
+            self.grouping_store.write_status({
+                "applied_revision": None,
+                "attempted_revision": None,
+                "last_attempt_at": now,
+                "last_applied_at": None,
+                "last_heartbeat_at": now,
+                "state": "failed",
+                "error": {
+                    "reason_code": "invalid_override_schema",
+                    "message": str(exc)[:500],
+                    "retryable": False,
+                },
+                "results": {},
+                "unresolved": {},
+            })
+            raise
         template_to_group = self._cluster_templates()
-        self._build_group_registry(template_to_group)
-        self._compute_centroids()
+        template_states = {
+            state.template_id: state for state in self.template_registry.all_templates()
+        }
+        resolution = self.grouping_manager.resolve(
+            template_to_group,
+            template_states,
+            self._active_grouping_snapshot,
+        )
+        template_to_group = {
+            template_id: group_id
+            for template_id, group_id in resolution.effective_mapping.items()
+            if group_id is not None
+        }
+        for template_id, group_id in template_to_group.items():
+            self.template_registry.set_group(template_id, group_id, flush=False)
+        groups, centroids, _deleted = self.grouping_manager.build_groups(
+            resolution.effective_mapping,
+            template_states,
+            self.template_registry.all_embeddings(),
+            {group.group_id: group for group in self.group_registry.all_groups()},
+        )
+        grouped_by_group = self._group_events(template_to_group)
+        self._train_anomaly_models(grouped_by_group)
+
+        # Publish the complete effective membership only after feature/model
+        # generation succeeds. A failed training run therefore never reports
+        # the grouping revision as applied.
+        self.template_registry.flush()
+        self.group_registry.replace_all(groups, centroids)
         self._match_documentation()
         DocumentationRefreshWorker(
             self.documentation_store,
@@ -98,11 +195,10 @@ class TrainingPipeline:
             self.template_registry,
             self.config.doc_matcher.refresh_interval_seconds,
         ).refresh_once()
-        grouped_by_group = self._group_events(template_to_group)
-        self._train_anomaly_models(grouped_by_group)
 
         logger.info("Phase 10: Persisting all registries and cleaning temporary indexes...")
         self._flush_all()
+        self._write_training_grouping_status(resolution)
         if checkpoint_store is not None:
             checkpoint_store.clear()
         self.event_index.clear()
@@ -112,6 +208,59 @@ class TrainingPipeline:
             len(self.template_registry.all_templates()),
             len(self.group_registry.all_groups()),
         )
+
+    def _write_training_grouping_status(self, resolution: Any) -> None:
+        snapshot = self._active_grouping_snapshot
+        if snapshot is None:
+            return
+        previous = {}
+        try:
+            previous = self.grouping_store.load_status()
+        except GroupingStoreError:
+            pass
+        results = resolution.results
+        has_nonretryable = any(
+            result.get("state") == "unresolved" and not result.get("retryable", False)
+            for result in results.values()
+        )
+        applied = sum(result.get("state") == "applied" for result in results.values())
+        unresolved = sum(result.get("state") == "unresolved" for result in results.values())
+        if has_nonretryable:
+            state = "failed"
+        elif applied and unresolved:
+            state = "partial"
+        elif unresolved:
+            state = "pending"
+        else:
+            state = "applied"
+        first_error = next(
+            (
+                result for result in results.values()
+                if result.get("state") == "unresolved" and not result.get("retryable", False)
+            ),
+            None,
+        )
+        now = time.time()
+        self.grouping_store.write_status({
+            "applied_revision": (
+                snapshot["revision"] if state == "applied" else previous.get("applied_revision")
+            ),
+            "attempted_revision": snapshot["revision"],
+            "last_attempt_at": now,
+            "last_applied_at": now if state == "applied" else previous.get("last_applied_at"),
+            "last_heartbeat_at": now,
+            "state": state,
+            "error": (
+                {
+                    "reason_code": first_error.get("reason_code"),
+                    "message": first_error.get("message", "Grouping assignment failed"),
+                    "retryable": False,
+                }
+                if first_error else None
+            ),
+            "results": results,
+            "unresolved": resolution.unresolved,
+        })
 
     # -- steps -----------------------------------------------------------
 
@@ -304,7 +453,8 @@ class TrainingPipeline:
         texts = [t.template_text for t in templates]
         embeddings = self.embedder.embed(texts)
         for tid, emb in zip(ids, embeddings):
-            self.template_registry.set_embedding(tid, emb)
+            self.template_registry.set_embedding(tid, emb, flush=False)
+        self.template_registry.flush()
         logger.info(
             "Phase 3 complete in %.2fs: Generated embeddings for %d templates",
             time.time() - t_phase3,
@@ -331,7 +481,6 @@ class TrainingPipeline:
             else:
                 group_id = f"G{label:04d}"
             template_to_group[tid] = group_id
-            self.template_registry.set_group(tid, group_id)
         logger.info(
             "Phase 4 complete in %.2fs: Clustered %d templates into %d groups",
             time.time() - t_phase4,

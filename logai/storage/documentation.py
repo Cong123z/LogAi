@@ -204,7 +204,12 @@ class DocumentationCorpusStore:
                     return entry, self._write_corpus(entries)
             raise KeyError(doc_id)
 
-    def delete_document(self, doc_id: str, expected_revision: str) -> Dict[str, Any]:
+    def delete_document(
+        self,
+        doc_id: str,
+        expected_revision: str,
+        active_group_ids: Optional[set[str]] = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             corpus = self.load_corpus()
             self._check_revision(expected_revision, corpus["revision"])
@@ -212,6 +217,7 @@ class DocumentationCorpusStore:
             users = sorted(
                 gid for gid, value in overrides.items()
                 if isinstance(value, dict) and value.get("documentation_id") == doc_id
+                and (active_group_ids is None or gid in active_group_ids)
             )
             if users:
                 raise DocumentInUse(users)

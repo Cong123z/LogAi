@@ -111,6 +111,11 @@ The realtime engine starts the web UI automatically via `depends_on`. Then open
 http://localhost:5555. The UI supports known/unknown status tabs,
 service and level filters, free-text search, sortable columns, pagination,
 auto-refresh, and a detail view for each template.
+Template details also provide manual semantic-group assignment. A template can
+move to an existing group or a new stable sequential group such as
+`G_MANUAL_001`. The UI keeps the
+operation visible while the engine applies it at a realtime batch boundary;
+the HTTP `202` response is acceptance, not completion.
 The page also includes a Semantic Groups table showing every entry currently
 stored in the live `group_registry.json`, including its group ID, service,
 representative template, documentation status, and event count. The same data
@@ -190,6 +195,8 @@ Tất cả state nằm dưới `data/` (mount volume `logai-data` trong Docker):
 | `documentation_corpus.json` | Editable documentation entries; seeded once from `docs/documentation_corpus.yaml` |
 | `documentation_overrides.json` | Persistent manual group-to-document assignments |
 | `documentation_status.json` | Last corpus/override revisions applied by the engine |
+| `grouping_overrides.json` | Web-owned desired template-to-group assignments |
+| `grouping_status.json` | Engine-owned results, heartbeat, and per-template failures |
 | `models/global_v3.pkl` | Global Isolation Forest v3 với rate-floor features |
 | `drain3_state.bin` | state cây Drain3 (persist riêng, thư viện tự quản) |
 
@@ -226,7 +233,39 @@ logai_events_failed_total
 logai_retry_total
 logai_processing_latency_seconds
 logai_queue_depth
+logai_engine_heartbeat_timestamp_seconds
+logai_last_successful_poll_timestamp_seconds
+logai_last_processed_event_timestamp_seconds
+logai_last_checkpoint_commit_timestamp_seconds
+logai_grouping_apply_total{result, reason_code}
+logai_pipeline_errors_total{stage, reason_code}
 ```
+
+`GET http://localhost:5555/api/health` combines the engine heartbeat with
+grouping and documentation synchronization state. Container readiness uses the
+same heartbeat contract; a listening metrics socket alone is not considered
+proof that the poll loop is progressing.
+
+Operational verification path:
+
+```bash
+# Must be HTTP 200 with engine_alive=true and fresh poll/checkpoint timestamps.
+curl -i http://localhost:5555/api/health
+
+# Shows pending/applied/partial/failed assignments and stable per-template reasons.
+curl -sS http://localhost:5555/api/grouping/status | jq
+
+# Confirms handled pipeline failures are counted by stage/reason.
+curl -sS http://localhost:9108/metrics \
+  | rg 'logai_(pipeline_errors|events_failed|dlq_records|grouping_apply)_total'
+
+# Event-level terminal failures retain the original record and error message.
+tail -n 20 data/dlq.jsonl
+```
+
+Together these distinguish liveness, forward progress, revision failures, and
+event-level failures. Process-level exceptions still belong in container logs;
+readiness becomes unavailable when such a failure stops the heartbeat.
 
 ## 8. Những điểm cần bạn tinh chỉnh trước khi coi là "production"
 

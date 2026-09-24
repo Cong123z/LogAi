@@ -69,6 +69,7 @@ storage:
   "schema_version": 1,
   "revision": "sha256-of-assignments-and-manual-groups",
   "updated_at": 1780000000.0,
+  "next_manual_group_number": 2,
   "assignments": {
     "T00012": {
       "target_kind": "anchor",
@@ -77,12 +78,12 @@ storage:
     },
     "T00025": {
       "target_kind": "manual_group",
-      "target_id": "G_MANUAL_a1b2c3d4e5f6",
+      "target_id": "G_MANUAL_001",
       "assigned_at": 1780000010.0
     }
   },
   "manual_groups": {
-    "G_MANUAL_a1b2c3d4e5f6": {
+    "G_MANUAL_001": {
       "created_at": 1780000010.0
     }
   }
@@ -94,8 +95,10 @@ Rules:
 - `revision` is a deterministic SHA-256 over `assignments` and `manual_groups` only.
 - An `anchor` means the source template follows the effective group containing the
   anchor template. This survives unstable HDBSCAN `Gnnnn` IDs across retraining.
-- A `manual_group` target is a stable server-generated ID matching
-  `G_MANUAL_[0-9a-f]{12}`.
+- A `manual_group` target is a stable server-generated sequential ID matching
+  `G_MANUAL_[0-9]{3,}`. A persisted monotonic counter prevents ID reuse.
+- `next_manual_group_number` is web-owned allocation state. Existing version-one
+  files without it derive the next value from their numeric manual IDs on load.
 - Reassigning a source template replaces its previous assignment.
 - Anchor graphs must be acyclic.
 - A manual-group definition is removed when no assignment targets it and it has no
@@ -117,16 +120,101 @@ Rules:
 }
 ```
 
-Synchronization state is derived as follows:
-
-- `applied`: `applied_revision` equals the current override revision and `error` is null.
-- `failed`: `attempted_revision` equals the current revision and `error` is non-null.
-- `pending`: the current revision differs from both applied and failed revisions.
-- `engine_unavailable`: no status has been written.
+Synchronization state is derived from the current override revision and the engine
+status. The complete state and per-template outcome rules are defined in section 3.3.
+The status file remains engine-owned; the web process must never infer successful
+application from the existence of an override file alone.
 
 Unresolved individual assignments do not fail the entire revision. Apply all resolvable
 assignments, report missing source or anchor templates in `unresolved`, and retry them
 when a relevant template later appears.
+
+### 3.3 User-visible application outcomes
+
+The web mutation has two distinct failure points:
+
+1. Request-time validation in the web process. Malformed input, a missing source or
+   target, a pending target, a stale revision, or an anchor cycle is rejected
+   synchronously with the existing structured HTTP error shape. No override revision is
+   created for these errors.
+2. Engine-time application after the override has been accepted. The web process cannot
+   guarantee that a separate realtime or training process is running, healthy, or able
+   to write its registries. These outcomes must be persisted in `grouping_status.json`
+   and exposed through read APIs.
+
+Extend the status schema with a durable per-template result and a top-level failure
+description:
+
+```json
+{
+  "schema_version": 1,
+  "applied_revision": "old-or-new-revision",
+  "attempted_revision": "new-revision",
+  "last_attempt_at": 1780000001.0,
+  "last_applied_at": 1780000001.1,
+  "state": "partial",
+  "error": null,
+  "results": {
+    "T00012": {
+      "state": "unresolved",
+      "reason_code": "missing_anchor",
+      "message": "Anchor template T00004 is not present",
+      "retryable": true
+    },
+    "T00025": {
+      "state": "applied",
+      "effective_group_id": "G_MANUAL_001"
+    }
+  }
+}
+```
+
+The existing `unresolved` map may remain as a compact compatibility field, but `results`
+is authoritative for the UI and API. All error messages are bounded, human-readable,
+and accompanied by stable reason codes. At minimum use:
+
+- `missing_source` and `missing_anchor` (`retryable: true` when the template may appear
+  in a later training or realtime registry refresh);
+- `missing_target_group` and `anchor_cycle` (`retryable: false`, normally prevented by
+  the web API and guarded again by the engine);
+- `embedding_failed`, `centroid_failed`, `registry_write_failed`,
+  `invalid_override_schema`, and `engine_exception` (`retryable: false` for the
+  attempted operation until a later revision or explicit engine retry).
+
+Derive the top-level state with these rules:
+
+- `applied`: every assignment in the current revision has an `applied` result and
+  `applied_revision` equals the current revision.
+- `partial`: at least one assignment is applied and at least one assignment is
+  unresolved; the unresolved entries remain retryable.
+- `pending`: the current revision has not yet been attempted, or all outstanding
+  results are retryable and no complete application has been recorded.
+- `failed`: the current revision was attempted and a non-retryable engine error was
+  recorded. Preserve the previous effective mapping for every template whose mutation
+  was not durably completed.
+- `engine_unavailable`: no valid status has been written, or the status heartbeat is
+  older than the configured engine-status staleness interval.
+
+An unresolved assignment does not roll back successfully applied assignments. The
+status must identify both outcomes so the user can see exactly which templates moved
+and which did not. A non-retryable failure must stop automatic polling for that
+revision, retain the error until a new revision is submitted or the engine repairs the
+same revision, and never claim `applied` merely because some registry writes finished.
+
+When applying a revision, the engine should write status in this order:
+
+1. Record `attempted_revision`, `state: pending`, and `last_attempt_at`.
+2. Resolve all assignments and record per-template unresolved reasons.
+3. Apply resolvable mappings and rebuild affected registries and centroids.
+4. Flush all affected artifacts durably.
+5. Record `results`, `applied_revision`, `last_applied_at`, and the final derived state.
+
+If a crash occurs before step 4, the revision remains pending and is safely replayed.
+If a crash occurs after step 4 but before step 5, replay must compare the current
+effective mapping and repair only status; it must not double-count template metadata.
+If any registry, embedding, centroid, or status write fails, preserve the previous
+checkpoint and write a failed status when possible. If the status write itself fails,
+log the error and leave the override revision pending so restart retries it.
 
 ## 4. Grouping Store
 
@@ -257,6 +345,20 @@ Successful mutation response:
   "state": "pending"
 }
 ```
+
+The accepted response is only an acknowledgement that the override was stored. It
+must not imply that the engine has applied the assignment. Add a read endpoint:
+
+```http
+GET /api/grouping/status
+```
+
+It returns the current override revision, synchronization state, top-level error,
+per-template results, retryability, and timestamps. Extend template and group responses
+with the same revision and synchronization fields; a template response also includes
+its requested assignment, effective group, and per-template result. The response must
+make these cases distinguishable: accepted and waiting, partially applied, applied,
+failed permanently, and engine unavailable.
 
 Return codes:
 
@@ -394,6 +496,15 @@ Update the Template Details modal in `logai/web/static/index.html`:
 - Poll existing read APIs until the submitted revision is applied or failed, then
   refresh template and group views.
 
+The grouping operation UI must keep a visible result after the modal closes. Display
+`pending`/`applying` while the engine has not finished, `applied` when every requested
+assignment succeeded, and `partial` with the affected template and retry reason when
+only some assignments succeeded. Display `failed` with the stable reason code and
+human-readable message for non-retryable engine errors, and display
+`engine_unavailable` when no fresh status is available. Stop polling on `applied` or a
+non-retryable `failed` result; continue polling for retryable unresolved assignments.
+The user must never see a success notification based solely on the HTTP `202` response.
+
 Use the selected template text as the representative text for a newly created group.
 
 ## 12. Throughput Requirements
@@ -431,6 +542,16 @@ During a manual operation:
   unresolved and leaves its old mapping intact.
 - Never advance the ES checkpoint solely because a grouping command was applied.
 - Never mark a grouping revision applied until all registry and centroid writes finish.
+- Every accepted revision has a durable per-template outcome exposed through
+  `GET /api/grouping/status`; asynchronous engine failures are therefore visible to the
+  user instead of being represented only in logs.
+- Request-time validation errors remain synchronous HTTP errors and do not create a
+  revision. Engine-time failures use stable reason codes, bounded messages, and an
+  explicit retryable flag.
+- A partial result reports applied and unresolved templates separately. It does not
+  silently convert unresolved work into `applied`.
+- A non-retryable failure retains the last effective mapping and remains visible until
+  a new revision or a successful repair attempt replaces it.
 
 ## 14. Affected Files
 
@@ -462,9 +583,80 @@ Modified web and deployment files:
 - `logai/storage/documentation.py`
 - `docker-compose.yml`
 - Kubernetes deployment manifests where the web volume is currently read-only
+- `scripts/run_web.py`
 - `README.md`
 - `ARCHITECTURE.md`
 - `docs/WEB_UI.md`
+
+### 14.1 Input/output and module boundary audit
+
+The implementation must update these contracts together:
+
+| Input or output | Owning module | Required change | Compatibility rule |
+|---|---|---|---|
+| `storage.grouping_overrides_file` and `storage.grouping_status_file` | `logai/config.py`, `config.yaml` | Add defaults and YAML loading | Existing deployments default to the two new filenames under `base_dir` |
+| Web grouping mutation body | `logai/web/app.py` | Validate `expected_revision`, `target_group_id`, and `create_new`; return structured 4xx errors | Do not create an override revision on validation failure |
+| Grouping override snapshot | `logai/storage/grouping.py` | Validate schema, revision, IDs, target kinds, and cycles; atomically replace JSON | Corrupt input is reported as a failed engine status and never silently treated as empty |
+| Grouping status snapshot | `logai/storage/grouping.py` | Validate and expose top-level plus per-template results | Unknown/malformed status is `engine_unavailable` or `failed`, never `applied` |
+| Template detail/list JSON | `logai/web/app.py` | Add requested assignment, effective group, revision, synchronization state, and result | Existing fields retain their meanings; `group_id` remains the effective persisted group |
+| Group list JSON | `logai/web/app.py` | Add grouping revision and synchronization state | Documentation synchronization remains a separate field and file |
+| `TemplateRegistry` mutations | `logai/storage/registries.py` | Add `set_group(..., flush=False)` and use one embedding/metadata flush per operation | Existing callers keep `flush=True` behavior by default |
+| `GroupRegistry` mutations | `logai/storage/registries.py` | Add deferred centroid/delete operations and complete `replace_all(groups, centroids)` | Replacement removes stale groups and stale centroids from prior runs |
+| Group metadata refresh | `logai/grouping/assignment_manager.py` | Rebuild only affected groups from template registry state | Preserve documentation fields while avoiding lost concurrent documentation updates |
+| Realtime command activation | `logai/realtime/realtime_pipeline.py` | Check before poll and after poll; flush old predictions before applying | No event in a fetched batch is processed under a new mapping unless the revision was applied before that batch starts |
+| Training mapping | `logai/training/train_pipeline.py` | Resolve overrides before group registry, centroids, historical grouping, and model training | A failed training revision does not mark grouping applied |
+| Feature/alert runtime state | `logai/features/feature_engine.py`, `logai/alert/alert_state_machine.py` | Add `drop_group` with one deferred flush | Only deleted groups are dropped; surviving groups retain windows and alert state |
+| Web launch and deployment permissions | `scripts/run_web.py`, `docker-compose.yml`, `k8s/*.yaml` | Pass grouping paths and mount the shared data volume read-write for the web writer, or provide a separate writable override/status mount | Registry files remain protected from web writes; grouping override writes must succeed in production |
+
+### 14.2 Implementation hazards and required safeguards
+
+- `config.yaml` already contains grouping filenames while `StorageConfig` currently
+  does not. Add the dataclass fields and ensure `LOGAI_STORAGE_BASE_DIR` resolves both
+  files under the overridden base directory; otherwise YAML values can be silently
+  ignored or the web and engine can select different paths.
+- `create_app()` currently receives only documentation paths. Add explicit grouping
+  override/status path arguments and pass them from `scripts/run_web.py`; do not rely
+  on a hard-coded filename when a deployment has custom storage filenames.
+- The Kubernetes web container currently mounts the data PVC read-only and the Docker
+  comments describe the web process as read-only. This makes the new mutation endpoint
+  fail at runtime. Mount only the grouping/documentation-owned files or directory
+  writable, or make the shared data mount writable while enforcing that the web code
+  writes only grouping and documentation-owned files.
+- `DocumentationRefreshWorker.apply_documentation_updates()` and grouping metadata
+  rebuilds both read-modify-write `GroupState`. A per-method lock is insufficient: one
+  operation can overwrite the other. Add a shared registry mutation lock/transaction
+  boundary, or make the documentation worker retry against a fresh group snapshot after
+  a grouping revision changes.
+- `GroupRegistry.replace_all()` must replace the centroid dictionary as well as group
+  metadata. Leaving old centroid keys makes deleted automatic groups eligible for future
+  realtime nearest-group assignment.
+- Deferred centroid writes must not call the current `set_centroid()` implementation,
+  which saves the complete pickle on every call. Add `flush=False` and save once after
+  all affected groups are changed. The same applies to template embedding writes.
+- The current `TemplateRegistry.set_group()` has no deferred-flush parameter even though
+  the grouping algorithm requires one. Update the method and all training call sites
+  deliberately; otherwise the operation will either fail at runtime or regress the
+  throughput requirement.
+- A status file can be read while an atomic replacement is in progress only if every
+  writer uses the same temporary-file-plus-`os.replace` protocol. Validate status reads
+  and distinguish corrupt status from a valid applied status.
+- Realtime and training are separate OS processes sharing registries. The operational
+  single-writer rule must be enforced by deployment/runbook or a lock/lease; otherwise
+  a training `replace_all()` can race with realtime assignment and lose metadata,
+  centroids, or status updates.
+- The web must validate against a consistent snapshot of template/group registries and
+  the current grouping revision. A target group can disappear between validation and
+  engine application, so the engine must return a per-template `missing_target_group`
+  result instead of crashing or reporting success.
+- `FeatureEngine.snapshot()` uses a `defaultdict` and can materialize a new empty cell.
+  `drop_group()` must remove all matching cells without creating any, and the idle alert
+  tick must not reintroduce a deleted group from persisted orphan state.
+- `/api/alerts` must filter persisted `(service, group_id)` states against the current
+  group registry before building `represented_groups`; otherwise deleted groups remain
+  visible after a move that empties their source.
+- Do not compute assignment resolution or centroids in `_process_one()` or the known
+  template `_assign_group()` path. All override parsing and affected-group work belongs
+  at the two batch-boundary checks so the steady-state hot path remains unchanged.
 
 ## 15. Test and Acceptance Matrix
 
@@ -478,6 +670,12 @@ Modified web and deployment files:
 - Template assigned to a new manual group.
 - Reassigning an already manually assigned template replaces its target.
 - Missing source/target, pending target, malformed request, same-group no-op, and cycle.
+- Accepted revision is visible as pending before engine application.
+- Retryable missing anchor is reported as partial/unresolved with a reason code.
+- Non-retryable embedding, centroid, registry, and status-write failures are exposed as
+  failed with bounded messages and retryability.
+- `GET /api/grouping/status`, template details, and group listings expose consistent
+  synchronization state.
 
 ### Centroids and registries
 
@@ -497,6 +695,9 @@ Modified web and deployment files:
 - A revision arriving during batch processing applies before the next batch.
 - Updated centroids are immediately used for subsequent unknown-template matching.
 - Restart before and after status persistence converges to the same state.
+- A crash or write failure before status finalization leaves the revision retryable and
+  never reports false success.
+- A partial revision reports each applied and unresolved template independently.
 
 ### Windows and alerts
 
@@ -511,6 +712,8 @@ Modified web and deployment files:
 - Anchor intent survives changed automatic group IDs across retraining.
 - Manual group IDs remain stable.
 - Missing anchors are reported and fall back to automatic grouping.
+- Training failures update grouping status with a user-visible reason and do not mark
+  the revision applied.
 - Documentation automatic matches refresh after centroid changes.
 - Membership changes suspend stale manual documentation overrides.
 

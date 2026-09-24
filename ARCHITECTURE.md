@@ -606,7 +606,8 @@ trong memory và reset khi process restart; Prometheus giữ time series đã sc
 ### 9.2 Web UI và HTTP API
 
 Flask web process là reader của template/group/anomaly state và là writer duy
-nhất của editable documentation corpus/overrides. Bốn view dùng hash route:
+nhất của editable documentation corpus/overrides và grouping intent. Engine là
+writer duy nhất của grouping status và applied registries. Bốn view dùng hash route:
 `#templates`, `#groups`, `#alerting`, `#documentation`. Sidebar và Reload luôn
 hiện trên desktop; request lỗi được retry mỗi 2 giây để browser tự reconnect sau
 web process restart.
@@ -621,6 +622,11 @@ Documentation mutations dùng optimistic revision và trả 409 khi client ghi t
 snapshot cũ. Assignment endpoint ghi override với fingerprint của group rồi trả
 `state: pending`; refresh worker áp dụng revision bất đồng bộ. API không có auth,
 vì vậy deployment phải chặn write routes bằng ingress/network policy.
+
+`PUT /api/templates/<id>/group` ghi desired assignment và trả `202`; engine
+flush prediction cũ rồi activate revision tại poll/batch boundary. `GET
+/api/grouping/status` phân biệt pending, partial, applied, failed và
+engine_unavailable. `GET /api/health` dùng heartbeat thay vì chỉ kiểm tra port.
 
 Chi tiết endpoint, payload, response và hành vi UI nằm tại
 [`docs/WEB_UI.md`](docs/WEB_UI.md).
@@ -643,6 +649,8 @@ Chi tiết endpoint, payload, response và hành vi UI nằm tại
 | `data/documentation_corpus.json` | Versioned JSON object | Web API (seed lần đầu từ YAML) | Matcher + web API | Editable documentation source of truth |
 | `data/documentation_overrides.json` | Versioned JSON object | Web API | Refresh worker + web API | Manual group assignment + group fingerprint |
 | `data/documentation_status.json` | JSON object | Refresh worker | Web API | Applied/attempted revisions, stale groups, refresh error |
+| `data/grouping_overrides.json` | Versioned JSON object | Web API | Training + realtime | Desired anchor/manual-group assignments |
+| `data/grouping_status.json` | JSON object | Training + realtime | Web API + readiness | Applied/attempted revision, per-template results, heartbeat and progress timestamps |
 | `data/dedup_index.json` | JSON object | Dedup index | Dedup index | `event_id -> processed wall-clock time` |
 | `data/dlq.jsonl` | Append-only JSONL | Realtime | Manual replay API | Failed event records |
 | `data/window_state.json` | Chưa dùng | Không | Không | Config placeholder |
@@ -758,6 +766,11 @@ Không có file lock/distributed lock. Hai OS processes cùng ghi một artifact
 thể overwrite state của nhau. Chỉ một realtime writer được phép dùng cùng
 `data/` directory.
 
+Grouping activation uses `grouping_status.json` as a recovery marker. A pending
+attempt is written before registry mutation and `applied_revision` only after
+template metadata/embeddings and group metadata/centroids are durable. A crash
+between file replacements is reconciled idempotently before the next event.
+
 DLQ là append JSONL dưới thread lock nhưng không dùng temp+replace hoặc `fsync`;
 record cuối có thể không bền vững nếu host mất điện đúng lúc ghi.
 
@@ -769,7 +782,8 @@ record cuối có thể không bền vững nếu host mất điện đúng lúc
 | Alert state | Flush một lần tại biên predict batch; key là `(service, group_id)` flatten; intermediate states giữ trong RAM cho metrics |
 | Dedup | Flush tại biên flush qua `gc()` |
 | Template/group metadata trong realtime | Update dùng `flush=False`; `flush()` tại biên flush micro-batch, no-op khi `_dirty` sạch |
-| Template embeddings | Save toàn embedding cache khi set |
+| Template embeddings | Mark dirty on update; save the complete cache once at a batch/training boundary |
+| Grouping intent/status | Web and engine have separate files; status heartbeat also carries last poll/event/checkpoint progress |
 | Feature windows | Chỉ in-memory, key `(service, group_id)`; reset khi restart (idle-tick bù bằng cách union với alert state đã persist) |
 | Prometheus client counters/gauges | Chỉ in-memory; reset khi restart |
 
@@ -853,6 +867,7 @@ Nguồn theo dõi remediation là `KNOWN_ISSUES.md`; lịch sử giải quyết 
    model.
 2. Training và realtime phải dùng cùng `data/` volume và cùng Drain3 state.
 3. Chỉ một realtime process được ghi vào một state directory.
+   Training và realtime cũng không được chạy đồng thời trên directory đó.
 4. Elasticsearch documents phải có sortable `@timestamp` và stable unique ID.
 5. Documentation corpus và model embedding phải có cùng embedding dimension.
 6. Không thay model embedding mà giữ centroids/doc embeddings cũ; phải retrain

@@ -25,6 +25,8 @@ class TemplateRegistry:
         self._meta = JSONStore(base / storage.template_registry_file)
         self._embeddings = PickleStore(base / storage.template_embeddings_file)
         self._embedding_cache: Dict[str, np.ndarray] = self._embeddings.load({})
+        self._embeddings_dirty = False
+        self._mutation_generation = 0
         self._counts_by_service: Dict[str, int] = {}
         for raw in self._meta.all().values():
             svc = ((raw.get("service") or "unknown").strip()) or "unknown"
@@ -41,6 +43,7 @@ class TemplateRegistry:
             if is_new:
                 svc = ((state.service or "unknown").strip()) or "unknown"
                 self._counts_by_service[svc] = self._counts_by_service.get(svc, 0) + 1
+                self._mutation_generation += 1
             else:
                 old_svc = ((old_raw.get("service") or "unknown").strip()) or "unknown"
                 new_svc = ((state.service or "unknown").strip()) or "unknown"
@@ -63,8 +66,12 @@ class TemplateRegistry:
                     self._counts_by_service[svc] -= 1
                     if self._counts_by_service[svc] == 0:
                         del self._counts_by_service[svc]
-                self._meta.delete(template_id, flush=flush)
-                self._embedding_cache.pop(template_id, None)
+                self._meta.delete(template_id, flush=False)
+                if self._embedding_cache.pop(template_id, None) is not None:
+                    self._embeddings_dirty = True
+                self._mutation_generation += 1
+                if flush:
+                    self.flush()
                 return True
             return False
 
@@ -84,34 +91,52 @@ class TemplateRegistry:
     def set_embedding(
         self, template_id: str, embedding: np.ndarray, flush: bool = True
     ) -> None:
-        self._embedding_cache[template_id] = embedding
-        if flush:
-            self._embeddings.save(self._embedding_cache)
+        with self._lock:
+            self._embedding_cache[template_id] = embedding
+            self._embeddings_dirty = True
+            self._mutation_generation += 1
+            if flush:
+                self._embeddings.save(self._embedding_cache)
+                self._embeddings_dirty = False
 
     def get_embedding(self, template_id: str) -> Optional[np.ndarray]:
-        return self._embedding_cache.get(template_id)
+        with self._lock:
+            return self._embedding_cache.get(template_id)
 
     def all_templates(self) -> List[TemplateState]:
         return [TemplateState(**v) for v in self._meta.all().values()]
 
     def all_embeddings(self) -> Dict[str, np.ndarray]:
-        return dict(self._embedding_cache)
+        with self._lock:
+            return dict(self._embedding_cache)
 
-    def set_group(self, template_id: str, group_id: str) -> None:
-        state = self.get(template_id)
-        if state:
-            state.group_id = group_id
-            self.upsert(state)
+    def set_group(self, template_id: str, group_id: str, flush: bool = True) -> None:
+        with self._lock:
+            state = self.get(template_id)
+            if state and state.group_id != group_id:
+                state.group_id = group_id
+                self._mutation_generation += 1
+                self.upsert(state, flush=flush)
+
+    @property
+    def mutation_generation(self) -> int:
+        with self._lock:
+            return self._mutation_generation
 
     def flush(self) -> None:
-        self._meta.flush()
-        self._embeddings.save(self._embedding_cache)
+        with self._lock:
+            self._meta.flush()
+            if self._embeddings_dirty:
+                self._embeddings.save(self._embedding_cache)
+                self._embeddings_dirty = False
 
     def replace_all(self, states: List[TemplateState]) -> None:
         """Persist a consistent template snapshot for a training run."""
         with self._lock:
             self._counts_by_service = {}
             self._embedding_cache = {}
+            self._embeddings_dirty = True
+            self._mutation_generation += 1
             self._meta.replace_all({})
             for state in states:
                 self.upsert(state, flush=False)
@@ -127,6 +152,8 @@ class GroupRegistry:
         self._meta = JSONStore(base / storage.group_registry_file)
         self._centroids = PickleStore(base / storage.group_centroids_file)
         self._centroid_cache: Dict[str, np.ndarray] = self._centroids.load({})
+        self._centroids_dirty = False
+        self._membership_generation = 0
 
     def get(self, group_id: str) -> Optional[GroupState]:
         raw = self._meta.get(group_id)
@@ -151,13 +178,22 @@ class GroupRegistry:
             self._meta.set(group_id, asdict(state), flush=False)
             return state
 
-    def apply_documentation_updates(self, updates: Dict[str, Dict[str, object]]) -> None:
+    def apply_documentation_updates(
+        self,
+        updates: Dict[str, Dict[str, object]],
+        expected_generation: Optional[int] = None,
+    ) -> bool:
         """Update only documentation fields, preserving concurrent activity data."""
         allowed = {
             "documented", "documentation_id", "confidence", "error_code",
             "documentation_source",
         }
         with self._lock:
+            if (
+                expected_generation is not None
+                and expected_generation != self._membership_generation
+            ):
+                return False
             for group_id, fields in updates.items():
                 state = self.get(group_id)
                 if state is None:
@@ -167,10 +203,32 @@ class GroupRegistry:
                         setattr(state, key, value)
                 self._meta.set(group_id, asdict(state), flush=False)
             self._meta.flush()
+            return True
 
-    def set_centroid(self, group_id: str, centroid: np.ndarray) -> None:
-        self._centroid_cache[group_id] = centroid
-        self._centroids.save(self._centroid_cache)
+    def set_centroid(
+        self, group_id: str, centroid: np.ndarray, flush: bool = True
+    ) -> None:
+        with self._lock:
+            self._centroid_cache[group_id] = centroid
+            self._centroids_dirty = True
+            if flush:
+                self._centroids.save(self._centroid_cache)
+                self._centroids_dirty = False
+
+    def delete(self, group_id: str, flush: bool = True) -> None:
+        with self._lock:
+            self._meta.delete(group_id, flush=False)
+            self._membership_generation += 1
+            if flush:
+                self.flush()
+
+    def delete_centroid(self, group_id: str, flush: bool = True) -> None:
+        with self._lock:
+            if group_id in self._centroid_cache:
+                del self._centroid_cache[group_id]
+                self._centroids_dirty = True
+            if flush:
+                self.flush()
 
     def get_centroid(self, group_id: str) -> Optional[np.ndarray]:
         return self._centroid_cache.get(group_id)
@@ -179,9 +237,79 @@ class GroupRegistry:
         return [GroupState(**v) for v in self._meta.all().values()]
 
     def all_centroids(self) -> Dict[str, np.ndarray]:
-        return dict(self._centroid_cache)
+        with self._lock:
+            return dict(self._centroid_cache)
+
+    @property
+    def membership_generation(self) -> int:
+        with self._lock:
+            return self._membership_generation
+
+    def membership_snapshot(
+        self,
+    ) -> tuple[int, List[GroupState], Dict[str, np.ndarray]]:
+        with self._lock:
+            return (
+                self._membership_generation,
+                self.all_groups(),
+                dict(self._centroid_cache),
+            )
+
+    def apply_grouping_changes(
+        self,
+        groups: Dict[str, GroupState],
+        centroids: Dict[str, np.ndarray],
+        deleted_group_ids: set[str],
+        *,
+        flush: bool = True,
+    ) -> None:
+        """Apply one membership transaction while excluding doc refresh writes."""
+        with self._lock:
+            for group_id in deleted_group_ids:
+                self._meta.delete(group_id, flush=False)
+                if group_id in self._centroid_cache:
+                    del self._centroid_cache[group_id]
+                    self._centroids_dirty = True
+            for group_id, state in groups.items():
+                # A documentation refresh may have committed after the grouping
+                # manager took its build snapshot. Preserve those latest fields
+                # while this lock excludes any later refresh commit.
+                current = self.get(group_id)
+                if current is not None:
+                    for field_name in (
+                        "error_code",
+                        "documented",
+                        "documentation_id",
+                        "confidence",
+                        "documentation_source",
+                    ):
+                        setattr(state, field_name, getattr(current, field_name))
+                self._meta.set(group_id, asdict(state), flush=False)
+            for group_id, centroid in centroids.items():
+                self._centroid_cache[group_id] = centroid
+                self._centroids_dirty = True
+            self._membership_generation += 1
+            if flush:
+                self.flush()
+
+    def replace_all(
+        self,
+        groups: List[GroupState] | Dict[str, GroupState],
+        centroids: Dict[str, np.ndarray],
+    ) -> None:
+        """Replace the complete training snapshot, including stale centroids."""
+        with self._lock:
+            values = groups.values() if isinstance(groups, dict) else groups
+            mapping = {state.group_id: asdict(state) for state in values}
+            self._meta.replace_all(mapping)
+            self._centroid_cache = dict(centroids)
+            self._centroids.save(self._centroid_cache)
+            self._centroids_dirty = False
+            self._membership_generation += 1
 
     def flush(self) -> None:
         with self._lock:
             self._meta.flush()
-            self._centroids.save(self._centroid_cache)
+            if self._centroids_dirty:
+                self._centroids.save(self._centroid_cache)
+                self._centroids_dirty = False

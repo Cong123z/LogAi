@@ -342,8 +342,9 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # Confirm queue depth returned to 0
         self.pipeline.metrics.logai_queue_depth.set.assert_called_with(0)
 
-        # Confirm high throughput: should comfortably exceed 1,000 logs/sec in single-thread test
-        self.assertGreater(throughput, 1_000)
+        # Manual grouping adds only cached boundary checks in steady state; the
+        # accepted throughput floor remains within 2% of the 5,000 logs/s baseline.
+        self.assertGreaterEqual(throughput, 4_900)
         print(f"\n[REALTIME PERFORMANCE] 10,000 logs processed in {elapsed:.3f}s | Throughput: {throughput:,.0f} logs/sec | Latency: {latency_us:.2f} µs/log")
 
     def test_duplicate_replay_throughput_after_crash(self):

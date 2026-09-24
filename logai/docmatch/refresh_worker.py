@@ -30,6 +30,12 @@ class DocumentationRefreshWorker:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_input: tuple[str, str] | None = None
+        self._invalidation_lock = threading.RLock()
+        self._invalidated_groups: set[str] = set()
+
+    def invalidate_groups(self, group_ids: set[str]) -> None:
+        with self._invalidation_lock:
+            self._invalidated_groups.update(group_ids)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -60,7 +66,9 @@ class DocumentationRefreshWorker:
         corpus = self.store.load_corpus()
         overrides_snapshot = self.store.load_overrides()
         input_revision = (corpus["revision"], overrides_snapshot["revision"])
-        if input_revision == self._last_input:
+        with self._invalidation_lock:
+            invalidated = set(self._invalidated_groups)
+        if input_revision == self._last_input and not invalidated:
             return False
 
         attempt_at = time.time()
@@ -71,11 +79,13 @@ class DocumentationRefreshWorker:
 
             entries = {entry.doc_id: entry for entry in self.matcher.entries}
             overrides = overrides_snapshot["overrides"]
-            centroids = self.groups.all_centroids()
+            membership_generation, group_snapshot, centroids = (
+                self.groups.membership_snapshot()
+            )
             updates: Dict[str, Dict[str, Any]] = {}
             stale_groups: list[str] = []
 
-            for group in self.groups.all_groups():
+            for group in group_snapshot:
                 centroid = centroids.get(group.group_id)
                 if centroid is None:
                     updates[group.group_id] = self._empty_update("none")
@@ -121,7 +131,10 @@ class DocumentationRefreshWorker:
             if latest != input_revision:
                 return False
 
-            self.groups.apply_documentation_updates(updates)
+            if not self.groups.apply_documentation_updates(
+                updates, expected_generation=membership_generation
+            ):
+                return False
             applied_at = time.time()
             self.store.write_status({
                 "applied_corpus_revision": input_revision[0],
@@ -134,6 +147,8 @@ class DocumentationRefreshWorker:
                 "error": None,
             })
             self._last_input = input_revision
+            with self._invalidation_lock:
+                self._invalidated_groups.difference_update(invalidated)
             return True
         except Exception as exc:  # noqa: BLE001
             logger.warning("Documentation revision could not be applied: %s", exc)

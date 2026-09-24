@@ -43,6 +43,12 @@ services:
     depends_on:
       - logai-web
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # ── Training (one-off job; NOT started by `up`, only via `run`) ─────────
   logai-training:
@@ -70,7 +76,7 @@ services:
     ports:
       - "${LOGAI_WEB_PORT:-5555}:${LOGAI_WEB_PORT:-5555}"
     volumes:
-      # Read the live engine state; the explorer must never mutate it.
+      # The web process writes only documentation and grouping intent files.
       - logai-data:/app/data
     networks:
       - aiops-net
