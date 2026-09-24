@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
 from logai.storage.documentation import group_fingerprint
+from logai.storage.grouping import GroupingOverrideStore
 from logai.web.app import create_app
 
 
@@ -40,6 +42,7 @@ class TestWebDocumentationAPI(unittest.TestCase):
             "revision": listing["revision"], "title": "Auth", "text": "Auth failed", "error_code": "ERR_AUTH"
         })
         self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.get_json()["item"]["id"], "DOC-001")
         stale = self.client.post("/api/documentation", json={
             "revision": listing["revision"], "text": "stale"
         })
@@ -103,6 +106,127 @@ class TestWebDocumentationAPI(unittest.TestCase):
         })
         self.assertEqual(cleared.status_code, 200)
 
+    def test_delete_is_blocked_by_automatic_group_assignment(self):
+        registry_path = self.base / "group_registry.json"
+        groups = json.loads(registry_path.read_text(encoding="utf-8"))
+        groups["G1"].update({
+            "documented": True,
+            "documentation_id": "DOC-1",
+            "documentation_source": "automatic",
+        })
+        registry_path.write_text(json.dumps(groups), encoding="utf-8")
+        docs = self.client.get("/api/documentation").get_json()
+
+        response = self.client.delete(
+            "/api/documentation/DOC-1", json={"revision": docs["revision"]}
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["group_ids"], ["G1"])
+
+    def test_documentation_mutations_are_blocked_until_grouping_is_applied(self):
+        grouping = GroupingOverrideStore(
+            self.base / "grouping_overrides.json",
+            self.base / "grouping_status.json",
+        )
+        original = grouping.load_overrides()
+        changed = grouping.replace_assignment(
+            "T1", "anchor", "T2", original["revision"]
+        )
+        groups = self.client.get("/api/groups").get_json()
+        before_revision = groups["override_revision"]
+
+        response = self.client.put("/api/groups/G1/documentation", json={
+            "documentation_id": "DOC-1",
+            "override_revision": groups["override_revision"],
+        })
+        clear_response = self.client.delete("/api/groups/G1/documentation", json={
+            "override_revision": groups["override_revision"],
+        })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["error"], "grouping_pending")
+        self.assertEqual(clear_response.status_code, 409)
+        self.assertEqual(clear_response.get_json()["error"], "grouping_pending")
+        self.assertEqual(response.get_json()["grouping_revision"], changed["revision"])
+        after_revision = self.client.get("/api/groups").get_json()["override_revision"]
+        self.assertEqual(after_revision, before_revision)
+        self.assertTrue(
+            self.client.get("/api/groups").get_json()["documentation_mutations_blocked"]
+        )
+
+    def test_documentation_mutation_is_allowed_after_grouping_is_applied(self):
+        grouping = GroupingOverrideStore(
+            self.base / "grouping_overrides.json",
+            self.base / "grouping_status.json",
+        )
+        original = grouping.load_overrides()
+        changed = grouping.replace_assignment(
+            "T1", "anchor", "T2", original["revision"]
+        )
+        now = time.time()
+        grouping.write_status({
+            "applied_revision": changed["revision"],
+            "attempted_revision": changed["revision"],
+            "last_attempt_at": now,
+            "last_applied_at": now,
+            "last_heartbeat_at": now,
+            "state": "applied",
+            "error": None,
+            "results": {},
+            "unresolved": {},
+        })
+        groups = self.client.get("/api/groups").get_json()
+
+        response = self.client.put("/api/groups/G1/documentation", json={
+            "documentation_id": "DOC-1",
+            "override_revision": groups["override_revision"],
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            self.client.get("/api/groups").get_json()["documentation_mutations_blocked"]
+        )
+
+    def test_group_api_reports_membership_change_without_stale_override(self):
+        groups = self.client.get("/api/groups").get_json()
+        assigned = self.client.put("/api/groups/G1/documentation", json={
+            "documentation_id": "DOC-1",
+            "override_revision": groups["override_revision"],
+        })
+        self.assertEqual(assigned.status_code, 200)
+        templates_path = self.base / "template_registry.json"
+        templates = json.loads(templates_path.read_text(encoding="utf-8"))
+        templates["T2"] = {
+            "template_id": "T2", "template_text": "Another template", "service": "api"
+        }
+        templates_path.write_text(json.dumps(templates), encoding="utf-8")
+        registry_path = self.base / "group_registry.json"
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry["G1"]["template_ids"].append("T2")
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+        group = self.client.get("/api/groups").get_json()["items"][0]
+
+        self.assertTrue(group["membership_changed_since_assignment"])
+        self.assertFalse(group["override_stale"])
+
+    def test_orphan_manual_override_does_not_block_document_deletion(self):
+        docs = self.client.get("/api/documentation").get_json()
+        groups = self.client.get("/api/groups").get_json()
+        assigned = self.client.put("/api/groups/G1/documentation", json={
+            "documentation_id": "DOC-1",
+            "override_revision": groups["override_revision"],
+        })
+        self.assertEqual(assigned.status_code, 200)
+        (self.base / "group_registry.json").write_text("{}", encoding="utf-8")
+
+        deleted = self.client.delete(
+            "/api/documentation/DOC-1", json={"revision": docs["revision"]}
+        )
+
+        self.assertEqual(deleted.status_code, 200)
+
     def test_ui_exposes_separate_sidebar_views_and_reload(self):
         html = self.client.get("/").get_data(as_text=True)
         self.assertIn('data-view="templates"', html)
@@ -119,6 +243,8 @@ class TestWebDocumentationAPI(unittest.TestCase):
         self.assertIn("height: 100vh", html)
         self.assertIn("position: sticky", html)
         self.assertIn("state.reconnectTimer", html)
+        self.assertIn("documentation_mutations_blocked", html)
+        self.assertIn("pollDocumentationResult", html)
 
 
 if __name__ == "__main__":

@@ -155,15 +155,21 @@ restart hay retrain anomaly model.
 | `text` | string | Có | Nội dung dùng để tạo embedding |
 | `error_code` | string | Không | Ghi vào `GroupState` khi match thành công |
 
+Document tạo qua API nhận ID tăng tuần tự (`DOC-001`, `DOC-002`, ...). Corpus
+lưu bộ đếm monotonic riêng nên ID đã xóa không được tái sử dụng; ID từ seed và
+legacy corpus được giữ nguyên. Bộ đếm không tham gia corpus revision vì không
+thay đổi nội dung dùng cho matching.
+
 Corpus hiện là dữ liệu demo và phải được thay bằng runbook/knowledge base thật
 trước production.
 
 Web mutation dùng optimistic revision. Hai browser cùng sửa một snapshot sẽ
 nhận HTTP 409 thay vì ghi đè lẫn nhau. Mọi file được ghi qua temporary file và
-`os.replace`. Document đang được manual-assign không thể bị xóa cho tới khi các
-assignment được đổi hoặc clear. Override lưu fingerprint của group membership;
-sau retraining, fingerprint lệch sẽ suspend override để tránh gán nhầm document
-cho một group ID được HDBSCAN tái sử dụng.
+`os.replace`. Document đang được bất kỳ active group nào sử dụng (manual hoặc
+automatic) không thể bị xóa cho tới khi assignment được đổi hoặc clear. Override
+lưu fingerprint của group membership để audit, nhưng manual assignment là intent
+gắn với group ID và không bị suspend khi membership thay đổi. Documentation
+mutation bị chặn trong lúc grouping revision chưa apply để không ghi từ snapshot cũ.
 
 ## 5. Core data contracts
 
@@ -233,7 +239,7 @@ Metadata persisted theo `group_id`.
 | `documented` | `bool` | `false` | Có vượt doc similarity threshold |
 | `documentation_id` | `Optional[str]` | `None` | ID tài liệu match tốt nhất |
 | `confidence` | `float` | `0.0` | Cosine similarity với documentation |
-| `documentation_source` | `str` | `"automatic"` | Nguồn match: `automatic`, `manual`, `stale_override`, hoặc `none` |
+| `documentation_source` | `str` | `"automatic"` | Nguồn match: `automatic`, `manual`, `stale_override` (document không còn trong corpus), hoặc `none` |
 | `severity` | `str` | `"unknown"` | Chưa được pipeline populate |
 | `first_seen` | `float` | current time | Mốc sớm nhất của group |
 | `last_seen` | `float` | current time | Mốc gần nhất của group |
@@ -619,9 +625,11 @@ template level nặng nhất trong service/group cell để cung cấp display c
 Alerting view chỉ poll mỗi 2 giây khi đang active.
 
 Documentation mutations dùng optimistic revision và trả 409 khi client ghi từ
-snapshot cũ. Assignment endpoint ghi override với fingerprint của group rồi trả
-`state: pending`; refresh worker áp dụng revision bất đồng bộ. API không có auth,
-vì vậy deployment phải chặn write routes bằng ingress/network policy.
+snapshot cũ hoặc grouping revision chưa apply. Assignment endpoint ghi override
+với fingerprint audit của group rồi trả `state: pending`; refresh worker áp dụng
+revision bất đồng bộ. Manual override hợp lệ tiếp tục gắn với group ID khi
+membership thay đổi. API không có auth, vì vậy deployment phải chặn write routes
+bằng ingress/network policy.
 
 `PUT /api/templates/<id>/group` ghi desired assignment và trả `202`; engine
 flush prediction cũ rồi activate revision tại poll/batch boundary. `GET

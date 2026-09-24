@@ -430,6 +430,7 @@
     .section-heading h2 { margin:0; }
     .btn { border:1px solid var(--border); background:var(--bg-input); color:var(--text); padding:7px 11px; border-radius:var(--radius-sm); cursor:pointer; font-size:12px; }
     .btn:hover { border-color:var(--accent); }
+    .btn:disabled { opacity:0.45; cursor:not-allowed; border-color:var(--border); }
     .btn-primary { background:var(--accent); border-color:var(--accent); color:#fff; }
     .btn-danger { color:var(--red); }
     .btn-row { display:flex; gap:6px; white-space:nowrap; }
@@ -739,6 +740,8 @@
       groupingTemplate: null,
       groupingMode: 'existing',
       groupingPollTimer: null,
+      documentationPollTimer: null,
+      documentationMutationsBlocked: false,
       expandedGroups: new Set(),
     };
 
@@ -856,6 +859,7 @@
         return;
       }
       const documentsById = new Map(state.documents.map(doc => [doc.id, doc]));
+      const documentationLocked = state.documentationMutationsBlocked;
       items = [...items].sort((left, right) => {
         const value = group => {
           if (state.groupSort === 'error_code') {
@@ -893,9 +897,9 @@
             <td>${escapeHtml(g.service || 'unknown')}</td>
             <td><div class="tmpl-text" title="${escapeHtml(g.representative_template || '')}">${highlightWildcards(escapeHtml(g.representative_template || '—'))}</div></td>
             <td>${g.documentation_id ? `<span class="tmpl-id">${escapeHtml(errorCode)}</span>` : '<span class="badge badge-unknown">Undocumented</span>'}</td>
-            <td><span class="badge ${g.documentation_source === 'manual' ? 'badge-info' : (g.documentation_source === 'stale_override' ? 'badge-warn' : (g.documented ? 'badge-known' : 'badge-unknown'))}">${escapeHtml(g.documentation_source || (g.documented ? 'automatic' : 'none'))}</span></td>
+            <td><span class="badge ${g.documentation_source === 'manual' ? 'badge-info' : (g.documentation_source === 'stale_override' ? 'badge-warn' : (g.documented ? 'badge-known' : 'badge-unknown'))}"${g.membership_changed_since_assignment ? ' title="Membership changed after this manual assignment"' : ''}>${escapeHtml(g.documentation_source || (g.documented ? 'automatic' : 'none'))}</span></td>
             <td>${formatCount(g.event_count || 0)}</td>
-            <td><div class="btn-row"><button class="btn assign-doc">${g.manual_documentation_id ? 'Change' : 'Assign'}</button>${g.manual_documentation_id ? '<button class="btn clear-doc">Clear</button>' : ''}</div></td>
+            <td><div class="btn-row"><button class="btn assign-doc"${documentationLocked ? ' disabled title="Waiting for template grouping"' : ''}>${g.manual_documentation_id ? 'Change' : 'Assign'}</button>${g.manual_documentation_id ? `<button class="btn clear-doc"${documentationLocked ? ' disabled title="Waiting for template grouping"' : ''}>Clear</button>` : ''}</div></td>
           </tr>
           <tr class="group-members-row" id="${memberRowId}" data-members-for="${escapeHtml(g.group_id)}"${expanded ? '' : ' hidden'}>
             <td colspan="7"><div class="group-members-panel"><div class="group-member-list"><div class="group-member group-member-header"><span>Template ID</span><span>Template</span><span>Service</span><span>Level</span><span class="group-member-events">Events</span></div>${memberRows}</div></div></td>
@@ -1074,6 +1078,29 @@
       state.groupingPollTimer = setTimeout(() => pollGroupingResult(revision, templateId), 1000);
     }
 
+    async function pollDocumentationResult(overrideRevision, groupId) {
+      clearTimeout(state.documentationPollTimer);
+      try {
+        const data = await fetchDocumentation();
+        const sync = data.synchronization || {};
+        if (sync.applied_override_revision === overrideRevision && sync.state === 'applied') {
+          showGroupingOperation('applied', `${groupId}: documentation applied`);
+          await loadData();
+          return;
+        }
+        if (sync.attempted_override_revision === overrideRevision && sync.state === 'failed') {
+          showGroupingOperation('failed', `${groupId}: ${sync.error || 'documentation assignment failed'}`);
+          return;
+        }
+        showGroupingOperation('pending', `${groupId}: documentation pending`);
+      } catch (error) {
+        showGroupingOperation('failed', `${groupId}: documentation status unavailable`);
+      }
+      state.documentationPollTimer = setTimeout(
+        () => pollDocumentationResult(overrideRevision, groupId), 1000
+      );
+    }
+
     async function deleteDocument(docId) {
       if (!confirm('Delete this documentation entry?')) return;
       try {
@@ -1083,6 +1110,7 @@
     }
 
     function openAssignment(groupId) {
+      if (state.documentationMutationsBlocked) return;
       state.assignmentGroup = groupId;
       document.getElementById('assignment-group').textContent = groupId;
       const select = document.getElementById('assignment-document');
@@ -1093,10 +1121,12 @@
     }
 
     async function clearAssignment(groupId) {
+      if (state.documentationMutationsBlocked) return;
       try {
         const result = await apiMutation(`/api/groups/${encodeURIComponent(groupId)}/documentation`, 'DELETE', {override_revision:state.overrideRevision});
         state.overrideRevision = result.override_revision;
-        await loadData();
+        showGroupingOperation('pending', `${groupId}: documentation pending`);
+        pollDocumentationResult(result.override_revision, groupId);
       } catch (err) { alert(err.message); }
     }
 
@@ -1389,7 +1419,8 @@
         });
         state.overrideRevision = result.override_revision;
         $assignmentModal.classList.remove('open');
-        await loadData();
+        showGroupingOperation('pending', `${state.assignmentGroup}: documentation pending`);
+        pollDocumentationResult(result.override_revision, state.assignmentGroup);
       } catch (err) { document.getElementById('assignment-error').textContent = err.message; }
     });
     document.getElementById('assign-group-command').addEventListener('click', async () => {
@@ -1534,6 +1565,7 @@
           state.groups = groups.items;
           state.groupingRevision = groups.grouping_revision;
           state.groupingSynchronization = groups.grouping_synchronization || {};
+          state.documentationMutationsBlocked = Boolean(groups.documentation_mutations_blocked);
           renderGroups(state.groups);
         } else if (state.activeView === 'alerting') {
           renderAlerts(await fetchAlerts());

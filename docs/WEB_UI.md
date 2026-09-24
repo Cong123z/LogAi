@@ -54,13 +54,16 @@ selecting the toggle again collapses the list.
 | Value | Meaning |
 |---|---|
 | `automatic` | Cosine matching selected the document. |
-| `manual` | A valid user assignment overrides cosine matching. |
-| `stale_override` | Group membership changed after assignment; the override is suspended. |
+| `manual` | A valid user assignment overrides cosine matching and remains bound to the group ID when membership changes. |
+| `stale_override` | The override references a document that is no longer in the corpus. |
 | `none` | No document currently meets the matching rules. |
 
 The `Undocumented only` checkbox filters the table without changing the summary
 counts. Assign, Change, and Clear update the persistent override file; the
-realtime engine applies the new revision asynchronously.
+realtime engine applies the new revision asynchronously and the UI polls until
+that exact revision is applied. These controls are disabled while a non-empty
+template-grouping revision is not yet applied, preventing an assignment against
+obsolete group membership.
 
 ## Alerting
 
@@ -91,7 +94,7 @@ Each entry contains:
 
 | Field | Rules |
 |---|---|
-| `id` | Generated on create; stable on update. |
+| `id` | Generated in monotonic order (`DOC-001`, `DOC-002`, ...); stable on update and never reused after deletion. Existing seed and legacy IDs are preserved. |
 | `title` | Optional string, at most 200 characters. |
 | `text` | Required non-empty string, at most 20,000 characters. |
 | `error_code` | Optional string, at most 100 characters. |
@@ -102,8 +105,9 @@ highest group count first and can also sort by ID, title, or error code.
 
 Every mutation includes the revision returned by the latest read. A stale
 revision returns HTTP 409 instead of overwriting another user's change. A
-document with manual group assignments cannot be deleted until those
-assignments are changed or cleared.
+document used by any active group cannot be deleted until every manual or
+automatic assignment is changed or cleared. Overrides for deleted groups are
+orphans and do not block deletion.
 
 The realtime refresh worker checks corpus and override revisions every five
 seconds by default. It reloads document embeddings, recomputes automatic
@@ -138,7 +142,8 @@ of these synchronization states:
 
 Mutation errors use JSON with an `error` and `message`. Important status codes
 are `400` for invalid input, `404` for an unknown document/group, `409` for a
-revision conflict or an assigned document, and `500` for a storage failure.
+revision conflict, an assigned document, or unsettled template grouping, and
+`500` for a storage failure.
 
 The API has no authentication or authorization. Do not expose the write routes
 directly to an untrusted network; enforce access at the ingress, reverse proxy,

@@ -120,6 +120,10 @@ The page also includes a Semantic Groups table showing every entry currently
 stored in the live `group_registry.json`, including its group ID, service,
 representative template, documentation status, and event count. The same data
 is available from `GET /api/groups`.
+Manual documentation remains attached to its group ID when templates move in or
+out. Documentation controls wait for an in-flight grouping revision to apply,
+and a documentation entry cannot be deleted while any active group uses it
+through either a manual assignment or an automatic match.
 
 Templates, Semantic Groups, Alerting, and Documentation are separate sidebar
 views. The Reload control performs a full browser refresh, while automatic

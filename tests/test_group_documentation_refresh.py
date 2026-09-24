@@ -78,13 +78,35 @@ class TestGroupDocumentationRefresh(unittest.TestCase):
         self.assertTrue(self.worker.refresh_once())
         self.assertEqual(self.groups.get("G1").documentation_id, "DOC-DB")
 
-    def test_changed_group_fingerprint_suspends_override(self):
+    def test_changed_group_fingerprint_preserves_manual_override(self):
         snapshot = self.store.load_overrides()
         self.store.set_override("G1", "DOC-AUTH", "old-fingerprint", snapshot["revision"])
         self.worker.refresh_once()
         state = self.groups.get("G1")
-        self.assertEqual(state.documentation_source, "stale_override")
-        self.assertEqual(state.documentation_id, "DOC-DB")
+        self.assertEqual(state.documentation_source, "manual")
+        self.assertEqual(state.documentation_id, "DOC-AUTH")
+        status = self.store.load_status()
+        self.assertEqual(status["stale_group_ids"], [])
+        self.assertEqual(status["membership_changed_group_ids"], ["G1"])
+
+    def test_manual_override_survives_group_membership_change(self):
+        snapshot = self.store.load_overrides()
+        fingerprint = group_fingerprint(["T1"], ["database <*> timeout"])
+        self.store.set_override("G1", "DOC-AUTH", fingerprint, snapshot["revision"])
+        self.assertTrue(self.worker.refresh_once())
+
+        self.templates.upsert(
+            TemplateState("T2", "database connection failed", "api", group_id="G1")
+        )
+        changed = self.groups.get("G1")
+        changed.template_ids.append("T2")
+        self.groups.upsert(changed)
+        self.worker.invalidate_groups({"G1"})
+
+        self.assertTrue(self.worker.refresh_once())
+        state = self.groups.get("G1")
+        self.assertEqual(state.documentation_source, "manual")
+        self.assertEqual(state.documentation_id, "DOC-AUTH")
 
 if __name__ == "__main__":
     unittest.main()

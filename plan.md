@@ -475,11 +475,48 @@ realtime must not write the same state directory concurrently.
 Membership changes alter the existing documentation group fingerprint:
 
 - Automatic documentation matching reruns against the new centroid.
-- A manual documentation override with an old membership fingerprint becomes
-  `stale_override` and is not force-applied.
+- A valid manual documentation override remains bound to its group ID. Its old
+  membership fingerprint is retained as audit metadata rather than suspending
+  the explicit user choice.
+- Documentation mutations are rejected while the current grouping revision is
+  not applied, preventing overrides from being recorded against old membership.
 - Documentation overrides for deleted groups are treated as orphaned: ignore them in
   usage counts and do not let them block document deletion.
 - Documentation refresh failure must not roll back an already-applied grouping change.
+
+### 10.1 Ordered documentation IDs
+
+Documents created through the web API receive stable sequential identifiers in the
+form `DOC-001`, `DOC-002`, and so on. The server owns ID allocation; a client-provided
+ID on a create request is ignored. Updating a document never changes its ID.
+
+Persist the next allocation value in `documentation_corpus.json`:
+
+```json
+{
+  "schema_version": 1,
+  "revision": "sha256-of-entries",
+  "updated_at": 1780000000.0,
+  "next_document_number": 3,
+  "entries": []
+}
+```
+
+Allocation and migration rules:
+
+- `next_document_number` is a positive, monotonically increasing integer.
+- Creating a document formats the current value with at least three digits, skips any
+  existing collision, and persists the following value in the same atomic write.
+- Updating or deleting a document preserves the counter. Deleted numbers are never
+  reused, including after a process restart.
+- Existing seed and runtime IDs remain unchanged. Named IDs such as `DOC-DB-001`,
+  short legacy IDs such as `DOC-1`, and UUID-based IDs do not consume the sequence.
+- A legacy corpus without `next_document_number` derives it from the highest existing
+  canonical ID matching `DOC-[0-9]{3,}`. If none exists, allocation starts at 1.
+- Corpus `revision` remains a hash of `entries` only. Allocation metadata does not
+  create a semantic documentation revision or trigger unnecessary rematching.
+- Invalid persisted counters are rejected as storage corruption rather than silently
+  resetting the sequence and risking ID reuse.
 
 ## 11. UI Changes
 
@@ -715,7 +752,14 @@ The implementation must update these contracts together:
 - Training failures update grouping status with a user-visible reason and do not mark
   the revision applied.
 - Documentation automatic matches refresh after centroid changes.
-- Membership changes suspend stale manual documentation overrides.
+- Membership changes preserve valid manual documentation overrides on the same group ID.
+- The first API-created document receives `DOC-001`; later creates increment in order.
+- Deleting `DOC-001` and restarting the store does not reuse it; the next allocation
+  continues from the persisted counter.
+- Legacy corpora derive the next canonical number while preserving named, short, and
+  UUID-based IDs exactly.
+- Documentation create responses return the generated ordered ID, while update,
+  assignment, deletion protection, and optimistic revision behavior remain unchanged.
 
 ### Performance
 

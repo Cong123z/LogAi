@@ -4,9 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -25,7 +25,7 @@ class RevisionConflict(DocumentationStoreError):
 
 class DocumentInUse(DocumentationStoreError):
     def __init__(self, group_ids: list[str]):
-        super().__init__("Document is manually assigned to one or more groups")
+        super().__init__("Document is assigned to one or more groups")
         self.group_ids = group_ids
 
 
@@ -44,6 +44,8 @@ def group_fingerprint(template_ids: Iterable[str], template_texts: Iterable[str]
 
 class DocumentationCorpusStore:
     """Single web-writer store; engine and training processes read snapshots."""
+
+    _ORDERED_ID_PATTERN = re.compile(r"^DOC-(\d{3,})$")
 
     def __init__(
         self,
@@ -103,7 +105,9 @@ class DocumentationCorpusStore:
                     with open(self.seed_path, "r", encoding="utf-8") as stream:
                         seed = yaml.safe_load(stream) or []
                     entries = self.validate_entries(seed, allow_ids=True)
-                self._write_corpus(entries)
+                self._write_corpus(
+                    entries, self._derive_next_document_number(entries)
+                )
             if not self.overrides_path.exists():
                 self._write_overrides({})
 
@@ -118,7 +122,7 @@ class DocumentationCorpusStore:
                 raise DocumentationStoreError(f"Entry {position} must be an object")
             doc_id = str(item.get("id") or "").strip() if allow_ids else ""
             if not doc_id:
-                doc_id = f"DOC-{uuid.uuid4()}"
+                raise DocumentationStoreError("id is required")
             if doc_id in seen:
                 raise DocumentationStoreError(f"Duplicate documentation id: {doc_id}")
             title = item.get("title", "")
@@ -139,11 +143,25 @@ class DocumentationCorpusStore:
             })
         return result
 
-    def _write_corpus(self, entries: list[Dict[str, str]]) -> Dict[str, Any]:
+    @classmethod
+    def _derive_next_document_number(cls, entries: Iterable[Dict[str, str]]) -> int:
+        numbers = []
+        for entry in entries:
+            match = cls._ORDERED_ID_PATTERN.fullmatch(entry["id"])
+            if match:
+                numbers.append(int(match.group(1)))
+        return max(numbers, default=0) + 1
+
+    def _write_corpus(
+        self,
+        entries: list[Dict[str, str]],
+        next_document_number: int,
+    ) -> Dict[str, Any]:
         payload = {
             "schema_version": 1,
             "revision": _revision(entries),
             "updated_at": time.time(),
+            "next_document_number": next_document_number,
             "entries": entries,
         }
         self._atomic_json_write(self.corpus_path, payload)
@@ -166,7 +184,22 @@ class DocumentationCorpusStore:
             expected = _revision(entries)
             if raw.get("revision") != expected:
                 raise DocumentationStoreError("Documentation corpus revision is invalid")
-            return {**raw, "entries": entries}
+            stored_next = raw.get("next_document_number")
+            if stored_next is not None and (
+                isinstance(stored_next, bool)
+                or not isinstance(stored_next, int)
+                or stored_next < 1
+            ):
+                raise DocumentationStoreError(
+                    "next_document_number must be a positive integer"
+                )
+            derived_next = self._derive_next_document_number(entries)
+            next_document_number = max(stored_next or 1, derived_next)
+            return {
+                **raw,
+                "entries": entries,
+                "next_document_number": next_document_number,
+            }
 
     def load_overrides(self) -> Dict[str, Any]:
         with self._lock:
@@ -187,8 +220,16 @@ class DocumentationCorpusStore:
         with self._lock:
             corpus = self.load_corpus()
             self._check_revision(expected_revision, corpus["revision"])
-            entry = self.validate_entries([data], allow_ids=False)[0]
-            updated = self._write_corpus([*corpus["entries"], entry])
+            next_number = corpus["next_document_number"]
+            existing_ids = {entry["id"] for entry in corpus["entries"]}
+            while f"DOC-{next_number:03d}" in existing_ids:
+                next_number += 1
+            entry = self.validate_entries(
+                [{**data, "id": f"DOC-{next_number:03d}"}], allow_ids=True
+            )[0]
+            updated = self._write_corpus(
+                [*corpus["entries"], entry], next_number + 1
+            )
             return entry, updated
 
     def update_document(self, doc_id: str, data: Dict[str, Any], expected_revision: str) -> tuple[Dict[str, str], Dict[str, Any]]:
@@ -201,7 +242,9 @@ class DocumentationCorpusStore:
             for index, current in enumerate(entries):
                 if current["id"] == doc_id:
                     entries[index] = entry
-                    return entry, self._write_corpus(entries)
+                    return entry, self._write_corpus(
+                        entries, corpus["next_document_number"]
+                    )
             raise KeyError(doc_id)
 
     def delete_document(
@@ -209,22 +252,24 @@ class DocumentationCorpusStore:
         doc_id: str,
         expected_revision: str,
         active_group_ids: Optional[set[str]] = None,
+        assigned_group_ids: Optional[Iterable[str]] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             corpus = self.load_corpus()
             self._check_revision(expected_revision, corpus["revision"])
             overrides = self.load_overrides()["overrides"]
-            users = sorted(
+            users = {
                 gid for gid, value in overrides.items()
                 if isinstance(value, dict) and value.get("documentation_id") == doc_id
                 and (active_group_ids is None or gid in active_group_ids)
-            )
+            }
+            users.update(str(group_id) for group_id in (assigned_group_ids or ()))
             if users:
-                raise DocumentInUse(users)
+                raise DocumentInUse(sorted(users))
             entries = [entry for entry in corpus["entries"] if entry["id"] != doc_id]
             if len(entries) == len(corpus["entries"]):
                 raise KeyError(doc_id)
-            return self._write_corpus(entries)
+            return self._write_corpus(entries, corpus["next_document_number"])
 
     def set_override(
         self,

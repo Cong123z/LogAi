@@ -84,6 +84,7 @@ class DocumentationRefreshWorker:
             )
             updates: Dict[str, Dict[str, Any]] = {}
             stale_groups: list[str] = []
+            membership_changed_groups: list[str] = []
 
             for group in group_snapshot:
                 centroid = centroids.get(group.group_id)
@@ -109,7 +110,9 @@ class DocumentationRefreshWorker:
                     ]
                     current_fingerprint = group_fingerprint(group.template_ids, texts)
                     doc_id = override.get("documentation_id")
-                    if override.get("group_fingerprint") != current_fingerprint or doc_id not in entries:
+                    if override.get("group_fingerprint") != current_fingerprint:
+                        membership_changed_groups.append(group.group_id)
+                    if doc_id not in entries:
                         update["documentation_source"] = "stale_override"
                         stale_groups.append(group.group_id)
                     else:
@@ -144,6 +147,7 @@ class DocumentationRefreshWorker:
                 "last_attempt_at": attempt_at,
                 "last_applied_at": applied_at,
                 "stale_group_ids": sorted(stale_groups),
+                "membership_changed_group_ids": sorted(membership_changed_groups),
                 "error": None,
             })
             self._last_input = input_revision
@@ -160,6 +164,9 @@ class DocumentationRefreshWorker:
                 "last_attempt_at": attempt_at,
                 "last_applied_at": previous_status.get("last_applied_at"),
                 "stale_group_ids": previous_status.get("stale_group_ids", []),
+                "membership_changed_group_ids": previous_status.get(
+                    "membership_changed_group_ids", []
+                ),
                 "error": str(exc),
             })
             return False

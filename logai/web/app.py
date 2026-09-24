@@ -108,6 +108,22 @@ def create_app(
             overrides = {"revision": synchronization.get("revision"), "assignments": {}}
         return overrides, synchronization
 
+    def _documentation_mutations_blocked() -> tuple[bool, Dict[str, Any]]:
+        overrides, synchronization = _grouping_context()
+        blocked = bool(overrides.get("assignments")) and (
+            synchronization.get("applied_revision") != overrides.get("revision")
+        )
+        return blocked, synchronization
+
+    def _grouping_pending_response(synchronization: Dict[str, Any]):
+        return jsonify({
+            "error": "grouping_pending",
+            "message": "Wait for template grouping to finish before changing group documentation",
+            "grouping_state": synchronization.get("state"),
+            "grouping_revision": synchronization.get("revision"),
+            "applied_revision": synchronization.get("applied_revision"),
+        }), 409
+
     @staticmethod
     def _template_grouping_fields(
         template_id: str,
@@ -436,6 +452,9 @@ def create_app(
         items = []
         override_snapshot = documentation.load_overrides()
         overrides = override_snapshot["overrides"]
+        document_ids = {
+            entry["id"] for entry in documentation.load_corpus()["entries"]
+        }
         templates = _load_json("template_registry.json")
         for gid, group in groups.items():
             item = {"group_id": gid, **group}
@@ -462,9 +481,14 @@ def create_app(
             item["manual_documentation_id"] = (
                 override.get("documentation_id") if isinstance(override, dict) else None
             )
-            item["override_stale"] = bool(
+            membership_changed = bool(
                 isinstance(override, dict)
                 and override.get("group_fingerprint") != current_fingerprint
+            )
+            item["membership_changed_since_assignment"] = membership_changed
+            item["override_stale"] = bool(
+                isinstance(override, dict)
+                and override.get("documentation_id") not in document_ids
             )
             if service and service not in str(item.get("service", "")).lower():
                 continue
@@ -481,6 +505,11 @@ def create_app(
             "override_revision": override_snapshot["revision"],
             "grouping_revision": grouping_overrides.get("revision"),
             "grouping_synchronization": grouping_sync,
+            "documentation_mutations_blocked": bool(
+                grouping_overrides.get("assignments")
+                and grouping_sync.get("applied_revision")
+                != grouping_overrides.get("revision")
+            ),
         })
 
     @app.route("/api/alerts")
@@ -627,10 +656,24 @@ def create_app(
     def delete_documentation(doc_id: str):
         payload = request.get_json(silent=True) or {}
         try:
+            groups = _load_json("group_registry.json")
+            active_group_ids = {
+                group_id
+                for group_id, group in groups.items()
+                if isinstance(group, dict) and group.get("active", True)
+            }
+            assigned_group_ids = {
+                group_id
+                for group_id, group in groups.items()
+                if isinstance(group, dict)
+                and group_id in active_group_ids
+                and group.get("documentation_id") == doc_id
+            }
             corpus = documentation.delete_document(
                 doc_id,
                 payload.get("revision"),
-                active_group_ids=set(_load_json("group_registry.json")),
+                active_group_ids=active_group_ids,
+                assigned_group_ids=assigned_group_ids,
             )
             return jsonify({"deleted_id": doc_id, "revision": corpus["revision"]})
         except Exception as exc:  # noqa: BLE001
@@ -639,6 +682,9 @@ def create_app(
     @app.route("/api/groups/<group_id>/documentation", methods=["PUT"])
     def assign_group_documentation(group_id: str):
         payload = request.get_json(silent=True) or {}
+        blocked, grouping_sync = _documentation_mutations_blocked()
+        if blocked:
+            return _grouping_pending_response(grouping_sync)
         groups = _load_json("group_registry.json")
         group = groups.get(group_id)
         if group is None:
@@ -668,6 +714,9 @@ def create_app(
     @app.route("/api/groups/<group_id>/documentation", methods=["DELETE"])
     def clear_group_documentation(group_id: str):
         payload = request.get_json(silent=True) or {}
+        blocked, grouping_sync = _documentation_mutations_blocked()
+        if blocked:
+            return _grouping_pending_response(grouping_sync)
         groups = _load_json("group_registry.json")
         if group_id not in groups:
             return jsonify({"error": "not_found", "message": group_id}), 404

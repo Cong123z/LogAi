@@ -9,6 +9,7 @@ from logai.storage.documentation import (
     DocumentInUse,
     DocumentationCorpusStore,
     RevisionConflict,
+    _revision,
 )
 
 
@@ -49,7 +50,7 @@ class TestDocumentationCorpusStore(unittest.TestCase):
             {"title": "Auth", "text": "Authentication failed", "error_code": "ERR_AUTH"},
             original["revision"],
         )
-        self.assertTrue(entry["id"].startswith("DOC-"))
+        self.assertEqual(entry["id"], "DOC-001")
         with self.assertRaises(RevisionConflict):
             self.store.create_document({"text": "stale"}, original["revision"])
         updated, latest = self.store.update_document(
@@ -59,6 +60,61 @@ class TestDocumentationCorpusStore(unittest.TestCase):
         self.assertEqual(updated["title"], "Auth v2")
         final = self.store.delete_document(entry["id"], latest["revision"])
         self.assertEqual(len(final["entries"]), 1)
+
+    def test_ordered_ids_are_monotonic_across_deletion_and_restart(self):
+        original = self.store.load_corpus()
+        first, after_first = self.store.create_document(
+            {"text": "First generated document"}, original["revision"]
+        )
+        second, after_second = self.store.create_document(
+            {"text": "Second generated document"}, after_first["revision"]
+        )
+        after_delete = self.store.delete_document(
+            first["id"], after_second["revision"]
+        )
+        reloaded = DocumentationCorpusStore(
+            self.store.corpus_path,
+            self.store.overrides_path,
+            self.store.status_path,
+            self.seed,
+        )
+        third, _ = reloaded.create_document(
+            {"text": "Third generated document"}, after_delete["revision"]
+        )
+
+        self.assertEqual(first["id"], "DOC-001")
+        self.assertEqual(second["id"], "DOC-002")
+        self.assertEqual(third["id"], "DOC-003")
+
+    def test_legacy_corpus_derives_counter_and_preserves_named_ids(self):
+        original = self.store.load_corpus()
+        entries = [
+            {"id": "DOC-007", "title": "", "text": "Ordered", "error_code": ""},
+            {"id": "DOC-DB-001", "title": "", "text": "Named", "error_code": ""},
+        ]
+        legacy = {
+            "schema_version": 1,
+            "revision": original["revision"],
+            "updated_at": original["updated_at"],
+            "entries": original["entries"],
+        }
+        self.store.corpus_path.write_text(json.dumps(legacy), encoding="utf-8")
+        loaded_legacy = self.store.load_corpus()
+        self.assertEqual(loaded_legacy["next_document_number"], 1)
+
+        legacy["entries"] = entries
+        legacy["revision"] = _revision(entries)
+        self.store.corpus_path.write_text(json.dumps(legacy), encoding="utf-8")
+        loaded = self.store.load_corpus()
+        created, _ = self.store.create_document(
+            {"text": "Next document"}, loaded["revision"]
+        )
+
+        self.assertEqual(
+            [entry["id"] for entry in loaded["entries"]],
+            ["DOC-007", "DOC-DB-001"],
+        )
+        self.assertEqual(created["id"], "DOC-008")
 
     def test_assigned_document_cannot_be_deleted(self):
         corpus = self.store.load_corpus()
