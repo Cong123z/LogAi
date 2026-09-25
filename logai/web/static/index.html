@@ -55,8 +55,18 @@
       flex-shrink: 0;
       display: flex;
       flex-direction: column;
-      position: sticky;
+      position: fixed;
+      left: 0;
       top: 0;
+      z-index: 1000;
+      transform: translateX(calc(-100% + 14px));
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      box-shadow: 8px 0 18px rgba(0, 0, 0, 0.16);
+    }
+    .sidebar:hover,
+    .sidebar:focus-within {
+      transform: translateX(0);
+      box-shadow: 12px 0 26px rgba(0, 0, 0, 0.28);
     }
     .sidebar-logo {
       padding: 0 20px 24px;
@@ -68,7 +78,7 @@
       gap: 10px;
     }
     .sidebar-logo svg { width: 24px; height: 24px; }
-    .sidebar-nav { flex: 1; }
+    .sidebar-nav { flex: 1; overflow-y: auto; }
     .sidebar-nav a {
       display: flex;
       align-items: center;
@@ -84,11 +94,36 @@
     .sidebar-reload { margin: 12px 14px 0; display:flex; align-items:center; justify-content:center; gap:8px; }
     .sidebar-reload svg { width:16px; height:16px; }
 
-    .main { flex: 1; padding: 28px 32px; overflow-x: auto; min-width: 0; }
+    .main {
+      flex: 1;
+      width: 100%;
+      margin-left: 14px;
+      padding: 28px 32px;
+      overflow-x: hidden;
+      min-width: 0;
+      touch-action: pan-y;
+    }
     .page-header { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:24px; }
     .page-title { font-size: 22px; font-weight: 700; }
     .view { display:none; }
-    .view.active { display:block; }
+    .view.active {
+      display:block;
+      animation: view-slide-in 0.22s ease both;
+    }
+    .view.slide-from-left { animation-name: view-slide-from-left; }
+    .view.slide-from-right { animation-name: view-slide-from-right; }
+    @keyframes view-slide-from-left {
+      from { opacity: 0; transform: translateX(-24px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes view-slide-from-right {
+      from { opacity: 0; transform: translateX(24px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    @keyframes view-slide-in {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
     .connection-status { color:var(--orange); font-size:12px; margin-left:auto; }
 
     /* ── Stats Cards ──────────────────────────────────────────────── */
@@ -457,17 +492,45 @@
     /* ── Responsive ───────────────────────────────────────────────── */
     @media (max-width: 768px) {
       .app { display:block; }
-      .sidebar { width:100%; height:auto; padding:8px; border-right:0; border-bottom:1px solid var(--border); position:sticky; top:0; z-index:900; flex-direction:row; align-items:center; }
+      .sidebar {
+        width:100%;
+        height:auto;
+        padding:8px;
+        border-right:0;
+        border-bottom:1px solid var(--border);
+        position: sticky;
+        left:auto;
+        top:0;
+        z-index:900;
+        flex-direction:row;
+        align-items:center;
+        transform:none;
+        box-shadow:none;
+      }
       .sidebar-logo { display:none; }
-      .sidebar-nav { display:flex; min-width:0; overflow-x:auto; }
-      .sidebar-nav a { padding:9px 11px; white-space:nowrap; }
+      .sidebar-nav {
+        display:flex;
+        min-width:0;
+        overflow-x:auto;
+        overflow-y:hidden;
+        overscroll-behavior-x:contain;
+        scroll-behavior:smooth;
+        scroll-snap-type:x proximity;
+        scrollbar-width:none;
+        touch-action:pan-x;
+      }
+      .sidebar-nav::-webkit-scrollbar { display:none; }
+      .sidebar-nav a { padding:9px 11px; white-space:nowrap; scroll-snap-align:start; }
       .sidebar-nav a.active { border-right:0; border-bottom:2px solid var(--accent); }
       .sidebar-reload { margin:0 0 0 auto; padding:8px; }
       .sidebar-reload span { display:none; }
-      .main { padding: 16px; }
+      .main { margin-left:0; padding: 16px; touch-action:pan-x pan-y; }
       .stats-row { grid-template-columns: 1fr 1fr; }
       .filter-bar { flex-direction: column; align-items: stretch; }
       .search-wrap { max-width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .sidebar, .view.active { transition:none; animation:none; }
     }
   </style>
 </head>
@@ -1522,12 +1585,32 @@
       alerting: 'Alerting',
       documentation: 'Documentation',
     };
+    const viewOrder = Object.keys(viewTitles);
 
     function setView(view, updateHash = true) {
       if (!viewTitles[view]) view = 'templates';
+      const previousView = state.activeView;
+      const previousIndex = viewOrder.indexOf(previousView);
+      const nextIndex = viewOrder.indexOf(view);
+      const direction = nextIndex > previousIndex ? 'slide-from-right' : 'slide-from-left';
       state.activeView = view;
-      document.querySelectorAll('.view').forEach(section => section.classList.toggle('active', section.id === `view-${view}`));
-      document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => link.classList.toggle('active', link.dataset.view === view));
+      document.querySelectorAll('.view').forEach(section => {
+        const active = section.id === `view-${view}`;
+        section.classList.toggle('active', active);
+        section.classList.remove('slide-from-left', 'slide-from-right');
+        if (active && previousView !== view) {
+          // Re-trigger the short pager animation when moving between views.
+          void section.offsetWidth;
+          section.classList.add(direction);
+        }
+      });
+      document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => {
+        const active = link.dataset.view === view;
+        link.classList.toggle('active', active);
+        if (active && window.matchMedia('(max-width: 768px)').matches) {
+          link.scrollIntoView({behavior: 'smooth', block: 'nearest', inline: 'nearest'});
+        }
+      });
       document.getElementById('page-title').textContent = viewTitles[view];
       if (updateHash && window.location.hash !== `#${view}`) history.pushState(null, '', `#${view}`);
       if (state.alertRefreshTimer) {
@@ -1544,6 +1627,31 @@
         setView(link.dataset.view);
       });
     });
+
+    // A horizontal swipe over the page body moves through the same views as
+    // the navigation. Interactive controls keep their native touch behavior.
+    let swipeStart = null;
+    const mainContent = document.querySelector('.main');
+    const shouldIgnoreSwipe = target => Boolean(target.closest('input, select, textarea, button, a, .table-wrap, .modal'));
+    mainContent.addEventListener('touchstart', event => {
+      if (event.touches.length !== 1 || shouldIgnoreSwipe(event.target)) {
+        swipeStart = null;
+        return;
+      }
+      const touch = event.touches[0];
+      swipeStart = {x: touch.clientX, y: touch.clientY};
+    }, {passive: true});
+    mainContent.addEventListener('touchend', event => {
+      if (!swipeStart || event.changedTouches.length !== 1) return;
+      const touch = event.changedTouches[0];
+      const deltaX = touch.clientX - swipeStart.x;
+      const deltaY = touch.clientY - swipeStart.y;
+      swipeStart = null;
+      if (Math.abs(deltaX) < 56 || Math.abs(deltaX) < Math.abs(deltaY) * 1.2) return;
+      const currentIndex = viewOrder.indexOf(state.activeView);
+      const nextIndex = deltaX < 0 ? currentIndex + 1 : currentIndex - 1;
+      if (nextIndex >= 0 && nextIndex < viewOrder.length) setView(viewOrder[nextIndex]);
+    }, {passive: true});
     window.addEventListener('hashchange', () => setView(window.location.hash.slice(1), false));
     document.getElementById('reload-app').addEventListener('click', () => window.location.reload());
 
