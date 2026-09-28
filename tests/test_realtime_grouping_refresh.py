@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 
 for module_name in (
-    "sentence_transformers",
     "hdbscan",
     "elasticsearch",
     "drain3",

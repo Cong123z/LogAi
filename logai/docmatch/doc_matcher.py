@@ -62,7 +62,10 @@ class DocumentationMatcher:
         self._lock = threading.RLock()
         self.last_reload_changed = False
         cached = self._cache_store.load({})
-        if isinstance(cached, dict):
+        if (
+            isinstance(cached, dict)
+            and cached.get("model_signature") == self._embedding_signature()
+        ):
             cached_entries = cached.get("entries", [])
             cached_embeddings = cached.get("embeddings", [])
             try:
@@ -75,8 +78,15 @@ class DocumentationMatcher:
         self.reload()
 
     def _embedding_key(self, text: str) -> str:
-        model_name = str(getattr(getattr(self.embedder, "config", None), "model_name", "default"))
-        return hashlib.sha256(f"{model_name}\0{text}".encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            f"{self._embedding_signature()}\0{text}".encode("utf-8")
+        ).hexdigest()
+
+    def _embedding_signature(self) -> str:
+        config = getattr(self.embedder, "config", None)
+        model_name = str(getattr(config, "model_name", "default"))
+        dimension = str(getattr(config, "dimension", "unknown"))
+        return f"{model_name}:{dimension}"
 
     def reload(self) -> bool:
         """Build and atomically activate a validated corpus snapshot.
@@ -147,7 +157,11 @@ class DocumentationMatcher:
 
         try:
             self._cache_store.save(
-                {"entries": self.entries, "embeddings": self.embeddings}
+                {
+                    "model_signature": self._embedding_signature(),
+                    "entries": self.entries,
+                    "embeddings": self.embeddings,
+                }
             )
         except Exception as exc:  # noqa: BLE001 - cache is not source of truth
             logger.warning("Unable to persist documentation embedding cache: %s", exc)

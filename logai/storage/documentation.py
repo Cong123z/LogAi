@@ -109,7 +109,7 @@ class DocumentationCorpusStore:
                     entries, self._derive_next_document_number(entries)
                 )
             if not self.overrides_path.exists():
-                self._write_overrides({})
+                self._write_overrides({}, {})
 
     @staticmethod
     def validate_entries(raw: Any, allow_ids: bool = True) -> list[Dict[str, str]]:
@@ -167,12 +167,25 @@ class DocumentationCorpusStore:
         self._atomic_json_write(self.corpus_path, payload)
         return payload
 
-    def _write_overrides(self, overrides: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    @staticmethod
+    def _override_revision(
+        overrides: Dict[str, Dict[str, Any]],
+        cleared_groups: Dict[str, Dict[str, Any]],
+    ) -> str:
+        return _revision({"overrides": overrides, "cleared_groups": cleared_groups})
+
+    def _write_overrides(
+        self,
+        overrides: Dict[str, Dict[str, Any]],
+        cleared_groups: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        cleared_groups = dict(cleared_groups or {})
         payload = {
             "schema_version": 1,
-            "revision": _revision(overrides),
+            "revision": self._override_revision(overrides, cleared_groups),
             "updated_at": time.time(),
             "overrides": overrides,
+            "cleared_groups": cleared_groups,
         }
         self._atomic_json_write(self.overrides_path, payload)
         return payload
@@ -207,9 +220,21 @@ class DocumentationCorpusStore:
             overrides = raw.get("overrides", {})
             if not isinstance(overrides, dict):
                 raise DocumentationStoreError("Documentation overrides must be an object")
-            if raw.get("revision") != _revision(overrides):
+            cleared_groups = raw.get("cleared_groups", {})
+            if not isinstance(cleared_groups, dict):
+                raise DocumentationStoreError("Cleared documentation groups must be an object")
+            expected = self._override_revision(overrides, cleared_groups)
+            legacy_expected = _revision(overrides)
+            legacy_file = "cleared_groups" not in raw
+            if raw.get("revision") != expected and not (
+                legacy_file and raw.get("revision") == legacy_expected
+            ):
                 raise DocumentationStoreError("Documentation override revision is invalid")
-            return {**raw, "overrides": dict(overrides)}
+            return {
+                **raw,
+                "overrides": dict(overrides),
+                "cleared_groups": dict(cleared_groups),
+            }
 
     @staticmethod
     def _check_revision(expected: Optional[str], current: str) -> None:
@@ -253,22 +278,34 @@ class DocumentationCorpusStore:
         expected_revision: str,
         active_group_ids: Optional[set[str]] = None,
         assigned_group_ids: Optional[Iterable[str]] = None,
+        force: bool = False,
     ) -> Dict[str, Any]:
         with self._lock:
             corpus = self.load_corpus()
             self._check_revision(expected_revision, corpus["revision"])
-            overrides = self.load_overrides()["overrides"]
+            override_snapshot = self.load_overrides()
+            overrides = override_snapshot["overrides"]
             users = {
                 gid for gid, value in overrides.items()
                 if isinstance(value, dict) and value.get("documentation_id") == doc_id
                 and (active_group_ids is None or gid in active_group_ids)
             }
             users.update(str(group_id) for group_id in (assigned_group_ids or ()))
-            if users:
+            if users and not force:
                 raise DocumentInUse(sorted(users))
             entries = [entry for entry in corpus["entries"] if entry["id"] != doc_id]
             if len(entries) == len(corpus["entries"]):
                 raise KeyError(doc_id)
+            if force:
+                overrides = {
+                    group_id: value
+                    for group_id, value in overrides.items()
+                    if not (
+                        isinstance(value, dict)
+                        and value.get("documentation_id") == doc_id
+                    )
+                }
+                self._write_overrides(overrides, override_snapshot.get("cleared_groups", {}))
             return self._write_corpus(entries, corpus["next_document_number"])
 
     def set_override(
@@ -285,20 +322,26 @@ class DocumentationCorpusStore:
             snapshot = self.load_overrides()
             self._check_revision(expected_revision, snapshot["revision"])
             overrides = snapshot["overrides"]
+            cleared_groups = snapshot.get("cleared_groups", {})
             overrides[group_id] = {
                 "documentation_id": documentation_id,
                 "group_fingerprint": fingerprint,
                 "assigned_at": time.time(),
             }
-            return self._write_overrides(overrides)
+            cleared_groups.pop(group_id, None)
+            return self._write_overrides(overrides, cleared_groups)
 
     def clear_override(self, group_id: str, expected_revision: str) -> Dict[str, Any]:
         with self._lock:
             snapshot = self.load_overrides()
             self._check_revision(expected_revision, snapshot["revision"])
             overrides = snapshot["overrides"]
+            cleared_groups = snapshot.get("cleared_groups", {})
             overrides.pop(group_id, None)
-            return self._write_overrides(overrides)
+            if group_id in cleared_groups:
+                return snapshot
+            cleared_groups[group_id] = {"cleared_at": time.time()}
+            return self._write_overrides(overrides, cleared_groups)
 
     def load_status(self) -> Dict[str, Any]:
         if not self.status_path.exists():

@@ -18,15 +18,6 @@ import unittest
 
 from unittest.mock import MagicMock
 
-HAS_REAL_NLP = False
-st_mod = sys.modules.get("sentence_transformers")
-hdb_mod = sys.modules.get("hdbscan")
-if st_mod is not None and not isinstance(st_mod, MagicMock) and hasattr(st_mod, "__file__"):
-    if hdb_mod is not None and not isinstance(hdb_mod, MagicMock) and hasattr(hdb_mod, "__file__"):
-        HAS_REAL_NLP = True
-
-if "sentence_transformers" not in sys.modules:
-    sys.modules["sentence_transformers"] = MagicMock()
 if "hdbscan" not in sys.modules:
     sys.modules["hdbscan"] = MagicMock()
 

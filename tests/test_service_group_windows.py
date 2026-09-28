@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 for _mod in [
     "numpy", "sklearn", "sklearn.ensemble", "hdbscan", "elasticsearch",
-    "sentence_transformers", "drain3", "drain3.template_miner",
+    "drain3", "drain3.template_miner",
     "drain3.file_persistence", "drain3.template_miner_config", "drain3.masking",
     "prometheus_client",
 ]:

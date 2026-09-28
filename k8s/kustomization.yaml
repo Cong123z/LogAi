@@ -84,13 +84,3 @@ replacements:
           name: logai-data-pvc
         fieldPaths:
           - spec.resources.requests.storage
-  - source:
-      kind: ConfigMap
-      name: logai-manifest-params
-      fieldPath: data.LOGAI_HF_STORAGE_SIZE
-    targets:
-      - select:
-          kind: PersistentVolumeClaim
-          name: logai-hf-cache-pvc
-        fieldPaths:
-          - spec.resources.requests.storage

@@ -18,7 +18,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-for mod in ["sentence_transformers", "prometheus_client", "drain3",
+for mod in ["prometheus_client", "drain3",
             "drain3.template_miner", "drain3.file_persistence",
             "drain3.template_miner_config"]:
     if mod not in sys.modules:

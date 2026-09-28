@@ -1,7 +1,6 @@
 """Focused resilience tests for the optional documentation enrichment stage."""
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,18 +8,15 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-# Importing the matcher should not load a real transformer model in unit tests.
-if "sentence_transformers" not in sys.modules:
-    sys.modules["sentence_transformers"] = MagicMock()
-
 from logai.config import DocMatcherConfig
 from logai.docmatch.doc_matcher import DocumentationMatcher
 
 
 class FakeEmbedder:
-    def __init__(self, vectors):
+    def __init__(self, vectors, model_name="test-model", dimension=2):
         self.vectors = np.asarray(vectors, dtype=np.float32)
         self.calls = 0
+        self.config = MagicMock(model_name=model_name, dimension=dimension)
 
     def embed(self, texts):
         self.calls += 1
@@ -151,6 +147,24 @@ class TestDocumentationMatcherResilience(unittest.TestCase):
 
         self.assertTrue(matcher.reload())
         self.assertEqual(embedder.calls, 1)
+
+    def test_cache_from_different_embedding_model_is_recomputed(self):
+        self._write_valid_corpus()
+        old_embedder = FakeEmbedder(
+            [[1.0, 0.0], [0.0, 1.0]], model_name="old-model", dimension=2
+        )
+        DocumentationMatcher(self.config, old_embedder, self.cache_path)
+
+        new_embedder = FakeEmbedder(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            model_name="BAAI/bge-m3",
+            dimension=3,
+        )
+        matcher = DocumentationMatcher(self.config, new_embedder, self.cache_path)
+
+        self.assertTrue(matcher.ready)
+        self.assertEqual(new_embedder.calls, 1)
+        self.assertEqual(matcher.embeddings.shape, (2, 3))
 
     def test_repeated_group_centroid_uses_cached_match(self):
         self._write_valid_corpus()

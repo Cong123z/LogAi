@@ -12,18 +12,3 @@ spec:
       storage: 10Gi
   # Optional: uncomment and specify your storage class if not using the default
   # storageClassName: standard
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: logai-hf-cache-pvc
-  labels:
-    app.kubernetes.io/name: logai
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
-  # Optional: uncomment and specify your storage class if not using the default
-  # storageClassName: standard

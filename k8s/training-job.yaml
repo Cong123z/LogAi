@@ -21,9 +21,6 @@ spec:
         - name: logai-data
           persistentVolumeClaim:
             claimName: logai-data-pvc
-        - name: hf-cache
-          persistentVolumeClaim:
-            claimName: logai-hf-cache-pvc
       containers:
         - name: logai-training
           image: logai-engine:latest
@@ -36,11 +33,11 @@ spec:
           envFrom:
             - secretRef:
                 name: logai-env
+            - configMapRef:
+                name: logai-embedding
           volumeMounts:
             - name: logai-data
               mountPath: /app/data
-            - name: hf-cache
-              mountPath: /app/hf-cache
           resources:
             requests:
               cpu: "1"

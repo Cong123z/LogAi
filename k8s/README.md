@@ -75,14 +75,33 @@ LOGAI_WEB_PORT=5555
 # Storage paths & sizes
 LOGAI_STORAGE_BASE_DIR=/app/data
 LOGAI_DOCUMENTATION_CORPUS_PATH=/app/data/documentation_corpus.json
-HF_HOME=/app/hf-cache
 LOGAI_DATA_STORAGE_SIZE=10Gi
-LOGAI_HF_STORAGE_SIZE=5Gi
+
+# Optional bearer token for the BGE-M3 API
+LOGAI_EMBEDDING_API_KEY=
 ```
 
 ---
 
-### Step 2: (Optional) Run Initial Training Job
+### Step 2: Link the BGE-M3 service
+
+Create `logai-embedding` in the same namespace as LogAI. Start from
+`k8s/embedding-config.example.yaml`, replace the endpoint with the Service URL
+provided by the cluster administrator, and set `LOGAI_EMBEDDING_API_FORMAT` to
+`openai` for `/v1/embeddings` or `tei` for `/embed`.
+
+```bash
+cp k8s/embedding-config.example.yaml k8s/embedding-config.yaml
+# Edit k8s/embedding-config.yaml before applying it.
+kubectl apply -f k8s/embedding-config.yaml
+```
+
+The realtime Deployment and training Job both require this ConfigMap. Keep an
+API key, when required, in `logai-env`; never put it in the ConfigMap.
+
+---
+
+### Step 3: (Optional) Run Initial Training Job
 
 If you have historical logs in Elasticsearch and want to pre-train template clusters and anomaly models before starting realtime processing:
 
@@ -99,7 +118,7 @@ Once completed, the trained models and template registries will be saved directl
 
 ---
 
-### Step 3: Deploy Realtime Pipeline & Web UI
+### Step 4: Deploy Realtime Pipeline & Web UI
 
 Deploy everything using Kustomize (native to `kubectl`):
 
@@ -117,7 +136,7 @@ You should see `2/2` containers running (`logai-engine` + `logai-web`).
 
 ---
 
-### Step 4: Access the Web UI & Metrics
+### Step 5: Access the Web UI & Metrics
 
 Forward the ports to your local machine:
 

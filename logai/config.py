@@ -48,9 +48,34 @@ class Drain3Config:
 
 @dataclass
 class EmbeddingConfig:
-    model_name: str = "sentence-transformers/all-mpnet-base-v2"
-    device: str = "cpu"
+    model_name: str = "BAAI/bge-m3"
+    endpoint: str = ""
+    api_format: str = "openai"
+    api_key: str | None = None
+    dimension: int = 1024
     batch_size: int = 64
+    timeout_seconds: float = 60.0
+    max_retries: int = 3
+    retry_backoff_seconds: float = 0.5
+
+    def validate(self, *, require_endpoint: bool = True) -> None:
+        if require_endpoint and not self.endpoint.strip():
+            raise ValueError(
+                "Remote embedding endpoint is required; set "
+                "LOGAI_EMBEDDING_ENDPOINT"
+            )
+        if self.api_format.lower() not in {"openai", "tei"}:
+            raise ValueError(
+                "LOGAI_EMBEDDING_API_FORMAT must be 'openai' or 'tei'"
+            )
+        if self.dimension <= 0:
+            raise ValueError("LOGAI_EMBEDDING_DIMENSION must be positive")
+        if self.batch_size <= 0:
+            raise ValueError("LOGAI_EMBEDDING_BATCH_SIZE must be positive")
+        if self.timeout_seconds <= 0:
+            raise ValueError("LOGAI_EMBEDDING_TIMEOUT_SECONDS must be positive")
+        if self.max_retries < 0:
+            raise ValueError("LOGAI_EMBEDDING_MAX_RETRIES cannot be negative")
 
 
 @dataclass
@@ -231,5 +256,25 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         cfg.doc_matcher.corpus_path = os.environ["LOGAI_DOCUMENTATION_CORPUS_PATH"]
     if os.environ.get("LOGAI_EMBEDDING_MODEL"):
         cfg.embedding.model_name = os.environ["LOGAI_EMBEDDING_MODEL"]
+    if os.environ.get("LOGAI_EMBEDDING_ENDPOINT"):
+        cfg.embedding.endpoint = os.environ["LOGAI_EMBEDDING_ENDPOINT"]
+    if os.environ.get("LOGAI_EMBEDDING_API_FORMAT"):
+        cfg.embedding.api_format = os.environ["LOGAI_EMBEDDING_API_FORMAT"]
+    if os.environ.get("LOGAI_EMBEDDING_API_KEY"):
+        cfg.embedding.api_key = os.environ["LOGAI_EMBEDDING_API_KEY"]
+    if os.environ.get("LOGAI_EMBEDDING_DIMENSION"):
+        cfg.embedding.dimension = int(os.environ["LOGAI_EMBEDDING_DIMENSION"])
+    if os.environ.get("LOGAI_EMBEDDING_BATCH_SIZE"):
+        cfg.embedding.batch_size = int(os.environ["LOGAI_EMBEDDING_BATCH_SIZE"])
+    if os.environ.get("LOGAI_EMBEDDING_TIMEOUT_SECONDS"):
+        cfg.embedding.timeout_seconds = float(
+            os.environ["LOGAI_EMBEDDING_TIMEOUT_SECONDS"]
+        )
+    if os.environ.get("LOGAI_EMBEDDING_MAX_RETRIES"):
+        cfg.embedding.max_retries = int(os.environ["LOGAI_EMBEDDING_MAX_RETRIES"])
+    if os.environ.get("LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS"):
+        cfg.embedding.retry_backoff_seconds = float(
+            os.environ["LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS"]
+        )
 
     return cfg

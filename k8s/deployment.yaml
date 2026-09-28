@@ -29,12 +29,6 @@ spec:
           persistentVolumeClaim:
             claimName: logai-data-pvc
 
-        # ── Hugging Face Model Cache Volume ───────────────────────────────────
-        # Persists sentence-transformers weights across pod restarts (~90MB).
-        - name: hf-cache
-          persistentVolumeClaim:
-            claimName: logai-hf-cache-pvc
-
       containers:
         # ── Container 1: Realtime LogAI Engine ────────────────────────────────
         - name: logai-engine
@@ -44,6 +38,8 @@ spec:
           envFrom:
             - secretRef:
                 name: logai-env
+            - configMapRef:
+                name: logai-embedding
           ports:
             - name: metrics
               containerPort: 9108
@@ -52,9 +48,6 @@ spec:
             # Read-Write access: writes discovered templates & models to /app/data
             - name: logai-data
               mountPath: /app/data
-            # Hugging Face model cache
-            - name: hf-cache
-              mountPath: /app/hf-cache
           resources:
             requests:
               cpu: "1"

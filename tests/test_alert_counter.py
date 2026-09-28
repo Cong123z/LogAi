@@ -13,7 +13,7 @@ import unittest
 from collections import defaultdict
 from unittest.mock import MagicMock
 
-for mod in ["sentence_transformers", "prometheus_client"]:
+for mod in ["prometheus_client"]:
     if mod not in sys.modules:
         sys.modules[mod] = MagicMock()
 

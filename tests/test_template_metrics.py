@@ -18,7 +18,6 @@ for mod in [
     "sklearn.ensemble",
     "hdbscan",
     "elasticsearch",
-    "sentence_transformers",
     "drain3",
     "drain3.template_miner",
     "drain3.file_persistence",

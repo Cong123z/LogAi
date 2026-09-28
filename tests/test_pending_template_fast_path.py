@@ -1,7 +1,7 @@
 """Unit tests verifying the fast-path for Pending/Unassigned templates in _assign_group.
 
-Prevents the critical CPU-starvation regression where unassigned templates
-re-triggered SentenceTransformer embed_one() and synchronous disk I/O
+Prevents the critical request-starvation regression where unassigned templates
+re-triggered remote embed_one() calls and synchronous disk I/O
 on every single occurrence.
 """
 from __future__ import annotations
@@ -19,7 +19,6 @@ for mod in [
     "sklearn.ensemble",
     "hdbscan",
     "elasticsearch",
-    "sentence_transformers",
     "drain3",
     "drain3.template_miner",
     "drain3.file_persistence",

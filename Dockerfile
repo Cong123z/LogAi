@@ -14,8 +14,6 @@ COPY requirements.txt .
 # final image size close to what it'd be without build-essential at all.
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && pip install --no-cache-dir --upgrade pip \
-    # CPU-only torch -- avoids pulling multi-GB CUDA/cuDNN packages
-    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.txt \
     # strip test/cache bloat from installed packages
     && find /usr/local/lib/python3.11 -type d -name "tests" -exec rm -rf {} + \

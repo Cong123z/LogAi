@@ -10,6 +10,10 @@ Elasticsearch → LogAI Engine → Prometheus → Grafana
 Tài liệu chi tiết về pipeline, input/output contracts, module ownership,
 reliability và các lựa chọn thiết kế: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+For a readable current-state map of flows, module boundaries, runtime
+contracts, persistence ownership, and crash/recovery semantics, see
+[`docs/ARCHITECTURE_GUIDE.md`](docs/ARCHITECTURE_GUIDE.md).
+
 ## 1. Kiến trúc & vị trí file
 
 ```
@@ -29,7 +33,7 @@ logai-engine/
     ├── models.py                 # RawLog, ParsedEvent, GroupState, FeatureVector...
     ├── storage/                  # JSON/pickle registries, checkpoint, dedup
     ├── parsing/drain3_parser.py  # Drain3 wrapper (3.2 / 4.2)
-    ├── embedding/embedder.py     # all-mpnet-base-v2 wrapper (3.4 / 4.4)
+    ├── embedding/embedder.py     # remote BGE-M3 HTTP client (3.4 / 4.4)
     ├── clustering/hdbscan_cluster.py   # HDBSCAN + centroid + nearest-group (3.5/3.6/4.4)
     ├── docmatch/doc_matcher.py   # cosine similarity vs doc corpus (3.7 / 4.5)
     ├── features/feature_engine.py     # sliding-window features (3.8 / 4.6)
@@ -121,9 +125,10 @@ stored in the live `group_registry.json`, including its group ID, service,
 representative template, documentation status, and event count. The same data
 is available from `GET /api/groups`.
 Manual documentation remains attached to its group ID when templates move in or
-out. Documentation controls wait for an in-flight grouping revision to apply,
-and a documentation entry cannot be deleted while any active group uses it
-through either a manual assignment or an automatic match.
+out. Documentation controls wait for an in-flight grouping revision to apply.
+Deleting a document used by active groups first lists the affected groups and
+requires explicit confirmation; confirmed deletion clears manual assignments
+and lets the engine rematch automatically or leave those groups undocumented.
 
 Templates, Semantic Groups, Alerting, and Documentation are separate sidebar
 views. The Reload control performs a full browser refresh, while automatic
@@ -139,7 +144,9 @@ is display context only. `AnomalyState.alert_state` is the alert condition.
 
 The Documentation view is writable. Users can add, edit, and delete corpus
 entries, then assign one entry to an undocumented semantic group. Manual
-assignments override cosine matching until cleared. Changes are persisted in
+assignments override cosine matching until cleared. Clear is available for
+automatic and manual groups, requires confirmation, and keeps the group
+undocumented until a new document is assigned. Changes are persisted in
 `documentation_corpus.json` and `documentation_overrides.json` on the shared
 data volume and are applied by the realtime engine within the configured
 refresh interval (5 seconds by default). The write API has no built-in
@@ -159,6 +166,9 @@ LOGAI_WEB_DATA_DIR=data python scripts/run_web.py
 ```bash
 pip install -r requirements.txt
 export LOGAI_ES_HOSTS=http://localhost:9200
+export LOGAI_EMBEDDING_ENDPOINT=http://localhost:8080/v1/embeddings
+export LOGAI_EMBEDDING_API_FORMAT=openai
+export LOGAI_EMBEDDING_API_KEY=
 python scripts/run_training.py --lookback-hours 24
 python scripts/run_realtime.py
 ```
@@ -284,5 +294,7 @@ readiness becomes unavailable when such a failure stops the heartbeat.
   ngang hoặc nhiều instance cùng ghi, cần chuyển `storage/` sang
   Postgres/Redis (interface `JSONStore`/`PickleStore`/`ModelStore` được
   thiết kế để swap được mà không đổi code gọi).
-- Embedding model (`all-mpnet-base-v2`) sẽ tự tải về từ HuggingFace lần
-  chạy đầu — cần mạng ra ngoài lần đầu tiên (hoặc pre-cache trong image).
+- Embeddings are produced by the remote `BAAI/bge-m3` service. Both training
+  and realtime must use the same endpoint, model revision, API format, and
+  1024-dimensional dense output. The LogAI image does not download model
+  weights or run a local Sentence Transformer.

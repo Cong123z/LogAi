@@ -26,7 +26,9 @@ class FakeMatcher:
         return True
 
     def match(self, group_id, _centroid):
-        return MatchResult(group_id, "DOC-DB", 0.99, True, "ERR_DB")
+        if not self.entries:
+            return MatchResult(group_id, None, 0.0, False, "")
+        return MatchResult(group_id, self.entries[0].doc_id, 0.99, True, "ERR_DB")
 
     def match_document(self, group_id, documentation_id, _centroid):
         return MatchResult(group_id, documentation_id, 0.1, True, "ERR_AUTH")
@@ -76,7 +78,17 @@ class TestGroupDocumentationRefresh(unittest.TestCase):
         current = self.store.load_overrides()
         self.store.clear_override("G1", current["revision"])
         self.assertTrue(self.worker.refresh_once())
-        self.assertEqual(self.groups.get("G1").documentation_id, "DOC-DB")
+        cleared = self.groups.get("G1")
+        self.assertIsNone(cleared.documentation_id)
+        self.assertEqual(cleared.documentation_source, "none")
+
+        reassigned = self.store.load_overrides()
+        self.store.set_override(
+            "G1", "DOC-AUTH", fingerprint, reassigned["revision"]
+        )
+        self.assertTrue(self.worker.refresh_once())
+        self.assertEqual(self.groups.get("G1").documentation_id, "DOC-AUTH")
+        self.assertEqual(self.groups.get("G1").documentation_source, "manual")
 
     def test_changed_group_fingerprint_preserves_manual_override(self):
         snapshot = self.store.load_overrides()
@@ -107,6 +119,48 @@ class TestGroupDocumentationRefresh(unittest.TestCase):
         state = self.groups.get("G1")
         self.assertEqual(state.documentation_source, "manual")
         self.assertEqual(state.documentation_id, "DOC-AUTH")
+
+    def test_forced_document_delete_clears_group_when_no_replacement_matches(self):
+        self.worker.refresh_once()
+        snapshot = self.store.load_overrides()
+        self.store.set_override(
+            "G1", "DOC-AUTH", "fingerprint", snapshot["revision"]
+        )
+        self.worker.refresh_once()
+
+        corpus = self.store.load_corpus()
+        self.store.delete_document("DOC-AUTH", corpus["revision"], force=True)
+        self.matcher.entries = []
+
+        self.assertTrue(self.worker.refresh_once())
+        state = self.groups.get("G1")
+        self.assertFalse(state.documented)
+        self.assertIsNone(state.documentation_id)
+        self.assertEqual(state.documentation_source, "none")
+
+    def test_forced_document_delete_rematches_remaining_document(self):
+        self.worker.refresh_once()
+        corpus = self.store.load_corpus()
+        self.store.delete_document("DOC-DB", corpus["revision"], force=True)
+        self.matcher.entries = [SimpleNamespace(doc_id="DOC-AUTH")]
+
+        self.assertTrue(self.worker.refresh_once())
+        state = self.groups.get("G1")
+        self.assertTrue(state.documented)
+        self.assertEqual(state.documentation_id, "DOC-AUTH")
+        self.assertEqual(state.documentation_source, "automatic")
+
+    def test_clear_suppression_prevents_automatic_rematch(self):
+        self.worker.refresh_once()
+        current = self.store.load_overrides()
+        self.store.clear_override("G1", current["revision"])
+        self.assertTrue(self.worker.refresh_once())
+
+        self.matcher.entries = [SimpleNamespace(doc_id="DOC-AUTH")]
+        self.assertFalse(self.worker.refresh_once())
+        state = self.groups.get("G1")
+        self.assertFalse(state.documented)
+        self.assertIsNone(state.documentation_id)
 
 if __name__ == "__main__":
     unittest.main()

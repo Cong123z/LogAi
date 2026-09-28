@@ -124,6 +124,28 @@ class TestDocumentationCorpusStore(unittest.TestCase):
             self.store.delete_document("DOC-1", corpus["revision"])
         self.assertEqual(caught.exception.group_ids, ["G0001"])
 
+    def test_forced_delete_removes_manual_assignment(self):
+        corpus = self.store.load_corpus()
+        overrides = self.store.load_overrides()
+        self.store.set_override("G0001", "DOC-1", "fingerprint", overrides["revision"])
+
+        deleted = self.store.delete_document(
+            "DOC-1", corpus["revision"], force=True
+        )
+
+        self.assertEqual(deleted["entries"], [])
+        self.assertEqual(self.store.load_overrides()["overrides"], {})
+
+    def test_clear_persists_suppression_and_assignment_removes_it(self):
+        current = self.store.load_overrides()
+        cleared = self.store.clear_override("G0001", current["revision"])
+        self.assertIn("G0001", cleared["cleared_groups"])
+
+        assigned = self.store.set_override(
+            "G0001", "DOC-1", "fingerprint", cleared["revision"]
+        )
+        self.assertNotIn("G0001", assigned["cleared_groups"])
+
     def test_empty_corpus_is_valid(self):
         corpus = self.store.load_corpus()
         emptied = self.store.delete_document("DOC-1", corpus["revision"])

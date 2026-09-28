@@ -98,6 +98,23 @@ def create_app(
         logger.exception("Web mutation failed")
         return jsonify({"error": "storage_error", "message": str(exc)}), 500
 
+    def _document_group_details(
+        groups: Dict[str, Any], group_ids: List[str]
+    ) -> List[Dict[str, str]]:
+        details: List[Dict[str, str]] = []
+        for group_id in sorted(set(group_ids)):
+            group = groups.get(group_id, {})
+            if not isinstance(group, dict):
+                group = {}
+            details.append({
+                "group_id": group_id,
+                "service": str(group.get("service") or "unknown"),
+                "representative_template": str(
+                    group.get("representative_template") or ""
+                ),
+            })
+        return details
+
     def _grouping_context() -> tuple[Dict[str, Any], Dict[str, Any]]:
         synchronization = grouping.synchronization_status(
             stale_seconds=grouping_stale_seconds
@@ -452,6 +469,7 @@ def create_app(
         items = []
         override_snapshot = documentation.load_overrides()
         overrides = override_snapshot["overrides"]
+        cleared_groups = override_snapshot.get("cleared_groups", {})
         document_ids = {
             entry["id"] for entry in documentation.load_corpus()["entries"]
         }
@@ -481,6 +499,7 @@ def create_app(
             item["manual_documentation_id"] = (
                 override.get("documentation_id") if isinstance(override, dict) else None
             )
+            item["documentation_clear_suppressed"] = gid in cleared_groups
             membership_changed = bool(
                 isinstance(override, dict)
                 and override.get("group_fingerprint") != current_fingerprint
@@ -669,13 +688,39 @@ def create_app(
                 and group_id in active_group_ids
                 and group.get("documentation_id") == doc_id
             }
+            override_snapshot = documentation.load_overrides()
+            manual_group_ids = {
+                group_id
+                for group_id, value in override_snapshot.get("overrides", {}).items()
+                if isinstance(value, dict)
+                and value.get("documentation_id") == doc_id
+                and group_id in active_group_ids
+            }
+            affected_group_ids = sorted(assigned_group_ids | manual_group_ids)
+            force = payload.get("force") is True
             corpus = documentation.delete_document(
                 doc_id,
                 payload.get("revision"),
                 active_group_ids=active_group_ids,
                 assigned_group_ids=assigned_group_ids,
+                force=force,
             )
-            return jsonify({"deleted_id": doc_id, "revision": corpus["revision"]})
+            override_revision = documentation.load_overrides()["revision"]
+            return jsonify({
+                "deleted_id": doc_id,
+                "revision": corpus["revision"],
+                "override_revision": override_revision,
+                "affected_group_ids": affected_group_ids,
+                "state": "pending",
+            })
+        except DocumentInUse as exc:
+            return jsonify({
+                "error": "document_in_use",
+                "message": str(exc),
+                "group_ids": exc.group_ids,
+                "groups": _document_group_details(groups, exc.group_ids),
+                "requires_confirmation": True,
+            }), 409
         except Exception as exc:  # noqa: BLE001
             return _mutation_error(exc)
 
@@ -720,6 +765,23 @@ def create_app(
         groups = _load_json("group_registry.json")
         if group_id not in groups:
             return jsonify({"error": "not_found", "message": group_id}), 404
+        if payload.get("force") is not True:
+            group = groups[group_id]
+            override = documentation.load_overrides().get("overrides", {}).get(group_id)
+            documentation_id = group.get("documentation_id")
+            if not documentation_id and isinstance(override, dict):
+                documentation_id = override.get("documentation_id")
+            documentation_source = group.get("documentation_source", "none")
+            if isinstance(override, dict) and override.get("documentation_id"):
+                documentation_source = "manual"
+            return jsonify({
+                "error": "confirmation_required",
+                "message": "Confirm clearing documentation for this group",
+                "group_id": group_id,
+                "documentation_id": documentation_id,
+                "documentation_source": documentation_source,
+                "requires_confirmation": True,
+            }), 409
         try:
             snapshot = documentation.clear_override(
                 group_id, payload.get("override_revision")
@@ -728,6 +790,7 @@ def create_app(
                 "group_id": group_id,
                 "override_revision": snapshot["revision"],
                 "state": "pending",
+                "clear_suppressed": True,
             })
         except Exception as exc:  # noqa: BLE001
             return _mutation_error(exc)

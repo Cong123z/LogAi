@@ -59,11 +59,13 @@ selecting the toggle again collapses the list.
 | `none` | No document currently meets the matching rules. |
 
 The `Undocumented only` checkbox filters the table without changing the summary
-counts. Assign, Change, and Clear update the persistent override file; the
-realtime engine applies the new revision asynchronously and the UI polls until
-that exact revision is applied. These controls are disabled while a non-empty
-template-grouping revision is not yet applied, preventing an assignment against
-obsolete group membership.
+counts. Assign and Change update the persistent override file. Clear is
+available for both manual and automatic documentation, asks for confirmation,
+and persists a clear suppression so the group remains undocumented until a new
+document is explicitly assigned. The realtime engine applies each new revision
+asynchronously and the UI polls until that exact revision is applied. These
+controls are disabled while a non-empty template-grouping revision is not yet
+applied, preventing an assignment against obsolete group membership.
 
 ## Alerting
 
@@ -104,10 +106,15 @@ records whose `documentation_id` points to that entry. The table defaults to
 highest group count first and can also sort by ID, title, or error code.
 
 Every mutation includes the revision returned by the latest read. A stale
-revision returns HTTP 409 instead of overwriting another user's change. A
-document used by any active group cannot be deleted until every manual or
-automatic assignment is changed or cleared. Overrides for deleted groups are
-orphans and do not block deletion.
+revision returns HTTP 409 instead of overwriting another user's change. The
+first delete request for a document used by an active group returns HTTP 409
+with the affected group IDs and details; the UI then asks for explicit
+confirmation. A confirmed request repeats the delete with `force: true`,
+removes manual overrides for that document, and returns pending corpus and
+override revisions. The refresh worker clears the deleted assignment and
+recomputes automatic matching, leaving groups with no replacement
+undocumented. Overrides for deleted groups are orphans and do not block
+deletion.
 
 The realtime refresh worker checks corpus and override revisions every five
 seconds by default. It reloads document embeddings, recomputes automatic
@@ -136,14 +143,16 @@ of these synchronization states:
 | `GET /api/documentation` | None | Entries, group counts, corpus revision, synchronization status |
 | `POST /api/documentation` | `revision`, `title`, `text`, `error_code` | Created entry and new corpus revision |
 | `PUT /api/documentation/<id>` | `revision`, `title`, `text`, `error_code` | Updated entry and new corpus revision |
-| `DELETE /api/documentation/<id>` | `revision` | Deleted ID and new corpus revision |
+| `DELETE /api/documentation/<id>` | `revision`, optional `force` | Protected 409 with affected groups, or confirmed deletion with corpus/override revisions |
 | `PUT /api/groups/<id>/documentation` | `documentation_id`, `override_revision` | Pending assignment and new override revision |
-| `DELETE /api/groups/<id>/documentation` | `override_revision` | Pending clear and new override revision |
+| `DELETE /api/groups/<id>/documentation` | `override_revision`, `force` | Confirmation-required 409 or pending clear suppression and new override revision |
 
 Mutation errors use JSON with an `error` and `message`. Important status codes
 are `400` for invalid input, `404` for an unknown document/group, `409` for a
-revision conflict, an assigned document, or unsettled template grouping, and
-`500` for a storage failure.
+revision conflict, an assigned document awaiting confirmation, or unsettled
+template grouping, and `500` for a storage failure. An assigned-document
+response includes `group_ids`, a `groups` detail list, and
+`requires_confirmation: true`.
 
 The API has no authentication or authorization. Do not expose the write routes
 directly to an untrusted network; enforce access at the ingress, reverse proxy,

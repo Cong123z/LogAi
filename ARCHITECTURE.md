@@ -81,7 +81,14 @@ Environment overrides hiện có:
 | `LOGAI_METRICS_HOST` | `metrics.http_host` |
 | `LOGAI_STORAGE_BASE_DIR` | Storage base, model directory, Drain3 path và ba documentation runtime paths |
 | `LOGAI_DOCUMENTATION_CORPUS_PATH` | Override riêng `doc_matcher.corpus_path` sau storage base |
-| `LOGAI_EMBEDDING_MODEL` | `embedding.model_name` |
+| `LOGAI_EMBEDDING_ENDPOINT` | Required remote embedding HTTP endpoint |
+| `LOGAI_EMBEDDING_API_FORMAT` | `openai` or `tei` response contract |
+| `LOGAI_EMBEDDING_API_KEY` | Optional bearer token |
+| `LOGAI_EMBEDDING_MODEL` | Remote model identifier, default `BAAI/bge-m3` |
+| `LOGAI_EMBEDDING_DIMENSION` | Expected dense-vector dimension, default `1024` |
+| `LOGAI_EMBEDDING_BATCH_SIZE` | Maximum texts sent per request |
+| `LOGAI_EMBEDDING_TIMEOUT_SECONDS` | Per-request HTTP timeout |
+| `LOGAI_EMBEDDING_MAX_RETRIES` | Retry count for transient failures |
 
 Các cấu hình khác chỉ thay đổi qua YAML hoặc code. `ReliabilityConfig` có các
 giá trị retry, nhưng decorator của Elasticsearch collector hiện dùng trực tiếp
@@ -447,7 +454,7 @@ flowchart TD
 
 Nếu `TemplateRegistry` đã có template và `group_id`:
 
-1. Không tạo embedding mới (bỏ qua SentenceTransformer).
+1. Không tạo embedding mới (bỏ qua remote BGE-M3 request).
 2. Không cluster hay so khớp centroids (bỏ qua HDBSCAN/Centroids).
 3. Không tính toán lại template metrics (bỏ qua `_update_template_metrics`).
 4. Cập nhật template `last_seen`, `event_count`, và promote `level` nếu event có
@@ -812,11 +819,13 @@ Drain3 là online parser, phù hợp cả training và realtime. Persisted tree 
 template IDs ổn định khi restart. Nếu mất hoặc thay `drain3_state.bin`, template
 IDs có thể thay đổi và làm lệch registries cũ.
 
-### 11.3 Sentence Transformer cho semantic representation
+### 11.3 Remote BGE-M3 semantic representation
 
-`all-mpnet-base-v2` tạo embedding 768 chiều và được L2 normalize. Dot product vì
-thế tương đương cosine similarity. Model phải được tải từ Hugging Face ở lần
-đầu hoặc pre-cache trong image; đây là dependency runtime lớn.
+Training and realtime call a separately deployed `BAAI/bge-m3` inference
+service over HTTP. LogAI consumes the 1024-dimensional dense output and applies
+L2 normalization, so dot product remains equivalent to cosine similarity. The
+model weights and accelerator dependencies are owned by the inference service,
+not the LogAI image. OpenAI-compatible and TEI response formats are supported.
 
 ### 11.4 Offline HDBSCAN, realtime nearest centroid
 

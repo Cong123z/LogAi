@@ -26,7 +26,7 @@ if "elasticsearch" not in sys.modules:
 # Stub heavy optional deps that realtime_pipeline pulls in transitively but
 # which run_forever does not exercise (metrics exporter and embedder are
 # replaced with mocks on the __new__-built pipeline below).
-for _mod in ("prometheus_client", "sentence_transformers"):
+for _mod in ("prometheus_client",):
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()
 

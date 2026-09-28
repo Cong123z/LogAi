@@ -91,7 +91,7 @@ class TestWebDocumentationAPI(unittest.TestCase):
         self.assertEqual(listing["counts"]["NORMAL"], 1)
         self.assertEqual(listing["items"][0]["alert_state"], "NORMAL")
 
-    def test_assign_clear_and_delete_protection(self):
+    def test_assign_delete_confirmation_and_forced_delete(self):
         docs = self.client.get("/api/documentation").get_json()
         groups = self.client.get("/api/groups").get_json()
         assigned = self.client.put("/api/groups/G1/documentation", json={
@@ -100,11 +100,23 @@ class TestWebDocumentationAPI(unittest.TestCase):
         self.assertEqual(assigned.status_code, 200)
         blocked = self.client.delete("/api/documentation/DOC-1", json={"revision": docs["revision"]})
         self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(blocked.get_json()["group_ids"], ["G1"])
-        cleared = self.client.delete("/api/groups/G1/documentation", json={
-            "override_revision": assigned.get_json()["override_revision"]
+        blocked_payload = blocked.get_json()
+        self.assertEqual(blocked_payload["group_ids"], ["G1"])
+        self.assertTrue(blocked_payload["requires_confirmation"])
+        self.assertEqual(blocked_payload["groups"][0]["group_id"], "G1")
+
+        deleted = self.client.delete("/api/documentation/DOC-1", json={
+            "revision": docs["revision"], "force": True
         })
-        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["affected_group_ids"], ["G1"])
+        self.assertEqual(
+            self.client.get("/api/documentation").get_json()["items"], []
+        )
+        self.assertEqual(
+            json.loads((self.base / "documentation_overrides.json").read_text())["overrides"],
+            {},
+        )
 
     def test_delete_is_blocked_by_automatic_group_assignment(self):
         registry_path = self.base / "group_registry.json"
@@ -123,6 +135,45 @@ class TestWebDocumentationAPI(unittest.TestCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.get_json()["group_ids"], ["G1"])
+
+        docs = self.client.get("/api/documentation").get_json()
+        forced = self.client.delete(
+            "/api/documentation/DOC-1",
+            json={"revision": docs["revision"], "force": True},
+        )
+        self.assertEqual(forced.status_code, 200)
+        self.assertEqual(forced.get_json()["affected_group_ids"], ["G1"])
+
+    def test_clear_requires_confirmation_and_supports_automatic_groups(self):
+        registry_path = self.base / "group_registry.json"
+        groups = json.loads(registry_path.read_text(encoding="utf-8"))
+        groups["G1"].update({
+            "documented": True,
+            "documentation_id": "DOC-1",
+            "documentation_source": "automatic",
+        })
+        registry_path.write_text(json.dumps(groups), encoding="utf-8")
+        current = self.client.get("/api/groups").get_json()
+
+        blocked = self.client.delete("/api/groups/G1/documentation", json={
+            "override_revision": current["override_revision"],
+        })
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(blocked.get_json()["error"], "confirmation_required")
+        self.assertTrue(blocked.get_json()["requires_confirmation"])
+
+        cleared = self.client.delete("/api/groups/G1/documentation", json={
+            "override_revision": current["override_revision"],
+            "force": True,
+        })
+        self.assertEqual(cleared.status_code, 200)
+        self.assertTrue(cleared.get_json()["clear_suppressed"])
+        listing = self.client.get("/api/groups").get_json()
+        self.assertTrue(listing["items"][0]["documentation_clear_suppressed"])
+        overrides = json.loads(
+            (self.base / "documentation_overrides.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("G1", overrides["cleared_groups"])
 
     def test_documentation_mutations_are_blocked_until_grouping_is_applied(self):
         grouping = GroupingOverrideStore(
@@ -245,6 +296,11 @@ class TestWebDocumentationAPI(unittest.TestCase):
         self.assertIn("state.reconnectTimer", html)
         self.assertIn("documentation_mutations_blocked", html)
         self.assertIn("pollDocumentationResult", html)
+        self.assertIn('id="delete-confirm-modal"', html)
+        self.assertIn('id="delete-document-confirm"', html)
+        self.assertIn("force: true", html)
+        self.assertIn('id="clear-confirm-modal"', html)
+        self.assertIn('id="clear-document-confirm"', html)
 
 
 if __name__ == "__main__":

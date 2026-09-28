@@ -34,6 +34,7 @@ def main() -> None:
     )
 
     config = load_config(args.config)
+    config.embedding.validate()
     lookback_seconds = (
         args.lookback_hours * 3600 if args.lookback_hours is not None else None
     )

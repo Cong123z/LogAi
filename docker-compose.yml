@@ -33,11 +33,18 @@ services:
       - LOGAI_METRICS_HOST=${LOGAI_METRICS_HOST:-0.0.0.0}
       - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
       - LOGAI_DOCUMENTATION_CORPUS_PATH=${LOGAI_DOCUMENTATION_CORPUS_PATH:-/app/data/documentation_corpus.json}
+      - LOGAI_EMBEDDING_ENDPOINT=${LOGAI_EMBEDDING_ENDPOINT:-}
+      - LOGAI_EMBEDDING_API_FORMAT=${LOGAI_EMBEDDING_API_FORMAT:-openai}
+      - LOGAI_EMBEDDING_API_KEY=${LOGAI_EMBEDDING_API_KEY:-}
+      - LOGAI_EMBEDDING_MODEL=${LOGAI_EMBEDDING_MODEL:-BAAI/bge-m3}
+      - LOGAI_EMBEDDING_DIMENSION=${LOGAI_EMBEDDING_DIMENSION:-1024}
+      - LOGAI_EMBEDDING_BATCH_SIZE=${LOGAI_EMBEDDING_BATCH_SIZE:-64}
+      - LOGAI_EMBEDDING_TIMEOUT_SECONDS=${LOGAI_EMBEDDING_TIMEOUT_SECONDS:-60}
+      - LOGAI_EMBEDDING_MAX_RETRIES=${LOGAI_EMBEDDING_MAX_RETRIES:-3}
     ports:
       - "${LOGAI_METRICS_PORT:-9108}:${LOGAI_METRICS_PORT:-9108}"
     volumes:
       - logai-data:/app/data
-      - hf-cache:/root/.cache/huggingface   # persist embedding model (~90MB)
     networks:
       - aiops-net
     depends_on:
@@ -61,9 +68,16 @@ services:
       - LOGAI_ES_PASSWORD=${LOGAI_ES_PASSWORD:-}
       - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}
       - LOGAI_DOCUMENTATION_CORPUS_PATH=${LOGAI_DOCUMENTATION_CORPUS_PATH:-/app/data/documentation_corpus.json}
+      - LOGAI_EMBEDDING_ENDPOINT=${LOGAI_EMBEDDING_ENDPOINT:-}
+      - LOGAI_EMBEDDING_API_FORMAT=${LOGAI_EMBEDDING_API_FORMAT:-openai}
+      - LOGAI_EMBEDDING_API_KEY=${LOGAI_EMBEDDING_API_KEY:-}
+      - LOGAI_EMBEDDING_MODEL=${LOGAI_EMBEDDING_MODEL:-BAAI/bge-m3}
+      - LOGAI_EMBEDDING_DIMENSION=${LOGAI_EMBEDDING_DIMENSION:-1024}
+      - LOGAI_EMBEDDING_BATCH_SIZE=${LOGAI_EMBEDDING_BATCH_SIZE:-64}
+      - LOGAI_EMBEDDING_TIMEOUT_SECONDS=${LOGAI_EMBEDDING_TIMEOUT_SECONDS:-60}
+      - LOGAI_EMBEDDING_MAX_RETRIES=${LOGAI_EMBEDDING_MAX_RETRIES:-3}
     volumes:
       - logai-data:/app/data
-      - hf-cache:/root/.cache/huggingface
     networks:
       - aiops-net
     command: ["python", "scripts/run_training.py", "--lookback-hours", "24"]
@@ -110,7 +124,5 @@ networks:
 volumes:
   logai-data:
     name: logai-data
-  hf-cache:
-    name: hf-cache
   grafana-data:
     name: logai-grafana-data

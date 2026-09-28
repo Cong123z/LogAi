@@ -79,6 +79,7 @@ class DocumentationRefreshWorker:
 
             entries = {entry.doc_id: entry for entry in self.matcher.entries}
             overrides = overrides_snapshot["overrides"]
+            cleared_groups = overrides_snapshot.get("cleared_groups", {})
             membership_generation, group_snapshot, centroids = (
                 self.groups.membership_snapshot()
             )
@@ -87,6 +88,9 @@ class DocumentationRefreshWorker:
             membership_changed_groups: list[str] = []
 
             for group in group_snapshot:
+                if group.group_id in cleared_groups:
+                    updates[group.group_id] = self._empty_update("none")
+                    continue
                 centroid = centroids.get(group.group_id)
                 if centroid is None:
                     updates[group.group_id] = self._empty_update("none")

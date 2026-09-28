@@ -31,9 +31,16 @@ drain3:
       mask_with: '*'
 
 embedding:
-  model_name: "sentence-transformers/all-minilm-l6-v2"
-  device: "cpu"
+  model_name: "BAAI/bge-m3"
+  # Required in production through LOGAI_EMBEDDING_ENDPOINT.
+  endpoint: ""
+  # Supported remote response formats: openai or tei.
+  api_format: "openai"
+  dimension: 1024
   batch_size: 64
+  timeout_seconds: 60
+  max_retries: 3
+  retry_backoff_seconds: 0.5
 
 clustering:
   # Conservative grouping: only form/accept groups with strong local support.

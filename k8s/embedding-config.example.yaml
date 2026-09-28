@@ -1,0 +1,15 @@
+# Set the endpoint supplied by the cluster administrator and apply this file in
+# the same namespace as LogAI before starting training or realtime processing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logai-embedding
+data:
+  LOGAI_EMBEDDING_ENDPOINT: "http://bge-m3.embedding.svc.cluster.local:8080/v1/embeddings"
+  LOGAI_EMBEDDING_API_FORMAT: "openai"
+  LOGAI_EMBEDDING_MODEL: "BAAI/bge-m3"
+  LOGAI_EMBEDDING_DIMENSION: "1024"
+  LOGAI_EMBEDDING_BATCH_SIZE: "64"
+  LOGAI_EMBEDDING_TIMEOUT_SECONDS: "60"
+  LOGAI_EMBEDDING_MAX_RETRIES: "3"
+  LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS: "0.5"

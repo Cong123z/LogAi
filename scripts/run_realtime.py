@@ -31,6 +31,7 @@ def main() -> None:
     )
 
     config = load_config(args.config)
+    config.embedding.validate()
     pipeline = RealtimePipeline(config)
     pipeline.run_forever()
 
