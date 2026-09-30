@@ -371,6 +371,14 @@ class ElasticsearchCollector:
 
             if len(hits) < current_limit:
                 break
+        else:
+            if max_docs > 0:
+                logger.warning(
+                    "Historical stream stopped at max_docs=%d; logs after %s were NOT "
+                    "used for training (time range truncated)",
+                    max_docs,
+                    search_after[0] if search_after else "the range start",
+                )
 
     def fetch_historical_range(
         self, start_ts: float, end_ts: Optional[float] = None, max_docs: int = 200_000

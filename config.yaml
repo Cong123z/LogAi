@@ -82,7 +82,7 @@ alert:
 
 training:
   batch_size: 2000
-  max_docs: 1000000
+  max_docs: 200000
   lookback_seconds: 604800
   dedup_buffer_size: 10000
 

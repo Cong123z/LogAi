@@ -8,8 +8,10 @@ realtime pipeline from historical logs.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
@@ -47,7 +49,9 @@ logger = logging.getLogger("logai.training")
 class TrainingPipeline:
     def __init__(self, config: AppConfig):
         self.config = config
-        self.parser = Drain3Parser(config.drain3)
+        # Bulk parsing: persist Drain3 once per batch (see _stream_parse)
+        # instead of re-serialising the whole tree on every template change.
+        self.parser = Drain3Parser(config.drain3, autosave=False)
         self.embedder = TemplateEmbedder(config.embedding)
         self.clusterer = GroupClusterer(config.clustering)
         self.template_registry = TemplateRegistry(config.storage)
@@ -281,6 +285,15 @@ class TrainingPipeline:
         )
         dedup_buffer = LocalTrainingDedup(max_size=dedup_size)
         durable_event_ids: Set[str] = self.event_index.event_ids()
+        logger.info(
+            "Phase 1 start: Drain3 state %s (%s) restored with %d clusters / %d messages; "
+            "event index has %d events from a previous interrupted run",
+            self.parser.persistence_path,
+            _format_size(_file_size(self.parser.persistence_path)),
+            self.parser.cluster_count(),
+            self.parser.message_count(),
+            len(durable_event_ids),
+        )
 
         if isinstance(historical_logs, list) and historical_logs and isinstance(historical_logs[0], RawLog):
             logger.info(
@@ -301,18 +314,26 @@ class TrainingPipeline:
 
         total_batches = 0
         parsed_count = 0
+        fetched_count = 0
+        state_bytes = 0
         t_phase1 = time.time()
+        t_wait = time.time()
 
         for item in batch_stream:
+            # Time spent inside the generator = Elasticsearch fetch latency.
+            fetch_seconds = time.time() - t_wait
             if isinstance(item, tuple) and len(item) == 2:
                 batch, cursor = item
             else:
                 batch, cursor = item, None
 
             if not batch:
+                t_wait = time.time()
                 continue
 
             total_batches += 1
+            fetched_count += len(batch)
+            t_batch = time.time()
             parsed_batch: List[ParsedEvent] = []
             for raw in batch:
                 # 1. Deduplicate network retries / duplicate logs in RAM
@@ -323,29 +344,60 @@ class TrainingPipeline:
                 pe = self.parser.parse(raw)
                 parsed_batch.append(pe)
                 durable_event_ids.add(raw.event_id)
+            parse_seconds = time.time() - t_batch
 
-            # Persist the batch before advancing the cursor.  A restart can
-            # therefore replay all historical events, not only new pages.
+            # Commit order per batch: Drain3 state -> event index -> cursor.
+            # The state goes first because event-index records reference
+            # Drain3 cluster ids: if the index were durable but the state not,
+            # a resumed miner could re-issue those ids for different templates.
+            # A crash after the state save only replays this batch into Drain3
+            # (slightly inflated cluster sizes), never loses a template.
+            save_seconds = 0.0
+            if parsed_batch:
+                t_save = time.time()
+                state_bytes = self.parser.save_state(f"training batch {total_batches}")
+                save_seconds = time.time() - t_save
             self.event_index.append_batch(parsed_batch)
             parsed_count += len(parsed_batch)
-
-            if total_batches % 100 == 0:
-                logger.info(
-                    "Phase 1 progress: Parsed %d events across %d batches...",
-                    parsed_count,
-                    total_batches,
-                )
 
             # Advance isolated training checkpoint only after durable index.
             if checkpoint_store is not None and cursor is not None:
                 checkpoint_store.set_search_after(cursor, flush=True)
 
+            elapsed = time.time() - t_phase1
+            last_ts = max(raw.timestamp for raw in batch)
+            logger.info(
+                "Phase 1 batch %d: fetched=%d parsed=%d skipped_dup=%d | total fetched=%d parsed=%d | "
+                "last_event=%s | clusters=%d drain3_messages=%d state=%s event_index=%s | "
+                "fetch=%.2fs parse=%.2fs save=%.2fs | elapsed=%.0fs rate=%.0f ev/s",
+                total_batches,
+                len(batch),
+                len(parsed_batch),
+                len(batch) - len(parsed_batch),
+                fetched_count,
+                parsed_count,
+                _format_ts(last_ts),
+                self.parser.cluster_count(),
+                self.parser.message_count(),
+                _format_size(state_bytes),
+                _format_size(_file_size(self.event_index.path)),
+                fetch_seconds,
+                parse_seconds,
+                save_seconds,
+                elapsed,
+                fetched_count / elapsed if elapsed > 0 else 0.0,
+            )
+            t_wait = time.time()
+
         logger.info(
-            "Phase 1 complete in %.2fs: Parsed %d events across %d batches (dropped %d duplicates)",
+            "Phase 1 complete in %.2fs: Parsed %d events across %d batches (dropped %d duplicates); "
+            "Drain3 has %d clusters, state %s",
             time.time() - t_phase1,
             parsed_count,
             total_batches,
             dedup_buffer.duplicates_dropped,
+            self.parser.cluster_count(),
+            _format_size(_file_size(self.parser.persistence_path)),
         )
 
     def _rebuild_template_registry(self) -> None:
@@ -645,6 +697,24 @@ class TrainingPipeline:
         self.group_registry.flush()
 
 
+def _format_ts(ts: float) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(timespec="seconds")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return str(ts)
+
+
+def _file_size(path: Any) -> int:
+    try:
+        return os.path.getsize(path)
+    except (OSError, TypeError):
+        return 0
+
+
+def _format_size(num_bytes: int) -> str:
+    return f"{num_bytes / (1024 * 1024):.1f}MB"
+
+
 def run_training_from_elasticsearch(
     config: AppConfig,
     lookback_seconds: Optional[float] = None,
@@ -665,24 +735,48 @@ def run_training_from_elasticsearch(
     start_ts = end_ts - lookback
 
     initial_search_after = training_checkpoint.get_search_after()
-    if initial_search_after:
-        logger.info(
-            "Resuming training pipeline from saved search_after cursor: %s",
-            initial_search_after,
-        )
+    pipeline = TrainingPipeline(config)
+
+    # On resume, events already in the durable index count towards max_docs;
+    # otherwise every restart would fetch another full max_docs window.
+    already_indexed = (
+        sum(1 for _ in pipeline.event_index.records()) if initial_search_after else 0
+    )
+    remaining_docs = max(total_docs - already_indexed, 0)
 
     logger.info(
-        "Streaming historical logs from ES (lookback=%.1fs, max_docs=%d, batch_size=%d)...",
-        lookback,
+        "Training job config: index=%s range=[%s .. %s] lookback=%.1fh max_docs=%d "
+        "batch_size=%d resume_cursor=%s already_indexed=%d remaining_docs=%d",
+        config.elasticsearch.index,
+        _format_ts(start_ts),
+        _format_ts(end_ts),
+        lookback / 3600,
         total_docs,
         chunk_size,
+        initial_search_after,
+        already_indexed,
+        remaining_docs,
     )
     batch_stream = collector.stream_historical_batches(
         start_ts=start_ts,
         end_ts=end_ts,
-        max_docs=total_docs,
+        max_docs=remaining_docs,
         batch_size=chunk_size,
         initial_search_after=initial_search_after,
     )
-    pipeline = TrainingPipeline(config)
-    pipeline.run(batch_stream, checkpoint_store=training_checkpoint)
+    t_start = time.time()
+    try:
+        pipeline.run(batch_stream, checkpoint_store=training_checkpoint)
+    except BaseException:
+        logger.exception(
+            "TRAINING FAILED after %.0fs; training checkpoint (cursor=%s) and event index "
+            "(%s) are kept so the next run resumes",
+            time.time() - t_start,
+            training_checkpoint.get_search_after(),
+            _format_size(_file_size(pipeline.event_index.path)),
+        )
+        raise
+    logger.info(
+        "TRAINING SUCCEEDED in %.0fs; training checkpoint and event index cleared",
+        time.time() - t_start,
+    )

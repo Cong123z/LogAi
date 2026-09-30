@@ -32,6 +32,9 @@ def main() -> None:
         level=args.log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # The training pipeline logs Drain3 state size per batch itself; drain3's
+    # own "Saving state ..." INFO line would just duplicate it.
+    logging.getLogger("drain3").setLevel(logging.WARNING)
 
     config = load_config(args.config)
     config.embedding.validate()

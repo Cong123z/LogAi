@@ -8,11 +8,12 @@ matched an existing template ("Known Template") or created a new one
 """
 from __future__ import annotations
 
+import os
 import re
-from typing import List, Pattern
+from pathlib import Path
+from typing import List, Optional, Pattern
 
 from drain3 import TemplateMiner
-from drain3.file_persistence import FilePersistence
 from drain3.masking import MaskingInstruction
 from drain3.template_miner_config import TemplateMinerConfig
 
@@ -20,8 +21,41 @@ from logai.config import Drain3Config
 from logai.models import ParsedEvent, RawLog
 
 
+class AtomicFilePersistence:
+    """Drain3 persistence handler that never leaves a half-written state file.
+
+    drain3's own FilePersistence writes the file in place, so a crash or
+    OOM-kill during a multi-megabyte write corrupts the whole template tree.
+    Write to a temp file, fsync, then atomically rename over the old state.
+    """
+
+    def __init__(self, file_path: str):
+        self.file_path = Path(file_path)
+        self.last_saved_bytes = 0
+
+    def save_state(self, state: bytes) -> None:
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.file_path.with_name(self.file_path.name + ".tmp")
+        with open(tmp_path, "wb") as stream:
+            stream.write(state)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, self.file_path)
+        self.last_saved_bytes = len(state)
+
+    def load_state(self) -> Optional[bytes]:
+        if not self.file_path.exists():
+            return None
+        return self.file_path.read_bytes()
+
+
 class Drain3Parser:
-    def __init__(self, config: Drain3Config):
+    def __init__(self, config: Drain3Config, autosave: bool = True):
+        """``autosave=True`` keeps drain3's default of re-serialising the
+        *whole* state after every template change. That is O(clusters) per
+        change and dominates bulk parsing once the tree is large, so the
+        training pipeline passes ``autosave=False`` and calls ``save_state()``
+        once per batch instead."""
         self.config = config
         tm_config = TemplateMinerConfig()
         tm_config.drain_sim_th = config.sim_threshold
@@ -51,8 +85,34 @@ class Drain3Parser:
                 for rule in wildcard_rules
             ]
 
-        persistence = FilePersistence(config.persistence_path)
-        self.miner = TemplateMiner(persistence, config=tm_config)
+        self._autosave = autosave
+        self._persistence = AtomicFilePersistence(config.persistence_path)
+        # The handler must be set during construction so the miner restores
+        # any existing state; detach it afterwards to disable per-change saves.
+        self.miner = TemplateMiner(self._persistence, config=tm_config)
+        if not autosave:
+            self.miner.persistence_handler = None
+
+    def save_state(self, reason: str) -> int:
+        """Persist the full Drain3 state now; returns the serialised size."""
+        self.miner.persistence_handler = self._persistence
+        try:
+            self.miner.save_state(reason)
+        finally:
+            if not self._autosave:
+                self.miner.persistence_handler = None
+        return self._persistence.last_saved_bytes
+
+    @property
+    def persistence_path(self) -> Path:
+        return self._persistence.file_path
+
+    def cluster_count(self) -> int:
+        return len(self.miner.drain.clusters)
+
+    def message_count(self) -> int:
+        return int(self.miner.drain.get_total_cluster_size())
+
     def parse(self, raw: RawLog) -> ParsedEvent:
         message = raw.message
         for pattern in self._strip_patterns:
