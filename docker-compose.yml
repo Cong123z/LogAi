@@ -27,6 +27,7 @@ services:
     container_name: logai-engine
     environment:
       - LOGAI_ES_HOSTS=${LOGAI_ES_HOSTS:-http://elasticsearch:9200}
+      - LOGAI_ES_INDEX=${LOGAI_ES_INDEX:-app-logs-*}
       - LOGAI_ES_USER=${LOGAI_ES_USER:-}
       - LOGAI_ES_PASSWORD=${LOGAI_ES_PASSWORD:-}
       - LOGAI_METRICS_PORT=${LOGAI_METRICS_PORT:-9108}
@@ -64,6 +65,7 @@ services:
     profiles: ["training"]
     environment:
       - LOGAI_ES_HOSTS=${LOGAI_ES_HOSTS:-http://elasticsearch:9200}
+      - LOGAI_ES_INDEX=${LOGAI_ES_INDEX:-app-logs-*}
       - LOGAI_ES_USER=${LOGAI_ES_USER:-}
       - LOGAI_ES_PASSWORD=${LOGAI_ES_PASSWORD:-}
       - LOGAI_STORAGE_BASE_DIR=${LOGAI_STORAGE_BASE_DIR:-/app/data}

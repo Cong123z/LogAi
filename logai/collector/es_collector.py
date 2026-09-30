@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -49,6 +50,83 @@ def _build_client(config: ElasticsearchConfig) -> Elasticsearch:
     return Elasticsearch(**kwargs)
 
 
+def _extract_service(src: Dict[str, Any]) -> str:
+    """Resolve the RawLog.service string from an ES `_source` dict.
+
+    Preference order (each optional, falls through on absence):
+      1. `service` - either a flat string, or an ECS-nested object
+         (`{"service": {"name": "..."}}`, used by Filebeat/APM integrations).
+      2. `service_code2` - the flat service-name string used by this
+         deployment's Logstash pipeline (its sibling `service_code` holds a
+         host IP, NOT a service name, and must never be used here).
+      3. "unknown".
+    """
+    service = src.get("service")
+    if isinstance(service, str) and service:
+        return service
+    if isinstance(service, dict):
+        name = service.get("name")
+        if isinstance(name, str) and name:
+            return name
+
+    service_code2 = src.get("service_code2")
+    if isinstance(service_code2, str) and service_code2:
+        return service_code2
+
+    return "unknown"
+
+
+# Level is always the 3rd whitespace-separated token in this deployment's log
+# lines: "<date> <time> <LEVEL> [<thread>] <message body>".
+_LEVEL_TOKEN_RE = re.compile(
+    r"^\S+\s+\S+\s+(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_level_from_message(message: str) -> Optional[str]:
+    if not message:
+        return None
+    match = _LEVEL_TOKEN_RE.match(message.strip())
+    return match.group(1).upper() if match else None
+
+
+def _extract_level(src: Dict[str, Any]) -> str:
+    """Read the log level, preferring the ECS nested path `log.level`.
+
+    Elastic Agent / Filebeat integrations (the current Elastic Integrations
+    format) write level under `log.level`, not a top-level `level` field.
+    Falls back to a legacy flat `level` field for older/custom shippers, then
+    to parsing the 3rd token of `message` for shippers that index neither.
+    """
+    log_obj = src.get("log")
+    if isinstance(log_obj, dict):
+        level = log_obj.get("level")
+        if isinstance(level, str) and level:
+            return level
+
+    flat_level = src.get("level")
+    if isinstance(flat_level, str) and flat_level:
+        return flat_level
+
+    from_message = _extract_level_from_message(src.get("message", ""))
+    if from_message:
+        return from_message
+
+    return "INFO"
+
+
+# Fields that are shipper/pipeline plumbing (Filebeat/Logstash/ECS envelope)
+# with no log-analysis value, plus fields already consumed into service/level
+# above - excluded from RawLog.metadata so it only carries business fields
+# (e.g. moduleCode, groupModule) that aren't yet used elsewhere in the schema.
+_NOISE_KEYS = (
+    "@timestamp", "service", "level", "message",
+    "ecs", "agent", "@version", "input", "logstash_instance",
+    "kafka_cluster", "log", "host", "service_code", "service_code2",
+)
+
+
 def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
     """Convert a single ES hit dict to RawLog.
 
@@ -72,10 +150,10 @@ def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
     ts = _parse_timestamp(ts_raw)
     return RawLog(
         timestamp=ts,
-        service=src.get("service", "unknown"),
-        level=src.get("level", "INFO"),
+        service=_extract_service(src),
+        level=_extract_level(src),
         message=src.get("message", ""),
-        metadata={k: v for k, v in src.items() if k not in ("@timestamp", "service", "level", "message")},
+        metadata={k: v for k, v in src.items() if k not in _NOISE_KEYS},
         event_id=hit_id,
         es_index=index,
         es_doc_id=hit_id,
@@ -184,10 +262,24 @@ class ElasticsearchCollector:
         body: Dict[str, Any] = {
             "size": self.config.batch_size,
             "sort": [{"@timestamp": "asc"}, {"_doc": "asc"}],
-            "query": {"match_all": {}},
         }
         if search_after:
+            body["query"] = {"match_all": {}}
             body["search_after"] = search_after
+        else:
+            # No cursor yet: this is the very first poll ever (or right after
+            # a checkpoint reset). Floor the query at the moment the realtime
+            # pipeline first started instead of match_all, so it never rewinds
+            # into the historical window already consumed by training. The
+            # floor is persisted so repeated empty polls (no new logs yet)
+            # don't keep pushing it forward and silently drop events.
+            start_ts = self.checkpoint.get_start_ts()
+            if start_ts is None:
+                start_ts = time.time()
+                self.checkpoint.set_start_ts(start_ts)
+            from datetime import datetime, timezone
+            gte_iso = datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat()
+            body["query"] = {"range": {"@timestamp": {"gte": gte_iso}}}
 
         response = self._search(body)
         hits = response.get("hits", {}).get("hits", [])

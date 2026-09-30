@@ -221,9 +221,9 @@ def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
-    """Load config.yaml (if present) and merge with defaults.
+    """Load config.yaml (if present) and merge with defaults.Load config
 
-    Environment variables always win for ES connection details so secrets
+    Environment variables always win for ES connection details so secretss
     never need to live in the YAML file:
       LOGAI_ES_HOSTS (comma separated), LOGAI_ES_USER, LOGAI_ES_PASSWORD
     """
@@ -236,6 +236,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
 
     if os.environ.get("LOGAI_ES_HOSTS"):
         cfg.elasticsearch.hosts = os.environ["LOGAI_ES_HOSTS"].split(",")
+    if os.environ.get("LOGAI_ES_INDEX"):
+        cfg.elasticsearch.index = os.environ["LOGAI_ES_INDEX"]
     if os.environ.get("LOGAI_ES_USER"):
         cfg.elasticsearch.username = os.environ["LOGAI_ES_USER"]
     if os.environ.get("LOGAI_ES_PASSWORD"):

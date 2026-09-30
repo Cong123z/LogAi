@@ -352,5 +352,149 @@ class TestDrain3LogMasking(unittest.TestCase):
         )
 
 
+class TestDrain3UniversalMaskingRules(unittest.TestCase):
+    """Validates the general, format-agnostic masking rules (UUID/timestamp/
+    secret/assignment-value shapes, plus the leading date-time-LEVEL-[thread]
+    stripper) against real production-shaped samples. The samples verify the
+    strategy; they are not what the rules were derived from."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.state_file = os.path.join(self.temp_dir, "drain3_universal_test.bin")
+        self.cfg = Drain3Config(persistence_path=self.state_file, sim_threshold=0.5)
+        self.parser = Drain3Parser(self.cfg)
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_uuid_and_timestamp_shapes_masked(self):
+        """UUID and ISO timestamp are masked even standing alone in free
+        text, independent of any key=value context."""
+        raw1 = RawLog(
+            timestamp=1000.0, service="svc", level="INFO",
+            message="request 6419a71e-ccf8-46e9-af77-c7cf036aa215 completed at 2026-09-30T07:00:32.036Z",
+        )
+        raw2 = RawLog(
+            timestamp=1001.0, service="svc", level="INFO",
+            message="request 19383617-5be0-48c9-8f85-25bc71ee3c20 completed at 2026-10-01T11:22:03.100Z",
+        )
+        p1 = self.parser.parse(raw1)
+        p2 = self.parser.parse(raw2)
+        self.assertEqual(p1.template_id, p2.template_id)
+        self.assertEqual(p2.template, "request <*> completed at <*>")
+
+    def test_multi_token_dates_collapse_to_single_wildcard(self):
+        """Timestamps must collapse to ONE <*>, not be fragmented by the
+        bare-number/path rules running first."""
+        parsed = self.parser.parse(RawLog(
+            timestamp=1000.0, service="svc", level="INFO",
+            message="x activeTime=Sat Sep 21 14:27:33 GMT+07:00 2019, at 27/07/2026 00:00:00.024 done",
+        ))
+        self.assertEqual(parsed.template, "x activeTime <*>, at <*> done")
+
+    def test_xml_payload_collapsed_to_single_token(self):
+        parsed = self.parser.parse(RawLog(
+            timestamp=1000.0, service="svc", level="INFO",
+            message=(
+                "27/07/2026 00:00:01.100 INFO [worker-1] BCCSUtil: Response of getInfoSub request for 84379383220: "
+                "<S:Envelope xmlns:S=\"http://schemas.xmlsoap.org/soap/envelope/\">\n<S:Body>\n"
+                "<ns2:gwOperationResponse><Result><error>0</error><description>success</description></Result>"
+                "</ns2:gwOperationResponse>\n</S:Body>\n</S:Envelope>"
+            ),
+        ))
+        self.assertEqual(parsed.template, "BCCSUtil: Response of getInfoSub request for <*>: <XML>")
+
+    def test_multiword_values_do_not_split_templates(self):
+        """A free-text value with a varying word count must not change the
+        token count (Drain3 partitions by length), so both land in one
+        template, with every key name still visible."""
+        msg_a = "27/07/2026 00:00:00.723 INFO [TM] Transaction timeout: Info{reqID=1, description=Receive incorrect, sentType=6}"
+        msg_b = "27/07/2026 00:00:00.724 INFO [TM] Transaction timeout: Info{reqID=2, description=Customer havent created password yet, sentType=4}"
+        p_a = self.parser.parse(RawLog(timestamp=1000.0, service="svc", level="INFO", message=msg_a))
+        p_b = self.parser.parse(RawLog(timestamp=1001.0, service="svc", level="INFO", message=msg_b))
+        self.assertEqual(p_a.template_id, p_b.template_id)
+        self.assertEqual(p_b.template, "Transaction timeout: Info{reqID <*>, description <*>, sentType <*>}")
+
+    def test_trailing_value_does_not_swallow_free_text(self):
+        """Outside a key=value list, a value is one token: the action words
+        after it must survive so distinct actions stay distinct templates."""
+        msgs = [
+            "27/07/2026 00:00:01.026 INFO [w-1] UssdAppInf:type=Gw,name=Ussd1 connector for send: con-0",
+            "27/07/2026 00:00:01.027 INFO [w-1] UssdAppInf:type=Gw,name=Ussd1 sending ...",
+        ]
+        parsed = [self.parser.parse(RawLog(timestamp=1000.0, service="svc", level="INFO", message=m)) for m in msgs]
+        self.assertNotEqual(parsed[0].template_id, parsed[1].template_id)
+        self.assertIn("connector for send", parsed[0].template)
+        self.assertIn("sending", parsed[1].template)
+
+    def test_leading_prefix_stripped_case_insensitive(self):
+        parsed = self.parser.parse(RawLog(
+            timestamp=1000.0, service="svc", level="INFO",
+            message="30/09/2026 14:00:31 info [t-1] hello world",
+        ))
+        self.assertEqual(parsed.template, "hello world")
+
+    def test_transaction_blob_values_masked_to_wildcard(self):
+        """Real TransactionManager sample: business-relevant key names stay
+        literal, every value is masked, and the leading date/time/LEVEL/
+        [thread] prefix is removed entirely rather than left as noise."""
+        message = (
+            "27/07/2026 00:00:00.024  INFO [TransactionManager] DBAdapter: "
+            "Log success request his TransactionInfo{reqID=1384223044, "
+            "transID=W12-89082-1785086988853, msisdn=84344872426, "
+            "encryptedPass=MlebjTtuWaLRN5ek0Rkwn3MuLNc=, "
+            "activeTime=Sat Sep 21 14:27:33 GMT+07:00 2019, "
+            "description=Receive incorrect, numHisTrans=0}"
+        )
+        parsed = self.parser.parse(RawLog(timestamp=1000.0, service="vas", level="INFO", message=message))
+        template = parsed.template
+        self.assertTrue(template.startswith("DBAdapter:"), template)
+        self.assertNotIn("27/07/2026", template)
+        self.assertNotIn("00:00:00.024", template)
+        self.assertNotIn("[TransactionManager]", template)
+        self.assertEqual(
+            template,
+            "DBAdapter: Log success request his TransactionInfo{reqID <*>, transID <*>, "
+            "msisdn <*>, encryptedPass <*>, activeTime <*>, description <*>, numHisTrans <*>}",
+        )
+
+    def test_transaction_blob_converges_to_same_template(self):
+        """Two transaction logs differing in every variable value (including
+        timestamp and thread name) must converge to the same template."""
+        def make(req_id, trans_id, enc_pass, ts, thread):
+            return (
+                f"{ts}  INFO [{thread}] DBAdapter: Log success request his "
+                f"TransactionInfo{{reqID={req_id}, transID={trans_id}, "
+                f"encryptedPass={enc_pass}, description=Receive incorrect}}"
+            )
+
+        msg_a = make("1384223044", "W12-89082-1785086988853", "MlebjTtuWaLRN5ek0Rkwn3MuLNc=", "27/07/2026 00:00:00.024", "TransactionManager")
+        msg_b = make("999999999", "W99-11111-9999999999999", "ZZZZ9999AAAA1111bbbb2222=", "30/07/2026 11:22:33.999", "TransactionManagerXYZ")
+        p_a = self.parser.parse(RawLog(timestamp=1000.0, service="vas", level="INFO", message=msg_a))
+        p_b = self.parser.parse(RawLog(timestamp=1001.0, service="vas", level="INFO", message=msg_b))
+        self.assertEqual(p_a.template_id, p_b.template_id)
+
+    def test_logfmt_style_space_separated_converges(self):
+        """A completely different, space-separated logfmt-style message (no
+        commas/braces, and no [thread] so rule 0 does not fire) still
+        converges when only the values differ - proves the assignment-value
+        rule generalises beyond the brace-delimited example."""
+        msg_a = "level=info ts=2026-09-30T07:00:32Z component=router req_id=abc123"
+        msg_b = "level=info ts=2026-10-01T09:11:03Z component=router req_id=xyz999"
+        p_a = self.parser.parse(RawLog(timestamp=1000.0, service="svc", level="INFO", message=msg_a))
+        p_b = self.parser.parse(RawLog(timestamp=1001.0, service="svc", level="INFO", message=msg_b))
+        self.assertEqual(p_a.template_id, p_b.template_id)
+
+    def test_leading_prefix_stripped_for_any_thread_name(self):
+        """Rule 0 strips the leading date/time/LEVEL/[thread] prefix
+        regardless of what the thread name actually is."""
+        msg_a = "30/09/2026 14:00:31 DEBUG [gossip-handlers-321] jgroups:name=Router responded to GET with []"
+        msg_b = "01/10/2026 09:12:45 DEBUG [gossip-handlers-999] jgroups:name=Router responded to GET with []"
+        p_a = self.parser.parse(RawLog(timestamp=1000.0, service="svc", level="DEBUG", message=msg_a))
+        p_b = self.parser.parse(RawLog(timestamp=1001.0, service="svc", level="DEBUG", message=msg_b))
+        self.assertEqual(p_a.template_id, p_b.template_id)
+        self.assertTrue(p_a.template.startswith("jgroups:"), p_a.template)
+
+
 if __name__ == "__main__":
     unittest.main()

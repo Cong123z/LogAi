@@ -135,13 +135,114 @@ class TestHitToRawlog(unittest.TestCase):
             "level": "DEBUG",
             "message": "hello",
             "trace_id": "abc",
-            "host": "node-1",
+            "region": "ap-southeast-1",
         }
         hit = _make_hit(source=source)
         result = _hit_to_rawlog(hit, "idx")
         self.assertEqual(result.metadata["trace_id"], "abc")
-        self.assertEqual(result.metadata["host"], "node-1")
+        self.assertEqual(result.metadata["region"], "ap-southeast-1")
         self.assertNotIn("@timestamp", result.metadata)
+
+    def test_service_falls_back_to_service_code2(self):
+        """No `service` field at all (production schema): service_code2 is the
+        real service string; service_code (no "2") is a trap holding host_ip,
+        never the service name, and must not leak into service or metadata."""
+        source = {
+            "@timestamp": "2026-09-30T07:00:32.036Z",
+            "service_code2": "vtn_cntt_vas_066",
+            "service_code": {"host_ip": "10.240.175.121"},
+            "message": "some message",
+        }
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertEqual(result.service, "vtn_cntt_vas_066")
+        self.assertNotIn("service_code", result.metadata)
+        self.assertNotIn("service_code2", result.metadata)
+
+    def test_service_prefers_flat_service_over_service_code2(self):
+        """Backward compatibility: a real `service` field always wins over
+        service_code2 when both are present."""
+        source = {
+            "@timestamp": "2026-09-30T07:00:32.036Z",
+            "service": "payment",
+            "service_code2": "other",
+            "message": "some message",
+        }
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertEqual(result.service, "payment")
+
+    def test_level_parsed_from_message_third_token(self):
+        """No log.level/level field: level is always the 3rd whitespace token
+        (date, time, LEVEL) per this deployment's log line convention."""
+        source = {
+            "@timestamp": "2026-09-30T07:00:32.036Z",
+            "message": (
+                "30/09/2026 14:00:31 DEBUG [gossip-handlers-321] "
+                "jgroups:name=NewGossipRouter responded to GOSSIP_GET with []"
+            ),
+        }
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertEqual(result.level, "DEBUG")
+
+    def test_level_parsed_from_message_transaction_sample(self):
+        """Real transaction-log sample: level (3rd token) must be read as
+        INFO, never confused with `error_code=10700` deep inside the message
+        body - the regex only ever looks at the 3rd token, nowhere else."""
+        source = {
+            "@timestamp": "2026-07-27T00:00:00.024Z",
+            "message": (
+                "27/07/2026 00:00:00.024 INFO [TransactionManager] DBAdapter: "
+                "Log success request his TransactionInfo{reqID=1384223044, "
+                "error_code=10700, description=Receive incorrect}"
+            ),
+        }
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertEqual(result.level, "INFO")
+
+    def test_level_regex_no_match_when_third_token_not_a_level(self):
+        """A message that doesn't follow the date/time/LEVEL convention falls
+        back to the INFO default rather than guessing from elsewhere in the
+        text."""
+        source = {
+            "@timestamp": "2026-09-30T07:00:32.036Z",
+            "message": "just a plain message with no structured prefix at all",
+        }
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        self.assertEqual(result.level, "INFO")
+
+    def test_noise_fields_excluded_business_fields_kept(self):
+        """Full production-shaped _source: Filebeat/Logstash/ECS envelope
+        fields must never reach metadata, but app-specific business fields
+        (moduleCode, groupModule) must be preserved."""
+        source = {
+            "@timestamp": "2026-09-30T07:00:32.036Z",
+            "ecs": {"version": "1.11.0"},
+            "agent": {"version": "7.15.2", "hostname": "VAS-APP121", "type": "filebeat"},
+            "service_code2": "vtn_cntt_vas_066",
+            "host": {"name": "VAS-APP121"},
+            "log": {"offset": 38903723, "file": {"path": "/u01/data_2g/gossip/gossip.log"}},
+            "logstash_instance": "ls-152-67",
+            "@version": "1",
+            "message": "30/09/2026 14:00:31 DEBUG [gossip-handlers-321] jgroups:...",
+            "groupModule": "GOSSIP",
+            "moduleCode": "VTN_CNTT_VAS_066_301",
+            "input": {"type": "log"},
+            "service_code": {"host_ip": "10.240.175.121"},
+            "kafka_cluster": "cluster07",
+        }
+        hit = _make_hit(source=source)
+        result = _hit_to_rawlog(hit, "idx")
+        for noise_key in (
+            "ecs", "agent", "@version", "input", "logstash_instance",
+            "kafka_cluster", "log", "host", "service_code", "service_code2",
+        ):
+            self.assertNotIn(noise_key, result.metadata)
+        self.assertEqual(result.metadata["groupModule"], "GOSSIP")
+        self.assertEqual(result.metadata["moduleCode"], "VTN_CNTT_VAS_066_301")
 
 
 # ── Unit tests for _safe_hits_to_rawlogs ─────────────────────────────────

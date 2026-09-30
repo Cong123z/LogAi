@@ -8,7 +8,8 @@ matched an existing template ("Known Template") or created a new one
 """
 from __future__ import annotations
 
-from typing import List
+import re
+from typing import List, Pattern
 
 from drain3 import TemplateMiner
 from drain3.file_persistence import FilePersistence
@@ -27,25 +28,44 @@ class Drain3Parser:
         tm_config.drain_depth = config.depth
         tm_config.drain_max_children = config.max_children
         tm_config.profiling_enabled = False
+        self._extra_delimiters: List[str] = list(getattr(config, "extra_delimiters", []))
+        tm_config.drain_extra_delimiters = self._extra_delimiters
 
         masking_rules = getattr(config, "masking_rules", [])
-        if masking_rules:
+        # Rules with mask_with == "" mean "delete this span outright" (e.g. the
+        # non-semantic "<date> <time> <LEVEL> [<thread>] " prefix). Drain3's
+        # own MaskingInstruction always wraps mask_with in its mask_prefix/
+        # suffix (default "<"/">"), so an empty mask_with there would still
+        # leave a literal "<>" behind. Apply those ourselves via plain
+        # re.sub before drain3 ever sees the message; only pass the
+        # placeholder-producing rules into drain3's own masking pipeline.
+        self._strip_patterns: List[Pattern[str]] = [
+            re.compile(rule["pattern"])
+            for rule in masking_rules
+            if rule.get("mask_with", "*") == ""
+        ]
+        wildcard_rules = [rule for rule in masking_rules if rule.get("mask_with", "*") != ""]
+        if wildcard_rules:
             tm_config.masking_instructions = [
                 MaskingInstruction(pattern=rule["pattern"], mask_with=rule.get("mask_with", "*"))
-                for rule in masking_rules
+                for rule in wildcard_rules
             ]
 
         persistence = FilePersistence(config.persistence_path)
         self.miner = TemplateMiner(persistence, config=tm_config)
-
     def parse(self, raw: RawLog) -> ParsedEvent:
-        result = self.miner.add_log_message(raw.message)
+        message = raw.message
+        for pattern in self._strip_patterns:
+            message = pattern.sub("", message)
+        result = self.miner.add_log_message(message)
         # drain3 result keys: cluster_id, cluster_size, template_mined,
         # change_type ("cluster_created" | "cluster_template_changed" | "none")
         template_id = f"T{result['cluster_id']:05d}"
         template = result["template_mined"]
         is_new = result["change_type"] == "cluster_created"
-        parameters = self._extract_parameters(template, raw.message)
+        for delimiter in self._extra_delimiters:
+            message = message.replace(delimiter, " ")
+        parameters = self._extract_parameters(template, message)
         return ParsedEvent(
             raw=raw,
             template_id=template_id,

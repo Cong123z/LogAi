@@ -28,6 +28,16 @@ class CheckpointStore:
     def set_last_timestamp(self, ts: float, flush: bool = True) -> None:
         self._store.set("last_timestamp", ts, flush=flush)
 
+    def get_start_ts(self) -> Optional[float]:
+        """Epoch time the realtime pipeline first started, used as a floor
+        so a fresh (checkpoint-less) start never rewinds into the historical
+        window already consumed by training. Persisted so repeated empty
+        polls (no new logs yet) don't keep pushing the floor forward."""
+        return self._store.get("start_ts")
+
+    def set_start_ts(self, ts: float, flush: bool = True) -> None:
+        self._store.set("start_ts", ts, flush=flush)
+
     def commit(self, search_after: List[Any], last_timestamp: float) -> None:
         """Atomically persist the cursor and its timestamp after batch completion."""
         self._store.bulk_set(
@@ -39,7 +49,8 @@ class CheckpointStore:
 
     def reset(self) -> None:
         self._store.set("search_after", None, flush=False)
-        self._store.set("last_timestamp", None)
+        self._store.set("last_timestamp", None, flush=False)
+        self._store.set("start_ts", None)
 
     def clear(self) -> None:
         if self.path.exists():

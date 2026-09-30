@@ -8,6 +8,7 @@ metadata:
 type: Opaque
 stringData:
   LOGAI_ES_HOSTS: "http://elasticsearch.logging.svc:9200"
+  LOGAI_ES_INDEX: "app-logs-*"
   LOGAI_ES_USER: "elastic"
   LOGAI_ES_PASSWORD: "password"
   LOGAI_METRICS_PORT: "9108"
