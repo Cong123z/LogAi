@@ -274,3 +274,25 @@ With placeholders now counted as matches, 0.5 merged distinct errors
   khang`, `Dcu m …`). One is a real loss: `ussd rsp … content: <*>` merges the
   result codes `SYNTAX_ERR` / `NAME_CORRECT` / `PREPAID_NOPASS`. Also
   `con-<*>-Sender: send <*>` merges `send message` / `send login`.
+
+---
+
+## Check + hardening: real ES doc (`udcntt-vtn_cntt_vas_066`, gossip log)
+
+- **Date:** Thursday, 2026-10-01 (+07)
+- **Status:** done, **uncommitted**. `pytest`: 278 passed.
+- The real doc parses correctly:
+  - service `vtn_cntt_vas_066` comes from `service_code2`;
+  - level `DEBUG`;
+  - metadata keeps only `groupModule`/`moduleCode`;
+  - the Drain3 input has no date, level or thread, the IP becomes `<*>`, and
+    `WARNING` inside `NewGossipRouterWARNING_...` is not taken as the level.
+- Fixes so that an odd field falls back instead of dropping the hit:
+  - `message` that is not a string becomes `str()`, and `null` becomes `""`;
+  - `@timestamp` that is a dict, list or garbage falls back to now; epoch
+    millis (> 1e11) are divided by 1000;
+  - `log.level`/`level` are stripped and upper-cased.
+- Preprocessor: a leading timestamp + `[thread]` with **no** level
+  (`30/09/2026 14:00:31 [main] x`) is now removed (`_strip_leading_timestamp`).
+  On node96 (first 300k lines) this case never occurs, so templates are unchanged.
+- Tests: `TestProductionGossipHit`, `TestOddFieldsAreIgnored`, `TestNormalizeMissingParts`.

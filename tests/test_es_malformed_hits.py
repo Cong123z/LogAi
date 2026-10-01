@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 import unittest
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
@@ -265,6 +266,86 @@ class TestHitToRawlog(unittest.TestCase):
 
 
 # ── Unit tests for _safe_hits_to_rawlogs ─────────────────────────────────
+
+GOSSIP_MESSAGE = (
+    "30/09/2026 14:00:31 DEBUG [gossip-handlers-321] "
+    "jgroups:name=NewGossipRouterWARNING_EXTEND_DATA_MI_HT2: "
+    "ConnectionHandler[peer: /10.240.175.140, logical_addrs: "
+    "warning_extend_data_mi_ht2_node2] responded to GOSSIP_GET with []"
+)
+
+# Real `_source` from index udcntt-vtn_cntt_vas_066-2026.09.30.
+GOSSIP_SOURCE: Dict[str, Any] = {
+    "ecs": {"version": "1.11.0"},
+    "agent": {"version": "7.15.2", "hostname": "VAS-APP121", "type": "filebeat"},
+    "service_code2": "vtn_cntt_vas_066",
+    "host": {"name": "VAS-APP121"},
+    "log": {
+        "offset": 38903723,
+        "file": {"path": "/u01/data_2g/gossip/new_gossip_extend/gossip_ex_ht2/log/full/gossip.log"},
+    },
+    "logstash_instance": "ls-152-67",
+    "@timestamp": "2026-09-30T07:00:32.036Z",
+    "@version": "1",
+    "message": GOSSIP_MESSAGE,
+    "groupModule": "GOSSIP",
+    "moduleCode": "VTN_CNTT_VAS_066_301",
+    "input": {"type": "log"},
+    "service_code": {"host_ip": "10.240.175.121"},
+    "kafka_cluster": "cluster07",
+}
+
+
+class TestProductionGossipHit(unittest.TestCase):
+    def test_fields_extracted(self):
+        raw = _hit_to_rawlog(
+            {"_id": "U5cd8aABgTaDf7peb8en", "_source": GOSSIP_SOURCE},
+            "udcntt-vtn_cntt_vas_066-2026.09.30",
+        )
+        self.assertEqual(raw.service, "vtn_cntt_vas_066")
+        self.assertEqual(raw.level, "DEBUG")
+        self.assertAlmostEqual(raw.timestamp, 1790751632.036, places=3)
+        self.assertEqual(raw.message, GOSSIP_MESSAGE)
+        self.assertEqual(
+            raw.metadata, {"groupModule": "GOSSIP", "moduleCode": "VTN_CNTT_VAS_066_301"}
+        )
+
+
+class TestOddFieldsAreIgnored(unittest.TestCase):
+    """A missing or oddly typed field falls back; the hit is never dropped."""
+
+    def _raw(self, **source: Any) -> RawLog:
+        rows = _safe_hits_to_rawlogs([{"_id": "d1", "_source": source}], "idx")
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    def test_message_not_a_string(self):
+        self.assertEqual(self._raw(message=123).message, "123")
+        self.assertEqual(self._raw(message=None).message, "")
+        self.assertEqual(self._raw().message, "")
+        self.assertEqual(self._raw(message={"a": 1}).level, "INFO")
+
+    def test_bad_timestamp_falls_back_to_now(self):
+        for value in ({"a": 1}, [1], "garbage", "", True):
+            before = time.time()
+            self.assertGreaterEqual(self._raw(**{"@timestamp": value}).timestamp, before)
+
+    def test_epoch_millis_timestamp(self):
+        self.assertAlmostEqual(
+            self._raw(**{"@timestamp": 1790751632036}).timestamp, 1790751632.036, places=3
+        )
+        self.assertEqual(self._raw(**{"@timestamp": 1790751632}).timestamp, 1790751632.0)
+
+    def test_level_field_is_normalised(self):
+        self.assertEqual(self._raw(log={"level": "debug"}).level, "DEBUG")
+        self.assertEqual(self._raw(level=" warn ").level, "WARN")
+        self.assertEqual(self._raw(level="  ", message="x ERROR y").level, "INFO")
+
+    def test_odd_service_fields(self):
+        self.assertEqual(self._raw(service_code2={"x": 1}).service, "unknown")
+        self.assertEqual(self._raw(service_code2=["a"]).service, "unknown")
+        self.assertEqual(self._raw(service={"name": None}, service_code2="svc").service, "svc")
+
 
 class TestSafeHitsToRawlogs(unittest.TestCase):
     """Verify batch-level malformed hit isolation."""

@@ -90,6 +90,45 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(len(normalize(" ".join(f"w{chr(97 + i % 26)}" for i in range(100)), max_tokens=40).split()), 40)
 
 
+class TestNormalizeMissingParts(unittest.TestCase):
+    """Rules that don't match are skipped; nothing raises."""
+
+    def test_production_gossip_line(self):
+        message = (
+            "30/09/2026 14:00:31 DEBUG [gossip-handlers-321] "
+            "jgroups:name=NewGossipRouterWARNING_EXTEND_DATA_MI_HT2: "
+            "ConnectionHandler[peer: /10.240.175.140, logical_addrs: "
+            "warning_extend_data_mi_ht2_node2] responded to GOSSIP_GET with []"
+        )
+        self.assertEqual(find_level(message)[0], "DEBUG")
+        self.assertEqual(
+            normalize(message),
+            "jgroups:name NewGossipRouterWARNING_EXTEND_DATA_MI_HT<*>: ConnectionHandler "
+            "peer: <*> logical_addrs: warning_extend_data_mi_ht<*>_node<*> "
+            "responded to GOSSIP_GET with",
+        )
+
+    def test_timestamp_and_thread_without_level(self):
+        self.assertEqual(normalize("30/09/2026 14:00:31 [main] something failed"), "something failed")
+        self.assertEqual(normalize("2026-09-30T07:00:32.036Z - started ok"), "started ok")
+
+    def test_no_timestamp_no_level(self):
+        self.assertEqual(
+            normalize("ConnectionHandler responded to GOSSIP_GET with []"),
+            "ConnectionHandler responded to GOSSIP_GET with",
+        )
+        self.assertEqual(normalize("[main] Connection ERROR here"), "main Connection ERROR here")
+
+    def test_level_without_timestamp(self):
+        self.assertEqual(normalize("ERROR something failed"), "something failed")
+
+    def test_non_string_input(self):
+        self.assertEqual(normalize(None), "")
+        self.assertEqual(normalize(""), "")
+        self.assertEqual(normalize("   "), "")
+        self.assertEqual(normalize(123), "<*>")
+
+
 class TestDrain3ParserUsesPreprocessor(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

@@ -76,11 +76,13 @@ def _extract_service(src: Dict[str, Any]) -> str:
     return "unknown"
 
 
-def _extract_level_from_message(message: str) -> Optional[str]:
+def _extract_level_from_message(message: Any) -> Optional[str]:
     """Level from the message prefix: searched within the first 5 tokens,
     preceded only by date/time/pid/[thread]-like tokens (shared with the
     Drain3 preprocessor so both agree on what the prefix is)."""
-    found = find_level((message or "").strip())
+    if not isinstance(message, str):
+        return None
+    found = find_level(message.strip())
     return found[0] if found else None
 
 
@@ -96,12 +98,12 @@ def _extract_level(src: Dict[str, Any]) -> str:
     log_obj = src.get("log")
     if isinstance(log_obj, dict):
         level = log_obj.get("level")
-        if isinstance(level, str) and level:
-            return level
+        if isinstance(level, str) and level.strip():
+            return level.strip().upper()
 
     flat_level = src.get("level")
-    if isinstance(flat_level, str) and flat_level:
-        return flat_level
+    if isinstance(flat_level, str) and flat_level.strip():
+        return flat_level.strip().upper()
 
     from_message = _extract_level_from_message(src.get("message", ""))
     if from_message:
@@ -119,6 +121,13 @@ _NOISE_KEYS = (
     "ecs", "agent", "@version", "input", "logstash_instance",
     "kafka_cluster", "log", "host", "service_code", "service_code2",
 )
+
+
+def _coerce_message(value: Any) -> str:
+    """`message` as a string: missing/null -> "", any other type -> str()."""
+    if isinstance(value, str):
+        return value
+    return "" if value is None else str(value)
 
 
 def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
@@ -142,11 +151,12 @@ def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
         )
     ts_raw = src.get("@timestamp")
     ts = _parse_timestamp(ts_raw)
+    message = _coerce_message(src.get("message"))
     return RawLog(
         timestamp=ts,
         service=_extract_service(src),
-        level=_extract_level(src),
-        message=src.get("message", ""),
+        level=_extract_level({**src, "message": message}),
+        message=message,
         metadata={k: v for k, v in src.items() if k not in _NOISE_KEYS},
         event_id=hit_id,
         es_index=index,
@@ -186,17 +196,19 @@ def _safe_hits_to_rawlogs(
 
 
 def _parse_timestamp(value: Any) -> float:
-    if value is None:
-        return time.time()
-    if isinstance(value, (int, float)):
-        return float(value)
-    # ISO8601 string, e.g. 2026-09-01T10:00:01Z
-    from datetime import datetime, timezone
+    """`@timestamp` as epoch seconds; falls back to now when unparseable."""
+    from datetime import datetime
     try:
-        v = value.replace("Z", "+00:00")
-        return datetime.fromisoformat(v).timestamp()
-    except ValueError:
-        return time.time()
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            # ES `date` fields stored as a long are epoch millis.
+            return float(value) / 1000.0 if value > 1e11 else float(value)
+        if isinstance(value, str) and value.strip():
+            # ISO8601 string, e.g. 2026-09-01T10:00:01Z
+            v = value.strip().replace("Z", "+00:00")
+            return datetime.fromisoformat(v).timestamp()
+    except (ValueError, OverflowError, OSError):
+        pass
+    return time.time()
 
 
 class ElasticsearchCollector:

@@ -93,6 +93,19 @@ _TIMESTAMP_RE = re.compile(
     r")(?![\w:])"
 )
 
+
+
+def _strip_leading_timestamp(text: str) -> str:
+    """Prefix without a level (``30/09/2026 14:00:31 [main] msg``): drop the
+    leading timestamp and one following ``[thread]``/separator. Text that
+    does not start with a timestamp is returned unchanged."""
+    start = len(text) - len(text.lstrip())
+    match = _TIMESTAMP_RE.match(text, start)
+    if match is None:
+        return text
+    return text[_AFTER_LEVEL_RE.match(text, match.end()).end():]
+
+
 # -- XML / SOAP ------------------------------------------------------------
 _XML_HINT_RE = re.compile(r"<[A-Za-z_/!?]")
 _XML_NOISE_RE = re.compile(r"<\?.*?\?>|<!--.*?-->", re.DOTALL)
@@ -159,11 +172,15 @@ def normalize(
     max_tokens: int = 40,
     level_search_tokens: int = 5,
 ) -> str:
-    text = (message or "")[:max_chars]
+    if not isinstance(message, str):
+        message = "" if message is None else str(message)
+    text = message[:max_chars]
 
     found = find_level(text, level_search_tokens)
     if found is not None:
         text = text[found[1]:]
+    else:
+        text = _strip_leading_timestamp(text)
 
     if "&" in text and ";" in text:
         # HTML-escaped payloads (&lt;soap:Envelope ...) are reduced like XML.
