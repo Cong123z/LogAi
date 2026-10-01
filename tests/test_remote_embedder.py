@@ -85,6 +85,24 @@ class TestRemoteEmbedder(unittest.TestCase):
         )
         self.assertEqual(session.calls[0]["json"]["model"], "BAAI/bge-m3")
 
+    def test_index_mismatch_logs_missing_and_duplicate_indexes(self):
+        session = FakeSession([FakeResponse(200, {
+            "data": [
+                {"index": 0, "embedding": [1.0, 0.0]},
+            ]
+        })])
+        config = EmbeddingConfig(
+            endpoint="https://embeddings.example/v1/embeddings",
+            api_format="openai",
+            dimension=2,
+        )
+
+        with self.assertLogs("logai.embedding.embedder", level="ERROR") as logs:
+            with self.assertRaises(EmbeddingServiceError):
+                TemplateEmbedder(config, session=session).embed(["first", "second"])
+
+        self.assertTrue(any("missing_indexes=[1]" in message for message in logs.output))
+
     def test_retryable_status_is_retried(self):
         session = FakeSession([
             FakeResponse(503, {"error": "starting"}),
@@ -128,6 +146,41 @@ class TestRemoteEmbedder(unittest.TestCase):
 
         with self.assertRaisesRegex(EmbeddingServiceError, "shape"):
             TemplateEmbedder(config, session=session).embed_one("hello")
+
+    def test_invalid_max_template_tokens_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "max_template_tokens"):
+            EmbeddingConfig(
+                endpoint="http://bge-m3:8080/embed", max_template_tokens=0
+            ).validate()
+
+    def test_oversized_template_is_truncated_before_sending(self):
+        session = FakeSession([FakeResponse(200, [[1.0, 0.0]])])
+        config = EmbeddingConfig(
+            endpoint="http://bge-m3:8080/embed",
+            api_format="tei",
+            dimension=2,
+            max_template_tokens=5,
+        )
+
+        with self.assertLogs("logai.embedding.embedder", level="WARNING") as logs:
+            TemplateEmbedder(config, session=session).embed_one("a" * 1000)
+
+        sent_text = session.calls[0]["json"]["inputs"][0]
+        self.assertLessEqual(len(sent_text), 5 * 4)
+        self.assertTrue(any("Truncated 1/1" in message for message in logs.output))
+
+    def test_short_template_is_not_truncated(self):
+        session = FakeSession([FakeResponse(200, [[1.0, 0.0]])])
+        config = EmbeddingConfig(
+            endpoint="http://bge-m3:8080/embed",
+            api_format="tei",
+            dimension=2,
+            max_template_tokens=5,
+        )
+
+        TemplateEmbedder(config, session=session).embed_one("short text")
+
+        self.assertEqual(session.calls[0]["json"]["inputs"][0], "short text")
 
     def test_environment_overrides_remote_settings(self):
         values = {

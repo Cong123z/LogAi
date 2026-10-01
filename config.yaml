@@ -10,7 +10,7 @@
 elasticsearch:
   hosts:
     - "http://elasticsearch:9200"
-  index: "hdfs-logs"
+  index: "recharge-logs"
   poll_interval_seconds: 1
   batch_size: 2000
   request_timeout_seconds: 30
@@ -42,6 +42,10 @@ embedding:
   timeout_seconds: 60
   max_retries: 3
   retry_backoff_seconds: 0.5
+  # Ước lượng (không phải tokenizer thật của model) ~4 ký tự/token. Template
+  # vượt ngưỡng này sẽ bị cắt bớt trước khi gửi, để tránh server âm thầm loại
+  # bỏ item quá dài khỏi response (gây lỗi index incomplete/duplicated).
+  max_template_tokens: 1000
 
 clustering:
   # Conservative grouping: only form/accept groups with strong local support.
@@ -84,7 +88,7 @@ alert:
 
 training:
   batch_size: 2000
-  max_docs: 200000
+  max_docs: 500000
   lookback_seconds: 604800
   dedup_buffer_size: 10000
 

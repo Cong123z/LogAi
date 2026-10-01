@@ -1,13 +1,23 @@
 """Remote dense embedding client used by training and realtime pipelines."""
 from __future__ import annotations
 
+import logging
 import time
-from typing import List
+from typing import List, Tuple
 
 import numpy as np
 import requests
 
 from logai.config import EmbeddingConfig
+
+logger = logging.getLogger(__name__)
+
+# No local tokenizer for the remote model (BAAI/bge-m3 or whatever is
+# configured) - approximate token count from character length. This is a
+# conservative heuristic (~4 chars/token for latin-script text), not an
+# exact count; it only needs to keep requests safely under the server's
+# real limit, not match it exactly.
+_CHARS_PER_TOKEN = 4
 
 
 class EmbeddingServiceError(RuntimeError):
@@ -108,6 +118,18 @@ class TemplateEmbedder:
                 ordered = sorted(items, key=lambda item: int(item["index"]))
                 indexes = [int(item["index"]) for item in ordered]
                 if indexes != list(range(expected_count)):
+                    missing = sorted(set(range(expected_count)) - set(indexes))
+                    duplicates = sorted({i for i in indexes if indexes.count(i) > 1})
+                    logger.error(
+                        "Embedding response index mismatch: expected %d item(s), "
+                        "received %d | missing_indexes=%s duplicate_indexes=%s "
+                        "raw_indexes=%s",
+                        expected_count,
+                        len(items),
+                        missing[:20],
+                        duplicates[:20],
+                        indexes[:50],
+                    )
                     raise ValueError("response indexes are incomplete or duplicated")
                 raw_vectors = [item["embedding"] for item in ordered]
             except (KeyError, TypeError, ValueError) as exc:
@@ -135,16 +157,71 @@ class TemplateEmbedder:
             raise EmbeddingServiceError("Embedding response contains a zero vector")
         return vectors / norms
 
+    def _truncate_oversized(self, texts: List[str]) -> List[str]:
+        """Caps each text's estimated token count at config.max_template_tokens.
+
+        Returns a new list (the caller's list/its callers' id-alignment is
+        never mutated); only the text sent over the wire is shortened.
+        """
+        max_chars = self.config.max_template_tokens * _CHARS_PER_TOKEN
+        truncated: List[str] = []
+        examples: List[Tuple[str, int]] = []
+        for text in texts:
+            if len(text) > max_chars:
+                examples.append((text[:60], len(text) // _CHARS_PER_TOKEN))
+                truncated.append(text[:max_chars])
+            else:
+                truncated.append(text)
+
+        if examples:
+            logger.warning(
+                "Truncated %d/%d template(s) exceeding max_template_tokens=%d "
+                "(~%d chars); examples (preview, ~original tokens): %s",
+                len(examples),
+                len(texts),
+                self.config.max_template_tokens,
+                max_chars,
+                [f"{preview!r}~{tokens}tok" for preview, tokens in examples[:3]],
+            )
+        return truncated
+
     def embed(self, texts: List[str]) -> np.ndarray:
         """Returns an (n, d) L2-normalized embedding matrix so that a plain
         dot product equals cosine similarity."""
         if not texts:
             return np.zeros((0, self.config.dimension), dtype=np.float32)
 
+        texts = self._truncate_oversized(texts)
+
+        total_batches = (len(texts) + self.config.batch_size - 1) // self.config.batch_size
         batches = []
-        for start in range(0, len(texts), self.config.batch_size):
+        for batch_index, start in enumerate(range(0, len(texts), self.config.batch_size), start=1):
             batch = texts[start:start + self.config.batch_size]
-            batches.append(self._parse_response(self._request(batch), len(batch)))
+            t_batch = time.time()
+            try:
+                batches.append(self._parse_response(self._request(batch), len(batch)))
+            except Exception:
+                lengths = [len(text) for text in batch]
+                logger.error(
+                    "Embedding batch %d/%d failed: %d text(s), char_len min=%d "
+                    "max=%d avg=%.0f | first=%r last=%r",
+                    batch_index,
+                    total_batches,
+                    len(batch),
+                    min(lengths),
+                    max(lengths),
+                    sum(lengths) / len(lengths),
+                    batch[0][:80],
+                    batch[-1][:80],
+                )
+                raise
+            logger.info(
+                "Embedding batch %d/%d complete: %d text(s) in %.2fs",
+                batch_index,
+                total_batches,
+                len(batch),
+                time.time() - t_batch,
+            )
         return np.vstack(batches)
 
     def embed_one(self, text: str) -> np.ndarray:

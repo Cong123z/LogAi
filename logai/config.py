@@ -60,6 +60,11 @@ class EmbeddingConfig:
     timeout_seconds: float = 60.0
     max_retries: int = 3
     retry_backoff_seconds: float = 0.5
+    # No local tokenizer for the remote model, so token count is approximated
+    # as len(text) // 4. Templates estimated above this are truncated before
+    # being sent, to avoid a server silently dropping an oversized item from
+    # its response (which otherwise surfaces as an index mismatch error).
+    max_template_tokens: int = 1000
 
     def validate(self, *, require_endpoint: bool = True) -> None:
         if require_endpoint and not self.endpoint.strip():
@@ -79,6 +84,8 @@ class EmbeddingConfig:
             raise ValueError("LOGAI_EMBEDDING_TIMEOUT_SECONDS must be positive")
         if self.max_retries < 0:
             raise ValueError("LOGAI_EMBEDDING_MAX_RETRIES cannot be negative")
+        if self.max_template_tokens <= 0:
+            raise ValueError("max_template_tokens must be positive")
 
 
 @dataclass
