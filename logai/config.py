@@ -35,15 +35,18 @@ class ElasticsearchConfig:
 @dataclass
 class Drain3Config:
     persistence_path: str = "data/drain3_state.bin"
-    sim_threshold: float = 0.4
+    sim_threshold: float = 0.6
     depth: int = 4
     max_children: int = 100
-    masking_rules: List[Dict[str, str]] = field(default_factory=lambda: [
-        {"pattern": r"/?\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?", "mask_with": "*"},
-        {"pattern": r"\bblk_-?\d+\b", "mask_with": "*"},
-        {"pattern": r"/(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+", "mask_with": "*"},
-        {"pattern": r"\b\d+\b", "mask_with": "*"},
-    ])
+    # Wording-only normalisation before Drain3 (logai/parsing/preprocessor.py):
+    # strips the date/time/LEVEL/[thread] prefix and all timestamps, masks
+    # ids and numbers, keeps words.
+    preprocess: bool = True
+    max_chars: int = 8192
+    max_tokens: int = 40
+    level_search_tokens: int = 5
+    # Optional extra Drain3 MaskingInstruction rules applied after preprocess.
+    masking_rules: List[Dict[str, str]] = field(default_factory=list)
 
 
 @dataclass

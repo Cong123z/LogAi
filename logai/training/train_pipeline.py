@@ -29,12 +29,11 @@ from logai.models import (
     DEFAULT_LEVEL,
     LEVEL_RANK,
     FeatureVector,
-    GroupState,
     ParsedEvent,
     RawLog,
     TemplateState,
 )
-from logai.parsing.drain3_parser import Drain3Parser
+from logai.parsing.drain3_parser import Drain3Parser, display_template
 from logai.storage.base import ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import LocalTrainingDedup
@@ -162,6 +161,8 @@ class TrainingPipeline:
             })
             raise
         template_to_group = self._cluster_templates()
+        logger.info("Phase 5: Applying grouping overrides and building groups + centroids...")
+        t_phase5 = time.time()
         template_states = {
             state.template_id: state for state in self.template_registry.all_templates()
         }
@@ -183,14 +184,35 @@ class TrainingPipeline:
             self.template_registry.all_embeddings(),
             {group.group_id: group for group in self.group_registry.all_groups()},
         )
+        results = resolution.results.values()
+        logger.info(
+            "Phase 5 complete in %.2fs: Built %d groups with centroids (%d singleton) "
+            "from %d templates; overrides applied=%d unresolved=%d; %d templates without a group",
+            time.time() - t_phase5,
+            len(groups),
+            sum(1 for group_id in groups if group_id.startswith("G_SINGLE_")),
+            len(template_states),
+            sum(1 for result in results if result.get("state") == "applied"),
+            sum(1 for result in results if result.get("state") == "unresolved"),
+            len(template_states) - len(template_to_group),
+        )
         grouped_by_group = self._group_events(template_to_group)
         self._train_anomaly_models(grouped_by_group)
 
         # Publish the complete effective membership only after feature/model
         # generation succeeds. A failed training run therefore never reports
         # the grouping revision as applied.
+        logger.info("Phase 8: Publishing template registry, groups and centroids...")
+        t_phase8 = time.time()
         self.template_registry.flush()
         self.group_registry.replace_all(groups, centroids)
+        logger.info(
+            "Phase 8 complete in %.2fs: Published %d templates, %d groups, %d centroids",
+            time.time() - t_phase8,
+            len(template_states),
+            len(groups),
+            len(centroids),
+        )
         self._match_documentation()
         DocumentationRefreshWorker(
             self.documentation_store,
@@ -201,11 +223,13 @@ class TrainingPipeline:
         ).refresh_once()
 
         logger.info("Phase 10: Persisting all registries and cleaning temporary indexes...")
+        t_phase10 = time.time()
         self._flush_all()
         self._write_training_grouping_status(resolution)
         if checkpoint_store is not None:
             checkpoint_store.clear()
         self.event_index.clear()
+        logger.info("Phase 10 complete in %.2fs", time.time() - t_phase10)
         logger.info(
             "=== Training pipeline complete in %.2fs: %d templates, %d groups successfully saved ===",
             time.time() - t_start_total,
@@ -468,34 +492,9 @@ class TrainingPipeline:
             if cluster is None:
                 return None
             template = cluster.get_template()
-            return template if isinstance(template, str) else None
+            return display_template(template) if isinstance(template, str) else None
         except (ValueError, TypeError, AttributeError):
             return None
-
-    def _parse_all(self, raw_logs: List[RawLog]) -> List[ParsedEvent]:
-        raw_logs_sorted = sorted(raw_logs, key=lambda r: r.timestamp)
-        return [self.parser.parse(r) for r in raw_logs_sorted]
-
-    def _build_template_registry(self, parsed_events: List[ParsedEvent]) -> None:
-        for pe in parsed_events:
-            existing = self.template_registry.get(pe.template_id)
-            if existing is None:
-                state = TemplateState(
-                    template_id=pe.template_id,
-                    template_text=pe.template,
-                    service=pe.raw.service,
-                    first_seen=pe.raw.timestamp,
-                    last_seen=pe.raw.timestamp,
-                    event_count=1,
-                )
-            else:
-                existing.last_seen = max(existing.last_seen, pe.raw.timestamp)
-                existing.first_seen = min(existing.first_seen, pe.raw.timestamp)
-                existing.event_count += 1
-                existing.template_text = pe.template
-                state = existing
-            self.template_registry.upsert(state, flush=False)
-        self.template_registry.flush()
 
     def _embed_templates(self) -> None:
         templates = self.template_registry.all_templates()
@@ -534,75 +533,19 @@ class TrainingPipeline:
                 group_id = f"G{label:04d}"
             template_to_group[tid] = group_id
         logger.info(
-            "Phase 4 complete in %.2fs: Clustered %d templates into %d groups",
+            "Phase 4 complete in %.2fs: Clustered %d templates into %d groups "
+            "(%d HDBSCAN clusters + %d noise singletons)",
             time.time() - t_phase4,
             len(ids),
             len(set(template_to_group.values())),
+            len(set(template_to_group.values())) - next_singleton,
+            next_singleton,
         )
         return template_to_group
 
-    def _build_group_registry(self, template_to_group: Dict[str, str]) -> None:
-        """Build group metadata from template aggregates.
-
-        TemplateRegistry already contains the event counts and time bounds for
-        every template, so rebuilding an event-to-group index here would add a
-        full O(N) pass and duplicate event references unnecessarily.
-        """
-        logger.info("Phase 5: Building group registry...")
-        t_phase5 = time.time()
-        group_templates: Dict[str, List[str]] = defaultdict(list)
-        for tid, gid in template_to_group.items():
-            group_templates[gid].append(tid)
-
-        for gid, tids in group_templates.items():
-            templates = [self.template_registry.get(tid) for tid in tids]
-            templates = [template for template in templates if template is not None]
-            if not templates:
-                logger.warning(
-                    "Skipping group %s because none of its templates exist in the registry",
-                    gid,
-                )
-                continue
-
-            representative = templates[0]
-            state = GroupState(
-                group_id=gid,
-                service=representative.service or "unknown",
-                template_ids=tids,
-                representative_template=representative.template_text,
-                first_seen=min(template.first_seen for template in templates),
-                last_seen=max(template.last_seen for template in templates),
-                event_count=sum(template.event_count for template in templates),
-            )
-            self.group_registry.upsert(state, flush=False)
-        self.group_registry.flush()
-        logger.info(
-            "Phase 5 complete in %.2fs: Saved %d groups",
-            time.time() - t_phase5,
-            len(group_templates),
-        )
-
-    def _compute_centroids(self) -> None:
-        logger.info("Phase 6: Computing cluster centroids for groups...")
-        t_phase6 = time.time()
-        embeddings_map = self.template_registry.all_embeddings()
-        count = 0
-        for group in self.group_registry.all_groups():
-            vecs = [embeddings_map[t] for t in group.template_ids if t in embeddings_map]
-            if not vecs:
-                continue
-            centroid = self.clusterer.compute_centroid(np.array(vecs))
-            self.group_registry.set_centroid(group.group_id, centroid)
-            count += 1
-        logger.info(
-            "Phase 6 complete in %.2fs: Computed centroids for %d groups",
-            time.time() - t_phase6,
-            count,
-        )
-
     def _match_documentation(self) -> None:
-        logger.info("Phase 7: Matching documentation with cluster centroids...")
-        t_phase7 = time.time()
+        logger.info("Phase 9: Matching documentation with cluster centroids...")
+        t_phase9 = time.time()
         if not self.doc_matcher.ready:
             logger.warning(
                 "Documentation matcher is unavailable; training will keep groups undocumented"
@@ -629,8 +572,8 @@ class TrainingPipeline:
             self.group_registry.upsert(group, flush=False)
         self.group_registry.flush()
         logger.info(
-            "Phase 7 complete in %.2fs: Matched documentation for %d groups",
-            time.time() - t_phase7,
+            "Phase 9 complete in %.2fs: Matched documentation for %d groups",
+            time.time() - t_phase9,
             len(matches),
         )
 
@@ -644,8 +587,8 @@ class TrainingPipeline:
         mirrors the realtime pipeline's window key exactly - train/serve parity
         requires both to bucket by (service, group), not by group alone.
         """
-        logger.info("Phase 8: Grouping and sorting event timestamps by (service, group)...")
-        t_phase8 = time.time()
+        logger.info("Phase 6: Grouping and sorting event timestamps by (service, group)...")
+        t_phase6 = time.time()
         result: Dict[Tuple[str, str], List[float]] = defaultdict(list)
         records = sorted(self.event_index.records(), key=lambda r: float(r["timestamp"]))
         for record in records:
@@ -655,8 +598,8 @@ class TrainingPipeline:
                     float(record["timestamp"])
                 )
         logger.info(
-            "Phase 8 complete in %.2fs: Grouped %d events into %d (service, group) windows",
-            time.time() - t_phase8,
+            "Phase 6 complete in %.2fs: Grouped %d events into %d (service, group) windows",
+            time.time() - t_phase6,
             len(records),
             len(result),
         )
@@ -665,8 +608,8 @@ class TrainingPipeline:
     def _train_anomaly_models(
         self, grouped: Dict[Tuple[str, str], List[float]]
     ) -> None:
-        logger.info("Phase 9: Extracting feature vectors and training global anomaly model...")
-        t_phase9 = time.time()
+        logger.info("Phase 7: Extracting feature vectors and training global anomaly model...")
+        t_phase7 = time.time()
         all_feature_vectors: List[FeatureVector] = []
         for window_key, timestamps in grouped.items():
             engine = FeatureEngine(self.config.features)
@@ -675,7 +618,7 @@ class TrainingPipeline:
                 all_feature_vectors.append(fv)
 
         logger.info(
-            "Phase 9: Collected %d total feature vectors across %d (service, group) windows for global model training",
+            "Phase 7: Collected %d total feature vectors across %d (service, group) windows for global model training",
             len(all_feature_vectors),
             len(grouped),
         )
@@ -688,9 +631,9 @@ class TrainingPipeline:
                 self.config.anomaly.min_training_samples,
             )
         else:
-            logger.info("Phase 9: Model fitting complete in %.2fs", time.time() - t_fit)
+            logger.info("Phase 7: Model fitting complete in %.2fs", time.time() - t_fit)
 
-        logger.info("Phase 9 complete in %.2fs", time.time() - t_phase9)
+        logger.info("Phase 7 complete in %.2fs", time.time() - t_phase7)
 
     def _flush_all(self) -> None:
         self.template_registry.flush()
@@ -756,6 +699,21 @@ def run_training_from_elasticsearch(
         initial_search_after,
         already_indexed,
         remaining_docs,
+    )
+    logger.info(
+        "Drain3 config: sim_threshold=%.2f depth=%d max_children=%d preprocess=%s "
+        "max_tokens=%d level_search_tokens=%d extra_masking_rules=%d | "
+        "clustering: min_cluster_size=%d min_samples=%d assign_threshold=%.2f",
+        config.drain3.sim_threshold,
+        config.drain3.depth,
+        config.drain3.max_children,
+        config.drain3.preprocess,
+        config.drain3.max_tokens,
+        config.drain3.level_search_tokens,
+        len(config.drain3.masking_rules),
+        config.clustering.min_cluster_size,
+        config.clustering.min_samples,
+        config.clustering.assignment_similarity_threshold,
     )
     batch_stream = collector.stream_historical_batches(
         start_ts=start_ts,

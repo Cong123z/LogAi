@@ -98,7 +98,7 @@ class DeterministicClusterer:
 from collections import defaultdict
 from logai.config import AppConfig, Drain3Config
 from logai.models import GroupState, RawLog, TemplateState
-from logai.parsing.drain3_parser import Drain3Parser
+from logai.parsing.drain3_parser import Drain3Parser, display_template
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
 IPS = ["10.250.10.1", "10.250.10.2", "10.250.10.3", "10.250.10.4", "10.250.10.5"]
@@ -212,7 +212,7 @@ class TestDrain3LogMasking(unittest.TestCase):
         app_cfg.storage.base_dir = self.temp_dir
         app_cfg.storage.model_dir = os.path.join(self.temp_dir, "models")
         app_cfg.drain3.persistence_path = os.path.join(self.temp_dir, "drain3.bin")
-        app_cfg.drain3.sim_threshold = 0.5
+        app_cfg.drain3.sim_threshold = 0.6
         parser = Drain3Parser(app_cfg.drain3)
         template_registry = TemplateRegistry(app_cfg.storage)
         group_registry = GroupRegistry(app_cfg.storage)
@@ -247,7 +247,7 @@ class TestDrain3LogMasking(unittest.TestCase):
             cluster_id = int(tid.lstrip("T"))
             gen_text = pe.template
             if hasattr(parser.miner, "drain") and cluster_id in parser.miner.drain.id_to_cluster:
-                gen_text = parser.miner.drain.id_to_cluster[cluster_id].get_template()
+                gen_text = display_template(parser.miner.drain.id_to_cluster[cluster_id].get_template())
             ts = pe.raw.timestamp
             if tid not in states:
                 states[tid] = TemplateState(
@@ -332,8 +332,10 @@ class TestDrain3LogMasking(unittest.TestCase):
         print("=" * 80 + "\n")
 
         # Assertions
-        # Exactly 31 unique message structures should yield 31 templates
-        self.assertEqual(len(templates), 31)
+        # 31 message variants yield 30 templates: the two "BLOCK* ask ... to
+        # datanode(s)" variants differ only in how many targets are listed,
+        # and repeated placeholders collapse into one, so they share a template.
+        self.assertEqual(len(templates), 30)
 
         # Find the template for T00027 (Exception writing block)
         exception_template = next((t for t in templates if "Exception writing block" in t.template_text), None)
@@ -353,10 +355,11 @@ class TestDrain3LogMasking(unittest.TestCase):
 
 
 class TestDrain3UniversalMaskingRules(unittest.TestCase):
-    """Validates the general, format-agnostic masking rules (UUID/timestamp/
-    secret/assignment-value shapes, plus the leading date-time-LEVEL-[thread]
-    stripper) against real production-shaped samples. The samples verify the
-    strategy; they are not what the rules were derived from."""
+    """Validates the wording-only preprocessor (logai/parsing/preprocessor.py)
+    end to end through Drain3: the date/time/LEVEL/[thread] prefix and every
+    timestamp are removed, ids/numbers become <*>, words are kept. The samples
+    are production-shaped; they verify the strategy, they are not what the
+    rules were derived from."""
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -368,8 +371,8 @@ class TestDrain3UniversalMaskingRules(unittest.TestCase):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_uuid_and_timestamp_shapes_masked(self):
-        """UUID and ISO timestamp are masked even standing alone in free
-        text, independent of any key=value context."""
+        """UUIDs are masked and ISO timestamps removed even standing alone in
+        free text, independent of any key=value context."""
         raw1 = RawLog(
             timestamp=1000.0, service="svc", level="INFO",
             message="request 6419a71e-ccf8-46e9-af77-c7cf036aa215 completed at 2026-09-30T07:00:32.036Z",
@@ -381,18 +384,20 @@ class TestDrain3UniversalMaskingRules(unittest.TestCase):
         p1 = self.parser.parse(raw1)
         p2 = self.parser.parse(raw2)
         self.assertEqual(p1.template_id, p2.template_id)
-        self.assertEqual(p2.template, "request <*> completed at <*>")
+        self.assertEqual(p2.template, "request <*> completed at")
 
-    def test_multi_token_dates_collapse_to_single_wildcard(self):
-        """Timestamps must collapse to ONE <*>, not be fragmented by the
-        bare-number/path rules running first."""
+    def test_multi_token_dates_are_removed(self):
+        """Multi-token timestamps are removed entirely (@timestamp already
+        carries the time), not fragmented by the number rule into pieces."""
         parsed = self.parser.parse(RawLog(
             timestamp=1000.0, service="svc", level="INFO",
             message="x activeTime=Sat Sep 21 14:27:33 GMT+07:00 2019, at 27/07/2026 00:00:00.024 done",
         ))
-        self.assertEqual(parsed.template, "x activeTime <*>, at <*> done")
+        self.assertEqual(parsed.template, "x activeTime at done")
 
-    def test_xml_payload_collapsed_to_single_token(self):
+    def test_xml_payload_reduced_to_element_names_and_words(self):
+        """SOAP wrappers, namespaces and attributes are dropped; element names
+        and text words are kept, so success and failure stay distinguishable."""
         parsed = self.parser.parse(RawLog(
             timestamp=1000.0, service="svc", level="INFO",
             message=(
@@ -402,18 +407,26 @@ class TestDrain3UniversalMaskingRules(unittest.TestCase):
                 "</ns2:gwOperationResponse>\n</S:Body>\n</S:Envelope>"
             ),
         ))
-        self.assertEqual(parsed.template, "BCCSUtil: Response of getInfoSub request for <*>: <XML>")
+        self.assertEqual(
+            parsed.template,
+            "BCCSUtil: Response of getInfoSub request for <*> gwOperationResponse Result "
+            "error <*> description success",
+        )
 
-    def test_multiword_values_do_not_split_templates(self):
-        """A free-text value with a varying word count must not change the
-        token count (Drain3 partitions by length), so both land in one
-        template, with every key name still visible."""
+    def test_free_text_values_keep_their_words(self):
+        """Free-text values are wording, so they are kept: two different
+        descriptions are two different templates. Key names stay visible and
+        numeric values are masked."""
         msg_a = "27/07/2026 00:00:00.723 INFO [TM] Transaction timeout: Info{reqID=1, description=Receive incorrect, sentType=6}"
         msg_b = "27/07/2026 00:00:00.724 INFO [TM] Transaction timeout: Info{reqID=2, description=Customer havent created password yet, sentType=4}"
         p_a = self.parser.parse(RawLog(timestamp=1000.0, service="svc", level="INFO", message=msg_a))
         p_b = self.parser.parse(RawLog(timestamp=1001.0, service="svc", level="INFO", message=msg_b))
-        self.assertEqual(p_a.template_id, p_b.template_id)
-        self.assertEqual(p_b.template, "Transaction timeout: Info{reqID <*>, description <*>, sentType <*>}")
+        self.assertNotEqual(p_a.template_id, p_b.template_id)
+        self.assertEqual(p_a.template, "Transaction timeout: Info reqID <*> description Receive incorrect sentType <*>")
+        self.assertEqual(
+            p_b.template,
+            "Transaction timeout: Info reqID <*> description Customer havent created password yet sentType <*>",
+        )
 
     def test_trailing_value_does_not_swallow_free_text(self):
         """Outside a key=value list, a value is one token: the action words
@@ -435,9 +448,9 @@ class TestDrain3UniversalMaskingRules(unittest.TestCase):
         self.assertEqual(parsed.template, "hello world")
 
     def test_transaction_blob_values_masked_to_wildcard(self):
-        """Real TransactionManager sample: business-relevant key names stay
-        literal, every value is masked, and the leading date/time/LEVEL/
-        [thread] prefix is removed entirely rather than left as noise."""
+        """Real TransactionManager sample: key names stay literal, ids and
+        secrets are masked, the embedded activeTime timestamp and the leading
+        date/time/LEVEL/[thread] prefix are removed, words are kept."""
         message = (
             "27/07/2026 00:00:00.024  INFO [TransactionManager] DBAdapter: "
             "Log success request his TransactionInfo{reqID=1384223044, "
@@ -454,8 +467,8 @@ class TestDrain3UniversalMaskingRules(unittest.TestCase):
         self.assertNotIn("[TransactionManager]", template)
         self.assertEqual(
             template,
-            "DBAdapter: Log success request his TransactionInfo{reqID <*>, transID <*>, "
-            "msisdn <*>, encryptedPass <*>, activeTime <*>, description <*>, numHisTrans <*>}",
+            "DBAdapter: Log success request his TransactionInfo reqID <*> transID <*> "
+            "msisdn <*> encryptedPass <*> activeTime description Receive incorrect numHisTrans <*>",
         )
 
     def test_transaction_blob_converges_to_same_template(self):

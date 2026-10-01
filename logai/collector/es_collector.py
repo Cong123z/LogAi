@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import random
-import re
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -35,6 +34,7 @@ except (ImportError, AttributeError):
 
 from logai.config import ElasticsearchConfig
 from logai.models import RawLog
+from logai.parsing.preprocessor import find_level
 from logai.storage.checkpoint import CheckpointStore
 
 logger = logging.getLogger("logai.collector")
@@ -76,19 +76,12 @@ def _extract_service(src: Dict[str, Any]) -> str:
     return "unknown"
 
 
-# Level is always the 3rd whitespace-separated token in this deployment's log
-# lines: "<date> <time> <LEVEL> [<thread>] <message body>".
-_LEVEL_TOKEN_RE = re.compile(
-    r"^\S+\s+\S+\s+(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL|CRITICAL)\b",
-    re.IGNORECASE,
-)
-
-
 def _extract_level_from_message(message: str) -> Optional[str]:
-    if not message:
-        return None
-    match = _LEVEL_TOKEN_RE.match(message.strip())
-    return match.group(1).upper() if match else None
+    """Level from the message prefix: searched within the first 5 tokens,
+    preceded only by date/time/pid/[thread]-like tokens (shared with the
+    Drain3 preprocessor so both agree on what the prefix is)."""
+    found = find_level((message or "").strip())
+    return found[0] if found else None
 
 
 def _extract_level(src: Dict[str, Any]) -> str:
@@ -97,7 +90,8 @@ def _extract_level(src: Dict[str, Any]) -> str:
     Elastic Agent / Filebeat integrations (the current Elastic Integrations
     format) write level under `log.level`, not a top-level `level` field.
     Falls back to a legacy flat `level` field for older/custom shippers, then
-    to parsing the 3rd token of `message` for shippers that index neither.
+    to the level found in the first 5 tokens of `message` for shippers that
+    index neither.
     """
     log_obj = src.get("log")
     if isinstance(log_obj, dict):

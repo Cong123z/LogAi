@@ -9,9 +9,8 @@ matched an existing template ("Known Template") or created a new one
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
-from typing import List, Optional, Pattern
+from typing import List, Optional
 
 from drain3 import TemplateMiner
 from drain3.masking import MaskingInstruction
@@ -19,6 +18,19 @@ from drain3.template_miner_config import TemplateMinerConfig
 
 from logai.config import Drain3Config
 from logai.models import ParsedEvent, RawLog
+from logai.parsing.preprocessor import PLACEHOLDER, normalize
+
+# Drain3's similarity (Drain.get_seq_distance) skips template tokens equal to
+# its own wildcard "<*>", so a message whose tokens are mostly preprocessor
+# placeholders could never reach sim_threshold against its own cluster and
+# would create a new cluster on every occurrence. Preprocessor placeholders
+# are therefore handed to Drain3 as this literal token (counted as a match)
+# and turned back into "<*>" in every template we expose.
+DRAIN_LITERAL_PLACEHOLDER = "<#>"
+
+
+def display_template(template: str) -> str:
+    return template.replace(DRAIN_LITERAL_PLACEHOLDER, PLACEHOLDER)
 
 
 class AtomicFilePersistence:
@@ -62,27 +74,14 @@ class Drain3Parser:
         tm_config.drain_depth = config.depth
         tm_config.drain_max_children = config.max_children
         tm_config.profiling_enabled = False
-        self._extra_delimiters: List[str] = list(getattr(config, "extra_delimiters", []))
-        tm_config.drain_extra_delimiters = self._extra_delimiters
-
-        masking_rules = getattr(config, "masking_rules", [])
-        # Rules with mask_with == "" mean "delete this span outright" (e.g. the
-        # non-semantic "<date> <time> <LEVEL> [<thread>] " prefix). Drain3's
-        # own MaskingInstruction always wraps mask_with in its mask_prefix/
-        # suffix (default "<"/">"), so an empty mask_with there would still
-        # leave a literal "<>" behind. Apply those ourselves via plain
-        # re.sub before drain3 ever sees the message; only pass the
-        # placeholder-producing rules into drain3's own masking pipeline.
-        self._strip_patterns: List[Pattern[str]] = [
-            re.compile(rule["pattern"])
-            for rule in masking_rules
-            if rule.get("mask_with", "*") == ""
-        ]
-        wildcard_rules = [rule for rule in masking_rules if rule.get("mask_with", "*") != ""]
-        if wildcard_rules:
+        # Wording-only normalisation (logai/parsing/preprocessor.py) runs
+        # before Drain3; config masking_rules are optional extra Drain3 rules
+        # applied after it.
+        masking_rules: List[dict] = getattr(config, "masking_rules", [])
+        if masking_rules:
             tm_config.masking_instructions = [
                 MaskingInstruction(pattern=rule["pattern"], mask_with=rule.get("mask_with", "*"))
-                for rule in wildcard_rules
+                for rule in masking_rules
             ]
 
         self._autosave = autosave
@@ -113,18 +112,26 @@ class Drain3Parser:
     def message_count(self) -> int:
         return int(self.miner.drain.get_total_cluster_size())
 
+    def preprocess(self, message: str) -> str:
+        if not getattr(self.config, "preprocess", True):
+            return message
+        return normalize(
+            message,
+            max_chars=self.config.max_chars,
+            max_tokens=self.config.max_tokens,
+            level_search_tokens=self.config.level_search_tokens,
+        )
+
     def parse(self, raw: RawLog) -> ParsedEvent:
-        message = raw.message
-        for pattern in self._strip_patterns:
-            message = pattern.sub("", message)
-        result = self.miner.add_log_message(message)
+        message = self.preprocess(raw.message)
+        result = self.miner.add_log_message(
+            message.replace(PLACEHOLDER, DRAIN_LITERAL_PLACEHOLDER)
+        )
         # drain3 result keys: cluster_id, cluster_size, template_mined,
         # change_type ("cluster_created" | "cluster_template_changed" | "none")
         template_id = f"T{result['cluster_id']:05d}"
-        template = result["template_mined"]
+        template = display_template(result["template_mined"])
         is_new = result["change_type"] == "cluster_created"
-        for delimiter in self._extra_delimiters:
-            message = message.replace(delimiter, " ")
         parameters = self._extract_parameters(template, message)
         return ParsedEvent(
             raw=raw,

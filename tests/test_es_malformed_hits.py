@@ -173,8 +173,8 @@ class TestHitToRawlog(unittest.TestCase):
         self.assertEqual(result.service, "payment")
 
     def test_level_parsed_from_message_third_token(self):
-        """No log.level/level field: level is always the 3rd whitespace token
-        (date, time, LEVEL) per this deployment's log line convention."""
+        """No log.level/level field: level is read from the message prefix
+        (here the 3rd token, after date and time)."""
         source = {
             "@timestamp": "2026-09-30T07:00:32.036Z",
             "message": (
@@ -187,9 +187,9 @@ class TestHitToRawlog(unittest.TestCase):
         self.assertEqual(result.level, "DEBUG")
 
     def test_level_parsed_from_message_transaction_sample(self):
-        """Real transaction-log sample: level (3rd token) must be read as
-        INFO, never confused with `error_code=10700` deep inside the message
-        body - the regex only ever looks at the 3rd token, nowhere else."""
+        """Real transaction-log sample: level must be read as INFO, never
+        confused with `error_code=10700` deep inside the message body - only
+        the first 5 tokens are searched."""
         source = {
             "@timestamp": "2026-07-27T00:00:00.024Z",
             "message": (
@@ -201,6 +201,25 @@ class TestHitToRawlog(unittest.TestCase):
         hit = _make_hit(source=source)
         result = _hit_to_rawlog(hit, "idx")
         self.assertEqual(result.level, "INFO")
+
+    def test_level_parsed_from_message_second_and_fourth_token(self):
+        """The level is not always the 3rd token: it is searched within the
+        first 5 tokens, behind date/time/pid/[thread]-like tokens only."""
+        for message, expected in (
+            ("2026-09-30T07:00:32.036Z ERROR [main] Payment failed", "ERROR"),
+            ("2026-09-30 14:00:31,123 [main] WARN com.x.Y - slow request", "WARN"),
+        ):
+            hit = _make_hit(source={"@timestamp": "2026-09-30T07:00:32.036Z", "message": message})
+            self.assertEqual(_hit_to_rawlog(hit, "idx").level, expected, message)
+
+    def test_level_word_inside_sentence_is_not_a_level(self):
+        """A level word preceded by a plain word is message text, not the
+        prefix, so the INFO default applies."""
+        hit = _make_hit(source={
+            "@timestamp": "2026-09-30T07:00:32.036Z",
+            "message": "Connection ERROR while calling gateway",
+        })
+        self.assertEqual(_hit_to_rawlog(hit, "idx").level, "INFO")
 
     def test_level_regex_no_match_when_third_token_not_a_level(self):
         """A message that doesn't follow the date/time/LEVEL convention falls

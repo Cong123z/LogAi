@@ -62,3 +62,215 @@ Whichever of these grows shows the current bottleneck.
 - Deploy: build a new image tag (prefer git SHA), then
   `kubectl delete job logai-training` before applying again.
 - Next task: regex/masking (see "Việc tiếp theo" in `HANDOFF.md`).
+
+---
+
+## Task: Wording-only regex preprocessing before Drain3
+
+- **Date:** Thursday, 2026-10-01 (timezone +07)
+- **Time:** ~02:10 – 02:55 (planning, then implementation; full test run at 02:52)
+- **Branch:** `calibrate` (base commit `7744ac3 Fix bottle neck in drain3`)
+- **Status:** done, **uncommitted**
+- **Plan:** `/home/cong/.claude/plans/i-u-ch-nh-m-t-ch-t-agile-deer.md`
+- **Decisions by user:**
+  - keep only the *semantic wording* of a log; numbers never need to be kept;
+  - the level is not always the 3rd token: search it in the **first 5 tokens**;
+  - timestamps and level are **removed** outright (not masked), because
+    `@timestamp` and `RawLog.level` already hold them;
+  - no separate measurement tool.
+
+### Design (`logai/parsing/preprocessor.py`, new)
+
+`normalize(message)` runs before Drain3 in both training and realtime (same
+`Drain3Parser`). Steps:
+
+0. Cut the message at `max_chars` (8192).
+1. `find_level()` looks for a level in the first 5 tokens. Every token
+   before it must be date/time/pid/`[thread]`-like, so `Connection ERROR ...`
+   is not treated as a prefix. If found, the prefix up to and including the
+   level, plus one `[thread]` and separator, is **deleted**.
+2. HTML entities are unescaped (`&lt;soap:Envelope`), and `key=` with an
+   empty value becomes `key=<*>` so the token count stays stable.
+3. XML/SOAP: wrappers (Envelope/Body/Header), namespaces and attributes are
+   dropped; element names and text are kept.
+4. Timestamps anywhere are **deleted**: Java `Thu Aug 13 18:52:11 GMT+07:00 2020`,
+   ISO, `dd/MM/yyyy HH:mm:ss.SSS`, bare `HH:mm:ss`.
+5. Separators `= , ; { } ( ) [ ] " '` become spaces.
+6. URL host, e-mail and IPv4[:port] become `<*>`. Hex ids with mixed
+   digits and letters become `<*>`. Long ids (16+ chars with 3+ digits:
+   secrets, UUIDs, transaction ids) become `<*>`. Each remaining digit run
+   inside a word becomes `<*>` and the letters stay (`con-1-Sender` →
+   `con-<*>-Sender`).
+7. A token made only of `<*>` and punctuation becomes `<*>`, and runs of
+   `<*>` collapse to one.
+8. At most `max_tokens` (40) tokens are kept.
+
+The regex cost is kept low with cheap marker checks before the costly rules
+(`://`, `@`, `&`, digits) and with callbacks instead of lookaheads that run at
+every position. Measured: short log ~7 µs, long transaction log ~37 µs.
+
+### Changes
+
+| File | Change |
+|------|--------|
+| `logai/parsing/preprocessor.py` | New: `find_level`, `normalize`, `LEVELS`. |
+| `logai/parsing/drain3_parser.py` | `preprocess()` → `normalize()` before `add_log_message`. Removed `_strip_patterns` / `extra_delimiters`. `masking_rules` are now optional extra Drain3 rules. |
+| `logai/config.py`, `config.yaml` | `Drain3Config`: `preprocess=True`, `max_chars=8192`, `max_tokens=40`, `level_search_tokens=5`. `masking_rules` defaults to `[]` (the 4 old rules are removed). |
+| `logai/collector/es_collector.py` | `_extract_level_from_message` uses the shared `find_level` (first 5 tokens). Removed `_LEVEL_TOKEN_RE`, so the level list now lives in one place. |
+| `tests/test_preprocessor.py` | New: level at positions 1–5, level word inside a sentence, timestamp removal, XML, ids, URL, collapse, token cap, parser integration. |
+| `tests/test_log_masking.py` | Expectations updated to the new format. The HDFS audit now expects 30 templates: the two `datanode(s)` variants differ only by list length and share a template. |
+| `tests/test_es_malformed_hits.py` | Level at token 2 and token 4; level word inside a sentence → INFO. |
+
+### Verification
+
+- `.venv/bin/python3 -m pytest -q`: **265 passed, 1 failed**. The failure is
+  `test_realtime_crash_load_and_perf.py::test_high_load_throughput_and_stress`
+  (asserts ≥4,900 logs/s). It also fails on the committed HEAD before this
+  change (4,100–4,600 logs/s on this machine), so it depends on machine speed
+  and is not caused by this change.
+- Real log `full_node96.log`, first 300k lines (119,432 events after joining
+  continuation lines):
+  - old 4 rules: 177 templates, 12 singletons;
+  - new preprocessor: 211 templates, 10 singletons.
+  - Both curves flatten after ~40% of the data.
+  - The old count was lower only because it **over-merged** unrelated logs.
+    One old template `<*><*> <*>:<*>:<*>.<*> INFO [worker-<*>] <*> <*> <*> <*>`
+    swallowed `RequestHandler: have password`, `ContentValidator: Name valid`,
+    `TopupUtil: Start verify`, … The new templates keep them apart and have
+    no date, level or thread noise.
+  - The new preprocessor also merged transaction logs that the old rules split
+    because of empty values.
+
+### Deploy notes
+
+Template text and ids change, so stop realtime, back up and delete
+`drain3_state.bin`, `training_checkpoint.json`, `training_event_index.jsonl`,
+`template_registry.json`, `template_embeddings.pkl`, `group_registry.json`,
+`group_centroids.pkl` and `models/global_v3.pkl`. Then build a new image tag,
+`kubectl delete job logai-training`, apply, and run realtime on the same image.
+
+---
+
+## Check: speed / "job never finishes" risk on `full_node97.log`
+
+- **Date:** Thursday, 2026-10-01 (+07), ~02:55 – 03:00
+- **Method:**
+  - Ran the real training Phase 1 (`TrainingPipeline._stream_parse`) and
+    Phase 2 on the **whole file** (590 MB). The path is preprocess → Drain3
+    (autosave off) → one state save per batch → event index → checkpoint.
+  - Continuation lines were joined into one event, as Filebeat multiline would do.
+  - Batches of 2,000, no `max_docs` limit (9× the production 200k).
+  - Elasticsearch was not involved, so `fetch` time here is only the file read.
+- **Result (new preprocessor):**
+  - 1,816,742 events in **95.6 s** for Phase 1, plus 3.9 s for Phase 2.
+  - **349 templates**, Drain3 state **20 KB**, peak RSS 370 MB.
+  - Speed stays flat: 20.5k ev/s at 200k events, 19.0k ev/s at the end.
+    Average parse per batch: 0.079 s in the first 100 batches, 0.084 s in
+    the last 100.
+  - Worst save per batch 0.04 s. Worst parse per batch 0.16 s.
+  - Cluster count flattens: 225 at 200k, 292 at 1M, 349 at 1.8M.
+- **Same data, old 4 rules, first 400k:** 188 clusters, 21.3k ev/s. The new
+  preprocessor costs about 10% throughput and gives cleaner, correctly
+  separated templates.
+- **Conclusion:**
+  - On this data Phase 1 for `max_docs=200000` takes ~10 s of CPU. The rest
+    is ES fetch latency for ~100 requests.
+  - Neither template growth nor save cost increases in a way that could keep
+    the job running forever.
+  - The ~140k clusters seen in production did not come from these node logs.
+    They most likely come from the Drain3 state accumulated on the PVC, or
+    from other services in the index. So the PVC reset before retraining is
+    required.
+
+---
+
+## Task: Training phase logs + Drain3 placeholder fix + config review
+
+- **Date:** Thursday, 2026-10-01 (+07), ~03:05 – 03:35
+- **Status:** done, **uncommitted**. `pytest`: 267 passed.
+
+### Phase logs (`logai/training/train_pipeline.py`)
+
+- Log order now follows the real execution order: 1 Parse, 2 Template registry,
+  3 Embedding, 4 HDBSCAN (now also reports clusters vs noise singletons),
+  **5 Build groups** (overrides applied/unresolved, singleton groups, templates
+  without a group), 6 Event windows, 7 Isolation Forest, **8 Publish**
+  (registry, groups, centroids), 9 Documentation, 10 Cleanup (+ `Phase 10 complete`).
+- Removed dead code that nothing called: `_build_group_registry`,
+  `_compute_centroids`, `_parse_all`, `_build_template_registry`. Groups and
+  centroids are built by `GroupAssignmentManager.build_groups`, which runs
+  HDBSCAN output plus manual overrides.
+- The job start now logs the Drain3, preprocessor and clustering settings.
+
+### Bug fix: placeholder-heavy messages created a new cluster every time
+
+`Drain.get_seq_distance` skips template tokens equal to Drain3's wildcard `<*>`.
+A preprocessed message where at least half the tokens were `<*>` therefore
+never reached `sim_threshold` against its own cluster, so every occurrence
+created a new cluster. This was a latent template explosion.
+
+Fix in `logai/parsing/drain3_parser.py`: preprocessor placeholders go into
+Drain3 as the literal `<#>`, which Drain3 counts as a match, and
+`display_template()` turns them back into `<*>` everywhere templates are
+exposed. A regression test is in `tests/test_preprocessor.py`.
+
+### `sim_threshold` retuned: 0.5 → 0.6 (config.yaml and dataclass default)
+
+With placeholders now counted as matches, 0.5 merged distinct errors
+("stream is closed" with "connection reset by peer").
+
+| sim_th | node96 200k | node97 400k | HDFS 31 variants |
+|---|---|---|---|
+| 0.5 | 217 | 212 | 29 (merged 2 errors) |
+| **0.6** | **223** | **216** | **30 (correct)** |
+| 0.7 | 234 | 226 | 30 |
+
+### node97 traffic profile (full file, 00:00–16:07, 1.82M events, 316 templates)
+
+- All events: median 1,854/min, p95 2,454/min, max 4,215/min.
+- Per template: no template has a median active-minute rate ≥150; only 12
+  ever peak ≥150/min. The busiest templates run ~100/min (median) and
+  ~220/min (peak).
+- Consequence: `alert.min_events_1m=150` blocks almost every template or
+  small group from ever alerting (see the config review in the conversation).
+- `max_docs=200000` covers only ~108 minutes of one node at this rate.
+
+---
+
+## Evaluation: template quality on full production logs (node96 + node97)
+
+- **Date:** Thursday, 2026-10-01 (+07), ~03:40 – 03:55
+- **Scope:** templates only. Groups need bge-m3 embeddings, which are not
+  available on this machine, so the user chose to skip them.
+- **Setup:** current code (preprocessor + `<#>` literal placeholder, sim_th 0.6);
+  continuation lines joined per event. Script:
+  `scratchpad/tpl_eval.py`.
+
+| | node96 | node97 |
+|---|---|---|
+| Events (full day, 00:00–16:07) | 1,859,660 | 1,816,742 |
+| Templates | 342 | 316 |
+| Templates covering 99% of events | 88 | 80 |
+| Singletons / ≤10 events | 25 / 109 | 27 / 111 |
+| Throughput | 19.9k ev/s (94 s) | 20.6k ev/s (88 s) |
+| Level found in the first 5 tokens | 100% | 100% |
+| Templates with a date, digit, level or thread left | 0 | 0 |
+| Split candidates (pairs differing in 1 token) | 0 | 2 (7 and 2 events) |
+| Median / max tokens; templates hitting the 40-token cap | 9 / 40; 44 | 9 / 40; 39 |
+
+- **Saturation:** templates still grow ~10–25 per 10% of the day. These are
+  rare message types, not noise.
+- **Cross-node:** learning on node96, only 25 node97 events (0.001%, 15
+  templates) hit an unseen template.
+- **Production-like `max_docs=200k` on node97:**
+  - first 200k (current behaviour): 0.03% of the rest of the day unseen,
+    **107** unseen templates;
+  - 200k sampled evenly across the day: 0.02% unseen, **74** unseen templates.
+  - The unseen ones are rare business or error messages (LixiHandler,
+    TransferHandler, ExchNode…). In realtime they become PENDING and are not
+    scored.
+- **Semantic loss from Drain generalisation:** 70–79 templates had a word
+  position generalised. Most of them are free-text user input (`params
+  khang`, `Dcu m …`). One is a real loss: `ussd rsp … content: <*>` merges the
+  result codes `SYNTAX_ERR` / `NAME_CORRECT` / `PREPAID_NOPASS`. Also
+  `con-<*>-Sender: send <*>` merges `send message` / `send login`.

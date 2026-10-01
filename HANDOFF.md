@@ -196,6 +196,18 @@ làm một process đang chạy tự lặp vô hạn.
 - `config.yaml` `max_docs` back to 200000 (no env/CLI override, by decision).
 - 6 tests in `TestDrain3UniversalMaskingRules` fail already before this change (regex work pending).
 
+## Done 2026-10-01 (02:10–02:55): regex layer before Drain3 (uncommitted)
+Supersedes the "Regex/masking thực tế" section and items 1, 2, 5 below. The design and
+numbers are in `agents.md`. In short: new `logai/parsing/preprocessor.py`:
+- level is searched in the first 5 tokens (shared with `es_collector`);
+- prefix and every timestamp are **deleted**;
+- XML is reduced to element names + words;
+- ids and numbers become `<*>`, words are kept.
+
+Config `masking_rules` now defaults to `[]`. Before deploy: reset the PVC training
+artifacts and retrain. Known timing-flaky test: `test_high_load_throughput_and_stress`
+(also fails on HEAD on this machine).
+
 ## Việc tiếp theo (đang chờ user quyết)
 1. **Tóm tắt XML thay vì xoá trắng** (đề xuất cuối cùng): giữ tên phần tử nghiệp vụ chính (bỏ
    Envelope/Body/Header) + thẻ trạng thái phổ biến (`error`, `resultcode`, `status`, `description`...)
