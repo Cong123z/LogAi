@@ -55,12 +55,13 @@ doc_matcher:
   seed_corpus_path: "docs/documentation_corpus.yaml"
   overrides_path: "data/documentation_overrides.json"
   status_path: "data/documentation_status.json"
-  similarity_threshold: 0.5
+  similarity_threshold: 0.75
   refresh_interval_seconds: 5
 
 features:
   windows_seconds: [10, 60, 300]
-  rolling_window_points: 30
+  # Baseline = closed 10s and 1m buckets over this span (time-based, not per event).
+  baseline_seconds: 1800
   history_retention_seconds: 3600
   rate_floor: 0.2
 

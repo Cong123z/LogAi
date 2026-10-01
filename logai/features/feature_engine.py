@@ -1,8 +1,9 @@
 """Feature generation (plan section 3.8 / 4.6).
 
-Maintains, per (service, group_id) window, a bounded deque of recent event
-timestamps plus a rolling history of computed 1-minute rates (used for
-mean/std/z-score/slope). Keying the window by BOTH service and group keeps each
+Maintains, per (service, group_id) window, bounded deques of recent event
+timestamps (current 10s / 1m / 5m rates) plus a **time-based baseline**: the
+rates of closed 10-second and 1-minute buckets over the last
+``baseline_seconds``. Keying the window by BOTH service and group keeps each
 service's rate baseline isolated - a group shared by several services no longer
 averages them into one blended baseline. The same `FeatureEngine` is used by:
   - training: fed historical events in timestamp order to build the feature
@@ -11,10 +12,17 @@ averages them into one blended baseline. The same `FeatureEngine` is used by:
 
 This keeps train/serve feature logic identical, which matters for anomaly
 detection consistency.
+
+Why buckets instead of a per-event history: a history that grows by one point
+per event spans only the last few seconds of a busy window, so any sustained
+change becomes the new "normal" almost immediately. Buckets advance with time,
+not with traffic, and buckets in which a window received nothing count as zero
+(from the engine's ``origin``, the moment it started listening), so a group
+that is normally silent keeps a near-zero baseline.
 """
 from __future__ import annotations
 
-import statistics
+import math
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
@@ -22,14 +30,96 @@ from typing import Deque, Dict, Iterable, List, Optional, Tuple
 from logai.config import FeatureConfig
 from logai.models import FeatureVector
 
+BUCKET_10S = 10.0
+BUCKET_1M = 60.0
+# A z-score needs a few closed buckets before mean/std mean anything.
+MIN_BASELINE_10S_BUCKETS = 3   # 30s; a median of 3 already ignores one partial bucket
+MIN_BASELINE_1M_BUCKETS = 3    # three minutes of 1-minute buckets
+# spike_ratio_10s compares the peak of the most recent buckets to the baseline.
+SPIKE_RECENT_BUCKETS = 6
+
+
+class _RollingStats:
+    """Bounded series of closed-bucket rates.
+
+    Statistics only change when a bucket closes, so they are computed lazily
+    once per change instead of on every event. ``median`` / ``robust_std``
+    (scaled MAD) are the deviation baseline: an incident lasting less than
+    half of ``baseline_seconds`` cannot drag them towards itself, unlike a
+    mean/std baseline. ``mean`` / ``std`` remain for burstiness (CV^2).
+    """
+
+    def __init__(self, maxlen: float):
+        self.maxlen = max(1, int(maxlen))
+        self.values: Deque[float] = deque(maxlen=self.maxlen)
+        self._stats: Optional[Tuple[float, float, float, float]] = None
+
+    def append(self, value: float) -> None:
+        self.values.append(value)
+        self._stats = None
+
+    def extend_zeros(self, count: int) -> None:
+        if count > 0:
+            self.values.extend([0.0] * min(count, self.maxlen))
+            self._stats = None
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def _compute(self) -> Tuple[float, float, float, float]:
+        if self._stats is None:
+            n = len(self.values)
+            if n == 0:
+                self._stats = (0.0, 0.0, 0.0, 0.0)
+            else:
+                mean = sum(self.values) / n
+                std = (
+                    math.sqrt(max(0.0, sum(v * v for v in self.values) / n - mean * mean))
+                    if n > 1 else 0.0
+                )
+                ordered = sorted(self.values)
+                median = _median(ordered)
+                mad = _median(sorted(abs(v - median) for v in ordered))
+                self._stats = (mean, std, median, 1.4826 * mad)
+        return self._stats
+
+    def mean(self) -> float:
+        return self._compute()[0]
+
+    def std(self) -> float:
+        return self._compute()[1]
+
+    def median(self) -> float:
+        return self._compute()[2]
+
+    def robust_std(self) -> float:
+        return self._compute()[3]
+
+    def recent_max(self, count: int) -> float:
+        if not self.values:
+            return 0.0
+        n = len(self.values)
+        return max(self.values[i] for i in range(max(0, n - count), n))
+
+
+def _median(ordered: List[float]) -> float:
+    n = len(ordered)
+    mid = n // 2
+    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+
 
 @dataclass
 class _GroupWindow:
     ts_10s: Deque[float] = field(default_factory=deque)
     ts_1m: Deque[float] = field(default_factory=deque)
     ts_5m: Deque[float] = field(default_factory=deque)
-    rate_10s_history: Deque[float] = field(default_factory=deque)
-    rate_1m_history: Deque[float] = field(default_factory=deque)
+    # Closed-bucket baselines (rates in events/s) and the open bucket of each.
+    hist_10s: _RollingStats = field(default_factory=lambda: _RollingStats(180))
+    hist_1m: _RollingStats = field(default_factory=lambda: _RollingStats(30))
+    bucket_10s: Optional[int] = None
+    bucket_10s_count: int = 0
+    bucket_1m: Optional[int] = None
+    bucket_1m_count: int = 0
 
     @property
     def timestamps(self) -> Deque[float]:
@@ -42,21 +132,31 @@ class _GroupWindow:
 
 
 class FeatureEngine:
-    def __init__(self, config: FeatureConfig):
+    def __init__(self, config: FeatureConfig, origin: Optional[float] = None):
+        """``origin`` is when the engine started observing traffic; buckets
+        between it and a window's first event count as silent (zero). Training
+        passes the earliest training timestamp; realtime leaves it unset and
+        the first event received fixes it."""
         self.config = config
+        self._origin = origin
         # Window key is (service, group_id). The body is key-agnostic (it only
         # stores/reads by the key), so re-keying per service is a type change.
         self._windows: Dict[Tuple[str, str], _GroupWindow] = defaultdict(self._create_window)
 
+    @property
+    def origin(self) -> Optional[float]:
+        return self._origin
+
     def _create_window(self) -> _GroupWindow:
-        maxlen = self.config.rolling_window_points
-        return _GroupWindow(
-            ts_10s=deque(),
-            ts_1m=deque(),
-            ts_5m=deque(),
-            rate_10s_history=deque(maxlen=maxlen),
-            rate_1m_history=deque(maxlen=maxlen),
+        baseline = float(self.config.baseline_seconds)
+        gw = _GroupWindow(
+            hist_10s=_RollingStats(baseline / BUCKET_10S),
+            hist_1m=_RollingStats(baseline / BUCKET_1M),
         )
+        if self._origin is not None:
+            gw.bucket_10s = int(self._origin // BUCKET_10S)
+            gw.bucket_1m = int(self._origin // BUCKET_1M)
+        return gw
 
     def _prune(self, gw: _GroupWindow, now: float) -> None:
         w10, w1m, w5m = self.config.windows_seconds
@@ -67,24 +167,51 @@ class FeatureEngine:
         while gw.ts_5m and now - gw.ts_5m[0] > w5m:
             gw.ts_5m.popleft()
 
+    @staticmethod
+    def _roll(
+        index: Optional[int], count: int, hist: _RollingStats, width: float, now: float
+    ) -> Tuple[int, int]:
+        """Close the open bucket (and any empty ones) up to ``now``.
+        Out-of-order events stay in the open bucket."""
+        now_index = int(now // width)
+        if index is None:
+            return now_index, 0
+        if now_index <= index:
+            return index, count
+        hist.append(count / width)
+        hist.extend_zeros(now_index - index - 1)
+        return now_index, 0
+
+    def _advance(self, gw: _GroupWindow, now: float) -> None:
+        gw.bucket_10s, gw.bucket_10s_count = self._roll(
+            gw.bucket_10s, gw.bucket_10s_count, gw.hist_10s, BUCKET_10S, now
+        )
+        gw.bucket_1m, gw.bucket_1m_count = self._roll(
+            gw.bucket_1m, gw.bucket_1m_count, gw.hist_1m, BUCKET_1M, now
+        )
+
+    @staticmethod
+    def _append_sorted(values: Deque[float], timestamp: float) -> Deque[float]:
+        values.append(timestamp)
+        if len(values) > 1 and values[-1] < values[-2]:
+            return deque(sorted(values))
+        return values
+
     def update(self, group_id: Tuple[str, str], timestamp: float) -> FeatureVector:
         """Record one event for window `group_id` = (service, group) at
         `timestamp` and return the freshly computed feature vector for that
         (service, group) cell. The param keeps the name `group_id` because it is
         echoed straight into FeatureVector.group_id; it now carries a tuple."""
+        if self._origin is None:
+            self._origin = timestamp
         gw = self._windows[group_id]
+        self._advance(gw, timestamp)
+        gw.bucket_10s_count += 1
+        gw.bucket_1m_count += 1
 
-        gw.ts_10s.append(timestamp)
-        if len(gw.ts_10s) > 1 and gw.ts_10s[-1] < gw.ts_10s[-2]:
-            gw.ts_10s = deque(sorted(gw.ts_10s))
-
-        gw.ts_1m.append(timestamp)
-        if len(gw.ts_1m) > 1 and gw.ts_1m[-1] < gw.ts_1m[-2]:
-            gw.ts_1m = deque(sorted(gw.ts_1m))
-
-        gw.ts_5m.append(timestamp)
-        if len(gw.ts_5m) > 1 and gw.ts_5m[-1] < gw.ts_5m[-2]:
-            gw.ts_5m = deque(sorted(gw.ts_5m))
+        gw.ts_10s = self._append_sorted(gw.ts_10s, timestamp)
+        gw.ts_1m = self._append_sorted(gw.ts_1m, timestamp)
+        gw.ts_5m = self._append_sorted(gw.ts_5m, timestamp)
 
         self._prune(gw, timestamp)
         return self._compute(group_id, gw, timestamp)
@@ -93,6 +220,8 @@ class FeatureEngine:
         """Compute the current feature vector without adding a new event -
         useful for periodic re-evaluation of idle (service, group) cells."""
         gw = self._windows[group_id]
+        if self._origin is not None and timestamp >= self._origin:
+            self._advance(gw, timestamp)
         self._prune(gw, timestamp)
         return self._compute(group_id, gw, timestamp)
 
@@ -129,27 +258,8 @@ class FeatureEngine:
         count_1m = len(gw.ts_1m)
         count_5m = len(gw.ts_5m)
 
-        rate_10s = count_10s / w10
-        rate_1m = count_1m / w1m
-        rate_5m = count_5m / w5m
-
-        # 1. Baseline statistics computed strictly from prior history (prior samples)
-        # to prevent anomaly from self-inflating the baseline (Baseline Contamination).
-        hist_10s = list(gw.rate_10s_history)
-        hist_1m = list(gw.rate_1m_history)
-
-        mu_10 = statistics.fmean(hist_10s) if hist_10s else 0.0
-        sigma_10 = statistics.pstdev(hist_10s) if len(hist_10s) > 1 else 0.0
-
-        mu_1m = statistics.fmean(hist_1m) if hist_1m else 0.0
-        sigma_1m = statistics.pstdev(hist_1m) if len(hist_1m) > 1 else 0.0
-
-        # Append current rates to history after capturing prior baseline
-        gw.rate_10s_history.append(rate_10s)
-        gw.rate_1m_history.append(rate_1m)
-
         # Cold-start: return neutral baseline vector
-        if len(gw.timestamps) <= 1:
+        if count_5m <= 1:
             return FeatureVector(
                 group_id=group_id,
                 timestamp=now,
@@ -164,15 +274,33 @@ class FeatureEngine:
                 count_1m=count_1m,
             )
 
+        rate_10s = count_10s / w10
+        rate_1m = count_1m / w1m
+        rate_5m = count_5m / w5m
+
         eps = 1e-9
         rate_floor = max(float(self.config.rate_floor), eps)
 
-        # 1. z_score_10s: short-term burst compared to 10s baseline
-        z_score_10s = (rate_10s - mu_10) / (sigma_10 + eps) if sigma_10 > eps else 0.0
+        # Baseline from closed buckets only, so the current burst never
+        # contaminates the baseline it is compared against. Deviation uses the
+        # robust median / scaled MAD; burstiness uses mean / std.
+        mu_10 = gw.hist_10s.mean()
+        sigma_10 = gw.hist_10s.std()
+        med_10 = gw.hist_10s.median()
+        med_1m = gw.hist_1m.median()
+        # A perfectly flat (often all-zero) baseline has zero spread; floor it
+        # so a burst on a normally silent group still yields a large, finite z.
+        spread_10 = max(gw.hist_10s.robust_std(), rate_floor)
+        spread_1m = max(gw.hist_1m.robust_std(), rate_floor)
+        has_10s_baseline = len(gw.hist_10s) >= MIN_BASELINE_10S_BUCKETS
+        has_1m_baseline = len(gw.hist_1m) >= MIN_BASELINE_1M_BUCKETS
+
+        # 1. z_score_10s: current 10s rate against the 10s-bucket baseline
+        z_score_10s = (rate_10s - med_10) / spread_10 if has_10s_baseline else 0.0
         z_score_10s = max(-10.0, min(10.0, z_score_10s))
 
-        # 2. z_score_1m: medium-term deviation compared to 1m baseline
-        z_score_1m = (rate_1m - mu_1m) / (sigma_1m + eps) if sigma_1m > eps else 0.0
+        # 2. z_score_1m: current 1m rate against the 1m-bucket baseline
+        z_score_1m = (rate_1m - med_1m) / spread_1m if has_1m_baseline else 0.0
         z_score_1m = max(-10.0, min(10.0, z_score_1m))
 
         # 3. short_growth_rate: instant burst ratio between 10s and 1m (theoretical max ~6.0)
@@ -186,25 +314,25 @@ class FeatureEngine:
             growth_rate = 1.0 if rate_1m <= eps else 5.0
         growth_rate = max(0.0, min(5.0, growth_rate))
 
-        # 5. burstiness_10s: relative variance (CV^2 = sigma^2 / mu^2) on 10s rate history
-        if len(hist_10s) > 1:
+        # 5. burstiness_10s: relative variance (CV^2) of the 10s-bucket baseline
+        if len(gw.hist_10s) > 1:
             burstiness_10s = (sigma_10 ** 2) / max(mu_10, rate_floor) ** 2
         else:
             burstiness_10s = 0.0
         burstiness_10s = max(0.0, min(20.0, burstiness_10s))
 
-        # 6. rate_delta_norm: rate delta normalized by 1m standard deviation
-        rate_delta_norm = (rate_1m - rate_5m) / (sigma_1m + eps) if sigma_1m > eps else 0.0
+        # 6. rate_delta_norm: 1m vs 5m rate, normalised by the 1m-bucket spread
+        rate_delta_norm = (rate_1m - rate_5m) / spread_1m if has_1m_baseline else 0.0
         rate_delta_norm = max(-10.0, min(10.0, rate_delta_norm))
 
-        # 7. slope_norm: linear trend of 1m rate history normalized by mean
-        slope = self._slope(list(gw.rate_1m_history))
-        slope_norm = slope / (mu_1m + eps) if mu_1m > eps else 0.0
+        # 7. slope_norm: linear trend of the 1m-bucket baseline normalised by its median
+        slope = self._slope(list(gw.hist_1m.values)) if has_1m_baseline else 0.0
+        slope_norm = slope / max(med_1m, rate_floor)
         slope_norm = max(-10.0, min(10.0, slope_norm))
 
-        # 8. spike_ratio_10s: peak recent 10s rate relative to baseline mu_10
-        max_recent_r10 = max(gw.rate_10s_history) if gw.rate_10s_history else rate_10s
-        spike_ratio_10s = max_recent_r10 / max(mu_10, rate_floor)
+        # 8. spike_ratio_10s: peak of the current and most recent 10s buckets vs baseline
+        peak_10s = max(rate_10s, gw.hist_10s.recent_max(SPIKE_RECENT_BUCKETS))
+        spike_ratio_10s = peak_10s / max(med_10, rate_floor)
         spike_ratio_10s = max(0.0, min(20.0, spike_ratio_10s))
 
         return FeatureVector(

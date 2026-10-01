@@ -86,7 +86,7 @@ class TestEndToEndParityAndRealtimeAlert(unittest.TestCase):
     def setUp(self):
         self.feat_cfg = FeatureConfig(
             windows_seconds=(10, 60, 300),
-            rolling_window_points=30,
+            baseline_seconds=1800.0,
             history_retention_seconds=3600.0,
         )
         self.anomaly_cfg = AnomalyConfig(

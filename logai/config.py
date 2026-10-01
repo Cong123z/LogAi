@@ -106,7 +106,10 @@ class DocMatcherConfig:
 @dataclass
 class FeatureConfig:
     windows_seconds: tuple = (10, 60, 300)  # 10s, 1m, 5m
-    rolling_window_points: int = 30
+    # Baseline span: closed 10-second and 1-minute buckets over this many
+    # seconds feed the z-score / burstiness / slope features. Time-based, so a
+    # sustained incident does not become "normal" after a few events.
+    baseline_seconds: float = 1800.0
     history_retention_seconds: float = 3600.0
     # Stabilize ratio-based features when a group's baseline is near zero.
     rate_floor: float = 0.2

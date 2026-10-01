@@ -611,8 +611,12 @@ class TrainingPipeline:
         logger.info("Phase 7: Extracting feature vectors and training global anomaly model...")
         t_phase7 = time.time()
         all_feature_vectors: List[FeatureVector] = []
+        # Every window shares the training start as its bucket origin, matching
+        # a realtime engine that has been listening since then: buckets before a
+        # window's first event count as silent.
+        origin = min((ts[0] for ts in grouped.values() if ts), default=None)
         for window_key, timestamps in grouped.items():
-            engine = FeatureEngine(self.config.features)
+            engine = FeatureEngine(self.config.features, origin=origin)
             for timestamp in timestamps:
                 fv = engine.update(window_key, timestamp)
                 all_feature_vectors.append(fv)

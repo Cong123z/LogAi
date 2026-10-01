@@ -9,7 +9,7 @@ class TestFeatureVector8D(unittest.TestCase):
     def setUp(self):
         self.config = FeatureConfig(
             windows_seconds=(10, 60, 300),
-            rolling_window_points=30,
+            baseline_seconds=1800.0,
             history_retention_seconds=3600.0,
         )
         self.engine = FeatureEngine(self.config)
@@ -56,13 +56,68 @@ class TestFeatureVector8D(unittest.TestCase):
         self.assertAlmostEqual(fv.spike_ratio_10s, 0.5)
         self.assertLess(fv.burstiness_10s, 20.0)
 
-    def test_window_maxlen_matches_config(self):
-        """_GroupWindow should respect rolling_window_points from config."""
-        # Touch window
+    def test_baseline_length_matches_config(self):
+        """Baseline bucket series span baseline_seconds (1800s = 180 x 10s, 30 x 1m)."""
         self.engine.update("G001", 1000.0)
         gw = self.engine._windows["G001"]
-        self.assertEqual(gw.rate_10s_history.maxlen, 30)
-        self.assertEqual(gw.rate_1m_history.maxlen, 30)
+        self.assertEqual(gw.hist_10s.maxlen, 180)
+        self.assertEqual(gw.hist_1m.maxlen, 30)
+
+    def test_sustained_burst_stays_anomalous(self):
+        """A sustained rate change must not become the baseline within seconds.
+
+        30 minutes at 1 event/s, then 5 minutes at 20 events/s: z_score_1m must
+        still be high at the end of the burst (the old per-event history adapted
+        after ~30 events)."""
+        t = 0.0
+        while t < 1800.0:
+            self.engine.update("G_BUSY", t)
+            t += 1.0
+        fv = None
+        while t < 2100.0:
+            fv = self.engine.update("G_BUSY", t)
+            t += 0.05
+        self.assertGreater(fv.z_score_1m, 5.0)
+        self.assertGreater(fv.z_score_10s, 5.0)
+
+    def test_silent_group_burst_is_compared_to_zero_baseline(self):
+        """A group that never logged since the engine started has a zero baseline:
+        its first burst must give a large z-score, not a neutral 0."""
+        # Another window establishes the engine origin 10 minutes earlier.
+        self.engine.update("G_OTHER", 1000.0)
+        fv = None
+        for i in range(50):
+            fv = self.engine.update("G_SILENT", 1600.0 + i * 0.2)
+        self.assertEqual(fv.z_score_10s, 10.0)
+        self.assertGreater(fv.spike_ratio_10s, 10.0)
+
+    def test_steady_traffic_has_small_z_scores(self):
+        """Steady traffic close to its own baseline stays near z = 0."""
+        fv = None
+        for i in range(3600):
+            fv = self.engine.update("G_STEADY", 1000.0 + i)
+        self.assertLess(abs(fv.z_score_10s), 1.0)
+        self.assertLess(abs(fv.z_score_1m), 1.0)
+
+    def test_explicit_origin_matches_realtime_listening_since_origin(self):
+        """Training passes the training start as origin; the result must equal a
+        realtime engine that saw an unrelated first event at that time."""
+        trained = FeatureEngine(self.config, origin=1000.0)
+        realtime = FeatureEngine(self.config)
+        realtime.update("G_FIRST", 1000.0)
+        for i in range(20):
+            ts = 1500.0 + i
+            self.assertEqual(
+                trained.update("G_X", ts).as_vector(),
+                realtime.update("G_X", ts).as_vector(),
+            )
+
+    def test_snapshot_before_any_event_is_neutral(self):
+        """Idle-tick snapshots can run before traffic arrives; they must not
+        fix the origin or produce non-neutral values."""
+        fv = self.engine.snapshot("G_IDLE", 5.0)
+        self.assertEqual(fv.as_vector(), [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+        self.assertIsNone(self.engine.origin)
 
     def test_steady_stream(self):
         """A steady stream of 1 event every second should produce near-constant rates."""
