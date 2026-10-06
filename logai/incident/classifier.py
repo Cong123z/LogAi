@@ -98,8 +98,10 @@ class IncidentClassifier:
         store: JSONStore,
         session: Optional[requests.Session] = None,
         on_result: Optional[Callable[[str], None]] = None,
+        service_store: Optional[JSONStore] = None,
     ):
         self.config = config
+        self.service_store = service_store
         self.matcher = matcher
         self.groups = groups
         self.templates = templates
@@ -107,7 +109,9 @@ class IncidentClassifier:
         self._session = session or requests.Session()
         self._on_result = on_result or (lambda result: None)
         self._queue: "queue.Queue[tuple]" = queue.Queue(maxsize=QUEUE_SIZE)
-        self._active: set[WindowKey] = set()
+        # Window tuples and ("service", name) keys share one set; the tag keeps
+        # a service named like a window from ever colliding with it.
+        self._active: set[tuple] = set()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -121,6 +125,14 @@ class IncidentClassifier:
                         identity, "Interrupted by engine restart before analysis finished"
                     ), flush=False)
         self.store.flush()
+        if self.service_store is not None:
+            for service, record in self.service_store.all().items():
+                if isinstance(record, dict) and record.get("status") == "pending":
+                    self.service_store.set(service, self._failed_service(
+                        service, record.get("requested_at"),
+                        "Interrupted by engine restart before analysis finished",
+                    ), flush=False)
+            self.service_store.flush()
 
     # -- engine-facing API ---------------------------------------------------
 
@@ -148,13 +160,55 @@ class IncidentClassifier:
                 self._active.discard(window_key)
             return False
         try:
-            self._queue.put_nowait((window_key, alert, summarize_parameters(recent_params)))
+            self._queue.put_nowait(("window", window_key, alert, summarize_parameters(recent_params)))
         except queue.Full:
             logger.warning("Incident analysis queue full; dropping %s", window_key)
             with self._lock:
                 self._active.discard(window_key)
             self.store.set(group_id_key(window_key), self._failed(
                 window_key, "Analysis queue is full; incident was not analyzed"
+            ))
+            self._on_result("dropped")
+            return False
+        return True
+
+    def submit_service(
+        self, service: str, requested_at: float, evidence: Dict[str, Any],
+        candidates: Dict[str, str], sent_groups: set[str],
+    ) -> bool:
+        """Queue one whole-service analysis without blocking. False when there
+        is no service store, the service is already queued/in flight, the
+        pending record cannot be written, or the queue is full."""
+        if self.service_store is None:
+            return False
+        active_key = ("service", service)
+        with self._lock:
+            if active_key in self._active:
+                return False
+            self._active.add(active_key)
+        try:
+            self.service_store.set(service, {
+                "status": "pending", "service": service,
+                "requested_at": requested_at, "queued_at": time.time(),
+            })
+        except Exception:  # noqa: BLE001 - never raise into the poll loop
+            logger.exception("Unable to persist pending service analysis for %s", service)
+            with self._lock:
+                self._active.discard(active_key)
+            return False
+        try:
+            # ponytail: one worker serves alert and service jobs, so a slow
+            # service analysis delays alert analyses queued behind it; add a
+            # second worker if alert latency matters.
+            self._queue.put_nowait(
+                ("service", service, requested_at, evidence, candidates, sent_groups)
+            )
+        except queue.Full:
+            logger.warning("Analysis queue full; dropping service %s", service)
+            with self._lock:
+                self._active.discard(active_key)
+            self.service_store.set(service, self._failed_service(
+                service, requested_at, "Analysis queue is full; service was not analyzed"
             ))
             self._on_result("dropped")
             return False
@@ -190,14 +244,18 @@ class IncidentClassifier:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                window_key, alert, parameters = self._queue.get(timeout=0.5)
+                kind, *job = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
+            active_key = job[0] if kind == "window" else ("service", job[0])
             try:
-                self.process(window_key, alert, parameters)
+                if kind == "window":
+                    self.process(*job)
+                else:
+                    self.process_service(*job)
             finally:
                 with self._lock:
-                    self._active.discard(window_key)
+                    self._active.discard(active_key)
 
     # -- one analysis ----------------------------------------------------------
 
@@ -219,6 +277,48 @@ class IncidentClassifier:
             logger.exception("Unable to persist incident analysis for %s", window_key)
         self._on_result(result)
         return record
+
+    def process_service(
+        self, service: str, requested_at: float, evidence: Dict[str, Any],
+        candidates: Dict[str, str], sent_groups: set[str],
+    ) -> Dict[str, Any]:
+        """Whole-service analysis: LLM -> validation -> persist. Never raises."""
+        from logai.incident.service_analysis import (
+            SERVICE_SYSTEM_PROMPT,
+            validate_service_reply,
+        )
+
+        try:
+            content = self._call(
+                evidence, SERVICE_SYSTEM_PROMPT, max(self.config.max_tokens, 2000)
+            )
+            record = {
+                "status": "done", "service": service, "requested_at": requested_at,
+                "analyzed_at": time.time(), "model": self.config.model,
+                **validate_service_reply(self._parse(content), candidates, sent_groups),
+                "error": None,
+            }
+            result = "service_done"
+        except Exception as exc:  # noqa: BLE001 - analysis is advisory enrichment
+            logger.warning("Service analysis failed for %s: %s", service, exc)
+            record = self._failed_service(service, requested_at, str(exc))
+            result = "service_failed"
+        try:
+            if self.service_store is not None:
+                self.service_store.set(service, record)
+        except Exception:  # noqa: BLE001
+            logger.exception("Unable to persist service analysis for %s", service)
+        self._on_result(result)
+        return record
+
+    def _failed_service(
+        self, service: str, requested_at: Optional[float], error: str
+    ) -> Dict[str, Any]:
+        return {
+            "status": "failed", "service": service, "requested_at": requested_at,
+            "analyzed_at": time.time(), "model": self.config.model,
+            "health": None, "summary": "", "issues": [], "error": error[:ERROR_LIMIT],
+        }
 
     def _evidence(
         self, window_key: WindowKey, alert: Dict[str, Any], parameters: List[Dict[str, Any]]
@@ -266,18 +366,21 @@ class IncidentClassifier:
         }
         return evidence, {entry.doc_id: entry.title for entry, _ in hits}
 
-    def _call(self, evidence: Dict[str, Any]) -> str:
+    def _call(
+        self, evidence: Dict[str, Any], system_prompt: str = SYSTEM_PROMPT,
+        max_tokens: Optional[int] = None,
+    ) -> str:
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         body = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)},
             ],
             "temperature": 0,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens or self.config.max_tokens,
         }
         attempts = self.config.max_retries + 1
         for attempt in range(attempts):

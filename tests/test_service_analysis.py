@@ -203,3 +203,91 @@ def test_validate_malformed_issues():
 
 def test_service_prompt_mentions_shape():
     assert '"health"' in SERVICE_SYSTEM_PROMPT and '"issues"' in SERVICE_SYSTEM_PROMPT
+
+
+# --- Task 3: classifier service job type ---------------------------------------
+
+import time
+
+from logai.config import LLMConfig
+from logai.incident.classifier import IncidentClassifier
+
+SVC_EVIDENCE = {"service": "recharge", "groups": [], "candidates": []}
+SVC_REPLY = {"health": "degraded", "summary": "s", "issues": [
+    {"title": "t", "group_ids": ["G1"], "documentation_id": "DOC-001", "reasoning": "r"}]}
+
+
+def _svc_classifier(tmp_path, responses, preseed=None):
+    groups, templates = _registries(tmp_path)
+    service_store = JSONStore(tmp_path / "service_analysis.json")
+    if preseed:
+        service_store.bulk_set(preseed)
+        service_store = JSONStore(tmp_path / "service_analysis.json")
+    session = tic.FakeSession(responses)
+    results = []
+    clf = IncidentClassifier(
+        LLMConfig(endpoint="http://llm", model="m", retry_backoff_seconds=0),
+        tic._matcher(tmp_path, tic.CLASSIFIER_DOCS), groups, templates,
+        JSONStore(tmp_path / "incident_analysis.json"),
+        session=session, on_result=results.append, service_store=service_store,
+    )
+    return clf, session, service_store, results
+
+
+def test_process_service_done(tmp_path):
+    clf, session, store, results = _svc_classifier(tmp_path, [tic._reply(SVC_REPLY)])
+    rec = clf.process_service("recharge", 5.0, SVC_EVIDENCE, {"DOC-001": "title DOC-001"}, {"G1"})
+    assert rec["status"] == "done" and rec["health"] == "degraded" and rec["requested_at"] == 5.0
+    assert rec["issues"][0]["document_title"] == "title DOC-001" and rec["model"] == "m"
+    assert store.get("recharge")["status"] == "done"
+    body = session.calls[0]["json"]
+    assert body["max_tokens"] == 2000
+    assert body["messages"][0]["content"] == SERVICE_SYSTEM_PROMPT
+    assert json.loads(body["messages"][1]["content"]) == SVC_EVIDENCE
+    assert results == ["service_done"]
+
+
+def test_process_service_failed_keeps_requested_at(tmp_path):
+    clf, _, store, results = _svc_classifier(tmp_path, [tic._reply("garbage")])
+    rec = clf.process_service("recharge", 5.0, SVC_EVIDENCE, {}, set())
+    assert rec["status"] == "failed" and rec["requested_at"] == 5.0 and rec["error"]
+    assert store.get("recharge")["status"] == "failed"
+    assert results == ["service_failed"]
+
+
+def test_submit_service_pending_and_dedupe(tmp_path):
+    clf, _, store, _ = _svc_classifier(tmp_path, [])
+    assert clf.submit_service("recharge", 5.0, SVC_EVIDENCE, {}, set()) is True
+    record = store.get("recharge")
+    assert record["status"] == "pending" and record["requested_at"] == 5.0
+    assert clf.submit_service("recharge", 6.0, SVC_EVIDENCE, {}, set()) is False
+    clf.service_store = None
+    assert clf.submit_service("other", 6.0, SVC_EVIDENCE, {}, set()) is False
+
+
+def test_service_restart_pending_to_failed(tmp_path):
+    _, _, store, _ = _svc_classifier(tmp_path, [], preseed={
+        "recharge": {"status": "pending", "service": "recharge", "requested_at": 7.0, "queued_at": 7.0}})
+    record = JSONStore(tmp_path / "service_analysis.json").get("recharge")
+    assert record["status"] == "failed" and record["requested_at"] == 7.0
+    assert "restart" in record["error"]
+
+
+def test_worker_runs_both_job_types(tmp_path):
+    window_reply = {"documentation_id": None, "reasoning": "x", "suggestion": tic.SUGGESTION}
+    clf, _, store, _ = _svc_classifier(tmp_path, [tic._reply(window_reply), tic._reply(SVC_REPLY)])
+    clf.start()
+    try:
+        assert clf.submit(("recharge", "G1"), tic.ALERT, [])
+        assert clf.submit_service("recharge", 5.0, SVC_EVIDENCE, {"DOC-001": "t"}, {"G1"})
+        incident = JSONStore(tmp_path / "incident_analysis.json")
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            done = (JSONStore(tmp_path / "incident_analysis.json").get(json.dumps(["recharge", "G1"])) or {}).get("status")
+            svc = (JSONStore(tmp_path / "service_analysis.json").get("recharge") or {}).get("status")
+            if done not in (None, "pending") and svc not in (None, "pending"):
+                break
+            time.sleep(0.05)
+        assert done == "done" and svc == "done"
+    finally:
+        clf.stop()
