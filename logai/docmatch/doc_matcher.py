@@ -267,6 +267,20 @@ class DocumentationMatcher:
             entry = self.entries[index]
             return MatchResult(group_id, entry.doc_id, similarity, True, entry.error_code)
 
+    def top_k(self, centroid: Any, k: int) -> List[tuple[DocEntry, float]]:
+        """The k closest corpus entries to ``centroid``, most similar first;
+        [] when nothing can be compared (no corpus, no/incompatible centroid)."""
+        with self._lock:
+            if not self.ready or not self.entries or centroid is None:
+                return []
+            candidate = np.asarray(centroid)
+            if candidate.ndim != 1 or candidate.shape[0] != self.embeddings.shape[1]:
+                return []
+            sims = self.embeddings @ candidate
+            return [
+                (self.entries[i], float(sims[i])) for i in np.argsort(-sims)[:k]
+            ]
+
     def match_all(
         self, group_centroids: Dict[str, np.ndarray]
     ) -> Dict[str, MatchResult]:

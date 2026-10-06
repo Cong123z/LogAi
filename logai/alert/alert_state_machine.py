@@ -164,6 +164,16 @@ class AlertStateMachine:
         """
         return list(self._non_normal)
 
+    def keys_in_states(self, states: Set[str]) -> Set[Tuple[str, str]]:
+        """Persisted (service, group_id) cells whose alert_state is in `states`.
+        Legacy plain-string keys are skipped."""
+        return {
+            identity
+            for key, raw in self._store.all().items()
+            if isinstance(raw, dict) and raw.get("alert_state") in states
+            and isinstance(identity := _parse_group_id_key(key), tuple)
+        }
+
     def drop_group(self, group_id: str) -> int:
         """Delete all persisted service cells for an empty semantic group."""
         keys = []
