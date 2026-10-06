@@ -588,6 +588,29 @@ như trước.
   documentation của `GroupState`. Suggestion có thể lưu thành tài liệu mới qua
   nút "Save as document" (dùng `POST /api/documentation` sẵn có).
 
+### 7.7 On-demand service analysis
+
+Phân tích toàn bộ một service theo yêu cầu (mọi alert state), chạy trên cùng
+worker `IncidentClassifier` như một loại job thứ hai.
+
+- **Request**: Web UI (panel "Service analysis" trong tab Alerts) gọi
+  `POST /api/service-analysis {service}`; web ghi `data/analysis_requests.json`
+  (`{service: requested_at}`, web là writer duy nhất, entry > 24h bị bỏ). Trả về
+  404 service lạ, 503 engine heartbeat cũ, 409 `llm_disabled` (heartbeat
+  `runtime.llm_enabled=false`), 409 `analysis_pending`.
+- **Pickup**: mỗi vòng poll, engine đọc lại file khi mtime đổi và submit mỗi
+  request đúng một lần: `requested_at` phải mới hơn cả bản đã xử lý trong RAM lẫn
+  `requested_at` của record đã lưu (an toàn khi restart). Service không có
+  template/cửa sổ nào bị bỏ qua.
+- **Evidence** (`logai/incident/service_analysis.py`): các group có template của
+  service hoặc có cửa sổ alert `(service, g)`; xếp theo alert state → level cao
+  nhất → event count, tối đa 20 group; mỗi group 3 template và top parameter;
+  candidate docs = top 3/group từ embeddings, khử trùng, tối đa 15.
+- **Kết quả**: `{health: healthy|degraded|critical|unknown, summary, issues[≤10]}`;
+  mỗi issue chỉ được tham chiếu group/doc đã gửi, issue không có doc hợp lệ lẫn
+  suggestion bị loại. Lưu ở `data/service_analysis.json` (chỉ engine ghi, key là
+  service); web chỉ đọc qua `GET /api/service-analysis`.
+
 ## 8. Module ownership và boundary mapping
 
 | Module | Trách nhiệm | Input | Output | State sở hữu |
