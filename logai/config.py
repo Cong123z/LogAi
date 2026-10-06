@@ -194,6 +194,8 @@ class StorageConfig:
     grouping_overrides_file: str = "grouping_overrides.json"
     grouping_status_file: str = "grouping_status.json"
     incident_analysis_file: str = "incident_analysis.json"
+    service_analysis_file: str = "service_analysis.json"
+    analysis_requests_file: str = "analysis_requests.json"
 
 
 @dataclass
