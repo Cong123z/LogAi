@@ -510,6 +510,13 @@
     .alert-state-warming { background:var(--yellow-bg); color:var(--yellow); }
     .alert-state-cooling { background:var(--blue-bg); color:var(--blue); }
     .alert-state-normal { background:var(--green-bg); color:var(--green); }
+    .ai-btn { white-space:nowrap; }
+    .ai-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .ai-matched { background:var(--blue-bg); color:var(--blue); border-color:transparent; }
+    .ai-suggestion { background:var(--yellow-bg); color:var(--yellow); border-color:transparent; }
+    .ai-failed { background:var(--red-bg); color:var(--red); border-color:transparent; }
+    .ai-pending { color:var(--text-dim); }
+    .ai-text { white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; font-size:13px; margin-top:6px; }
 
     /* ── Responsive ───────────────────────────────────────────────── */
     @media (max-width: 768px) {
@@ -715,8 +722,8 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th data-alert-sort="alert_state" class="sorted">State <span class="sort-arrow">▼</span></th><th data-alert-sort="level">Level <span class="sort-arrow"></span></th><th data-alert-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-alert-sort="service">Service <span class="sort-arrow"></span></th><th data-alert-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-alert-sort="anomaly_score">Score <span class="sort-arrow"></span></th><th data-alert-sort="consecutive_anomaly_count">Consecutive <span class="sort-arrow"></span></th><th data-alert-sort="timestamp">Last evaluation <span class="sort-arrow"></span></th><th>Representative Template</th></tr></thead>
-            <tbody id="alerts-tbody"><tr><td colspan="9" class="loading">Loading alert state...</td></tr></tbody>
+            <thead><tr><th data-alert-sort="alert_state" class="sorted">State <span class="sort-arrow">▼</span></th><th data-alert-sort="level">Level <span class="sort-arrow"></span></th><th data-alert-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-alert-sort="service">Service <span class="sort-arrow"></span></th><th data-alert-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-alert-sort="anomaly_score">Score <span class="sort-arrow"></span></th><th data-alert-sort="consecutive_anomaly_count">Consecutive <span class="sort-arrow"></span></th><th data-alert-sort="timestamp">Last evaluation <span class="sort-arrow"></span></th><th>AI analysis</th><th>Representative Template</th></tr></thead>
+            <tbody id="alerts-tbody"><tr><td colspan="10" class="loading">Loading alert state...</td></tr></tbody>
           </table>
         </div>
       </section>
@@ -747,6 +754,15 @@
         <div class="form-error" id="document-error"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="document-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
       </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="ai-analysis-modal" role="dialog" aria-modal="true" aria-labelledby="ai-analysis-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="ai-analysis-title">AI analysis</h2><button class="modal-close" data-close="ai-analysis-modal" aria-label="Close">&times;</button></div>
+      <div class="detail-grid" id="ai-analysis-details"></div>
+      <div id="ai-analysis-suggestion"></div>
+      <div class="form-actions"><button type="button" class="btn" data-close="ai-analysis-modal">Close</button><button type="button" class="btn btn-primary" id="ai-save-document" hidden>Save as document</button></div>
     </div>
   </div>
 
@@ -1094,7 +1110,7 @@
         return state.alertOrder === 'asc' ? comparison : -comparison;
       });
       if (!items.length) {
-        $alertsTbody.innerHTML = '<tr><td colspan="9" class="empty-state">No groups match this alert state.</td></tr>';
+        $alertsTbody.innerHTML = '<tr><td colspan="10" class="empty-state">No groups match this alert state.</td></tr>';
         return;
       }
       $alertsTbody.innerHTML = items.map(item => `
@@ -1107,8 +1123,64 @@
           <td>${Number(item.anomaly_score || 0).toFixed(3)}</td>
           <td>${formatCount(item.consecutive_anomaly_count || 0)}</td>
           <td title="${formatFullTs(item.timestamp)}">${formatTs(item.timestamp)}</td>
+          <td>${aiCell(item)}</td>
           <td><div class="tmpl-text" title="${escapeHtml(item.representative_template || '')}">${highlightWildcards(escapeHtml(item.representative_template || '—'))}</div></td>
         </tr>`).join('');
+    }
+
+    // ── AI incident analysis ──
+    const $aiModal = document.getElementById('ai-analysis-modal');
+    const aiKey = item => `${item.service}|${item.group_id}`;
+    let aiOpenerKey = null;
+    let aiSuggestion = null;
+
+    function aiCell(item) {
+      const a = item.analysis;
+      if (!a) return '—';
+      let label = 'Suggestion', cls = 'ai-suggestion', busy = '';
+      if (a.status === 'pending') { label = 'Analyzing…'; cls = 'ai-pending'; busy = ' aria-busy="true"'; }
+      else if (a.status === 'failed') { label = 'Failed'; cls = 'ai-failed'; }
+      else if (a.documentation_id) { label = `${a.documentation_id} · ${Math.round((a.confidence || 0) * 100)}%`; cls = 'ai-matched'; }
+      return `<button type="button" class="btn ai-btn ${cls}"${busy} data-ai-key="${escapeHtml(aiKey(item))}" aria-label="AI analysis for ${escapeHtml(item.group_id)} on ${escapeHtml(item.service)}">${escapeHtml(label)}</button>`;
+    }
+
+    function openAiAnalysis(item) {
+      const a = item.analysis || {};
+      const rows = [
+        ['Window', `${item.service} / ${item.group_id}`],
+        ['Status', a.status],
+        ['Model', a.model],
+        ['Analyzed', a.analyzed_at ? formatFullTs(a.analyzed_at) : (a.queued_at ? `queued ${formatFullTs(a.queued_at)}` : '')],
+      ];
+      if (a.documentation_id) {
+        rows.push(['Document', `${a.documentation_id}${a.document_title ? ' — ' + a.document_title : ''}`]);
+        rows.push(['Confidence', `${Math.round((a.confidence || 0) * 100)}%`]);
+      }
+      if (a.reasoning) rows.push(['Reasoning', a.reasoning]);
+      if (a.error) rows.push(['Error', a.error]);
+      document.getElementById('ai-analysis-details').innerHTML = rows.map(([label, value]) => `
+        <div class="detail-label">${escapeHtml(label)}</div>
+        <div class="detail-value">${escapeHtml(String(value || '—'))}</div>`).join('');
+
+      aiSuggestion = a.status === 'done' && !a.documentation_id ? a.suggestion : null;
+      document.getElementById('ai-analysis-suggestion').innerHTML = aiSuggestion ? `
+        <div class="form-field" style="margin-top:16px"><label>Suggested solution</label>
+          <div class="detail-value"><strong>${escapeHtml(aiSuggestion.title)}</strong>${aiSuggestion.error_code ? ` <span class="tmpl-id">${escapeHtml(aiSuggestion.error_code)}</span>` : ''}</div>
+          <div class="ai-text">${escapeHtml(aiSuggestion.text)}</div>
+        </div>` : '';
+      document.getElementById('ai-save-document').hidden = !aiSuggestion;
+
+      aiOpenerKey = aiKey(item);
+      $aiModal.classList.add('open');
+      $aiModal.querySelector('.modal-close').focus();
+    }
+
+    function closeAiAnalysis() {
+      $aiModal.classList.remove('open');
+      // Rows re-render on every poll, so find the opener again by its key.
+      const opener = aiOpenerKey && $alertsTbody.querySelector(`[data-ai-key="${CSS.escape(aiOpenerKey)}"]`);
+      if (opener) opener.focus();
+      aiOpenerKey = null;
     }
 
     function openDocumentEditor(docId = null) {
@@ -1647,6 +1719,26 @@
         }
       });
     });
+    $alertsTbody.addEventListener('click', event => {
+      const button = event.target.closest('[data-ai-key]');
+      if (!button) return;
+      const item = state.alerts.find(candidate => aiKey(candidate) === button.dataset.aiKey);
+      if (item) openAiAnalysis(item);
+    });
+    $aiModal.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', closeAiAnalysis));
+    $aiModal.addEventListener('click', event => { if (event.target === $aiModal) closeAiAnalysis(); });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && $aiModal.classList.contains('open')) closeAiAnalysis();
+    });
+    document.getElementById('ai-save-document').addEventListener('click', () => {
+      const suggestion = aiSuggestion;
+      if (!suggestion) return;
+      $aiModal.classList.remove('open');
+      openDocumentEditor();
+      document.getElementById('document-title').value = suggestion.title || '';
+      document.getElementById('document-text').value = suggestion.text || '';
+      document.getElementById('document-error-code').value = suggestion.error_code || '';
+    });
     document.getElementById('delete-document-confirm').addEventListener('click', confirmDocumentDeletion);
     document.getElementById('clear-document-confirm').addEventListener('click', confirmClearDocumentation);
     document.getElementById('add-document-btn').addEventListener('click', () => openDocumentEditor());
@@ -1659,11 +1751,14 @@
         text: document.getElementById('document-text').value,
         error_code: document.getElementById('document-error-code').value,
       };
+      const submit = event.submitter;
+      if (submit) submit.disabled = true;
       try {
         await apiMutation(docId ? `/api/documentation/${encodeURIComponent(docId)}` : '/api/documentation', docId ? 'PUT' : 'POST', payload);
         $documentModal.classList.remove('open');
         await loadData();
       } catch (err) { document.getElementById('document-error').textContent = err.message; }
+      finally { if (submit) submit.disabled = false; }
     });
     document.getElementById('assignment-save').addEventListener('click', async () => {
       try {

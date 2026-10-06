@@ -176,3 +176,22 @@ def test_health_reports_engine_progress_from_fresh_heartbeat():
         assert response.get_json()["last_processed_event_at"] == 123.0
     finally:
         temporary.cleanup()
+
+
+def test_alert_api_attaches_incident_analysis():
+    temporary, base, client = _client()
+    try:
+        key = json.dumps(["api", "GA"])
+        (base / "anomaly_state.json").write_text(json.dumps({
+            key: {"group_id": ["api", "GA"], "alert_state": "ALERTING"}
+        }), encoding="utf-8")
+        (base / "incident_analysis.json").write_text(json.dumps({
+            key: {"status": "done", "service": "api", "group_id": "GA",
+                  "documentation_id": "DOC-001", "confidence": 0.82}
+        }), encoding="utf-8")
+        listing = client.get("/api/alerts").get_json()
+        item = next(i for i in listing["items"] if i["group_id"] == "GA")
+        assert item["analysis"]["documentation_id"] == "DOC-001"
+        assert next(i for i in listing["items"] if i["group_id"] == "GB")["analysis"] is None
+    finally:
+        temporary.cleanup()

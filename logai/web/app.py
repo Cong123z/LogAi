@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 
+from logai.alert.alert_state_machine import group_id_key
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.documentation import (
     DocumentInUse,
@@ -537,6 +538,8 @@ def create_app(
         groups = _load_json("group_registry.json")
         templates = _load_json("template_registry.json")
         persisted = _load_json("anomaly_state.json")
+        # Engine-owned LLM incident analysis, keyed like anomaly_state.json.
+        analyses = _load_json("incident_analysis.json")
 
         def group_level(group: Dict[str, Any], service: str) -> str:
             candidates = [
@@ -588,6 +591,7 @@ def create_app(
                 "representative_template": group.get("representative_template", ""),
                 "error_code": group.get("error_code", ""),
                 "documentation_id": group.get("documentation_id"),
+                "analysis": analyses.get(group_id_key((service, group_id))),
             })
 
         for group_id, group in groups.items():
@@ -606,6 +610,7 @@ def create_app(
                 "representative_template": group.get("representative_template", ""),
                 "error_code": group.get("error_code", ""),
                 "documentation_id": group.get("documentation_id"),
+                "analysis": analyses.get(group_id_key((service, group_id))),
             })
 
         state_priority = {"NORMAL": 0, "COOLING": 1, "WARMING": 2, "ALERTING": 3}
