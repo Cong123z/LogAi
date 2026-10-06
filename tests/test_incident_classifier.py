@@ -270,3 +270,82 @@ def test_llm_env_overrides():
         llm = load_config().llm
     assert (llm.endpoint, llm.model, llm.api_key) == ("http://x", "qwen", "s")
     assert llm.max_candidates == 5 and llm.max_tokens == 800
+
+
+# --- Task 3: realtime pipeline wiring ---------------------------------------
+
+from collections import deque
+
+from logai.config import AppConfig
+from logai.models import AnomalyResult, AnomalyState, GroupedEvent, RawLog
+
+WK = ("auth", "G_AUTH")
+
+
+def _pipeline(tmp_path, endpoint="http://llm"):
+    from logai.realtime.realtime_pipeline import RealtimePipeline
+
+    cfg = AppConfig()
+    cfg.storage.base_dir = str(tmp_path)
+    cfg.storage.model_dir = str(tmp_path / "models")
+    cfg.drain3.persistence_path = str(tmp_path / "drain3_state.bin")
+    cfg.doc_matcher.corpus_path = str(tmp_path / "missing.yaml")
+    cfg.llm.endpoint = endpoint
+    # Prometheus collectors are process-global; a mock keeps pipelines independent.
+    with patch("logai.realtime.realtime_pipeline.MetricsExporter"):
+        return RealtimePipeline(cfg)
+
+
+def _result(key):
+    return AnomalyResult(group_id=key, timestamp=1.0, anomaly_score=0.9, anomaly=True, count_1m=12)
+
+
+def _state(key, alert_state):
+    return AnomalyState(group_id=key, timestamp=1.0, anomaly_score=0.9, alert_state=alert_state)
+
+
+def test_episode_triggers_once_per_episode(tmp_path):
+    p = _pipeline(tmp_path)
+    p.incident_classifier = MagicMock()
+    for s in ["NORMAL", "WARMING", "ALERTING", "COOLING", "ALERTING", "COOLING",
+              "NORMAL", "WARMING", "ALERTING"]:
+        p._track_alert_episodes([_result(WK)], [_state(WK, s)])
+    assert p.incident_classifier.submit.call_count == 2
+    key, alert, params = p.incident_classifier.submit.call_args.args
+    assert key == WK and alert == {"state": "ALERTING", "score": 0.9, "count_1m": 12}
+    assert params == []
+
+
+def test_restart_seeded_episode_not_retriggered(tmp_path):
+    (tmp_path / "anomaly_state.json").write_text(json.dumps({
+        json.dumps(list(WK)): {"group_id": list(WK), "timestamp": 1.0, "alert_state": "ALERTING"}
+    }), encoding="utf-8")
+    p = _pipeline(tmp_path)
+    p.incident_classifier = MagicMock()
+    p._track_alert_episodes([_result(WK)], [_state(WK, "ALERTING")])
+    p.incident_classifier.submit.assert_not_called()
+
+
+def test_params_buffered_without_placeholders(tmp_path):
+    p = _pipeline(tmp_path)
+    p._assign_group = lambda parsed: GroupedEvent(parsed=parsed, group_id="G_AUTH")
+    for i, (reason, gateway) in enumerate([("Timeout", "VTP"), ("Unauthorized", "MOMO")]):
+        p._process_one(RawLog(
+            timestamp=1000.0 + i, service="auth", level="ERROR", event_id=f"e{i}",
+            message=f"Recharge failed for msisdn=8491234567{i} code=E50{i} reason={reason} gateway={gateway}",
+        ))
+    buffered = p._recent_params[WK]
+    assert isinstance(buffered, deque) and buffered.maxlen == 200
+    assert [params[-2:] for _, params in buffered] == [["Unauthorized", "MOMO"]]
+
+
+def test_classifier_results_counted(tmp_path):
+    p = _pipeline(tmp_path)
+    p.incident_classifier._on_result("matched")
+    p.metrics.logai_llm_requests_total.labels.assert_called_with(result="matched")
+
+
+def test_disabled_when_no_endpoint(tmp_path):
+    p = _pipeline(tmp_path, endpoint="")
+    assert p.incident_classifier is None
+    p._track_alert_episodes([_result(WK)], [_state(WK, "ALERTING")])

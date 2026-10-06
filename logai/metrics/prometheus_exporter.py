@@ -136,6 +136,11 @@ class MetricsExporter:
             "Events durably written to the dead-letter queue",
             ["reason_code"],
         )
+        self.logai_llm_requests_total = Counter(
+            "logai_llm_requests_total",
+            "LLM incident analyses by result",
+            ["result"],
+        )
         self._last_grouping_revision_labels: Tuple[str, str] | None = None
 
     def start(self) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from typing import Any, Optional, Tuple, Union
 
 from logai.config import AppConfig
@@ -26,8 +27,12 @@ from logai.grouping.assignment_manager import (
     GroupAssignmentError,
     GroupAssignmentManager,
 )
+from logai.incident.classifier import IncidentClassifier
 from logai.metrics.prometheus_exporter import MetricsExporter
 from logai.models import (
+    AlertStateEnum,
+    AnomalyResult,
+    AnomalyState,
     DEFAULT_LEVEL,
     LEVEL_RANK,
     FeatureVector,
@@ -47,6 +52,10 @@ from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
 logger = logging.getLogger("logai.realtime")
+
+# Recent extracted template parameters kept per (service, group) window as
+# evidence for the LLM incident analysis.
+RECENT_PARAMS_PER_WINDOW = 200
 
 class RealtimePipeline:
     def __init__(self, config: AppConfig):
@@ -107,6 +116,29 @@ class RealtimePipeline:
         )
         self.collector._malformed_counter = self.metrics.logai_es_malformed_hits_total
 
+        # LLM incident analysis: one job per alert episode (entering ALERTING),
+        # run on a background thread. Disabled while no endpoint is configured.
+        self.incident_classifier: Optional[IncidentClassifier] = None
+        if config.llm.endpoint:
+            self.incident_classifier = IncidentClassifier(
+                config.llm,
+                self.doc_matcher,
+                self.group_registry,
+                self.template_registry,
+                JSONStore(
+                    f"{config.storage.base_dir}/{config.storage.incident_analysis_file}"
+                ),
+                on_result=lambda result: self.metrics.logai_llm_requests_total.labels(
+                    result=result
+                ).inc(),
+            )
+        self._recent_params: dict[Tuple[str, str], deque] = {}
+        # Windows already analyzed in their current episode. COOLING is still
+        # the same episode, so a restart never re-triggers an ongoing alert.
+        self._alert_episodes: set[Tuple[str, str]] = self.alert_sm.keys_in_states(
+            {"ALERTING", "COOLING"}
+        )
+
         # DocumentationMatcher already attempted its initial load in __init__.
         # Avoid encoding the same corpus again on the first realtime event.
         self._template_counts: dict[str, int] = {}
@@ -156,6 +188,9 @@ class RealtimePipeline:
             and self.documentation_store.corpus_path.suffix.lower() == ".json"
         ):
             documentation_worker.start()
+        incident_classifier = getattr(self, "incident_classifier", None)
+        if incident_classifier is not None:
+            incident_classifier.start()
         logger.info("Realtime pipeline started, polling Elasticsearch...")
         consecutive_poll_failures = 0
         MAX_POLL_BACKOFF = 300.0  # 5 minutes
@@ -345,6 +380,37 @@ class RealtimePipeline:
         for state in states:
             self.metrics.set_alert_state(state)
         self._pending_predictions = []
+        self._track_alert_episodes(scored, states)
+
+    def _track_alert_episodes(
+        self, scored: list[AnomalyResult], states: list[AnomalyState]
+    ) -> None:
+        """Submit an LLM analysis when a window enters a new ALERTING episode.
+
+        `states` is aligned 1:1 with `scored` (transition_batch keeps order).
+        An episode ends only at NORMAL; COOLING -> ALERTING does not re-trigger.
+        """
+        classifier = getattr(self, "incident_classifier", None)
+        if classifier is None:
+            return
+        for result, state in zip(scored, states):
+            key = tuple(state.group_id)
+            if state.alert_state == AlertStateEnum.NORMAL.value:
+                self._alert_episodes.discard(key)
+            elif (
+                state.alert_state == AlertStateEnum.ALERTING.value
+                and key not in self._alert_episodes
+            ):
+                self._alert_episodes.add(key)
+                classifier.submit(
+                    key,
+                    {
+                        "state": state.alert_state,
+                        "score": result.anomaly_score,
+                        "count_1m": result.count_1m,
+                    },
+                    list(self._recent_params.get(key, ())),
+                )
 
     def _process_one(self, raw: RawLog) -> bool:
         start = time.time()
@@ -363,6 +429,12 @@ class RealtimePipeline:
                 # the feature/alert path is per-service. One update + one append.
                 window_key = (raw.service, grouped.group_id)
                 fv = self.feature_engine.update(window_key, raw.timestamp)
+                if getattr(self, "incident_classifier", None) is not None and any(
+                    value != "<*>" for value in parsed.parameters
+                ):
+                    self._recent_params.setdefault(
+                        window_key, deque(maxlen=RECENT_PARAMS_PER_WINDOW)
+                    ).append((parsed.template_id, parsed.parameters))
                 # Defer scoring: buffer the (window_key, vector) pair for the next
                 # batch flush instead of calling predict() once per event.
                 self._pending_predictions.append((window_key, fv))
@@ -655,6 +727,10 @@ class RealtimePipeline:
                 self.feature_engine.drop_group(group_id)
                 self.alert_sm.drop_group(group_id)
                 self.metrics.drop_group(group_id)
+                if getattr(self, "incident_classifier", None) is not None:
+                    self.incident_classifier.drop_group(group_id)
+                    for key in [k for k in self._recent_params if k[1] == group_id]:
+                        del self._recent_params[key]
             if outcome.resolution.affected_groups:
                 self.documentation_worker.invalidate_groups(
                     outcome.resolution.affected_groups
