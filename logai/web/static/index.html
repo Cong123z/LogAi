@@ -523,24 +523,52 @@
     .llm-banner a { color:inherit; text-decoration:underline; }
     .llm-status-error { color:var(--red); }
     .llm-status-disabled { color:var(--yellow); }
-    .service-analysis { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:16px 20px; margin-bottom:16px; }
-    .service-analysis-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-    .service-analysis-controls h2 { font-size:15px; margin:0 8px 0 0; }
-    .service-analysis-controls label { color:var(--text-dim); font-size:13px; }
-    .service-analysis-controls .btn:focus-visible, #service-analysis-select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-    .service-analysis-card { margin-top:14px; }
-    .health-healthy { background:var(--green-bg); color:var(--green); }
-    .health-degraded { background:var(--yellow-bg); color:var(--yellow); }
-    .health-critical { background:var(--red-bg); color:var(--red); }
-    .health-unknown { background:var(--gray-bg); color:var(--gray); }
-    .sa-meta { color:var(--text-dim); font-size:12px; margin-left:8px; }
-    .sa-summary { margin:10px 0 14px; line-height:1.5; }
-    .sa-issues { margin:0; padding-left:20px; display:flex; flex-direction:column; gap:14px; }
-    .sa-issue-title { font-weight:600; }
-    .sa-chips { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0; }
-    .sa-reasoning { color:var(--text-dim); font-size:13px; line-height:1.5; margin:4px 0; }
-    .sa-error { color:var(--red); }
-    .ai-text { white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; font-size:13px; margin-top:6px; }
+    /* AI Insights: dense list + detail; status always has text, not color alone. */
+    .ins-toolbar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+    .ins-toolbar label { color:var(--text-dim); font-size:13px; }
+    .ins-count { display:inline-block; min-width:18px; margin-left:6px; padding:0 6px; border-radius:9px; background:var(--bg-row-hover); font-size:11px; line-height:18px; }
+    .toggle-btn.active .ins-count { background:rgba(255,255,255,.2); }
+    .ins-toast { min-height:20px; margin:0 0 10px; font-size:13px; color:var(--green); }
+    .ins-toast.ins-toast-error { color:var(--red); }
+    .ins-layout { display:grid; grid-template-columns:minmax(300px, 380px) 1fr; gap:16px; align-items:start; }
+    .ins-list { list-style:none; margin:0; padding:0; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); max-height:calc(100vh - 240px); overflow:auto; }
+    .ins-list li + li { border-top:1px solid var(--border); }
+    .ins-item { display:flex; flex-direction:column; gap:4px; width:100%; text-align:left; background:none; border:0; border-left:3px solid transparent; color:var(--text); padding:10px 12px; cursor:pointer; font:inherit; }
+    .ins-item:hover { background:var(--bg-row-hover); }
+    .ins-item:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+    .ins-item[aria-current="true"] { background:var(--bg-row-hover); border-left-color:var(--accent); }
+    .ins-item-top { display:flex; align-items:center; gap:8px; min-width:0; }
+    .ins-item-title { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ins-item-sub { font-family:monospace; font-size:12px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ins-item-status { font-size:12px; font-weight:600; }
+    .ins-detail { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:18px 20px; min-height:240px; }
+    .ins-detail h2 { font-size:16px; margin:0; }
+    .ins-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
+    .ins-meta { color:var(--text-dim); font-size:12px; }
+    .ins-code { font-family:monospace; font-size:13px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; margin:10px 0 14px; word-break:break-word; }
+    .ins-section { border-top:1px solid var(--border); padding-top:14px; margin-top:14px; }
+    .ins-section h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); margin:0 0 8px; }
+    .ins-why { color:var(--text-dim); font-size:13px; line-height:1.5; margin:6px 0; }
+    .ins-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+    .ins-empty { color:var(--text-dim); font-size:13px; line-height:1.6; }
+    .ins-issues { margin:0; padding-left:20px; display:flex; flex-direction:column; gap:14px; }
+    .ins-issues .ins-actions { margin-top:8px; }
+    .ins-chips { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0; }
+    .st-none { color:var(--text-dim); }
+    .st-busy { color:var(--text-dim); }
+    .st-failed, .st-suspicious, .st-critical { color:var(--red); }
+    .st-suggestion, .st-degraded, .st-unsure { color:var(--yellow); }
+    .st-matched { color:var(--blue); }
+    .st-benign, .st-healthy { color:var(--green); }
+    .st-unknown { color:var(--gray); }
+    .badge-red { background:var(--red-bg); color:var(--red); }
+    .badge-yellow { background:var(--yellow-bg); color:var(--yellow); }
+    .badge-green { background:var(--green-bg); color:var(--green); }
+    .badge-blue { background:var(--blue-bg); color:var(--blue); }
+    .badge-gray { background:var(--gray-bg); color:var(--gray); }
+    @media (max-width: 900px) { .ins-layout { grid-template-columns:1fr; } .ins-list { max-height:320px; } }
+    @media (prefers-reduced-motion: reduce) { .ins-item { transition:none; } }
+    .ai-text {    .ai-text { white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; font-size:13px; margin-top:6px; }
 
     /* ── Responsive ───────────────────────────────────────────────── */
     @media (max-width: 768px) {
@@ -611,6 +639,10 @@
         <a href="#documentation" data-view="documentation">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           Documentation
+        </a>
+        <a href="#insights" data-view="insights">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
+          AI Insights
         </a>
         <a href="#llm" data-view="llm">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
@@ -749,16 +781,6 @@
           <div class="live-status"><span class="live-dot"></span><span id="alert-last-updated">Waiting for alert state...</span></div>
         </div>
         <div class="llm-banner" id="llm-banner" role="status" hidden></div>
-        <section class="service-analysis" aria-labelledby="service-analysis-heading">
-          <div class="service-analysis-controls">
-            <h2 id="service-analysis-heading">Service analysis</h2>
-            <label for="service-analysis-select">Service</label>
-            <select id="service-analysis-select" class="filter-select"></select>
-            <button type="button" class="btn btn-primary" id="service-analysis-run">Analyze service</button>
-            <span id="service-analysis-status" class="sync-status sa-error" aria-live="polite"></span>
-          </div>
-          <div id="service-analysis-card" class="service-analysis-card"></div>
-        </section>
         <div class="table-wrap">
           <table>
             <thead><tr><th data-alert-sort="alert_state" class="sorted">State <span class="sort-arrow">▼</span></th><th data-alert-sort="level">Level <span class="sort-arrow"></span></th><th data-alert-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-alert-sort="service">Service <span class="sort-arrow"></span></th><th data-alert-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-alert-sort="anomaly_score">Score <span class="sort-arrow"></span></th><th data-alert-sort="consecutive_anomaly_count">Consecutive <span class="sort-arrow"></span></th><th data-alert-sort="timestamp">Last evaluation <span class="sort-arrow"></span></th><th>AI analysis</th><th>Representative Template</th></tr></thead>
@@ -780,6 +802,25 @@
         </div>
       </section>
 
+      <section class="view" id="view-insights" aria-label="AI Insights">
+        <div class="llm-banner" id="ins-llm-banner" role="status" hidden></div>
+        <div class="ins-toolbar">
+          <div class="toggle-group" role="tablist" aria-label="Insight type">
+            <button class="toggle-btn active" role="tab" aria-selected="true" data-ins-tab="windows">Alerts<span class="ins-count" id="ins-count-windows"></span></button>
+            <button class="toggle-btn" role="tab" aria-selected="false" data-ins-tab="services">Services<span class="ins-count" id="ins-count-services"></span></button>
+            <button class="toggle-btn" role="tab" aria-selected="false" data-ins-tab="templates">Unknown templates<span class="ins-count" id="ins-count-templates"></span></button>
+          </div>
+          <label for="ins-filter">Show</label>
+          <select id="ins-filter" class="filter-select"></select>
+          <button type="button" class="btn" id="ins-triage-all" hidden>Triage all unknown</button>
+        </div>
+        <p class="ins-toast" id="ins-toast" role="status" aria-live="polite"></p>
+        <div class="ins-layout">
+          <ul class="ins-list" id="ins-list" aria-label="Analyses"></ul>
+          <section class="ins-detail" id="ins-detail" aria-live="polite"></section>
+        </div>
+      </section>
+
       <section class="view groups-section" id="view-llm">
         <div class="section-heading">
           <div class="sync-status" id="llm-engine-status" aria-live="polite">Loading profiles...</div>
@@ -788,7 +829,7 @@
             <button class="btn btn-primary" id="add-llm-profile-btn">Add profile</button>
           </div>
         </div>
-        <p class="sa-error" id="llm-action-status" aria-live="polite"></p>
+        <p class="ins-toast ins-toast-error" id="llm-action-status" aria-live="polite"></p>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Name</th><th>Model</th><th>Endpoint</th><th>API key</th><th>Status</th><th>Actions</th></tr></thead>
@@ -829,12 +870,12 @@
     </div>
   </div>
 
-  <div class="modal-overlay" id="ai-analysis-modal" role="dialog" aria-modal="true" aria-labelledby="ai-analysis-title">
+  <div class="modal-overlay" id="insight-delete-modal" role="dialog" aria-modal="true" aria-labelledby="insight-delete-title">
     <div class="modal">
-      <div class="modal-header"><h2 id="ai-analysis-title">AI analysis</h2><button class="modal-close" data-close="ai-analysis-modal" aria-label="Close">&times;</button></div>
-      <div class="detail-grid" id="ai-analysis-details"></div>
-      <div id="ai-analysis-suggestion"></div>
-      <div class="form-actions"><button type="button" class="btn" data-close="ai-analysis-modal">Close</button><button type="button" class="btn btn-primary" id="ai-save-document" hidden>Save as document</button></div>
+      <div class="modal-header"><h2 id="insight-delete-title">Delete this analysis?</h2><button class="modal-close" data-close="insight-delete-modal" aria-label="Close">&times;</button></div>
+      <p class="delete-warning" id="insight-delete-message"></p>
+      <p class="sync-status">Only the AI result is removed. Logs, groups and documents are not changed, and you can analyze again later.</p>
+      <div class="form-actions"><button type="button" class="btn" data-close="insight-delete-modal">Cancel</button><button type="button" class="btn btn-danger" id="insight-delete-confirm">Delete analysis</button></div>
     </div>
   </div>
 
@@ -1201,59 +1242,27 @@
         </tr>`).join('');
     }
 
-    // ── AI incident analysis ──
-    const $aiModal = document.getElementById('ai-analysis-modal');
-    const aiKey = item => `${item.service}|${item.group_id}`;
-    let aiOpenerKey = null;
-    let aiSuggestion = null;
+    // ── AI analysis status shared by the Alerts table and AI Insights ──
+    function insightStatus(kind, a) {
+      if (!a) return {label: 'Not analyzed', cls: 'st-none', busy: false};
+      if (a.status === 'requested' || a.status === 'pending') return {label: 'Analyzing…', cls: 'st-busy', busy: true};
+      if (a.status === 'failed') return {label: 'Failed', cls: 'st-failed', busy: false};
+      if (kind === 'service') {
+        const health = ['healthy', 'degraded', 'critical'].includes(a.health) ? a.health : 'unknown';
+        return {label: health[0].toUpperCase() + health.slice(1), cls: `st-${health}`, busy: false};
+      }
+      if (kind === 'template') {
+        const verdict = ['suspicious', 'benign', 'unsure'].includes(a.verdict) ? a.verdict : 'unsure';
+        return {label: verdict[0].toUpperCase() + verdict.slice(1), cls: `st-${verdict}`, busy: false};
+      }
+      if (a.documentation_id) return {label: `${a.documentation_id} · ${Math.round((a.confidence || 0) * 100)}%`, cls: 'st-matched', busy: false};
+      return {label: 'Suggestion', cls: 'st-suggestion', busy: false};
+    }
 
     function aiCell(item) {
-      const a = item.analysis;
-      if (!a) return '—';
-      let label = 'Suggestion', cls = 'ai-suggestion', busy = '';
-      if (a.status === 'pending') { label = 'Analyzing…'; cls = 'ai-pending'; busy = ' aria-busy="true"'; }
-      else if (a.status === 'failed') { label = 'Failed'; cls = 'ai-failed'; }
-      else if (a.documentation_id) { label = `${a.documentation_id} · ${Math.round((a.confidence || 0) * 100)}%`; cls = 'ai-matched'; }
-      return `<button type="button" class="btn ai-btn ${cls}"${busy} data-ai-key="${escapeHtml(aiKey(item))}" aria-label="AI analysis for ${escapeHtml(item.group_id)} on ${escapeHtml(item.service)}">${escapeHtml(label)}</button>`;
-    }
-
-    function openAiAnalysis(item) {
-      const a = item.analysis || {};
-      const rows = [
-        ['Window', `${item.service} / ${item.group_id}`],
-        ['Status', a.status],
-        ['Model', a.model],
-        ['Analyzed', a.analyzed_at ? formatFullTs(a.analyzed_at) : (a.queued_at ? `queued ${formatFullTs(a.queued_at)}` : '')],
-      ];
-      if (a.documentation_id) {
-        rows.push(['Document', `${a.documentation_id}${a.document_title ? ' — ' + a.document_title : ''}`]);
-        rows.push(['Confidence', `${Math.round((a.confidence || 0) * 100)}%`]);
-      }
-      if (a.reasoning) rows.push(['Reasoning', a.reasoning]);
-      if (a.error) rows.push(['Error', a.error]);
-      document.getElementById('ai-analysis-details').innerHTML = rows.map(([label, value]) => `
-        <div class="detail-label">${escapeHtml(label)}</div>
-        <div class="detail-value">${escapeHtml(String(value || '—'))}</div>`).join('');
-
-      aiSuggestion = a.status === 'done' && !a.documentation_id ? a.suggestion : null;
-      document.getElementById('ai-analysis-suggestion').innerHTML = aiSuggestion ? `
-        <div class="form-field" style="margin-top:16px"><label>Suggested solution</label>
-          <div class="detail-value"><strong>${escapeHtml(aiSuggestion.title)}</strong>${aiSuggestion.error_code ? ` <span class="tmpl-id">${escapeHtml(aiSuggestion.error_code)}</span>` : ''}</div>
-          <div class="ai-text">${escapeHtml(aiSuggestion.text)}</div>
-        </div>` : '';
-      document.getElementById('ai-save-document').hidden = !aiSuggestion;
-
-      aiOpenerKey = aiKey(item);
-      $aiModal.classList.add('open');
-      $aiModal.querySelector('.modal-close').focus();
-    }
-
-    function closeAiAnalysis() {
-      $aiModal.classList.remove('open');
-      // Rows re-render on every poll, so find the opener again by its key.
-      const opener = aiOpenerKey && $alertsTbody.querySelector(`[data-ai-key="${CSS.escape(aiOpenerKey)}"]`);
-      if (opener) opener.focus();
-      aiOpenerKey = null;
+      const status = insightStatus('window', item.analysis);
+      const label = item.analysis ? status.label : 'Analyze';
+      return `<a class="ai-btn ${status.cls}" href="#insights" data-open-insight="${escapeHtml(item.key)}"${status.busy ? ' aria-busy="true"' : ''} aria-label="AI analysis for ${escapeHtml(item.group_id)} on ${escapeHtml(item.service)}: ${escapeHtml(label)}">${escapeHtml(label)}</a>`;
     }
 
     function openDocumentEditor(docId = null) {
@@ -1793,31 +1802,23 @@
       });
     });
     $alertsTbody.addEventListener('click', event => {
-      const button = event.target.closest('[data-ai-key]');
-      if (!button) return;
-      const item = state.alerts.find(candidate => aiKey(candidate) === button.dataset.aiKey);
-      if (item) openAiAnalysis(item);
+      const link = event.target.closest('[data-open-insight]');
+      if (!link) return;
+      ins.tab = 'windows';
+      ins.filter.windows = 'all';
+      ins.selected.windows = link.dataset.openInsight;
+      ins.signature = null;
     });
-    $aiModal.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', closeAiAnalysis));
-    $aiModal.addEventListener('click', event => { if (event.target === $aiModal) closeAiAnalysis(); });
-    document.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && $aiModal.classList.contains('open')) closeAiAnalysis();
-    });
-    async function prefillDocumentEditor(suggestion) {
-      // The Alerts tab never loads the corpus, so fetch its revision before
-      // saving or the POST would be rejected as a revision conflict.
+    async function prefillDocumentEditor(suggestion, assignGroupIds = []) {
+      // The Alerts/Insights tabs never load the corpus, so fetch its revision
+      // first or the POST would be rejected as a revision conflict.
       try { state.documentRevision = (await fetchDocumentation()).revision; } catch (_) {}
       openDocumentEditor();
+      state.pendingAssign = assignGroupIds.length ? assignGroupIds : null;
       document.getElementById('document-title').value = suggestion.title || '';
       document.getElementById('document-text').value = suggestion.text || '';
       document.getElementById('document-error-code').value = suggestion.error_code || '';
     }
-    document.getElementById('ai-save-document').addEventListener('click', () => {
-      const suggestion = aiSuggestion;
-      if (!suggestion) return;
-      $aiModal.classList.remove('open');
-      prefillDocumentEditor(suggestion);
-    });
 
     // ── LLM status reason (reported by the engine) ──
     function llmReasonText(state) {
@@ -1826,8 +1827,8 @@
       return `${state.reason || 'LLM analysis is unavailable'}${since}`;
     }
 
-    function renderLlmBanner(state) {
-      const banner = document.getElementById('llm-banner');
+    function renderLlmBanner(state, bannerId = 'llm-banner') {
+      const banner = document.getElementById(bannerId);
       const text = llmReasonText(state);
       banner.hidden = !text;
       if (!text) return;
@@ -1871,7 +1872,7 @@
       $llmTbody.innerHTML = llm.profiles.map(p => {
         const isActive = p.id === llm.activeId;
         const status = isActive
-          ? `<span class="badge health-healthy">Active</span>${engine.llm_profile_id === p.id ? ' <span class="sa-meta">in use</span>' : ''}`
+          ? `<span class="badge badge-green">Active</span>${engine.llm_profile_id === p.id ? ' <span class="ins-meta">in use</span>' : ''}`
           : `<button type="button" class="btn" data-llm-use="${escapeHtml(p.id)}" aria-label="Use profile ${escapeHtml(p.name)}">Use</button>`;
         return `<tr>
           <td>${escapeHtml(p.name)}</td>
@@ -1961,111 +1962,285 @@
       }
     });
 
-    // ── Service analysis ──
-    const $saSelect = document.getElementById('service-analysis-select');
-    const $saRun = document.getElementById('service-analysis-run');
-    const $saStatus = document.getElementById('service-analysis-status');
-    const $saCard = document.getElementById('service-analysis-card');
-    const SA_HEALTH = {healthy:'Healthy', degraded:'Degraded', critical:'Critical'};
-    const SA_ERRORS = {
-      engine_unavailable: 'Engine unavailable',
-      llm_disabled: 'LLM analysis is disabled',
-      analysis_pending: 'Analysis already running',
+    // ── AI Insights ──
+    const ins = {
+      tab: 'windows', data: null, signature: null,
+      filter: {windows: 'attention', services: 'all', templates: 'all'},
+      selected: {windows: null, services: null, templates: null},
+      deleteTarget: null, toastTimer: null,
     };
-    const sa = {services: [], analyses: {}, selected: null, busy: false, suggestions: [], renderedSignature: null};
+    const INS_FILTERS = {
+      windows: [['attention', 'Needs attention'], ['analyzed', 'Analyzed'], ['all', 'All windows']],
+      services: [['all', 'All services'], ['analyzed', 'Analyzed']],
+      templates: [['all', 'All unknown'], ['suspicious', 'Suspicious'], ['untriaged', 'Not triaged']],
+    };
+    const INS_ERRORS = {engine_unavailable: 'The analysis engine is not running', analysis_pending: 'An analysis is already running'};
+    const $insList = document.getElementById('ins-list');
+    const $insDetail = document.getElementById('ins-detail');
+    const $insToast = document.getElementById('ins-toast');
 
-    async function fetchServiceAnalysis() {
-      const resp = await fetch('/api/service-analysis');
-      if (!resp.ok) throw new Error('Unable to load service analysis');
+    async function fetchInsights() {
+      const resp = await fetch('/api/insights');
+      if (!resp.ok) throw new Error('Unable to load AI insights');
       return resp.json();
     }
 
-    function renderServiceAnalysis(data) {
-      const services = data.services || [];
-      sa.llm = data.llm || null;
-      sa.analyses = data.analyses || {};
-      if (!services.includes(sa.selected)) sa.selected = services[0] || null;
-      // Rebuild the options only when the list changes, so a refresh never
-      // disturbs someone using the select.
-      if (JSON.stringify(services) !== JSON.stringify(sa.services)) {
-        sa.services = services;
-        $saSelect.innerHTML = services.map(name =>
-          `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
-      }
-      $saSelect.value = sa.selected || '';
-      $saSelect.disabled = !services.length;
-      renderServiceAnalysisCard();
+    function insToast(message, isError = false) {
+      $insToast.textContent = message;
+      $insToast.className = 'ins-toast' + (isError ? ' ins-toast-error' : '');
+      clearTimeout(ins.toastTimer);
+      ins.toastTimer = setTimeout(() => { $insToast.textContent = ''; }, isError ? 10000 : 6000);
     }
 
-    function renderServiceAnalysisCard() {
-      const a = sa.selected ? sa.analyses[sa.selected] : null;
-      const running = Boolean(a && (a.status === 'requested' || a.status === 'pending'));
-      // A failed last call may be temporary, so only "off" or "engine down" blocks the button.
-      const blocked = Boolean(sa.llm && (!sa.llm.alive || !sa.llm.llm_enabled));
-      $saRun.disabled = !sa.selected || sa.busy || running || blocked;
-      // The alerts refresh calls this every 2s; rebuilding unchanged content
-      // would wipe the reader's text selection, scroll position and focus.
-      const signature = JSON.stringify([sa.selected, a || null]);
-      if (signature === sa.renderedSignature) return;
-      sa.renderedSignature = signature;
-      $saCard.removeAttribute('aria-busy');
-      sa.suggestions = [];
-      if (!sa.selected) { $saCard.innerHTML = '<p class="sync-status">No services yet.</p>'; return; }
-      if (!a) { $saCard.innerHTML = '<p class="sync-status">No analysis yet for this service.</p>'; return; }
-      if (running) {
-        $saCard.setAttribute('aria-busy', 'true');
-        $saCard.innerHTML = '<p class="sync-status">Analyzing…</p>';
-        return;
-      }
-      const when = a.analyzed_at ? formatFullTs(a.analyzed_at) : '';
-      if (a.status === 'failed') {
-        $saCard.innerHTML = `<p class="sa-error">Analysis failed: ${escapeHtml(a.error || 'unknown error')}</p><p class="sync-status">${escapeHtml(when)}</p>`;
-        return;
-      }
-      const health = SA_HEALTH[a.health] ? a.health : 'unknown';
-      const issues = a.issues || [];
-      sa.suggestions = issues.map(issue => issue.suggestion);
-      $saCard.innerHTML = `
-        <div><span class="badge health-${health}">${SA_HEALTH[health] || 'Unknown'}</span><span class="sa-meta">Analyzed ${escapeHtml(when)}${a.model ? ' · ' + escapeHtml(a.model) : ''}</span></div>
-        <p class="sa-summary">${escapeHtml(a.summary || '')}</p>
-        ${issues.length ? `<ol class="sa-issues">${issues.map((issue, index) => `
-          <li>
-            <div class="sa-issue-title">${escapeHtml(issue.title)}</div>
-            ${(issue.group_ids || []).length ? `<div class="sa-chips">${issue.group_ids.map(g => `<span class="tmpl-id">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
-            ${issue.reasoning ? `<p class="sa-reasoning">${escapeHtml(issue.reasoning)}</p>` : ''}
-            ${issue.documentation_id
-              ? `<span class="badge ai-matched">${escapeHtml(issue.documentation_id)}${issue.document_title ? ' — ' + escapeHtml(issue.document_title) : ''}</span>`
-              : `<div class="detail-value"><strong>${escapeHtml(issue.suggestion.title)}</strong>${issue.suggestion.error_code ? ` <span class="tmpl-id">${escapeHtml(issue.suggestion.error_code)}</span>` : ''}</div>
-                 <div class="ai-text">${escapeHtml(issue.suggestion.text)}</div>
-                 <div class="form-actions" style="justify-content:flex-start;margin-top:8px"><button type="button" class="btn btn-primary" data-sa-issue="${index}">Save as document</button></div>`}
-          </li>`).join('')}</ol>` : '<p class="sync-status">No issues found.</p>'}`;
+    function insItems(tab) {
+      const data = ins.data || {};
+      if (tab === 'windows') return (data.windows || []).map(w => ({id: w.key, kind: 'window', raw: w, analysis: w.analysis}));
+      if (tab === 'services') return (data.services || []).map(s => ({id: s.service, kind: 'service', raw: s, analysis: s.analysis}));
+      return (data.templates || []).map(t => ({id: t.template_id, kind: 'template', raw: t, analysis: t.analysis}));
     }
 
-    $saSelect.addEventListener('change', () => {
-      sa.selected = $saSelect.value;
-      $saStatus.textContent = '';
-      renderServiceAnalysisCard();
+    function insFiltered(tab) {
+      const filter = ins.filter[tab];
+      return insItems(tab).filter(item => {
+        if (filter === 'analyzed') return Boolean(item.analysis);
+        if (filter === 'attention') return item.raw.alert_state !== 'NORMAL' || Boolean(item.analysis);
+        if (filter === 'suspicious') return item.analysis && item.analysis.verdict === 'suspicious';
+        if (filter === 'untriaged') return !item.analysis;
+        return true;
+      });
+    }
+
+    function insItemHtml(item, selected) {
+      const status = insightStatus(item.kind, item.analysis);
+      const r = item.raw;
+      let badge = '', title = '', sub = '';
+      if (item.kind === 'window') {
+        badge = `<span class="badge alert-state-${escapeHtml(r.alert_state.toLowerCase())}">${escapeHtml(r.alert_state)}</span>`;
+        title = `${r.group_id} · ${r.service}`;
+        sub = r.representative_template || '';
+      } else if (item.kind === 'service') {
+        title = r.service;
+        sub = item.analysis && item.analysis.summary ? item.analysis.summary : 'Whole-service health review';
+      } else {
+        badge = `<span class="badge ${levelBadgeClass(r.level)}">${escapeHtml(r.level)}</span>`;
+        title = `${r.template_id} · ${r.service}`;
+        sub = r.template_text || '';
+      }
+      return `<li><button type="button" class="ins-item" data-ins-id="${escapeHtml(item.id)}"${selected ? ' aria-current="true"' : ''}>
+        <span class="ins-item-top">${badge}<span class="ins-item-title">${escapeHtml(title)}</span></span>
+        <span class="ins-item-sub">${escapeHtml(sub)}</span>
+        <span class="ins-item-status ${status.cls}"${status.busy ? ' aria-busy="true"' : ''}>${escapeHtml(status.label)}</span>
+      </button></li>`;
+    }
+
+    function renderInsights(data) {
+      if (data) ins.data = data;
+      const signature = JSON.stringify([ins.data, ins.tab, ins.filter, ins.selected]);
+      if (signature === ins.signature) return;  // keep focus/selection between polls
+      ins.signature = signature;
+      renderLlmBanner(ins.data.llm, 'ins-llm-banner');
+      const counts = {
+        windows: (ins.data.windows || []).filter(w => w.alert_state !== 'NORMAL').length,
+        services: (ins.data.services || []).length,
+        templates: (ins.data.templates || []).length,
+      };
+      for (const tab of ['windows', 'services', 'templates']) {
+        document.getElementById(`ins-count-${tab}`).textContent = counts[tab];
+      }
+      document.querySelectorAll('[data-ins-tab]').forEach(button => {
+        const active = button.dataset.insTab === ins.tab;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+      const $filter = document.getElementById('ins-filter');
+      $filter.innerHTML = INS_FILTERS[ins.tab].map(([value, label]) =>
+        `<option value="${value}"${value === ins.filter[ins.tab] ? ' selected' : ''}>${label}</option>`).join('');
+      document.getElementById('ins-triage-all').hidden = ins.tab !== 'templates';
+
+      const items = insFiltered(ins.tab);
+      if (!items.some(item => item.id === ins.selected[ins.tab])) {
+        ins.selected[ins.tab] = items.length ? items[0].id : null;
+      }
+      $insList.innerHTML = items.length
+        ? items.map(item => insItemHtml(item, item.id === ins.selected[ins.tab])).join('')
+        : `<li class="ins-empty" style="padding:16px">${ins.tab === 'templates' ? 'No unknown templates. New log patterns that fit no group will appear here.' : 'Nothing matches this filter.'}</li>`;
+      const selected = items.find(item => item.id === ins.selected[ins.tab]);
+      $insDetail.innerHTML = selected ? insDetailHtml(selected) : '<p class="ins-empty">Select an item to see its AI analysis.</p>';
+    }
+
+    function insMeta(a) {
+      if (!a || !a.analyzed_at) return '';
+      return `<p class="ins-meta">Analyzed ${escapeHtml(formatFullTs(a.analyzed_at))}${a.model ? ' · ' + escapeHtml(a.model) : ''}</p>`;
+    }
+
+    function insSuggestionHtml(suggestion, groupIds, index) {
+      const target = groupIds.length ? ` and assign to ${groupIds.join(', ')}` : '';
+      return `<div class="detail-value"><strong>${escapeHtml(suggestion.title)}</strong>${suggestion.error_code ? ` <span class="tmpl-id">${escapeHtml(suggestion.error_code)}</span>` : ''}</div>
+        <div class="ai-text">${escapeHtml(suggestion.text)}</div>
+        <div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="save" data-ins-suggestion="${index}">Save as document${escapeHtml(target)}</button></div>`;
+    }
+
+    function insActions(item, extra = '') {
+      const a = item.analysis;
+      const running = a && (a.status === 'requested' || a.status === 'pending');
+      const llm = (ins.data && ins.data.llm) || {};
+      const blocked = !llm.alive || !llm.llm_enabled;
+      const analyzeLabel = a ? 'Re-analyze' : (item.kind === 'template' ? 'Triage with AI' : 'Analyze with AI');
+      const analyze = running ? '' : `<button type="button" class="btn${a ? '' : ' btn-primary'}" data-ins-action="analyze"${blocked ? ' disabled aria-describedby="ins-llm-banner"' : ''}>${analyzeLabel}</button>`;
+      const del = a && !running ? '<button type="button" class="btn btn-danger" data-ins-action="delete">Delete analysis</button>' : '';
+      return `<div class="ins-actions">${extra}${analyze}${del}</div>`;
+    }
+
+    function insAnalysisBody(item) {
+      const a = item.analysis;
+      ins.suggestions = [];
+      if (!a) return `<p class="ins-empty">Not analyzed yet. The AI ${item.kind === 'template' ? 'judges whether this pattern looks suspicious and which group it belongs to' : item.kind === 'service' ? 'reviews every group of this service and lists the important issues' : 'matches this incident to a document or suggests a fix'}.</p>`;
+      if (a.status === 'requested' || a.status === 'pending') return '<p class="ins-empty" aria-busy="true">Analyzing… this usually takes 5–15 seconds.</p>';
+      if (a.status === 'failed') return `<p class="st-failed">Analysis failed: ${escapeHtml(a.error || 'unknown error')}</p>${insMeta(a)}`;
+      if (item.kind === 'window') {
+        if (a.documentation_id) {
+          return `<p><span class="badge badge-blue">Matched</span> <strong>${escapeHtml(a.documentation_id)}</strong> ${escapeHtml(a.document_title || '')}</p>
+            <p class="ins-meta">Confidence ${Math.round((a.confidence || 0) * 100)}%</p>
+            <p class="ins-why">${escapeHtml(a.reasoning || '')}</p>${insMeta(a)}`;
+        }
+        ins.suggestions = [{suggestion: a.suggestion, groups: [item.raw.group_id]}];
+        return `<p><span class="badge badge-yellow">No matching document</span></p>
+          <p class="ins-why">${escapeHtml(a.reasoning || '')}</p>
+          <h3 style="margin-top:12px">Suggested fix</h3>${insSuggestionHtml(a.suggestion, [item.raw.group_id], 0)}${insMeta(a)}`;
+      }
+      if (item.kind === 'service') {
+        const health = ['healthy', 'degraded', 'critical'].includes(a.health) ? a.health : 'unknown';
+        const color = {healthy: 'green', degraded: 'yellow', critical: 'red', unknown: 'gray'}[health];
+        const issues = a.issues || [];
+        ins.suggestions = issues.map(issue => ({suggestion: issue.suggestion, groups: issue.group_ids || []}));
+        return `<p><span class="badge badge-${color}">${health[0].toUpperCase() + health.slice(1)}</span></p>
+          <p style="line-height:1.5">${escapeHtml(a.summary || '')}</p>${insMeta(a)}
+          ${issues.length ? `<div class="ins-section"><h3>Issues (${issues.length})</h3><ol class="ins-issues">${issues.map((issue, index) => `
+            <li><strong>${escapeHtml(issue.title)}</strong>
+              ${(issue.group_ids || []).length ? `<div class="ins-chips">${issue.group_ids.map(g => `<span class="tmpl-id">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
+              ${issue.reasoning ? `<p class="ins-why">${escapeHtml(issue.reasoning)}</p>` : ''}
+              ${issue.documentation_id
+                ? `<span class="badge badge-blue">${escapeHtml(issue.documentation_id)}</span> ${escapeHtml(issue.document_title || '')}`
+                : insSuggestionHtml(issue.suggestion, issue.group_ids || [], index)}
+            </li>`).join('')}</ol></div>` : '<p class="ins-empty">No issues found.</p>'}`;
+      }
+      const verdict = ['suspicious', 'benign', 'unsure'].includes(a.verdict) ? a.verdict : 'unsure';
+      const color = {suspicious: 'red', benign: 'green', unsure: 'gray'}[verdict];
+      let group = '<p class="ins-empty">No group suggested.</p>';
+      if (a.suggested_group_id === 'new') {
+        group = `<p>Belongs in a <strong>new group</strong>; no existing group fits.</p><div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="move" data-ins-group="">Create new group</button></div>`;
+      } else if (a.suggested_group_id) {
+        group = `<p>Belongs with <strong>${escapeHtml(a.suggested_group_id)}</strong></p><div class="ins-code">${escapeHtml(a.suggested_group_rep || '')}</div>
+          <div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="move" data-ins-group="${escapeHtml(a.suggested_group_id)}">Move to ${escapeHtml(a.suggested_group_id)}</button></div>`;
+      }
+      return `<p><span class="badge badge-${color}">${verdict[0].toUpperCase() + verdict.slice(1)}</span> <span class="ins-meta">Confidence ${Math.round((a.confidence || 0) * 100)}%</span></p>
+        <p class="ins-why">${escapeHtml(a.reasoning || '')}</p>${insMeta(a)}
+        <div class="ins-section"><h3>Suggested group</h3>${group}</div>`;
+    }
+
+    function insDetailHtml(item) {
+      const r = item.raw;
+      let head = '';
+      if (item.kind === 'window') {
+        head = `<div class="ins-head"><h2>${escapeHtml(r.group_id)} · ${escapeHtml(r.service)}</h2>
+            <span class="badge alert-state-${escapeHtml(r.alert_state.toLowerCase())}">${escapeHtml(r.alert_state)}</span>
+            <span class="ins-meta">score ${Number(r.anomaly_score || 0).toFixed(3)} · ${escapeHtml(r.level)}</span></div>
+          <div class="ins-code">${highlightWildcards(escapeHtml(r.representative_template || '—'))}</div>`;
+      } else if (item.kind === 'service') {
+        head = `<div class="ins-head"><h2>${escapeHtml(r.service)}</h2><span class="ins-meta">whole-service review</span></div>`;
+      } else {
+        head = `<div class="ins-head"><h2>${escapeHtml(r.template_id)} · ${escapeHtml(r.service)}</h2>
+            <span class="badge ${levelBadgeClass(r.level)}">${escapeHtml(r.level)}</span>
+            <span class="ins-meta">${formatCount(r.event_count || 0)} events · last seen ${escapeHtml(formatTs(r.last_seen))}</span></div>
+          <div class="ins-code">${highlightWildcards(escapeHtml(r.template_text || '—'))}</div>`;
+      }
+      const openDoc = item.kind === 'window' && item.analysis && item.analysis.documentation_id
+        ? '<a class="btn" href="#documentation">Open documentation</a>' : '';
+      return `${head}<div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody(item)}</div>${insActions(item, openDoc)}`;
+    }
+
+    function insSelectedItem() {
+      return insItems(ins.tab).find(item => item.id === ins.selected[ins.tab]);
+    }
+
+    async function insReload() {
+      ins.signature = null;
+      renderInsights(await fetchInsights());
+    }
+
+    document.querySelectorAll('[data-ins-tab]').forEach(button => button.addEventListener('click', () => {
+      ins.tab = button.dataset.insTab;
+      renderInsights();
+    }));
+    document.getElementById('ins-filter').addEventListener('change', event => {
+      ins.filter[ins.tab] = event.target.value;
+      renderInsights();
     });
-    $saRun.addEventListener('click', async () => {
-      if (!sa.selected || sa.busy) return;
-      sa.busy = true;
-      $saStatus.textContent = '';
-      renderServiceAnalysisCard();
+    $insList.addEventListener('click', event => {
+      const button = event.target.closest('[data-ins-id]');
+      if (!button) return;
+      ins.selected[ins.tab] = button.dataset.insId;
+      renderInsights();
+      const again = $insList.querySelector(`[data-ins-id="${CSS.escape(button.dataset.insId)}"]`);
+      if (again) again.focus();
+    });
+    document.getElementById('ins-triage-all').addEventListener('click', async event => {
+      event.currentTarget.disabled = true;
       try {
-        await apiMutation('/api/service-analysis', 'POST', {service: sa.selected});
-        renderServiceAnalysis(await fetchServiceAnalysis());
+        const result = await apiMutation('/api/insights/analyze', 'POST', {kind: 'templates_all'});
+        insToast(result.queued ? `Queued ${result.queued} template(s) for triage.` : 'Every unknown template is already triaged or queued.');
+        await insReload();
+      } catch (err) { insToast(INS_ERRORS[err.payload && err.payload.error] || err.message, true); }
+      finally { event.currentTarget.disabled = false; }
+    });
+    $insDetail.addEventListener('click', async event => {
+      const button = event.target.closest('[data-ins-action]');
+      const item = insSelectedItem();
+      if (!button || !item) return;
+      const action = button.dataset.insAction;
+      if (action === 'save') {
+        const entry = (ins.suggestions || [])[Number(button.dataset.insSuggestion)];
+        if (entry && entry.suggestion) prefillDocumentEditor(entry.suggestion, entry.groups);
+        return;
+      }
+      if (action === 'delete') {
+        ins.deleteTarget = item;
+        document.getElementById('insight-delete-message').textContent = `The AI analysis of ${item.kind === 'window' ? item.raw.group_id + ' · ' + item.raw.service : item.id} will be deleted.`;
+        document.getElementById('insight-delete-modal').classList.add('open');
+        document.getElementById('insight-delete-confirm').focus();
+        return;
+      }
+      button.disabled = true;
+      try {
+        if (action === 'analyze') {
+          await apiMutation('/api/insights/analyze', 'POST', {kind: item.kind, id: item.id});
+          insToast('Analysis requested. The result appears here in a few seconds.');
+        } else if (action === 'move') {
+          const target = button.dataset.insGroup;
+          await apiMutation(`/api/templates/${encodeURIComponent(item.id)}/group`, 'PUT',
+            target ? {target_group_id: target, expected_revision: ins.data.grouping_revision}
+                   : {create_new: true, expected_revision: ins.data.grouping_revision});
+          insToast(`${item.id} will move to ${target || 'a new group'} once the engine applies the change.`);
+        }
+        await insReload();
       } catch (err) {
-        $saStatus.textContent = SA_ERRORS[err.payload && err.payload.error] || err.message;
-      } finally {
-        sa.busy = false;
-        renderServiceAnalysisCard();
+        insToast(INS_ERRORS[err.payload && err.payload.error] || err.message, true);
+        button.disabled = false;
       }
     });
-    $saCard.addEventListener('click', event => {
-      const button = event.target.closest('[data-sa-issue]');
-      const suggestion = button && sa.suggestions[Number(button.dataset.saIssue)];
-      if (suggestion) prefillDocumentEditor(suggestion);
+    document.getElementById('insight-delete-confirm').addEventListener('click', async event => {
+      const item = ins.deleteTarget;
+      if (!item) return;
+      event.currentTarget.disabled = true;
+      try {
+        await apiMutation('/api/insights/delete', 'POST', {kind: item.kind, id: item.id});
+        document.getElementById('insight-delete-modal').classList.remove('open');
+        insToast('Analysis deleted.');
+        await insReload();
+      } catch (err) { insToast(err.message, true); }
+      finally { event.currentTarget.disabled = false; ins.deleteTarget = null; }
     });
+
     document.getElementById('delete-document-confirm').addEventListener('click', confirmDocumentDeletion);
     document.getElementById('clear-document-confirm').addEventListener('click', confirmClearDocumentation);
     document.getElementById('add-document-btn').addEventListener('click', () => openDocumentEditor());
@@ -2078,11 +2253,19 @@
         text: document.getElementById('document-text').value,
         error_code: document.getElementById('document-error-code').value,
       };
+      if (!docId && state.pendingAssign) payload.assign_group_ids = state.pendingAssign;
       const submit = event.submitter;
       if (submit) submit.disabled = true;
       try {
-        await apiMutation(docId ? `/api/documentation/${encodeURIComponent(docId)}` : '/api/documentation', docId ? 'PUT' : 'POST', payload);
+        const result = await apiMutation(docId ? `/api/documentation/${encodeURIComponent(docId)}` : '/api/documentation', docId ? 'PUT' : 'POST', payload);
         $documentModal.classList.remove('open');
+        if (payload.assign_group_ids) {
+          const assigned = result.assigned_group_ids || [];
+          const skipped = result.assignment_skipped || [];
+          insToast(`Saved ${result.item.id}` + (assigned.length ? ` and assigned it to ${assigned.join(', ')}.` : '.')
+            + (skipped.length ? ` Not assigned to ${skipped.map(s => `${s.group_id} (${s.reason.replace('_', ' ')})`).join(', ')}.` : ''), skipped.length > 0);
+        }
+        state.pendingAssign = null;
         await loadData();
       } catch (err) { document.getElementById('document-error').textContent = err.message; }
       finally { if (submit) submit.disabled = false; }
@@ -2197,6 +2380,7 @@
       groups: 'Semantic Groups',
       alerting: 'Alerting',
       documentation: 'Documentation',
+      insights: 'AI Insights',
       llm: 'LLM profiles',
     };
     const viewOrder = Object.keys(viewTitles);
@@ -2233,7 +2417,7 @@
       }
       loadData();
       if (view === 'alerting') state.alertRefreshTimer = setInterval(loadData, 2000);
-      if (view === 'llm') state.alertRefreshTimer = setInterval(loadData, 3000);
+      if (view === 'llm' || view === 'insights') state.alertRefreshTimer = setInterval(loadData, 3000);
     }
 
     document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => {
@@ -2291,12 +2475,11 @@
           state.documentationMutationsBlocked = Boolean(groups.documentation_mutations_blocked);
           renderGroups(state.groups);
         } else if (state.activeView === 'alerting') {
-          const [alerts, services] = await Promise.all([
-            fetchAlerts(), fetchServiceAnalysis().catch(() => null),
-          ]);
+          const alerts = await fetchAlerts();
           renderAlerts(alerts);
           renderLlmBanner(alerts.llm);
-          if (services) renderServiceAnalysis(services);
+        } else if (state.activeView === 'insights') {
+          renderInsights(await fetchInsights());
         } else if (state.activeView === 'llm') {
           renderLlmProfiles(await fetchLlmProfiles());
         } else {
