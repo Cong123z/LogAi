@@ -637,7 +637,30 @@ def create_app(
         counts = {state: 0 for state in ("NORMAL", "WARMING", "ALERTING", "COOLING")}
         for item in items:
             counts[item["alert_state"]] = counts.get(item["alert_state"], 0) + 1
-        return jsonify({"items": items, "total": len(items), "counts": counts})
+        return jsonify({
+            "items": items, "total": len(items), "counts": counts, "llm": _llm_engine_state(),
+        })
+
+    def _llm_engine_state() -> Dict[str, Any]:
+        """Whether the engine can run LLM analysis, and why not (never the key)."""
+        status = grouping.synchronization_status(stale_seconds=grouping_stale_seconds)
+        runtime = status.get("runtime") or {}
+        if status.get("state") == "engine_unavailable":
+            return {
+                "alive": False, "llm_enabled": False,
+                "llm_profile_id": runtime.get("llm_profile_id"), "status": "error",
+                "reason": "The analysis engine is not running (no recent heartbeat)",
+                "reason_since": status.get("last_heartbeat_at"),
+            }
+        enabled = runtime.get("llm_enabled") is True
+        return {
+            "alive": True, "llm_enabled": enabled,
+            "llm_profile_id": runtime.get("llm_profile_id"),
+            "status": runtime.get("llm_status") or ("ok" if enabled else "disabled"),
+            "reason": runtime.get("llm_reason") or (
+                "" if enabled else "LLM analysis is disabled on the engine"),
+            "reason_since": runtime.get("llm_reason_since"),
+        }
 
     def _known_services() -> List[str]:
         services = {
@@ -679,7 +702,10 @@ def create_app(
 
     @app.route("/api/service-analysis", methods=["GET"])
     def list_service_analysis():
-        return jsonify({"services": _known_services(), "analyses": _service_analyses()})
+        return jsonify({
+            "services": _known_services(), "analyses": _service_analyses(),
+            "llm": _llm_engine_state(),
+        })
 
     @app.route("/api/service-analysis", methods=["POST"])
     def request_service_analysis():
@@ -694,9 +720,10 @@ def create_app(
             return jsonify({
                 "error": "engine_unavailable", "message": "The analysis engine is not running",
             }), 503
-        if (status.get("runtime") or {}).get("llm_enabled") is not True:
+        llm_state = _llm_engine_state()
+        if not llm_state["llm_enabled"]:
             return jsonify({
-                "error": "llm_disabled", "message": "LLM analysis is disabled on the engine",
+                "error": "llm_disabled", "message": llm_state["reason"],
             }), 409
         current = _service_analyses().get(service)
         if isinstance(current, dict) and current.get("status") in {"requested", "pending"}:
@@ -731,16 +758,7 @@ def create_app(
 
     @app.route("/api/llm-profiles", methods=["GET"])
     def list_llm_profiles():
-        status = grouping.synchronization_status(stale_seconds=grouping_stale_seconds)
-        runtime = status.get("runtime") or {}
-        return jsonify({
-            **llm_profiles.public_view(),
-            "engine": {
-                "alive": status.get("state") != "engine_unavailable",
-                "llm_enabled": runtime.get("llm_enabled") is True,
-                "llm_profile_id": runtime.get("llm_profile_id"),
-            },
-        })
+        return jsonify({**llm_profiles.public_view(), "engine": _llm_engine_state()})
 
     @app.route("/api/llm-profiles", methods=["POST"])
     def create_llm_profile():

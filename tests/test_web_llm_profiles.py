@@ -70,9 +70,12 @@ def test_listing_reports_engine_applied_profile():
     try:
         pid = client.post("/api/llm-profiles", json=NEW).get_json()["profile"]["id"]
         GroupingOverrideStore(base / "grouping_overrides.json", base / "grouping_status.json") \
-            .update_heartbeat(time.time(), runtime={"llm_enabled": True, "llm_profile_id": pid})
+            .update_heartbeat(time.time(), runtime={
+                "llm_enabled": True, "llm_profile_id": pid, "llm_status": "ok",
+                "llm_reason": "Using profile 'Zen' (gpt-5.6-luna)", "llm_reason_since": None})
         engine = client.get("/api/llm-profiles").get_json()["engine"]
-        assert engine == {"alive": True, "llm_enabled": True, "llm_profile_id": pid}
+        assert engine == {"alive": True, "llm_enabled": True, "llm_profile_id": pid, "status": "ok",
+                          "reason": "Using profile 'Zen' (gpt-5.6-luna)", "reason_since": None}
     finally:
         temporary.cleanup()
 
@@ -96,5 +99,44 @@ def test_endpoint_host_change_needs_key_via_api():
         pid = client.post("/api/llm-profiles", json=NEW).get_json()["profile"]["id"]
         response = client.put(f"/api/llm-profiles/{pid}", json={"endpoint": "http://attacker:8080"})
         assert response.status_code == 400 and "API key" in response.get_json()["message"]
+    finally:
+        temporary.cleanup()
+
+
+
+def _beat(base, age=0.0, **runtime):
+    GroupingOverrideStore(base / "grouping_overrides.json", base / "grouping_status.json") \
+        .update_heartbeat(time.time() - age, runtime=runtime)
+
+
+def test_llm_reason_shown_on_alerts_and_service_analysis():
+    temporary, base, client = _client()
+    try:
+        reason = "Cannot reach Elasticsearch, so no new logs are analyzed: name not resolved"
+        _beat(base, llm_enabled=True, llm_status="error", llm_reason=reason, llm_reason_since=123.0)
+        for url in ("/api/alerts", "/api/service-analysis"):
+            llm = client.get(url).get_json()["llm"]
+            assert llm["status"] == "error" and llm["reason"] == reason and llm["reason_since"] == 123.0
+    finally:
+        temporary.cleanup()
+
+
+def test_engine_offline_reason():
+    temporary, base, client = _client()
+    try:
+        _beat(base, age=3600, llm_enabled=True, llm_status="ok", llm_reason="fine")
+        llm = client.get("/api/alerts").get_json()["llm"]
+        assert llm["alive"] is False and llm["status"] == "error" and "not running" in llm["reason"]
+    finally:
+        temporary.cleanup()
+
+
+def test_service_analysis_409_explains_disabled_reason():
+    temporary, base, client = _client()
+    try:
+        reason = "No active LLM profile and no server default"
+        _beat(base, llm_enabled=False, llm_status="disabled", llm_reason=reason)
+        response = client.post("/api/service-analysis", json={"service": "api"})
+        assert response.status_code == 409 and response.get_json()["message"] == reason
     finally:
         temporary.cleanup()
