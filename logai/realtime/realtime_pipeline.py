@@ -9,6 +9,7 @@ templates just wait for the next training run.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections import deque
 from typing import Any, Optional, Tuple, Union
@@ -28,6 +29,8 @@ from logai.grouping.assignment_manager import (
     GroupAssignmentManager,
 )
 from logai.incident.classifier import IncidentClassifier
+from logai.incident.requests import load_requests
+from logai.incident.service_analysis import build_service_evidence
 from logai.metrics.prometheus_exporter import MetricsExporter
 from logai.models import (
     AlertStateEnum,
@@ -131,7 +134,17 @@ class RealtimePipeline:
                 on_result=lambda result: self.metrics.logai_llm_requests_total.labels(
                     result=result
                 ).inc(),
+                service_store=JSONStore(
+                    f"{config.storage.base_dir}/{config.storage.service_analysis_file}"
+                ),
             )
+        # On-demand whole-service analysis requests (web-owned file).
+        self._analysis_requests_path = (
+            f"{config.storage.base_dir}/{config.storage.analysis_requests_file}"
+        )
+        self._analysis_requests: dict[str, float] = {}
+        self._analysis_requests_mtime: Optional[int] = None
+        self._handled_requests: dict[str, float] = {}
         self._recent_params: dict[Tuple[str, str], deque] = {}
         # Windows already analyzed in their current episode. COOLING is still
         # the same episode, so a restart never re-triggers an ongoing alert.
@@ -197,6 +210,7 @@ class RealtimePipeline:
 
         while True:
             self._refresh_grouping_if_needed()
+            self._process_analysis_requests()
             # ── Phase 1: Poll ES ──────────────────────────────────────────
             try:
                 batch, cursor = self.collector.poll_batch()
@@ -624,6 +638,53 @@ class RealtimePipeline:
         count = self.template_registry.count_by_service(svc)
         self.metrics.set_template_count(svc, count)
 
+    # --- on-demand service analysis -----------------------------------------
+
+    def _process_analysis_requests(self) -> None:
+        """Submit each web request for a whole-service analysis exactly once.
+
+        A request is new when its requested_at is newer than both what this
+        process already handled and the stored record's requested_at (the
+        latter keeps it restart-safe). Never raises into the poll loop.
+        """
+        classifier = getattr(self, "incident_classifier", None)
+        if classifier is None or classifier.service_store is None:
+            return
+        try:
+            try:
+                mtime = os.stat(self._analysis_requests_path).st_mtime_ns
+            except FileNotFoundError:
+                return
+            if mtime != self._analysis_requests_mtime:
+                self._analysis_requests = load_requests(self._analysis_requests_path)
+                self._analysis_requests_mtime = mtime
+            for service, requested_at in self._analysis_requests.items():
+                record = classifier.service_store.get(service) or {}
+                if requested_at <= max(
+                    self._handled_requests.get(service, 0.0),
+                    float(record.get("requested_at") or 0.0),
+                ):
+                    continue
+                alert_states = self.alert_sm.states_for_service(service)
+                if self.template_registry.count_by_service(service) == 0 and not alert_states:
+                    logger.info("Ignoring analysis request for unknown service %r", service)
+                    self._handled_requests[service] = requested_at
+                    continue
+                evidence, candidates, sent_groups = build_service_evidence(
+                    service,
+                    self.group_registry,
+                    self.template_registry,
+                    alert_states,
+                    {g: list(dq) for (s, g), dq in self._recent_params.items() if s == service},
+                    self.doc_matcher,
+                )
+                if classifier.submit_service(
+                    service, requested_at, evidence, candidates, sent_groups
+                ):
+                    self._handled_requests[service] = requested_at
+        except Exception as exc:  # noqa: BLE001 - enrichment must not stop the loop
+            logger.warning("Service analysis request handling failed: %s", exc)
+
     # --- grouping revision activation ---------------------------------------
 
     def _heartbeat_grouping(self) -> None:
@@ -634,6 +695,7 @@ class RealtimePipeline:
         ):
             return
         self.grouping_store.update_heartbeat(now, runtime={
+            "llm_enabled": getattr(self, "incident_classifier", None) is not None,
             "last_successful_poll_at": self._last_successful_poll_at,
             "last_processed_event_at": self._last_processed_event_at,
             "last_checkpoint_commit_at": self._last_checkpoint_commit_at,

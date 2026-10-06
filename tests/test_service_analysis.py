@@ -291,3 +291,87 @@ def test_worker_runs_both_job_types(tmp_path):
         assert done == "done" and svc == "done"
     finally:
         clf.stop()
+
+
+# --- Task 4: engine pickup + heartbeat ------------------------------------------
+
+from unittest.mock import MagicMock, patch
+
+
+def _engine(tmp_path, record=None, endpoint="http://llm"):
+    if record is not None:
+        JSONStore(tmp_path / "service_analysis.json").set("recharge", record)
+    p = tic._pipeline(tmp_path, endpoint=endpoint)
+    p.template_registry.upsert(TemplateState(
+        template_id="T1", template_text="x", service="recharge", event_count=1, group_id="G1"))
+    if p.incident_classifier is not None:
+        p.incident_classifier.submit_service = MagicMock(return_value=True)
+    return p
+
+
+def _request(tmp_path, service, requested_at):
+    add_request(tmp_path / "analysis_requests.json", service, requested_at, now=requested_at)
+
+
+def test_request_submitted_once(tmp_path):
+    p = _engine(tmp_path)
+    _request(tmp_path, "recharge", 10.0)
+    p._process_analysis_requests()
+    p._process_analysis_requests()
+    submit = p.incident_classifier.submit_service
+    assert submit.call_count == 1
+    service, requested_at, evidence, candidates, sent = submit.call_args.args
+    assert (service, requested_at, evidence["service"]) == ("recharge", 10.0, "recharge")
+
+
+def test_handled_across_restart(tmp_path):
+    p = _engine(tmp_path, record={"status": "done", "service": "recharge", "requested_at": 10.0})
+    _request(tmp_path, "recharge", 10.0)
+    p._process_analysis_requests()
+    p.incident_classifier.submit_service.assert_not_called()
+
+
+def test_new_request_after_done_runs_again(tmp_path):
+    p = _engine(tmp_path, record={"status": "done", "service": "recharge", "requested_at": 10.0})
+    _request(tmp_path, "recharge", 20.0)
+    p._process_analysis_requests()
+    p._process_analysis_requests()
+    assert p.incident_classifier.submit_service.call_count == 1
+
+
+def test_unknown_service_marked_handled(tmp_path):
+    p = _engine(tmp_path)
+    _request(tmp_path, "ghost", 10.0)
+    p._process_analysis_requests()
+    p._process_analysis_requests()
+    p.incident_classifier.submit_service.assert_not_called()
+    assert p._handled_requests["ghost"] == 10.0
+
+
+def test_active_service_retried(tmp_path):
+    p = _engine(tmp_path)
+    p.incident_classifier.submit_service = MagicMock(side_effect=[False, True])
+    _request(tmp_path, "recharge", 10.0)
+    for _ in range(3):
+        p._process_analysis_requests()
+    assert p.incident_classifier.submit_service.call_count == 2
+
+
+def test_heartbeat_has_llm_enabled(tmp_path):
+    p = _engine(tmp_path)
+    p._last_grouping_heartbeat = 0.0
+    p._heartbeat_grouping()
+    assert p.grouping_store.load_status()["runtime"]["llm_enabled"] is True
+    off = _engine(tmp_path / "off", endpoint="")
+    off._last_grouping_heartbeat = 0.0
+    off._heartbeat_grouping()
+    assert off.grouping_store.load_status()["runtime"]["llm_enabled"] is False
+    off._process_analysis_requests()  # disabled: no classifier, no error
+
+
+def test_pickup_never_raises(tmp_path):
+    p = _engine(tmp_path)
+    _request(tmp_path, "recharge", 10.0)
+    with patch("logai.realtime.realtime_pipeline.build_service_evidence", side_effect=RuntimeError("boom")):
+        assert p._process_analysis_requests() is None
+    p.incident_classifier.submit_service.assert_not_called()
