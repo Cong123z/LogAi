@@ -196,6 +196,7 @@ class StorageConfig:
     incident_analysis_file: str = "incident_analysis.json"
     service_analysis_file: str = "service_analysis.json"
     analysis_requests_file: str = "analysis_requests.json"
+    llm_profiles_file: str = "llm_profiles.json"
 
 
 @dataclass
