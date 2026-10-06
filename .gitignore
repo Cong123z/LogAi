@@ -16,5 +16,23 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
-=3.0.0
 *.log
+
+# Local-only notes / tooling
+.claude/
+.agents/
+graphify-out/
+CLAUDE.md
+skills-lock.json
+.gitattributes
+/md
+TASK.md
+plan.md
+update.md
+HANDOFF.md
+agents.md
+ISSUES_FIXED.md
+KNOWN_ISSUES.md
+docs/superpowers/
+k8s/logai.yaml
+k8s/training.yaml
