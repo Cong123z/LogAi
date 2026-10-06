@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import threading
 import time
 from collections import deque
 from typing import Any, Optional, Tuple, Union
@@ -149,6 +150,10 @@ class RealtimePipeline:
             f"{config.storage.base_dir}/{config.storage.llm_profiles_file}"
         )
         self._llm_profile_id: Optional[str] = None
+        self._llm_profile_name: Optional[str] = None
+        self._llm_profile_error: Optional[str] = None
+        self._es_error: Optional[str] = None
+        self._es_error_since: Optional[float] = None
         self._refresh_llm_profile()
         self._recent_params: dict[Tuple[str, str], deque] = {}
         # Windows already analyzed in their current episode. COOLING is still
@@ -209,17 +214,28 @@ class RealtimePipeline:
         incident_classifier = getattr(self, "incident_classifier", None)
         if incident_classifier is not None:
             incident_classifier.start()
+        # Profile switches and the heartbeat (with the LLM status reason) run on
+        # their own timer: an Elasticsearch outage blocks the poll loop for
+        # minutes of retries, and the web must still learn why.
+        self._control_stop = threading.Event()
+        threading.Thread(target=self._control_loop, name="engine-control", daemon=True).start()
         logger.info("Realtime pipeline started, polling Elasticsearch...")
+        try:
+            self._poll_loop()
+        finally:
+            self._control_stop.set()
+
+    def _poll_loop(self) -> None:
         consecutive_poll_failures = 0
         MAX_POLL_BACKOFF = 300.0  # 5 minutes
 
         while True:
             self._refresh_grouping_if_needed()
-            self._refresh_llm_profile()
             self._process_analysis_requests()
             # ── Phase 1: Poll ES ──────────────────────────────────────────
             try:
                 batch, cursor = self.collector.poll_batch()
+                self._record_es_ok()
                 consecutive_poll_failures = 0
                 self._last_successful_poll_at = time.time()
                 self.metrics.logai_engine_heartbeat_timestamp_seconds.set(
@@ -229,6 +245,7 @@ class RealtimePipeline:
                     self._last_successful_poll_at
                 )
             except Exception as exc:  # noqa: BLE001
+                self._record_es_error(exc)
                 consecutive_poll_failures += 1
                 backoff = min(
                     self.config.elasticsearch.poll_interval_seconds
@@ -655,6 +672,56 @@ class RealtimePipeline:
         classifier = getattr(self, "incident_classifier", None)
         return classifier is not None and classifier.enabled
 
+    CONTROL_INTERVAL_SECONDS = 2.0
+
+    def _control_tick(self) -> None:
+        self._refresh_llm_profile()
+        self._heartbeat_grouping()
+
+    def _control_loop(self) -> None:
+        """Runs until run_forever's poll loop exits."""
+        while not self._control_stop.wait(self.CONTROL_INTERVAL_SECONDS):
+            try:
+                self._control_tick()
+            except Exception as exc:  # noqa: BLE001 - keep the control timer alive
+                logger.warning("Engine control tick failed: %s", exc)
+
+    def _record_es_error(self, exc: BaseException) -> None:
+        self._es_error = str(exc)[:300]
+        if getattr(self, "_es_error_since", None) is None:
+            self._es_error_since = time.time()
+
+    def _record_es_ok(self) -> None:
+        self._es_error = None
+        self._es_error_since = None
+
+    def _llm_status(self) -> tuple[str, str, Optional[float]]:
+        """(status, reason, since) explaining whether LLM analysis can run:
+        status is ok | disabled | error; never contains the API key."""
+        classifier = getattr(self, "incident_classifier", None)
+        if not self._llm_enabled():
+            profile_error = getattr(self, "_llm_profile_error", None)
+            if profile_error:
+                return "disabled", f"{profile_error}; no server default LLM is configured", None
+            return (
+                "disabled",
+                "No active LLM profile and no server default (LOGAI_LLM_ENDPOINT); "
+                "choose a profile on the LLM profiles page",
+                None,
+            )
+        es_error = getattr(self, "_es_error", None)
+        if es_error:
+            return (
+                "error",
+                f"Cannot reach Elasticsearch, so no new logs are analyzed: {es_error}",
+                getattr(self, "_es_error_since", None),
+            )
+        if classifier.last_error and classifier.last_error_at >= classifier.last_ok_at:
+            return "error", f"Last LLM call failed: {classifier.last_error}", classifier.last_error_at
+        name = getattr(self, "_llm_profile_name", None)
+        source = f"profile {name!r}" if name else "the server default"
+        return "ok", f"Using {source} ({classifier.config.model or 'no model set'})", None
+
     def _refresh_llm_profile(self) -> None:
         """Apply the web's active LLM profile (or fall back to env config)
         without a restart. A broken profile file keeps the env config."""
@@ -680,6 +747,7 @@ class RealtimePipeline:
                 model=profile.get("model", ""),
             )
         profile_id = profile.get("id") if profile else None
+        self._llm_profile_name = profile.get("name") if profile else None
         if target != classifier.config or profile_id != self._llm_profile_id:
             logger.info(
                 "LLM source: %s",
@@ -751,6 +819,7 @@ class RealtimePipeline:
         self.grouping_store.update_heartbeat(now, runtime={
             "llm_enabled": self._llm_enabled(),
             "llm_profile_id": getattr(self, "_llm_profile_id", None),
+            **dict(zip(("llm_status", "llm_reason", "llm_reason_since"), self._llm_status())),
             "last_successful_poll_at": self._last_successful_poll_at,
             "last_processed_event_at": self._last_processed_event_at,
             "last_checkpoint_commit_at": self._last_checkpoint_commit_at,

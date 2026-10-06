@@ -115,6 +115,11 @@ class IncidentClassifier:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Outcome of the most recent LLM job, reported by the engine heartbeat
+        # so the web can say why analysis is not working.
+        self.last_error: Optional[str] = None
+        self.last_error_at: float = 0.0
+        self.last_ok_at: float = 0.0
         # The queue lives in memory: pending records from a previous process
         # will never complete, and their episode is not resubmitted.
         for key, record in self.store.all().items():
@@ -279,6 +284,7 @@ class IncidentClassifier:
             logger.warning("Incident analysis failed for %s: %s", window_key, exc)
             record = self._failed(window_key, str(exc))
             result = "failed"
+        self._note_outcome(record)
         record["model"] = cfg.model
         try:
             self.store.set(group_id_key(window_key), record)
@@ -313,6 +319,7 @@ class IncidentClassifier:
             logger.warning("Service analysis failed for %s: %s", service, exc)
             record = self._failed_service(service, requested_at, str(exc))
             result = "service_failed"
+        self._note_outcome(record)
         record["model"] = cfg.model
         try:
             if self.service_store is not None:
@@ -321,6 +328,14 @@ class IncidentClassifier:
             logger.exception("Unable to persist service analysis for %s", service)
         self._on_result(result)
         return record
+
+    def _note_outcome(self, record: Dict[str, Any]) -> None:
+        if record.get("status") == "failed":
+            self.last_error = str(record.get("error") or "unknown error")[:300]
+            self.last_error_at = time.time()
+        else:
+            self.last_error = None
+            self.last_ok_at = time.time()
 
     def _failed_service(
         self, service: str, requested_at: Optional[float], error: str
