@@ -89,6 +89,19 @@ class EmbeddingConfig:
 
 
 @dataclass
+class LLMConfig:
+    # OpenAI-compatible /chat/completions URL; empty disables incident analysis.
+    endpoint: str = ""
+    api_key: str | None = None
+    model: str = ""
+    timeout_seconds: float = 60.0
+    max_retries: int = 2
+    retry_backoff_seconds: float = 1.0
+    max_candidates: int = 5
+    max_tokens: int = 800
+
+
+@dataclass
 class ClusteringConfig:
     # Conservative defaults: prefer compact, high-confidence groups over
     # assigning borderline templates to an existing group.
@@ -180,6 +193,7 @@ class StorageConfig:
     doc_embeddings_file: str = "doc_embeddings.pkl"
     grouping_overrides_file: str = "grouping_overrides.json"
     grouping_status_file: str = "grouping_status.json"
+    incident_analysis_file: str = "incident_analysis.json"
 
 
 @dataclass
@@ -219,6 +233,7 @@ class AppConfig:
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     grouping: GroupingConfig = field(default_factory=GroupingConfig)
+    llm: LLMConfig = field(default_factory=LLMConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
@@ -291,5 +306,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         cfg.embedding.retry_backoff_seconds = float(
             os.environ["LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS"]
         )
+    if os.environ.get("LOGAI_LLM_ENDPOINT"):
+        cfg.llm.endpoint = os.environ["LOGAI_LLM_ENDPOINT"]
+    if os.environ.get("LOGAI_LLM_API_KEY"):
+        cfg.llm.api_key = os.environ["LOGAI_LLM_API_KEY"]
+    if os.environ.get("LOGAI_LLM_MODEL"):
+        cfg.llm.model = os.environ["LOGAI_LLM_MODEL"]
 
     return cfg
