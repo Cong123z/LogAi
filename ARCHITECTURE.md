@@ -89,6 +89,9 @@ Environment overrides hiện có:
 | `LOGAI_EMBEDDING_BATCH_SIZE` | Maximum texts sent per request |
 | `LOGAI_EMBEDDING_TIMEOUT_SECONDS` | Per-request HTTP timeout |
 | `LOGAI_EMBEDDING_MAX_RETRIES` | Retry count for transient failures |
+| `LOGAI_LLM_ENDPOINT` | OpenAI-compatible `/chat/completions` URL cho LLM incident classification; rỗng = tắt |
+| `LOGAI_LLM_API_KEY` | Optional bearer token cho LLM endpoint |
+| `LOGAI_LLM_MODEL` | Model name gửi trong request LLM |
 
 Các cấu hình khác chỉ thay đổi qua YAML hoặc code. `ReliabilityConfig` có các
 giá trị retry, nhưng decorator của Elasticsearch collector hiện dùng trực tiếp
@@ -560,6 +563,30 @@ poll rồi chấm **một lượt**.
 - **Crash-safety**: `_flush_batch()` giữ nguyên thứ tự durability — predict+apply
   → registry flush → `dedup.gc()` → `checkpoint.commit()` (chỉ khi có cursor thật
   từ stream). Chi tiết ở §10.3.
+
+### 7.6 LLM incident classification
+
+Bật khi `llm.endpoint` (`LOGAI_LLM_ENDPOINT`) khác rỗng; khi rỗng realtime chạy y
+như trước.
+
+- **Trigger**: sau `transition_batch()`, mỗi cửa sổ `(service, group_id)` vừa vào
+  ALERTING ở một *episode* mới được `submit` một lần. Episode chỉ kết thúc khi về
+  NORMAL; COOLING → ALERTING không trigger lại. Khi khởi động, các cửa sổ đang
+  ALERTING/COOLING trong `anomaly_state.json` được coi là đã phân tích (restart
+  không trigger lại).
+- **Evidence**: templates của group (ưu tiên cùng service, tối đa 10), trạng thái
+  alert, top giá trị parameter theo slot từ 200 event gần nhất của cửa sổ (bỏ
+  `<*>`; số/ID đã bị preprocessor mask nên không rời cluster), và top-k tài liệu
+  gần nhất theo cosine với centroid (`DocumentationMatcher.top_k`).
+- **Thực thi**: daemon thread `IncidentClassifier` với queue bounded 100; poll loop
+  không bao giờ chờ LLM. Retry 408/429/5xx; mọi lỗi được ghi `status=failed`,
+  không raise vào engine. Metric `logai_llm_requests_total{result}`.
+- **Hallucination guard**: `documentation_id` không thuộc danh sách candidate bị
+  coi là `null`; khi không có tài liệu hợp lệ thì bắt buộc có `suggestion`.
+- **Ownership**: `data/incident_analysis.json` chỉ engine ghi; web chỉ đọc và gắn
+  vào `/api/alerts` (`analysis`). Kết quả là tư vấn, không ghi vào field
+  documentation của `GroupState`. Suggestion có thể lưu thành tài liệu mới qua
+  nút "Save as document" (dùng `POST /api/documentation` sẵn có).
 
 ## 8. Module ownership và boundary mapping
 
