@@ -195,3 +195,87 @@ def test_alert_api_attaches_incident_analysis():
         assert next(i for i in listing["items"] if i["group_id"] == "GB")["analysis"] is None
     finally:
         temporary.cleanup()
+
+
+from logai.incident.requests import load_requests
+
+
+def _heartbeat(base, llm_enabled=True, age=0.0):
+    store = GroupingOverrideStore(base / "grouping_overrides.json", base / "grouping_status.json")
+    store.update_heartbeat(time.time() - age, runtime={"llm_enabled": llm_enabled})
+
+
+def test_post_service_analysis_202():
+    temporary, base, client = _client()
+    try:
+        _heartbeat(base)
+        response = client.post("/api/service-analysis", json={"service": "api"})
+        assert response.status_code == 202
+        body = response.get_json()
+        assert body["state"] == "requested"
+        assert load_requests(base / "analysis_requests.json")["api"] == body["requested_at"]
+    finally:
+        temporary.cleanup()
+
+
+def test_post_service_analysis_errors():
+    temporary, base, client = _client()
+    try:
+        _heartbeat(base)
+        assert client.post("/api/service-analysis", json={"service": "ghost"}).status_code == 404
+        assert client.post("/api/service-analysis", json={}).status_code == 400
+        _heartbeat(base, age=3600)
+        assert client.post("/api/service-analysis", json={"service": "api"}).status_code == 503
+        _heartbeat(base, llm_enabled=False)
+        response = client.post("/api/service-analysis", json={"service": "api"})
+        assert response.status_code == 409 and response.get_json()["error"] == "llm_disabled"
+        _heartbeat(base)
+        assert client.post("/api/service-analysis", json={"service": "api"}).status_code == 202
+        response = client.post("/api/service-analysis", json={"service": "api"})
+        assert response.status_code == 409 and response.get_json()["error"] == "analysis_pending"
+        # A pending record also blocks, even without a newer request.
+        (base / "service_analysis.json").write_text(json.dumps(
+            {"api": {"status": "pending", "service": "api", "requested_at": time.time() + 10}}),
+            encoding="utf-8")
+        response = client.post("/api/service-analysis", json={"service": "api"})
+        assert response.get_json()["error"] == "analysis_pending"
+    finally:
+        temporary.cleanup()
+
+
+def test_post_unicode_service():
+    temporary, base, client = _client()
+    try:
+        name = 'pay "vn" ví'
+        templates = json.loads((base / "template_registry.json").read_text(encoding="utf-8"))
+        templates["T9"] = {"template_id": "T9", "template_text": "x", "service": name,
+                           "event_count": 1, "group_id": "GA"}
+        (base / "template_registry.json").write_text(json.dumps(templates), encoding="utf-8")
+        _heartbeat(base)
+        assert client.post("/api/service-analysis", json={"service": name}).status_code == 202
+        listing = client.get("/api/service-analysis").get_json()
+        assert name in listing["services"] and listing["analyses"][name]["status"] == "requested"
+    finally:
+        temporary.cleanup()
+
+
+def test_get_service_analysis():
+    temporary, base, client = _client()
+    try:
+        (base / "anomaly_state.json").write_text(json.dumps({
+            json.dumps(["billing", "GA"]): {"group_id": ["billing", "GA"], "alert_state": "NORMAL"}
+        }), encoding="utf-8")
+        (base / "service_analysis.json").write_text(json.dumps({
+            "api": {"status": "done", "service": "api", "requested_at": 5.0, "health": "healthy",
+                    "summary": "fine", "issues": []},
+            "billing": {"status": "done", "service": "billing", "requested_at": 5.0},
+        }), encoding="utf-8")
+        from logai.incident.requests import add_request
+        add_request(base / "analysis_requests.json", "billing", 9.0, now=9.0)
+        listing = client.get("/api/service-analysis").get_json()
+        assert listing["services"] == ["api", "billing"]
+        assert listing["analyses"]["api"]["health"] == "healthy"
+        assert listing["analyses"]["billing"] == {"status": "requested", "service": "billing",
+                                                  "requested_at": 9.0}
+    finally:
+        temporary.cleanup()

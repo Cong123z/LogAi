@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, jsonify, request, send_from_directory
 
 from logai.alert.alert_state_machine import group_id_key
+from logai.incident.requests import add_request, load_requests
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.documentation import (
     DocumentInUse,
@@ -44,6 +46,8 @@ def create_app(
     grouping_overrides_path: str | None = None,
     grouping_status_path: str | None = None,
     grouping_stale_seconds: float = 45.0,
+    service_analysis_path: str | None = None,
+    analysis_requests_path: str | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     base = Path(data_dir)
@@ -58,6 +62,9 @@ def create_app(
         grouping_overrides_path or base / "grouping_overrides.json",
         grouping_status_path or base / "grouping_status.json",
     )
+
+    service_analysis_file = Path(service_analysis_path or base / "service_analysis.json")
+    analysis_requests_file = Path(analysis_requests_path or base / "analysis_requests.json")
 
     def _load_json(filename: str) -> Dict[str, Any]:
         path = base / filename
@@ -626,6 +633,70 @@ def create_app(
         for item in items:
             counts[item["alert_state"]] = counts.get(item["alert_state"], 0) + 1
         return jsonify({"items": items, "total": len(items), "counts": counts})
+
+    def _known_services() -> List[str]:
+        services = {
+            str(t.get("service") or "unknown")
+            for t in _load_json("template_registry.json").values() if isinstance(t, dict)
+        }
+        for key in _load_json("anomaly_state.json"):
+            try:
+                decoded = json.loads(key)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(decoded, list) and len(decoded) == 2:
+                services.add(str(decoded[0]))
+        return sorted(services)
+
+    def _service_analyses() -> Dict[str, Any]:
+        """Engine records, with requests not yet picked up shown as 'requested'."""
+        try:
+            with open(service_analysis_file, "r", encoding="utf-8") as stream:
+                records = json.load(stream)
+        except (OSError, json.JSONDecodeError):
+            records = {}
+        records = records if isinstance(records, dict) else {}
+        for service, requested_at in load_requests(analysis_requests_file).items():
+            record = records.get(service)
+            if not isinstance(record, dict) or requested_at > float(record.get("requested_at") or 0.0):
+                records[service] = {
+                    "status": "requested", "service": service, "requested_at": requested_at,
+                }
+        return records
+
+    @app.route("/api/service-analysis", methods=["GET"])
+    def list_service_analysis():
+        return jsonify({"services": _known_services(), "analyses": _service_analyses()})
+
+    @app.route("/api/service-analysis", methods=["POST"])
+    def request_service_analysis():
+        payload = request.get_json(silent=True)
+        service = payload.get("service") if isinstance(payload, dict) else None
+        if not isinstance(service, str) or not service.strip():
+            return jsonify({"error": "invalid_request", "message": "service is required"}), 400
+        if service not in _known_services():
+            return jsonify({"error": "not_found", "message": service}), 404
+        status = grouping.synchronization_status(stale_seconds=grouping_stale_seconds)
+        if status.get("state") == "engine_unavailable":
+            return jsonify({
+                "error": "engine_unavailable", "message": "The analysis engine is not running",
+            }), 503
+        if (status.get("runtime") or {}).get("llm_enabled") is not True:
+            return jsonify({
+                "error": "llm_disabled", "message": "LLM analysis is disabled on the engine",
+            }), 409
+        current = _service_analyses().get(service)
+        if isinstance(current, dict) and current.get("status") in {"requested", "pending"}:
+            return jsonify({
+                "error": "analysis_pending", "message": "An analysis for this service is already running",
+            }), 409
+        requested_at = time.time()
+        try:
+            add_request(analysis_requests_file, service, requested_at)
+        except OSError as exc:
+            logger.exception("Unable to write analysis request")
+            return jsonify({"error": "storage_error", "message": str(exc)}), 500
+        return jsonify({"state": "requested", "requested_at": requested_at}), 202
 
     @app.route("/api/documentation", methods=["GET"])
     def list_documentation():

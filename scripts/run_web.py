@@ -57,6 +57,12 @@ def main():
             web_base, config.storage.grouping_status_file
         ),
         grouping_stale_seconds=config.grouping.engine_status_stale_seconds,
+        service_analysis_path=_storage_path(
+            web_base, config.storage.service_analysis_file
+        ),
+        analysis_requests_path=_storage_path(
+            web_base, config.storage.analysis_requests_file
+        ),
     )
     print(f"Template Explorer running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
