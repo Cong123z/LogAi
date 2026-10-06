@@ -516,6 +516,13 @@
     .ai-suggestion { background:var(--yellow-bg); color:var(--yellow); border-color:transparent; }
     .ai-failed { background:var(--red-bg); color:var(--red); border-color:transparent; }
     .ai-pending { color:var(--text-dim); }
+    .llm-banner { display:flex; gap:10px; align-items:flex-start; border-radius:var(--radius); padding:10px 14px; margin-bottom:16px; font-size:13px; line-height:1.5; border:1px solid transparent; }
+    .llm-banner[hidden] { display:none; }
+    .llm-banner.llm-disabled { background:var(--yellow-bg); color:var(--yellow); border-color:var(--yellow-bg); }
+    .llm-banner.llm-error { background:var(--red-bg); color:var(--red); border-color:var(--red-bg); }
+    .llm-banner a { color:inherit; text-decoration:underline; }
+    .llm-status-error { color:var(--red); }
+    .llm-status-disabled { color:var(--yellow); }
     .service-analysis { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:16px 20px; margin-bottom:16px; }
     .service-analysis-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
     .service-analysis-controls h2 { font-size:15px; margin:0 8px 0 0; }
@@ -741,6 +748,7 @@
           </div>
           <div class="live-status"><span class="live-dot"></span><span id="alert-last-updated">Waiting for alert state...</span></div>
         </div>
+        <div class="llm-banner" id="llm-banner" role="status" hidden></div>
         <section class="service-analysis" aria-labelledby="service-analysis-heading">
           <div class="service-analysis-controls">
             <h2 id="service-analysis-heading">Service analysis</h2>
@@ -1811,6 +1819,24 @@
       prefillDocumentEditor(suggestion);
     });
 
+    // ── LLM status reason (reported by the engine) ──
+    function llmReasonText(state) {
+      if (!state || state.status === 'ok') return '';
+      const since = state.reason_since ? ` (since ${formatFullTs(state.reason_since)})` : '';
+      return `${state.reason || 'LLM analysis is unavailable'}${since}`;
+    }
+
+    function renderLlmBanner(state) {
+      const banner = document.getElementById('llm-banner');
+      const text = llmReasonText(state);
+      banner.hidden = !text;
+      if (!text) return;
+      banner.className = `llm-banner ${state.status === 'disabled' ? 'llm-disabled' : 'llm-error'}`;
+      const label = state.status === 'disabled' ? 'LLM analysis is off' : 'LLM analysis has a problem';
+      banner.innerHTML = `<strong>${label}:</strong> <span>${escapeHtml(text)}</span>`
+        + (state.status === 'disabled' ? ' <a href="#llm">Open LLM profiles</a>' : '');
+    }
+
     // ── LLM profiles ──
     const $llmTbody = document.getElementById('llm-tbody');
     const $llmModal = document.getElementById('llm-modal');
@@ -1832,12 +1858,11 @@
       llm.profiles = data.profiles || [];
       llm.activeId = data.active_profile_id;
       const engine = data.engine || {};
-      const active = llm.profiles.find(p => p.id === llm.activeId);
-      if (!engine.alive) $llmStatus.textContent = 'Engine offline: changes apply when it starts.';
-      else if (engine.llm_profile_id && engine.llm_profile_id === llm.activeId) $llmStatus.textContent = `Engine is using profile "${active ? active.name : engine.llm_profile_id}".`;
-      else if (llm.activeId) $llmStatus.textContent = 'Waiting for the engine to switch profile…';
-      else if (engine.llm_enabled) $llmStatus.textContent = 'Engine is using the server default configuration.';
-      else $llmStatus.textContent = 'LLM analysis is disabled: no active profile and no server default.';
+      const waiting = engine.alive && (engine.llm_profile_id || null) !== (llm.activeId || null);
+      $llmStatus.className = 'sync-status' + (waiting ? '' : (engine.status === 'error' ? ' llm-status-error' : engine.status === 'disabled' ? ' llm-status-disabled' : ''));
+      if (waiting) $llmStatus.textContent = 'Waiting for the engine to switch profile…';
+      else if (engine.status === 'ok') $llmStatus.textContent = `Engine: ${engine.reason || 'LLM analysis is running'}.`;
+      else $llmStatus.textContent = llmReasonText(engine);
       document.getElementById('llm-use-default-btn').disabled = !llm.activeId;
       if (!llm.profiles.length) {
         $llmTbody.innerHTML = '<tr><td colspan="6" class="empty-state">No profiles yet. Add one to choose the LLM used for analysis.</td></tr>';
@@ -1957,6 +1982,7 @@
 
     function renderServiceAnalysis(data) {
       const services = data.services || [];
+      sa.llm = data.llm || null;
       sa.analyses = data.analyses || {};
       if (!services.includes(sa.selected)) sa.selected = services[0] || null;
       // Rebuild the options only when the list changes, so a refresh never
@@ -1974,7 +2000,9 @@
     function renderServiceAnalysisCard() {
       const a = sa.selected ? sa.analyses[sa.selected] : null;
       const running = Boolean(a && (a.status === 'requested' || a.status === 'pending'));
-      $saRun.disabled = !sa.selected || sa.busy || running;
+      // A failed last call may be temporary, so only "off" or "engine down" blocks the button.
+      const blocked = Boolean(sa.llm && (!sa.llm.alive || !sa.llm.llm_enabled));
+      $saRun.disabled = !sa.selected || sa.busy || running || blocked;
       // The alerts refresh calls this every 2s; rebuilding unchanged content
       // would wipe the reader's text selection, scroll position and focus.
       const signature = JSON.stringify([sa.selected, a || null]);
@@ -2267,6 +2295,7 @@
             fetchAlerts(), fetchServiceAnalysis().catch(() => null),
           ]);
           renderAlerts(alerts);
+          renderLlmBanner(alerts.llm);
           if (services) renderServiceAnalysis(services);
         } else if (state.activeView === 'llm') {
           renderLlmProfiles(await fetchLlmProfiles());
