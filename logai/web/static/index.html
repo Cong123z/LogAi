@@ -918,7 +918,8 @@
     function escapeHtml(str) {
       const div = document.createElement('div');
       div.textContent = str;
-      return div.innerHTML;
+      // Also used inside quoted attributes, so quotes must be escaped too.
+      return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     function levelBadgeClass(level) {

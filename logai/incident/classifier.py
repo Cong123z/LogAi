@@ -39,6 +39,7 @@ SYSTEM_PROMPT = (
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 MAX_TEMPLATES = 10
 MAX_CANDIDATE_TEXT = 2000
+MAX_PARAMETER_VALUE = 200
 TITLE_LIMIT, TEXT_LIMIT, ERROR_CODE_LIMIT, ERROR_LIMIT = 200, 20_000, 100, 500
 QUEUE_SIZE = 100
 
@@ -93,6 +94,16 @@ class IncidentClassifier:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # The queue lives in memory: pending records from a previous process
+        # will never complete, and their episode is not resubmitted.
+        for key, record in self.store.all().items():
+            if isinstance(record, dict) and record.get("status") == "pending":
+                identity = _parse_group_id_key(key)
+                if isinstance(identity, tuple) and len(identity) == 2:
+                    self.store.set(key, self._failed(
+                        identity, "Interrupted by engine restart before analysis finished"
+                    ), flush=False)
+        self.store.flush()
 
     # -- engine-facing API ---------------------------------------------------
 
@@ -109,10 +120,16 @@ class IncidentClassifier:
         service, group_id = window_key
         # Pending goes first so the worker's final record can never be
         # overwritten by it.
-        self.store.set(group_id_key(window_key), {
-            "status": "pending", "service": service, "group_id": group_id,
-            "queued_at": time.time(),
-        })
+        try:
+            self.store.set(group_id_key(window_key), {
+                "status": "pending", "service": service, "group_id": group_id,
+                "queued_at": time.time(),
+            })
+        except Exception:  # noqa: BLE001 - never raise into the poll loop
+            logger.exception("Unable to persist pending incident analysis for %s", window_key)
+            with self._lock:
+                self._active.discard(window_key)
+            return False
         try:
             self._queue.put_nowait((window_key, alert, summarize_parameters(recent_params)))
         except queue.Full:
@@ -210,7 +227,17 @@ class IncidentClassifier:
                 {"id": s.template_id, "text": s.template_text, "level": s.level, "count": s.event_count}
                 for s in members[:MAX_TEMPLATES]
             ],
-            "parameters": parameters,
+            "parameters": [
+                {
+                    **item,
+                    "top_values": [
+                        [str(value)[:MAX_PARAMETER_VALUE], count]
+                        for value, count in item["top_values"]
+                    ],
+                }
+                for item in parameters
+                if item["template_id"] in {s.template_id for s in members[:MAX_TEMPLATES]}
+            ],
             "candidates": [
                 {
                     "id": entry.doc_id, "title": entry.title,
@@ -257,13 +284,17 @@ class IncidentClassifier:
     @staticmethod
     def _parse(content: str) -> Dict[str, Any]:
         """Tolerates code fences and prose around the JSON object."""
-        start, end = content.find("{"), content.rfind("}")
-        if start < 0 or end < start:
-            raise ValueError("LLM reply contains no JSON object")
-        reply = json.loads(content[start:end + 1])
-        if not isinstance(reply, dict):
-            raise ValueError("LLM reply is not a JSON object")
-        return reply
+        decoder = json.JSONDecoder()
+        start = content.find("{")
+        while start >= 0:
+            try:
+                reply, _ = decoder.raw_decode(content, start)
+            except json.JSONDecodeError:
+                reply = None
+            if isinstance(reply, dict):
+                return reply
+            start = content.find("{", start + 1)
+        raise ValueError("LLM reply contains no JSON object")
 
     def _validate(
         self, window_key: WindowKey, reply: Dict[str, Any], candidates: Dict[str, str]
@@ -279,7 +310,7 @@ class IncidentClassifier:
                 isinstance(raw, dict)
                 and isinstance(raw.get("title"), str) and raw["title"].strip()
                 and isinstance(raw.get("text"), str) and raw["text"].strip()
-                and isinstance(raw.get("error_code", ""), str)
+                and isinstance(raw.get("error_code") or "", str)
             ):
                 raise ValueError("LLM chose no candidate document and gave no valid suggestion")
             suggestion = {

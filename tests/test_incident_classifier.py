@@ -349,3 +349,44 @@ def test_disabled_when_no_endpoint(tmp_path):
     p = _pipeline(tmp_path, endpoint="")
     assert p.incident_classifier is None
     p._track_alert_episodes([_result(WK)], [_state(WK, "ALERTING")])
+
+
+# --- Final review fixes -------------------------------------------------------
+
+def test_restart_turns_stale_pending_into_failed(tmp_path):
+    store = JSONStore(tmp_path / "incident_analysis.json")
+    store.set(STORE_KEY, {"status": "pending", "service": "api", "group_id": "GA", "queued_at": 1.0})
+    _classifier(tmp_path, [])
+    rec = JSONStore(tmp_path / "incident_analysis.json").get(STORE_KEY)
+    assert rec["status"] == "failed" and "restart" in rec["error"]
+
+
+def test_null_error_code_suggestion_accepted(tmp_path):
+    clf, _, _, _ = _classifier(tmp_path, [_reply({"documentation_id": None, "reasoning": "x",
+        "suggestion": {"title": "Restart gateway", "text": "fix", "error_code": None}})])
+    rec = clf.process(KEY, ALERT, [])
+    assert rec["status"] == "done" and rec["suggestion"]["error_code"] == ""
+
+
+def test_prose_with_braces_before_json(tmp_path):
+    body = json.dumps({"documentation_id": "DOC-001", "reasoning": "db", "suggestion": None})
+    clf, _, _, _ = _classifier(tmp_path, [_reply(f"Use {{placeholder}} values.\n```json\n{body}\n```")])
+    assert clf.process(KEY, ALERT, [])["status"] == "done"
+
+
+def test_submit_store_failure_does_not_raise_or_block(tmp_path):
+    clf, _, store, _ = _classifier(tmp_path, [])
+    original = store.set
+    store.set = MagicMock(side_effect=OSError("disk full"))
+    assert clf.submit(KEY, ALERT, []) is False
+    store.set = original
+    assert clf.submit(KEY, ALERT, []) is True
+
+
+def test_parameter_evidence_bounded(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [_reply(
+        {"documentation_id": "DOC-001", "reasoning": "db", "suggestion": None})])
+    clf.process(KEY, ALERT, summarize_parameters([("T1", ["x" * 5000]), ("T_OTHER", ["y"])]))
+    params = _evidence(session)["parameters"]
+    assert [p["template_id"] for p in params] == ["T1"]
+    assert len(params[0]["top_values"][0][0]) == 200
