@@ -15,7 +15,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from logai.alert.alert_state_machine import group_id_key
 from logai.incident.profiles import LLMProfileStore, ProfileError, ProfileStoreUnreadable
-from logai.incident.requests import add_request, load_requests
+from logai.incident.requests import add_request, load_requests, request_key
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.documentation import (
     DocumentInUse,
@@ -38,6 +38,8 @@ logger = logging.getLogger("logai.web")
 PENDING_GROUP_ID = "UNASSIGNED_PENDING"
 # A request the engine has not picked up within this time is shown as failed.
 STALE_REQUEST_SECONDS = 600
+# Upper bound for "Triage all unknown" so one click cannot flood the LLM queue.
+TRIAGE_ALL_LIMIT = 50
 
 
 def create_app(
@@ -52,6 +54,7 @@ def create_app(
     service_analysis_path: str | None = None,
     analysis_requests_path: str | None = None,
     llm_profiles_path: str | None = None,
+    template_triage_path: str | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     base = Path(data_dir)
@@ -68,8 +71,14 @@ def create_app(
     )
 
     service_analysis_file = Path(service_analysis_path or base / "service_analysis.json")
+    template_triage_file = Path(template_triage_path or base / "template_triage.json")
+    incident_analysis_file = base / "incident_analysis.json"
     llm_profiles = LLMProfileStore(llm_profiles_path or base / "llm_profiles.json")
     analysis_requests_file = Path(analysis_requests_path or base / "analysis_requests.json")
+
+    def _json_body() -> Optional[Dict[str, Any]]:
+        payload = request.get_json(silent=True)
+        return payload if isinstance(payload, dict) else None
 
     def _load_json(filename: str) -> Dict[str, Any]:
         path = base / filename
@@ -544,14 +553,13 @@ def create_app(
             ),
         })
 
-    @app.route("/api/alerts")
-    def list_alerts():
-        """Return the latest persisted alert condition for every current group."""
+    def _alert_items() -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+        """Every (service, group) window with its latest alert state and
+        LLM analysis (requests not yet picked up are merged in)."""
         groups = _load_json("group_registry.json")
         templates = _load_json("template_registry.json")
         persisted = _load_json("anomaly_state.json")
-        # Engine-owned LLM incident analysis, keyed like anomaly_state.json.
-        analyses = _load_json("incident_analysis.json")
+        analyses = _analyses("window")
 
         def group_level(group: Dict[str, Any], service: str) -> str:
             candidates = [
@@ -603,6 +611,7 @@ def create_app(
                 "representative_template": group.get("representative_template", ""),
                 "error_code": group.get("error_code", ""),
                 "documentation_id": group.get("documentation_id"),
+                "key": group_id_key((service, group_id)),
                 "analysis": analyses.get(group_id_key((service, group_id))),
             })
 
@@ -622,6 +631,7 @@ def create_app(
                 "representative_template": group.get("representative_template", ""),
                 "error_code": group.get("error_code", ""),
                 "documentation_id": group.get("documentation_id"),
+                "key": group_id_key((service, group_id)),
                 "analysis": analyses.get(group_id_key((service, group_id))),
             })
 
@@ -637,6 +647,12 @@ def create_app(
         counts = {state: 0 for state in ("NORMAL", "WARMING", "ALERTING", "COOLING")}
         for item in items:
             counts[item["alert_state"]] = counts.get(item["alert_state"], 0) + 1
+        return items, counts
+
+    @app.route("/api/alerts")
+    def list_alerts():
+        """Return the latest persisted alert condition for every current group."""
+        items, counts = _alert_items()
         return jsonify({
             "items": items, "total": len(items), "counts": counts, "llm": _llm_engine_state(),
         })
@@ -676,67 +692,166 @@ def create_app(
                 services.add(str(decoded[0]))
         return sorted(services)
 
-    def _service_analyses() -> Dict[str, Any]:
-        """Engine records, with requests not yet picked up shown as 'requested'."""
+    # ── AI Insights: on-demand LLM analyses ──
+
+    def _read_records(path: Path) -> Dict[str, Any]:
         try:
-            with open(service_analysis_file, "r", encoding="utf-8") as stream:
+            with open(path, "r", encoding="utf-8") as stream:
                 records = json.load(stream)
         except (OSError, json.JSONDecodeError):
-            records = {}
-        records = records if isinstance(records, dict) else {}
-        for service, requested_at in load_requests(analysis_requests_file).items():
-            record = records.get(service)
-            if not isinstance(record, dict) or requested_at > float(record.get("requested_at") or 0.0):
-                if time.time() - requested_at > STALE_REQUEST_SECONDS:
-                    # Never picked up (engine down or LLM disabled): stop
-                    # blocking the button so the user can retry.
-                    records[service] = {
-                        "status": "failed", "service": service, "requested_at": requested_at,
-                        "error": "The engine did not pick up this request; try again",
-                    }
-                else:
-                    records[service] = {
-                        "status": "requested", "service": service, "requested_at": requested_at,
-                    }
+            return {}
+        return records if isinstance(records, dict) else {}
+
+    _record_files = {
+        "window": incident_analysis_file,
+        "service": service_analysis_file,
+        "template": template_triage_file,
+    }
+
+    def _analyses(kind: str) -> Dict[str, Any]:
+        """Engine records of one kind, keyed like the request ids, with web
+        requests merged in: an analyze request not yet picked up shows as
+        'requested' (or failed once stale); a pending delete hides the record."""
+        records = _read_records(_record_files[kind])
+        now = time.time()
+        prefix = f"{kind}:"
+        for key, (action, at) in load_requests(analysis_requests_file).items():
+            if not key.startswith(prefix):
+                continue
+            target = key[len(prefix):]
+            record = records.get(target)
+            record_at = float(record.get("requested_at") or 0.0) if isinstance(record, dict) else 0.0
+            if at <= record_at:
+                continue
+            if action == "delete":
+                records.pop(target, None)
+            elif now - at > STALE_REQUEST_SECONDS:
+                records[target] = {
+                    "status": "failed", "requested_at": at,
+                    "error": "The engine did not pick up this request; try again",
+                }
+            else:
+                records[target] = {"status": "requested", "requested_at": at}
         return records
 
-    @app.route("/api/service-analysis", methods=["GET"])
-    def list_service_analysis():
+    def _known_services() -> List[str]:
+        services = {
+            str(t.get("service") or "unknown")
+            for t in _load_json("template_registry.json").values() if isinstance(t, dict)
+        }
+        for key in _load_json("anomaly_state.json"):
+            try:
+                decoded = json.loads(key)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(decoded, list) and len(decoded) == 2:
+                services.add(str(decoded[0]))
+        return sorted(services)
+
+    def _pending_templates() -> List[Dict[str, Any]]:
+        templates = _load_json("template_registry.json")
+        return [
+            {
+                "template_id": tid,
+                "template_text": t.get("template_text", ""),
+                "service": t.get("service", "unknown"),
+                "level": t.get("level", DEFAULT_LEVEL),
+                "event_count": t.get("event_count", 0),
+                "first_seen": t.get("first_seen", 0),
+                "last_seen": t.get("last_seen", 0),
+            }
+            for tid, t in templates.items()
+            if isinstance(t, dict) and not _is_known(t.get("group_id"))
+        ]
+
+    def _target_exists(kind: str, target_id: str) -> bool:
+        if kind == "window":
+            try:
+                identity = json.loads(target_id)
+            except (TypeError, ValueError):
+                return False
+            return (
+                isinstance(identity, list) and len(identity) == 2
+                and identity[1] in _load_json("group_registry.json")
+            )
+        if kind == "service":
+            return target_id in _known_services()
+        if kind == "template":
+            return target_id in _load_json("template_registry.json")
+        return False
+
+    @app.route("/api/insights", methods=["GET"])
+    def list_insights():
+        windows, counts = _alert_items()
+        services = _analyses("service")
+        triage = _analyses("template")
+        templates = _pending_templates()
+        for template in templates:
+            template["analysis"] = triage.get(template["template_id"])
+        templates.sort(key=lambda t: (-int(t["event_count"] or 0), t["template_id"]))
+        try:
+            grouping_revision = grouping.load_overrides()["revision"]
+        except GroupingStoreError:
+            grouping_revision = None
         return jsonify({
-            "services": _known_services(), "analyses": _service_analyses(),
             "llm": _llm_engine_state(),
+            "windows": windows,
+            "window_counts": counts,
+            "services": [{"service": name, "analysis": services.get(name)} for name in _known_services()],
+            "templates": templates,
+            "grouping_revision": grouping_revision,
         })
 
-    @app.route("/api/service-analysis", methods=["POST"])
-    def request_service_analysis():
-        payload = request.get_json(silent=True)
-        service = payload.get("service") if isinstance(payload, dict) else None
-        if not isinstance(service, str) or not service.strip():
-            return jsonify({"error": "invalid_request", "message": "service is required"}), 400
-        if service not in _known_services():
-            return jsonify({"error": "not_found", "message": service}), 404
-        status = grouping.synchronization_status(stale_seconds=grouping_stale_seconds)
-        if status.get("state") == "engine_unavailable":
-            return jsonify({
-                "error": "engine_unavailable", "message": "The analysis engine is not running",
-            }), 503
+    def _llm_unavailable():
         llm_state = _llm_engine_state()
+        if not llm_state["alive"]:
+            return jsonify({"error": "engine_unavailable", "message": llm_state["reason"]}), 503
         if not llm_state["llm_enabled"]:
-            return jsonify({
-                "error": "llm_disabled", "message": llm_state["reason"],
-            }), 409
-        current = _service_analyses().get(service)
+            return jsonify({"error": "llm_disabled", "message": llm_state["reason"]}), 409
+        return None
+
+    @app.route("/api/insights/analyze", methods=["POST"])
+    def request_insight():
+        payload = _json_body() or {}
+        kind, target_id = payload.get("kind"), payload.get("id")
+        if kind not in {"window", "service", "template", "templates_all"}:
+            return jsonify({"error": "invalid_request", "message": "unknown kind"}), 400
+        blocked = _llm_unavailable()
+        if blocked is not None:
+            return blocked
+        now = time.time()
+        if kind == "templates_all":
+            triage = _analyses("template")
+            queued = 0
+            for template in _pending_templates():
+                if queued >= TRIAGE_ALL_LIMIT:
+                    break
+                current = triage.get(template["template_id"])
+                if isinstance(current, dict) and current.get("status") in {"requested", "pending"}:
+                    continue
+                add_request(analysis_requests_file, "template", template["template_id"], now)
+                queued += 1
+            return jsonify({"state": "requested", "queued": queued}), 202
+        if not isinstance(target_id, str) or not _target_exists(kind, target_id):
+            return jsonify({"error": "not_found", "message": str(target_id)}), 404
+        current = _analyses(kind).get(target_id)
         if isinstance(current, dict) and current.get("status") in {"requested", "pending"}:
             return jsonify({
-                "error": "analysis_pending", "message": "An analysis for this service is already running",
+                "error": "analysis_pending", "message": "An analysis for this item is already running",
             }), 409
-        requested_at = time.time()
-        try:
-            add_request(analysis_requests_file, service, requested_at)
-        except OSError as exc:
-            logger.exception("Unable to write analysis request")
-            return jsonify({"error": "storage_error", "message": str(exc)}), 500
-        return jsonify({"state": "requested", "requested_at": requested_at}), 202
+        add_request(analysis_requests_file, kind, target_id, now)
+        return jsonify({"state": "requested", "requested_at": now}), 202
+
+    @app.route("/api/insights/delete", methods=["POST"])
+    def delete_insight():
+        payload = _json_body() or {}
+        kind, target_id = payload.get("kind"), payload.get("id")
+        if kind not in _record_files or not isinstance(target_id, str):
+            return jsonify({"error": "invalid_request", "message": "kind and id are required"}), 400
+        if _analyses(kind).get(target_id) is None:
+            return jsonify({"error": "not_found", "message": target_id}), 404
+        add_request(analysis_requests_file, kind, target_id, time.time(), action="delete")
+        return jsonify({"state": "deleting", "key": request_key(kind, target_id)}), 202
 
     # ── LLM profiles (keys go in, only hints come out) ──
 
@@ -751,10 +866,6 @@ def create_app(
         if isinstance(exc, KeyError):
             return jsonify({"error": "not_found", "message": str(exc.args[0])}), 404
         return jsonify({"error": "invalid_request", "message": str(exc)}), 400
-
-    def _json_body() -> Optional[Dict[str, Any]]:
-        payload = request.get_json(silent=True)
-        return payload if isinstance(payload, dict) else None
 
     @app.route("/api/llm-profiles", methods=["GET"])
     def list_llm_profiles():
@@ -839,14 +950,45 @@ def create_app(
             "synchronization": documentation.synchronization_status(),
         })
 
+    def _assign_document(doc_id: str, group_ids: List[Any]) -> tuple[List[str], List[Dict[str, str]]]:
+        """Make doc_id the manual documentation of each existing group."""
+        assigned: List[str] = []
+        skipped: List[Dict[str, str]] = []
+        blocked, _ = _documentation_mutations_blocked()
+        groups = _load_json("group_registry.json")
+        templates = _load_json("template_registry.json")
+        for group_id in dict.fromkeys(str(g) for g in group_ids):
+            if blocked:
+                skipped.append({"group_id": group_id, "reason": "grouping_pending"})
+                continue
+            group = groups.get(group_id)
+            if not isinstance(group, dict):
+                skipped.append({"group_id": group_id, "reason": "not_found"})
+                continue
+            texts = [templates.get(t, {}).get("template_text", "") for t in group.get("template_ids", [])]
+            try:
+                documentation.set_override(
+                    group_id, doc_id, group_fingerprint(group.get("template_ids", []), texts),
+                    documentation.load_overrides()["revision"],
+                )
+                assigned.append(group_id)
+            except Exception as exc:  # noqa: BLE001 - the document itself was saved
+                logger.warning("Unable to assign %s to %s: %s", doc_id, group_id, exc)
+                skipped.append({"group_id": group_id, "reason": "assignment_failed"})
+        return assigned, skipped
+
     @app.route("/api/documentation", methods=["POST"])
     def create_documentation():
         payload = request.get_json(silent=True) or {}
+        group_ids = payload.pop("assign_group_ids", None) if isinstance(payload, dict) else None
         try:
             item, corpus = documentation.create_document(payload, payload.get("revision"))
-            return jsonify({"item": item, "revision": corpus["revision"]}), 201
         except Exception as exc:  # noqa: BLE001
             return _mutation_error(exc)
+        body: Dict[str, Any] = {"item": item, "revision": corpus["revision"]}
+        if isinstance(group_ids, list) and group_ids:
+            body["assigned_group_ids"], body["assignment_skipped"] = _assign_document(item["id"], group_ids)
+        return jsonify(body), 201
 
     @app.route("/api/documentation/<doc_id>", methods=["PUT"])
     def update_documentation(doc_id: str):

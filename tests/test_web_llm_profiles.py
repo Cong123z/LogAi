@@ -109,12 +109,12 @@ def _beat(base, age=0.0, **runtime):
         .update_heartbeat(time.time() - age, runtime=runtime)
 
 
-def test_llm_reason_shown_on_alerts_and_service_analysis():
+def test_llm_reason_shown_on_alerts_and_insights():
     temporary, base, client = _client()
     try:
         reason = "Cannot reach Elasticsearch, so no new logs are analyzed: name not resolved"
         _beat(base, llm_enabled=True, llm_status="error", llm_reason=reason, llm_reason_since=123.0)
-        for url in ("/api/alerts", "/api/service-analysis"):
+        for url in ("/api/alerts", "/api/insights"):
             llm = client.get(url).get_json()["llm"]
             assert llm["status"] == "error" and llm["reason"] == reason and llm["reason_since"] == 123.0
     finally:
@@ -136,7 +136,7 @@ def test_service_analysis_409_explains_disabled_reason():
     try:
         reason = "No active LLM profile and no server default"
         _beat(base, llm_enabled=False, llm_status="disabled", llm_reason=reason)
-        response = client.post("/api/service-analysis", json={"service": "api"})
+        response = client.post("/api/insights/analyze", json={"kind": "service", "id": "api"})
         assert response.status_code == 409 and response.get_json()["message"] == reason
     finally:
         temporary.cleanup()

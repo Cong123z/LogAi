@@ -66,6 +66,9 @@ def main():
         llm_profiles_path=_storage_path(
             web_base, config.storage.llm_profiles_file
         ),
+        template_triage_path=_storage_path(
+            web_base, config.storage.template_triage_file
+        ),
     )
     print(f"Template Explorer running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
