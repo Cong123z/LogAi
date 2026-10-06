@@ -8,6 +8,7 @@ templates just wait for the next training run.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from collections import deque
@@ -28,6 +29,7 @@ from logai.grouping.assignment_manager import (
     GroupAssignmentManager,
 )
 from logai.incident.classifier import IncidentClassifier
+from logai.incident.profiles import LLMProfileStore
 from logai.incident.requests import load_requests
 from logai.incident.service_analysis import build_service_evidence
 from logai.metrics.prometheus_exporter import MetricsExporter
@@ -119,29 +121,35 @@ class RealtimePipeline:
         self.collector._malformed_counter = self.metrics.logai_es_malformed_hits_total
 
         # LLM incident analysis: one job per alert episode (entering ALERTING),
-        # run on a background thread. Disabled while no endpoint is configured.
+        # run on a background thread. The endpoint comes from the active web
+        # profile, else from LLM env config; with neither it stays disabled.
         self.incident_classifier: Optional[IncidentClassifier] = None
-        if config.llm.endpoint:
-            self.incident_classifier = IncidentClassifier(
-                config.llm,
-                self.doc_matcher,
-                self.group_registry,
-                self.template_registry,
-                JSONStore(
-                    f"{config.storage.base_dir}/{config.storage.incident_analysis_file}"
-                ),
-                on_result=lambda result: self.metrics.logai_llm_requests_total.labels(
-                    result=result
-                ).inc(),
-                service_store=JSONStore(
-                    f"{config.storage.base_dir}/{config.storage.service_analysis_file}"
-                ),
-            )
+        self.incident_classifier = IncidentClassifier(
+            config.llm,
+            self.doc_matcher,
+            self.group_registry,
+            self.template_registry,
+            JSONStore(
+                f"{config.storage.base_dir}/{config.storage.incident_analysis_file}"
+            ),
+            on_result=lambda result: self.metrics.logai_llm_requests_total.labels(
+                result=result
+            ).inc(),
+            service_store=JSONStore(
+                f"{config.storage.base_dir}/{config.storage.service_analysis_file}"
+            ),
+        )
         # On-demand whole-service analysis requests (web-owned file).
         self._analysis_requests_path = (
             f"{config.storage.base_dir}/{config.storage.analysis_requests_file}"
         )
         self._handled_requests: dict[str, float] = {}
+        self._env_llm_config = config.llm
+        self._llm_profiles = LLMProfileStore(
+            f"{config.storage.base_dir}/{config.storage.llm_profiles_file}"
+        )
+        self._llm_profile_id: Optional[str] = None
+        self._refresh_llm_profile()
         self._recent_params: dict[Tuple[str, str], deque] = {}
         # Windows already analyzed in their current episode. COOLING is still
         # the same episode, so a restart never re-triggers an ongoing alert.
@@ -207,6 +215,7 @@ class RealtimePipeline:
 
         while True:
             self._refresh_grouping_if_needed()
+            self._refresh_llm_profile()
             self._process_analysis_requests()
             # ── Phase 1: Poll ES ──────────────────────────────────────────
             try:
@@ -401,9 +410,9 @@ class RealtimePipeline:
         `states` is aligned 1:1 with `scored` (transition_batch keeps order).
         An episode ends only at NORMAL; COOLING -> ALERTING does not re-trigger.
         """
-        classifier = getattr(self, "incident_classifier", None)
-        if classifier is None:
+        if not self._llm_enabled():
             return
+        classifier = self.incident_classifier
         for result, state in zip(scored, states):
             key = tuple(state.group_id)
             if state.alert_state == AlertStateEnum.NORMAL.value:
@@ -635,6 +644,41 @@ class RealtimePipeline:
         count = self.template_registry.count_by_service(svc)
         self.metrics.set_template_count(svc, count)
 
+    # --- LLM profile ---------------------------------------------------------
+
+    def _llm_enabled(self) -> bool:
+        classifier = getattr(self, "incident_classifier", None)
+        return classifier is not None and classifier.enabled
+
+    def _refresh_llm_profile(self) -> None:
+        """Apply the web's active LLM profile (or fall back to env config)
+        without a restart. A broken profile file keeps the env config."""
+        classifier = getattr(self, "incident_classifier", None)
+        if classifier is None:
+            return
+        try:
+            profile = self._llm_profiles.active_profile()
+        except Exception as exc:  # noqa: BLE001 - never raise into the poll loop
+            logger.warning("Unable to read LLM profiles: %s", exc)
+            profile = None
+        target = self._env_llm_config
+        if profile is not None:
+            target = dataclasses.replace(
+                self._env_llm_config,
+                endpoint=profile.get("endpoint", ""),
+                api_key=profile.get("api_key") or None,
+                model=profile.get("model", ""),
+            )
+        profile_id = profile.get("id") if profile else None
+        if target != classifier.config or profile_id != self._llm_profile_id:
+            logger.info(
+                "LLM source: %s",
+                f"profile {profile.get('name')!r} ({target.model})" if profile else
+                ("env config" if target.endpoint else "disabled"),
+            )
+            classifier.config = target
+            self._llm_profile_id = profile_id
+
     # --- on-demand service analysis -----------------------------------------
 
     def _process_analysis_requests(self) -> None:
@@ -645,8 +689,10 @@ class RealtimePipeline:
         latter keeps it restart-safe). A request that cannot run gets a failed
         record, so the web never waits on it. Never raises into the poll loop.
         """
-        classifier = getattr(self, "incident_classifier", None)
-        if classifier is None or classifier.service_store is None:
+        if not self._llm_enabled():
+            return
+        classifier = self.incident_classifier
+        if classifier.service_store is None:
             return
         # The file is tiny; reading it every loop avoids missing a write that
         # lands within the filesystem's mtime granularity.
@@ -693,7 +739,8 @@ class RealtimePipeline:
         ):
             return
         self.grouping_store.update_heartbeat(now, runtime={
-            "llm_enabled": getattr(self, "incident_classifier", None) is not None,
+            "llm_enabled": self._llm_enabled(),
+            "llm_profile_id": getattr(self, "_llm_profile_id", None),
             "last_successful_poll_at": self._last_successful_poll_at,
             "last_processed_event_at": self._last_processed_event_at,
             "last_checkpoint_commit_at": self._last_checkpoint_commit_at,

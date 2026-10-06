@@ -347,7 +347,9 @@ def test_classifier_results_counted(tmp_path):
 
 def test_disabled_when_no_endpoint(tmp_path):
     p = _pipeline(tmp_path, endpoint="")
-    assert p.incident_classifier is None
+    # The classifier always exists (a web profile can enable it at runtime)
+    # but stays disabled while no endpoint is configured.
+    assert p.incident_classifier is not None and not p.incident_classifier.enabled
     p._track_alert_episodes([_result(WK)], [_state(WK, "ALERTING")])
 
 

@@ -87,3 +87,75 @@ def test_corrupt_file_reads_empty(tmp_path):
     path.write_text("{oops", encoding="utf-8")
     store = LLMProfileStore(path)
     assert store.active_profile() is None and store.public_view()["profiles"] == []
+
+
+# --- engine applies the active profile ------------------------------------------
+
+from unittest.mock import MagicMock
+
+import test_incident_classifier as tic
+
+
+@pytest.fixture(autouse=True)
+def _use_real_numpy(real_numpy):
+    tic.np = real_numpy
+
+
+def _status(p):
+    p._last_grouping_heartbeat = 0.0
+    p._heartbeat_grouping()
+    return p.grouping_store.load_status()["runtime"]
+
+
+def test_active_profile_applied_without_restart(tmp_path):
+    p = tic._pipeline(tmp_path, endpoint="")
+    assert not p.incident_classifier.enabled and _status(p)["llm_enabled"] is False
+    store = LLMProfileStore(tmp_path / "llm_profiles.json")
+    pid = store.create(name="Zen", endpoint="https://zendigikey.shop", api_key="sk-abc-123456",
+                       model="gpt-5.6-luna", activate=True)["id"]
+    p._refresh_llm_profile()
+    cfg = p.incident_classifier.config
+    assert (cfg.endpoint, cfg.api_key, cfg.model) == (
+        "https://zendigikey.shop/v1/chat/completions", "sk-abc-123456", "gpt-5.6-luna")
+    assert p.incident_classifier.enabled
+    runtime = _status(p)
+    assert runtime["llm_enabled"] is True and runtime["llm_profile_id"] == pid
+    assert "sk-abc-123456" not in json.dumps(p.grouping_store.load_status())
+
+
+def test_active_profile_used_at_startup(tmp_path):
+    LLMProfileStore(tmp_path / "llm_profiles.json").create(
+        name="Zen", endpoint="https://z.io", api_key="k", model="m", activate=True)
+    p = tic._pipeline(tmp_path, endpoint="")
+    assert p.incident_classifier.enabled and p.incident_classifier.config.model == "m"
+
+
+def test_switch_back_to_env_config(tmp_path):
+    p = tic._pipeline(tmp_path, endpoint="http://env-llm")
+    store = LLMProfileStore(tmp_path / "llm_profiles.json")
+    store.create(name="Zen", endpoint="https://z.io", api_key="k", model="m", activate=True)
+    p._refresh_llm_profile()
+    assert p.incident_classifier.config.endpoint == "https://z.io/v1/chat/completions"
+    store.set_active(None)
+    p._refresh_llm_profile()
+    assert p.incident_classifier.config.endpoint == "http://env-llm"
+    assert _status(p)["llm_profile_id"] is None
+
+
+def test_disabled_llm_skips_alerts_and_requests(tmp_path):
+    p = tic._pipeline(tmp_path, endpoint="")
+    p.incident_classifier.submit = MagicMock()
+    p.incident_classifier.submit_service = MagicMock()
+    p._track_alert_episodes([tic._result(tic.WK)], [tic._state(tic.WK, "ALERTING")])
+    from logai.incident.requests import add_request
+    add_request(tmp_path / "analysis_requests.json", "auth", 10.0, now=10.0)
+    p._process_analysis_requests()
+    p.incident_classifier.submit.assert_not_called()
+    p.incident_classifier.submit_service.assert_not_called()
+
+
+def test_broken_profile_file_keeps_env_config(tmp_path):
+    p = tic._pipeline(tmp_path, endpoint="http://env-llm")
+    (tmp_path / "llm_profiles.json").write_text("{bad", encoding="utf-8")
+    p._refresh_llm_profile()
+    assert p.incident_classifier.config.endpoint == "http://env-llm"

@@ -134,6 +134,11 @@ class IncidentClassifier:
                     ), flush=False)
             self.service_store.flush()
 
+    @property
+    def enabled(self) -> bool:
+        """False until an endpoint is configured (env or active web profile)."""
+        return bool(self.config.endpoint)
+
     # -- engine-facing API ---------------------------------------------------
 
     def submit(
