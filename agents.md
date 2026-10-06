@@ -460,3 +460,57 @@ millisecond at a page boundary can be skipped or re-read.
   running.
 - Scratch scripts (`fresh_e2e.py`, `verify_split.py`, `eval_tg.py`,
   `sim_realtime.py`) live in the session scratchpad and are not part of either repo.
+
+---
+
+## Task: LLM analysis, LLM profiles, AI Insights (afternoon session)
+
+- **Date:** Tuesday, 2026-10-06 (timezone +07)
+- **Time:** ~14:57 – 17:15 (commit times `78eb510` … `b4e8a04`)
+- **Branch:** `calibrate` (not merged to `master`; no git remote)
+- **Status:** done and committed; full suite **397 passed** (`.venv/bin/python3 -m pytest -q`)
+- **Process:** superpowers brainstorming → spec → writing-plans → executing-plans
+  (Native) + a fresh opus reviewer per feature; UI designed with UI UX Pro Max;
+  ponytail mode active (no new dependencies).
+
+### Completed
+
+| # | Feature | Key commits | Notes |
+|---|---------|-------------|-------|
+| 1 | LLM incident classification (OpenAI-compatible endpoint, top-5 doc candidates, hallucination guard, suggestion → Save as document) | `78eb510`..`d4cf678` | Review fixes: stale pending after restart, `error_code: null`, prose with `{`, poll-loop safety, bounded evidence, `escapeHtml` quote injection |
+| 2 | Whole-service analysis (health + summary + ≤10 issues) | `64f0347`..`8b60773` | Review fixes: stuck "requested", mtime misses, card re-render wiping focus |
+| 3 | LLM profiles managed in the web (endpoint/key/model, one active, switch without restart, env fallback) | `f7ab6c7`..`66c57f3` | Keys never sent to browser (hint `sk-…W7h`), file mode 0600; host change requires re-entering the key; per-job config snapshot; corrupt file not overwritten |
+| 4 | Engine reports **why** LLM analysis is not working (`llm_status`/`llm_reason`, ES unreachable, no profile, last call failed); heartbeat on its own 2s control timer | `dec219b`..`e369620` | Banner on Alerts, AI Insights and LLM profiles pages |
+| 5 | **AI Insights** page; LLM is **never called automatically**; unknown-template triage (suspicious/benign/unsure + suggested group); delete analysis; **bug fix: Save as document now assigns the document to the group** | `9ef3242`..`b4e8a04` | Request file v2 (`analysis_requests.json`, analyze/delete for window/service/template), processed on the control timer; `/api/service-analysis` replaced by `/api/insights` |
+
+Docs: specs/plans under `docs/superpowers/`, `ARCHITECTURE.md` §7.6–7.8.
+
+### Verified
+
+- Live LLM (`gpt-5.6-luna` via `https://zendigikey.shop/v1/chat/completions`):
+  incident match + suggestion, service analysis (degraded, 2 issues). Key passed
+  only via env on the command line, never written to files.
+- Headless Chrome checks for every UI change (AI Insights flow: save+assign,
+  delete with confirm, move to group, analyze, Alerts link; profiles view; banner).
+- 10x replay run: 16 windows ALERTING, 16/16 analyses done (6 doc matches,
+  10 suggestions); DOC-012/DOC-014 were saved from suggestions by the user.
+
+### Environment notes
+
+- systemd user units written outside the repo: `~/.config/systemd/user/logai-engine.service`,
+  `logai-web.service`, overrides in `~/.config/logai/host.env` (loaded after `.env`,
+  because `EnvironmentFile` overrides `Environment=`). Not enabled/started.
+- Docker deploy needs an image rebuild from `calibrate`; then open **LLM profiles**,
+  click **Use** on the profile, and analyze from **AI Insights**.
+- The `elasticsearch` container had exited (code 255) earlier; restart it if needed.
+
+### Open items
+
+1. Live LLM check of **template triage** (was about to run when stopped).
+2. Final fresh review of the AI Insights commits (`9ef3242..b4e8a04`) not yet run.
+3. Deferred minors: concurrent request writes/stale requests after re-enable,
+   registry re-read on every 2s refresh, evidence built before active check,
+   no total evidence byte budget, recent params buffered while LLM is off.
+4. Pre-existing flaky test under CPU load:
+   `test_realtime_crash_load_and_perf::test_high_load_throughput_and_stress`.
+5. Rotate the LLM API key (it was pasted in chat).
