@@ -71,6 +71,23 @@ def summarize_parameters(
     ]
 
 
+def clean_suggestion(raw: Any) -> Optional[Dict[str, str]]:
+    """A trimmed {title, text, error_code} suggestion, or None when invalid
+    (title/text must be non-empty strings; error_code may be null)."""
+    if not (
+        isinstance(raw, dict)
+        and isinstance(raw.get("title"), str) and raw["title"].strip()
+        and isinstance(raw.get("text"), str) and raw["text"].strip()
+        and isinstance(raw.get("error_code") or "", str)
+    ):
+        return None
+    return {
+        "title": raw["title"].strip()[:TITLE_LIMIT],
+        "text": raw["text"].strip()[:TEXT_LIMIT],
+        "error_code": (raw.get("error_code") or "").strip()[:ERROR_CODE_LIMIT],
+    }
+
+
 class IncidentClassifier:
     def __init__(
         self,
@@ -304,20 +321,10 @@ class IncidentClassifier:
         if doc_id not in candidates:
             doc_id = None
         suggestion = None
-        raw = reply.get("suggestion")
         if doc_id is None:
-            if not (
-                isinstance(raw, dict)
-                and isinstance(raw.get("title"), str) and raw["title"].strip()
-                and isinstance(raw.get("text"), str) and raw["text"].strip()
-                and isinstance(raw.get("error_code") or "", str)
-            ):
+            suggestion = clean_suggestion(reply.get("suggestion"))
+            if suggestion is None:
                 raise ValueError("LLM chose no candidate document and gave no valid suggestion")
-            suggestion = {
-                "title": raw["title"].strip()[:TITLE_LIMIT],
-                "text": raw["text"].strip()[:TEXT_LIMIT],
-                "error_code": (raw.get("error_code") or "").strip()[:ERROR_CODE_LIMIT],
-            }
         try:
             confidence = min(1.0, max(0.0, float(reply.get("confidence") or 0.0)))
         except (TypeError, ValueError):

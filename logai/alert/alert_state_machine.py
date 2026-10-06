@@ -174,6 +174,19 @@ class AlertStateMachine:
             and isinstance(identity := _parse_group_id_key(key), tuple)
         }
 
+    def states_for_service(self, service: str) -> Dict[str, Tuple[str, float]]:
+        """group_id -> (alert_state, anomaly_score) for this service's persisted windows."""
+        result: Dict[str, Tuple[str, float]] = {}
+        for key, raw in self._store.all().items():
+            identity = _parse_group_id_key(key)
+            if isinstance(identity, tuple) and len(identity) == 2 and identity[0] == service \
+                    and isinstance(raw, dict):
+                result[identity[1]] = (
+                    str(raw.get("alert_state") or AlertStateEnum.NORMAL.value),
+                    float(raw.get("anomaly_score") or 0.0),
+                )
+        return result
+
     def drop_group(self, group_id: str) -> int:
         """Delete all persisted service cells for an empty semantic group."""
         keys = []
