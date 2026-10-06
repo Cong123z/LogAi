@@ -82,13 +82,6 @@ def test_validation(tmp_path):
         store.create(name="A", endpoint="https://a.io", api_key="k" * 600, model="m")
 
 
-def test_corrupt_file_reads_empty(tmp_path):
-    path = tmp_path / "llm_profiles.json"
-    path.write_text("{oops", encoding="utf-8")
-    store = LLMProfileStore(path)
-    assert store.active_profile() is None and store.public_view()["profiles"] == []
-
-
 # --- engine applies the active profile ------------------------------------------
 
 from unittest.mock import MagicMock
@@ -159,3 +152,93 @@ def test_broken_profile_file_keeps_env_config(tmp_path):
     (tmp_path / "llm_profiles.json").write_text("{bad", encoding="utf-8")
     p._refresh_llm_profile()
     assert p.incident_classifier.config.endpoint == "http://env-llm"
+
+
+# --- review fixes -----------------------------------------------------------------
+
+from unittest.mock import patch
+
+from logai.incident.profiles import _write_lock  # noqa: F401  (module import check)
+
+
+def test_endpoint_host_change_requires_new_key(tmp_path):
+    store = LLMProfileStore(tmp_path / "llm_profiles.json")
+    pid = store.create(name="A", endpoint="https://a.io", api_key="sk-real-key-0001", model="m")["id"]
+    with pytest.raises(ProfileError, match="API key"):
+        store.update(pid, endpoint="http://attacker:8080")
+    assert store.get(pid)["endpoint"] == "https://a.io/v1/chat/completions"
+    store.update(pid, endpoint="https://a.io/v1/other")  # same host: key kept
+    assert store.get(pid)["api_key"] == "sk-real-key-0001"
+    store.update(pid, endpoint="https://b.io", api_key="sk-new-key-0002")
+    assert store.get(pid)["endpoint"].startswith("https://b.io") and store.get(pid)["api_key"] == "sk-new-key-0002"
+
+
+def test_endpoint_rejects_userinfo_and_bad_hosts():
+    for bad in ["https://u:p@h.io", "http://:80", "http://h:abc", "https://user@h.io/v1"]:
+        with pytest.raises(ProfileError):
+            normalize_endpoint(bad)
+    assert normalize_endpoint("http://[::1]:8000/v1/") == "http://[::1]:8000/v1/chat/completions"
+
+
+def test_key_rejects_whitespace_and_control_chars(tmp_path):
+    store = LLMProfileStore(tmp_path / "llm_profiles.json")
+    for bad in ["sk-a\nb", "sk a", "sk-\x00x"]:
+        with pytest.raises(ProfileError):
+            store.create(name="A", endpoint="https://a.io", api_key=bad, model="m")
+
+
+def test_failed_write_leaves_no_temp_file(tmp_path):
+    store = LLMProfileStore(tmp_path / "llm_profiles.json")
+    with patch("logai.incident.profiles.os.replace", side_effect=OSError("disk full")):
+        with pytest.raises(OSError):
+            store.create(name="A", endpoint="https://a.io", api_key="k", model="m")
+    assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_corrupt_file_is_not_overwritten(tmp_path):
+    path = tmp_path / "llm_profiles.json"
+    path.write_text("{oops", encoding="utf-8")
+    store = LLMProfileStore(path)
+    with pytest.raises(ProfileError):
+        store.create(name="A", endpoint="https://a.io", api_key="k", model="m")
+    assert path.read_text(encoding="utf-8") == "{oops"
+    with pytest.raises(ProfileError):
+        store.active_profile()
+
+
+def test_retry_uses_the_config_of_its_own_job(tmp_path):
+    from logai.config import LLMConfig
+    old = LLMConfig(endpoint="http://a/v1/chat/completions", api_key="key-A", model="mA",
+                    retry_backoff_seconds=0)
+    clf, session, _, _ = tic._classifier(tmp_path, [
+        tic.FakeResponse(503, {}),
+        tic._reply({"documentation_id": None, "reasoning": "x", "suggestion": tic.SUGGESTION})])
+    clf.config = old
+    real_post = session.post
+
+    def post(url, **kwargs):
+        response = real_post(url, **kwargs)
+        clf.config = LLMConfig(endpoint="http://b/v1/chat/completions", api_key="key-B", model="mB")
+        return response
+
+    session.post = post
+    record = clf.process(tic.KEY, tic.ALERT, [])
+    assert [c["url"] for c in session.calls] == ["http://a/v1/chat/completions"] * 2
+    assert all(c["headers"]["Authorization"] == "Bearer key-A" for c in session.calls)
+    assert all(c["json"]["model"] == "mA" for c in session.calls)
+    assert record["model"] == "mA"
+
+
+def test_episode_ends_while_disabled_then_new_alert_is_analyzed(tmp_path):
+    p = tic._pipeline(tmp_path, endpoint="http://env-llm")
+    p.incident_classifier.submit = MagicMock(return_value=True)
+    track = lambda s: p._track_alert_episodes([tic._result(tic.WK)], [tic._state(tic.WK, s)])
+    track("ALERTING")
+    p.incident_classifier.config = dataclasses.replace(p.incident_classifier.config, endpoint="")
+    track("NORMAL")  # while disabled
+    p.incident_classifier.config = dataclasses.replace(p.incident_classifier.config, endpoint="http://env-llm")
+    track("ALERTING")
+    assert p.incident_classifier.submit.call_count == 2
+
+
+import dataclasses  # noqa: E402

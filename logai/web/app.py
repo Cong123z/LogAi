@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from flask import Flask, jsonify, request, send_from_directory
 
 from logai.alert.alert_state_machine import group_id_key
-from logai.incident.profiles import LLMProfileStore, ProfileError
+from logai.incident.profiles import LLMProfileStore, ProfileError, ProfileStoreUnreadable
 from logai.incident.requests import add_request, load_requests
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.documentation import (
@@ -713,7 +713,14 @@ def create_app(
 
     # ── LLM profiles (keys go in, only hints come out) ──
 
+    @app.errorhandler(ProfileStoreUnreadable)
+    def _profiles_unreadable(exc: ProfileStoreUnreadable):
+        logger.error("%s", exc)
+        return jsonify({"error": "profiles_unreadable", "message": str(exc)}), 500
+
     def _profile_error(exc: Exception):
+        if isinstance(exc, ProfileStoreUnreadable):
+            return _profiles_unreadable(exc)
         if isinstance(exc, KeyError):
             return jsonify({"error": "not_found", "message": str(exc.args[0])}), 404
         return jsonify({"error": "invalid_request", "message": str(exc)}), 400
@@ -777,7 +784,7 @@ def create_app(
     def delete_llm_profile(profile_id: str):
         try:
             llm_profiles.delete(profile_id)
-        except KeyError as exc:
+        except (KeyError, ProfileStoreUnreadable) as exc:
             return _profile_error(exc)
         except ProfileError as exc:
             return jsonify({"error": "profile_active", "message": str(exc)}), 409

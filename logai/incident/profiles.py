@@ -28,14 +28,25 @@ class ProfileError(ValueError):
     """Invalid profile data or a forbidden operation."""
 
 
+class ProfileStoreUnreadable(ProfileError):
+    """The profile file exists but cannot be read or parsed."""
+
+
 def normalize_endpoint(value: Any) -> str:
     """Accept a base URL and turn it into the OpenAI-compatible chat URL:
     https://host -> https://host/v1/chat/completions, .../v1 -> .../v1/chat/completions.
     Any other explicit path is kept as typed."""
     url = str(value or "").strip()
     parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or len(url) > ENDPOINT_LIMIT:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or len(url) > ENDPOINT_LIMIT:
         raise ProfileError("endpoint must be an http(s) URL")
+    if parsed.username or parsed.password:
+        # Credentials belong in the API key field, which is never shown back.
+        raise ProfileError("endpoint must not contain a username or password")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ProfileError("endpoint has an invalid port") from exc
     path = parsed.path.rstrip("/")
     if path in {"", "/v1"}:
         path = "/v1" + CHAT_PATH
@@ -59,6 +70,20 @@ def _text(value: Any, field: str, limit: int, required: bool = True) -> str:
     return text
 
 
+def _api_key(value: Any) -> str:
+    key = _text(value, "api_key", KEY_LIMIT, required=False)
+    # A key with whitespace/control characters makes requests raise an error
+    # that quotes the whole header (and so the key) into logs and records.
+    if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in key):
+        raise ProfileError("api_key must not contain spaces or control characters")
+    return key
+
+
+def _origin(endpoint: str) -> tuple[str, str]:
+    parsed = urlparse(endpoint)
+    return parsed.scheme, parsed.netloc.lower()
+
+
 class LLMProfileStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -66,11 +91,17 @@ class LLMProfileStore:
     # -- reading -------------------------------------------------------------
 
     def _load(self) -> Dict[str, Any]:
+        """A missing file is empty; an unreadable or corrupt one raises, so a
+        later write can never silently replace every stored profile."""
         try:
             with open(self.path, "r", encoding="utf-8") as stream:
                 raw = json.load(stream)
-        except (OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             raw = {}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProfileStoreUnreadable(f"LLM profile file is unreadable: {exc}") from exc
+        if not isinstance(raw, dict):
+            raise ProfileStoreUnreadable("LLM profile file is unreadable: not a JSON object")
         profiles = raw.get("profiles") if isinstance(raw, dict) else None
         profiles = {
             pid: p for pid, p in (profiles or {}).items()
@@ -117,11 +148,17 @@ class LLMProfileStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(self.path.suffix + f".{uuid.uuid4().hex}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({"schema_version": SCHEMA_VERSION, **data}, stream, ensure_ascii=False, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, self.path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"schema_version": SCHEMA_VERSION, **data}, stream,
+                          ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            # The temp file holds API keys; never leave it behind.
+            tmp.unlink(missing_ok=True)
+            raise
 
     def create(
         self, *, name: Any, endpoint: Any, api_key: Any, model: Any, activate: bool = False
@@ -131,7 +168,7 @@ class LLMProfileStore:
             "id": f"llm-{uuid.uuid4().hex[:12]}",
             "name": _text(name, "name", NAME_LIMIT),
             "endpoint": normalize_endpoint(endpoint),
-            "api_key": _text(api_key, "api_key", KEY_LIMIT, required=False),
+            "api_key": _api_key(api_key),
             "model": _text(model, "model", MODEL_LIMIT),
             "created_at": now, "updated_at": now,
         }
@@ -152,11 +189,19 @@ class LLMProfileStore:
                 raise KeyError(profile_id)
             if "name" in fields:
                 profile["name"] = _text(fields["name"], "name", NAME_LIMIT)
+            new_key = _api_key(fields.get("api_key"))
             if "endpoint" in fields:
-                profile["endpoint"] = normalize_endpoint(fields["endpoint"])
+                endpoint = normalize_endpoint(fields["endpoint"])
+                # Keeping the stored key while moving to another host would
+                # hand it to whoever runs that host.
+                if (
+                    _origin(endpoint) != _origin(profile.get("endpoint", ""))
+                    and profile.get("api_key") and not new_key
+                ):
+                    raise ProfileError("Re-enter the API key when changing the endpoint host")
+                profile["endpoint"] = endpoint
             if "model" in fields:
                 profile["model"] = _text(fields["model"], "model", MODEL_LIMIT)
-            new_key = _text(fields.get("api_key"), "api_key", KEY_LIMIT, required=False)
             if new_key:
                 profile["api_key"] = new_key
             profile["updated_at"] = time.time()

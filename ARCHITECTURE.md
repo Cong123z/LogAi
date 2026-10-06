@@ -629,6 +629,9 @@ profiles"), không cần sửa env hay restart.
   hiển thị profile engine đang thực sự dùng.
 - **Không có xác thực**: ai truy cập được Web UI đều có thể tạo/đổi profile (và do
   đó chuyển hướng log evidence tới endpoint khác). Chỉ expose UI trong mạng tin cậy.
+  Engine cũng sẽ POST tới bất kỳ host nào được nhập (kể cả địa chỉ nội bộ — SSRF);
+  nếu cần siết lại, thêm allowlist host qua env. Đổi host của một profile bắt buộc
+  nhập lại API key, để key đã lưu không bị gửi tới host mới.
 
 ## 8. Module ownership và boundary mapping
 

@@ -75,3 +75,26 @@ def test_listing_reports_engine_applied_profile():
         assert engine == {"alive": True, "llm_enabled": True, "llm_profile_id": pid}
     finally:
         temporary.cleanup()
+
+
+def test_corrupt_profile_file_reports_error_and_is_kept():
+    temporary, base, client = _client()
+    try:
+        (base / "llm_profiles.json").write_text("{oops", encoding="utf-8")
+        listing = client.get("/api/llm-profiles")
+        assert listing.status_code == 500 and listing.get_json()["error"] == "profiles_unreadable"
+        created = client.post("/api/llm-profiles", json=NEW)
+        assert created.status_code == 500
+        assert (base / "llm_profiles.json").read_text(encoding="utf-8") == "{oops"
+    finally:
+        temporary.cleanup()
+
+
+def test_endpoint_host_change_needs_key_via_api():
+    temporary, base, client = _client()
+    try:
+        pid = client.post("/api/llm-profiles", json=NEW).get_json()["profile"]["id"]
+        response = client.put(f"/api/llm-profiles/{pid}", json={"endpoint": "http://attacker:8080"})
+        assert response.status_code == 400 and "API key" in response.get_json()["message"]
+    finally:
+        temporary.cleanup()

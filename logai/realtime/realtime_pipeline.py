@@ -410,15 +410,20 @@ class RealtimePipeline:
         `states` is aligned 1:1 with `scored` (transition_batch keeps order).
         An episode ends only at NORMAL; COOLING -> ALERTING does not re-trigger.
         """
-        if not self._llm_enabled():
+        classifier = getattr(self, "incident_classifier", None)
+        if classifier is None:
             return
-        classifier = self.incident_classifier
+        # Episode ends are tracked even while LLM is disabled (it can be
+        # toggled at runtime); only the submit is gated. A window that started
+        # alerting while disabled is analyzed once LLM is enabled again.
+        enabled = self._llm_enabled()
         for result, state in zip(scored, states):
             key = tuple(state.group_id)
             if state.alert_state == AlertStateEnum.NORMAL.value:
                 self._alert_episodes.discard(key)
             elif (
-                state.alert_state == AlertStateEnum.ALERTING.value
+                enabled
+                and state.alert_state == AlertStateEnum.ALERTING.value
                 and key not in self._alert_episodes
             ):
                 self._alert_episodes.add(key)
@@ -659,8 +664,13 @@ class RealtimePipeline:
         try:
             profile = self._llm_profiles.active_profile()
         except Exception as exc:  # noqa: BLE001 - never raise into the poll loop
-            logger.warning("Unable to read LLM profiles: %s", exc)
+            # Logged once per distinct error; this runs every poll loop.
+            if str(exc) != getattr(self, "_llm_profile_error", None):
+                logger.warning("Unable to read LLM profiles, using env config: %s", exc)
+            self._llm_profile_error = str(exc)
             profile = None
+        else:
+            self._llm_profile_error = None
         target = self._env_llm_config
         if profile is not None:
             target = dataclasses.replace(

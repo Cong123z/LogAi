@@ -268,14 +268,18 @@ class IncidentClassifier:
         self, window_key: WindowKey, alert: Dict[str, Any], parameters: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """Evidence -> LLM -> validation -> persist. Never raises."""
+        cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
         try:
             evidence, candidates = self._evidence(window_key, alert, parameters)
-            record = self._validate(window_key, self._parse(self._call(evidence)), candidates)
+            record = self._validate(
+                window_key, self._parse(self._call(evidence, cfg=cfg)), candidates
+            )
             result = "matched" if record["documentation_id"] else "suggested"
         except Exception as exc:  # noqa: BLE001 - analysis is advisory enrichment
             logger.warning("Incident analysis failed for %s: %s", window_key, exc)
             record = self._failed(window_key, str(exc))
             result = "failed"
+        record["model"] = cfg.model
         try:
             self.store.set(group_id_key(window_key), record)
         except Exception:  # noqa: BLE001
@@ -293,9 +297,10 @@ class IncidentClassifier:
             validate_service_reply,
         )
 
+        cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
         try:
             content = self._call(
-                evidence, SERVICE_SYSTEM_PROMPT, max(self.config.max_tokens, 2000)
+                evidence, SERVICE_SYSTEM_PROMPT, max(cfg.max_tokens, 2000), cfg=cfg
             )
             record = {
                 "status": "done", "service": service, "requested_at": requested_at,
@@ -308,6 +313,7 @@ class IncidentClassifier:
             logger.warning("Service analysis failed for %s: %s", service, exc)
             record = self._failed_service(service, requested_at, str(exc))
             result = "service_failed"
+        record["model"] = cfg.model
         try:
             if self.service_store is not None:
                 self.service_store.set(service, record)
@@ -373,26 +379,29 @@ class IncidentClassifier:
 
     def _call(
         self, evidence: Dict[str, Any], system_prompt: str = SYSTEM_PROMPT,
-        max_tokens: Optional[int] = None,
+        max_tokens: Optional[int] = None, cfg: Optional[LLMConfig] = None,
     ) -> str:
+        # One config for the whole request, retries included: a profile switch
+        # meanwhile must never send this key to the other profile's host.
+        cfg = cfg or self.config
         headers = {"Content-Type": "application/json"}
-        if self.config.api_key:
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        if cfg.api_key:
+            headers["Authorization"] = f"Bearer {cfg.api_key}"
         body = {
-            "model": self.config.model,
+            "model": cfg.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(evidence, ensure_ascii=False)},
             ],
             "temperature": 0,
-            "max_tokens": max_tokens or self.config.max_tokens,
+            "max_tokens": max_tokens or cfg.max_tokens,
         }
-        attempts = self.config.max_retries + 1
+        attempts = cfg.max_retries + 1
         for attempt in range(attempts):
             try:
                 response = self._session.post(
-                    self.config.endpoint, headers=headers, json=body,
-                    timeout=self.config.timeout_seconds,
+                    cfg.endpoint, headers=headers, json=body,
+                    timeout=cfg.timeout_seconds,
                 )
             except (requests.ConnectionError, requests.Timeout) as exc:
                 error: Exception = exc
@@ -403,7 +412,7 @@ class IncidentClassifier:
                     return str(response.json()["choices"][0]["message"]["content"])
                 error = RuntimeError(f"LLM returned HTTP {response.status_code}")
             if attempt + 1 < attempts:
-                time.sleep(self.config.retry_backoff_seconds * (2 ** attempt))
+                time.sleep(cfg.retry_backoff_seconds * (2 ** attempt))
         raise error
 
     @staticmethod

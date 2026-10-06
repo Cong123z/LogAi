@@ -1876,7 +1876,7 @@
       const key = document.getElementById('llm-key');
       key.value = '';
       key.required = !profile;
-      key.placeholder = profile ? `Current: ${profile.api_key_hint || 'none'} (leave blank to keep)` : '';
+      key.placeholder = profile ? `Current: ${profile.api_key_hint || 'none'} (leave blank to keep; required if you change the host)` : '';
       document.getElementById('llm-activate-field').hidden = Boolean(profile);
       document.getElementById('llm-error').textContent = '';
       $llmModal.classList.add('open');
