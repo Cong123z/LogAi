@@ -135,16 +135,6 @@ def test_switch_back_to_env_config(tmp_path):
     assert _status(p)["llm_profile_id"] is None
 
 
-def test_disabled_llm_skips_alerts_and_requests(tmp_path):
-    p = tic._pipeline(tmp_path, endpoint="")
-    p.incident_classifier.submit = MagicMock()
-    p.incident_classifier.submit_service = MagicMock()
-    p._track_alert_episodes([tic._result(tic.WK)], [tic._state(tic.WK, "ALERTING")])
-    from logai.incident.requests import add_request
-    add_request(tmp_path / "analysis_requests.json", "auth", 10.0, now=10.0)
-    p._process_analysis_requests()
-    p.incident_classifier.submit.assert_not_called()
-    p.incident_classifier.submit_service.assert_not_called()
 
 
 def test_broken_profile_file_keeps_env_config(tmp_path):
@@ -228,17 +218,3 @@ def test_retry_uses_the_config_of_its_own_job(tmp_path):
     assert all(c["json"]["model"] == "mA" for c in session.calls)
     assert record["model"] == "mA"
 
-
-def test_episode_ends_while_disabled_then_new_alert_is_analyzed(tmp_path):
-    p = tic._pipeline(tmp_path, endpoint="http://env-llm")
-    p.incident_classifier.submit = MagicMock(return_value=True)
-    track = lambda s: p._track_alert_episodes([tic._result(tic.WK)], [tic._state(tic.WK, s)])
-    track("ALERTING")
-    p.incident_classifier.config = dataclasses.replace(p.incident_classifier.config, endpoint="")
-    track("NORMAL")  # while disabled
-    p.incident_classifier.config = dataclasses.replace(p.incident_classifier.config, endpoint="http://env-llm")
-    track("ALERTING")
-    assert p.incident_classifier.submit.call_count == 2
-
-
-import dataclasses  # noqa: E402

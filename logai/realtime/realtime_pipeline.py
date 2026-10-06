@@ -9,6 +9,7 @@ templates just wait for the next training run.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import threading
 import time
@@ -16,7 +17,7 @@ from collections import deque
 from typing import Any, Optional, Tuple, Union
 
 from logai.config import AppConfig
-from logai.alert.alert_state_machine import AlertStateMachine
+from logai.alert.alert_state_machine import AlertStateMachine, group_id_key
 from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomalyModels
 from logai.clustering.hdbscan_cluster import GroupClusterer
 from logai.collector.es_collector import ElasticsearchCollector
@@ -31,8 +32,9 @@ from logai.grouping.assignment_manager import (
 )
 from logai.incident.classifier import IncidentClassifier
 from logai.incident.profiles import LLMProfileStore
-from logai.incident.requests import load_requests
+from logai.incident.requests import load_requests, parse_key
 from logai.incident.service_analysis import build_service_evidence
+from logai.incident.template_triage import build_template_evidence
 from logai.metrics.prometheus_exporter import MetricsExporter
 from logai.models import (
     AlertStateEnum,
@@ -139,6 +141,9 @@ class RealtimePipeline:
             service_store=JSONStore(
                 f"{config.storage.base_dir}/{config.storage.service_analysis_file}"
             ),
+            template_store=JSONStore(
+                f"{config.storage.base_dir}/{config.storage.template_triage_file}"
+            ),
         )
         # On-demand whole-service analysis requests (web-owned file).
         self._analysis_requests_path = (
@@ -155,12 +160,10 @@ class RealtimePipeline:
         self._es_error: Optional[str] = None
         self._es_error_since: Optional[float] = None
         self._refresh_llm_profile()
+        # Recent template parameters per window: evidence for on-demand LLM
+        # analysis. Written by the poll thread, read by the control thread.
         self._recent_params: dict[Tuple[str, str], deque] = {}
-        # Windows already analyzed in their current episode. COOLING is still
-        # the same episode, so a restart never re-triggers an ongoing alert.
-        self._alert_episodes: set[Tuple[str, str]] = self.alert_sm.keys_in_states(
-            {"ALERTING", "COOLING"}
-        )
+        self._params_lock = threading.Lock()
 
         # DocumentationMatcher already attempted its initial load in __init__.
         # Avoid encoding the same corpus again on the first realtime event.
@@ -231,7 +234,6 @@ class RealtimePipeline:
 
         while True:
             self._refresh_grouping_if_needed()
-            self._process_analysis_requests()
             # ── Phase 1: Poll ES ──────────────────────────────────────────
             try:
                 batch, cursor = self.collector.poll_batch()
@@ -417,42 +419,6 @@ class RealtimePipeline:
         for state in states:
             self.metrics.set_alert_state(state)
         self._pending_predictions = []
-        self._track_alert_episodes(scored, states)
-
-    def _track_alert_episodes(
-        self, scored: list[AnomalyResult], states: list[AnomalyState]
-    ) -> None:
-        """Submit an LLM analysis when a window enters a new ALERTING episode.
-
-        `states` is aligned 1:1 with `scored` (transition_batch keeps order).
-        An episode ends only at NORMAL; COOLING -> ALERTING does not re-trigger.
-        """
-        classifier = getattr(self, "incident_classifier", None)
-        if classifier is None:
-            return
-        # Episode ends are tracked even while LLM is disabled (it can be
-        # toggled at runtime); only the submit is gated. A window that started
-        # alerting while disabled is analyzed once LLM is enabled again.
-        enabled = self._llm_enabled()
-        for result, state in zip(scored, states):
-            key = tuple(state.group_id)
-            if state.alert_state == AlertStateEnum.NORMAL.value:
-                self._alert_episodes.discard(key)
-            elif (
-                enabled
-                and state.alert_state == AlertStateEnum.ALERTING.value
-                and key not in self._alert_episodes
-            ):
-                self._alert_episodes.add(key)
-                classifier.submit(
-                    key,
-                    {
-                        "state": state.alert_state,
-                        "score": result.anomaly_score,
-                        "count_1m": result.count_1m,
-                    },
-                    list(self._recent_params.get(key, ())),
-                )
 
     def _process_one(self, raw: RawLog) -> bool:
         start = time.time()
@@ -474,9 +440,10 @@ class RealtimePipeline:
                 if getattr(self, "incident_classifier", None) is not None and any(
                     value != "<*>" for value in parsed.parameters
                 ):
-                    self._recent_params.setdefault(
-                        window_key, deque(maxlen=RECENT_PARAMS_PER_WINDOW)
-                    ).append((parsed.template_id, parsed.parameters))
+                    with self._params_lock:
+                        self._recent_params.setdefault(
+                            window_key, deque(maxlen=RECENT_PARAMS_PER_WINDOW)
+                        ).append((parsed.template_id, parsed.parameters))
                 # Defer scoring: buffer the (window_key, vector) pair for the next
                 # batch flush instead of calling predict() once per event.
                 self._pending_predictions.append((window_key, fv))
@@ -676,6 +643,7 @@ class RealtimePipeline:
 
     def _control_tick(self) -> None:
         self._refresh_llm_profile()
+        self._process_analysis_requests()
         self._heartbeat_grouping()
 
     def _control_loop(self) -> None:
@@ -757,55 +725,104 @@ class RealtimePipeline:
             classifier.config = target
             self._llm_profile_id = profile_id
 
-    # --- on-demand service analysis -----------------------------------------
+    # --- on-demand analysis requests -----------------------------------------
+
+    def _params_snapshot(self, window_filter) -> dict:
+        with self._params_lock:
+            return {key: list(dq) for key, dq in self._recent_params.items() if window_filter(key)}
+
+    def _analysis_store(self, kind: str):
+        classifier = self.incident_classifier
+        return {"window": classifier.store, "service": classifier.service_store,
+                "template": classifier.template_store}[kind]
+
+    @staticmethod
+    def _store_key(kind: str, target_id: str) -> str:
+        if kind == "window":
+            return group_id_key(tuple(json.loads(target_id)))
+        return target_id
 
     def _process_analysis_requests(self) -> None:
-        """Submit each web request for a whole-service analysis exactly once.
-
-        A request is new when its requested_at is newer than both what this
-        process already handled and the stored record's requested_at (the
-        latter keeps it restart-safe). A request that cannot run gets a failed
-        record, so the web never waits on it. Never raises into the poll loop.
+        """Apply each web request (analyze or delete, for a window, service or
+        template) exactly once. An analyze request is new when it is newer
+        than both what this process handled and the stored record's
+        requested_at (restart-safe). Deletes apply even while LLM is disabled.
+        A request that cannot run gets a failed record so the web never waits.
+        Never raises.
         """
-        if not self._llm_enabled():
+        classifier = getattr(self, "incident_classifier", None)
+        if classifier is None:
             return
-        classifier = self.incident_classifier
-        if classifier.service_store is None:
-            return
-        # The file is tiny; reading it every loop avoids missing a write that
-        # lands within the filesystem's mtime granularity.
-        for service, requested_at in load_requests(self._analysis_requests_path).items():
+        enabled = self._llm_enabled()
+        # The file is tiny; reading it every tick avoids mtime-granularity misses.
+        for key, (action, requested_at) in load_requests(self._analysis_requests_path).items():
+            parsed = parse_key(key)
+            if parsed is None or requested_at <= self._handled_requests.get(key, 0.0):
+                continue
+            kind, target_id = parsed
             try:
-                record = classifier.service_store.get(service) or {}
-                if requested_at <= max(
-                    self._handled_requests.get(service, 0.0),
-                    float(record.get("requested_at") or 0.0),
-                ):
+                store = self._analysis_store(kind)
+                store_key = self._store_key(kind, target_id)
+                if action == "delete":
+                    classifier.delete_record(kind, target_id)
+                    self._handled_requests[key] = requested_at
                     continue
-                alert_states = self.alert_sm.states_for_service(service)
-                if self.template_registry.count_by_service(service) == 0 and not alert_states:
-                    raise LookupError(f"Unknown service {service!r}")
-                evidence, candidates, sent_groups = build_service_evidence(
-                    service,
-                    self.group_registry,
-                    self.template_registry,
-                    alert_states,
-                    {g: list(dq) for (s, g), dq in self._recent_params.items() if s == service},
-                    self.doc_matcher,
-                )
-                if classifier.submit_service(
-                    service, requested_at, evidence, candidates, sent_groups
-                ):
-                    self._handled_requests[service] = requested_at
+                if not enabled:
+                    continue  # web blocks new analyze requests while disabled
+                record = (store.get(store_key) if store is not None else None) or {}
+                if requested_at <= float(record.get("requested_at") or 0.0):
+                    self._handled_requests[key] = requested_at
+                    continue
+                if self._submit_request(kind, target_id, requested_at):
+                    self._handled_requests[key] = requested_at
             except Exception as exc:  # noqa: BLE001 - one bad request must not block others
-                logger.warning("Service analysis request for %r failed: %s", service, exc)
-                self._handled_requests[service] = requested_at
-                try:
-                    classifier.service_store.set(
-                        service, classifier._failed_service(service, requested_at, str(exc))
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("Unable to persist failed service analysis for %r", service)
+                logger.warning("LLM request %s failed: %s", key, exc)
+                self._handled_requests[key] = requested_at
+                self._write_failed(kind, target_id, requested_at, str(exc))
+
+    def _submit_request(self, kind: str, target_id: str, requested_at: float) -> bool:
+        classifier = self.incident_classifier
+        if kind == "window":
+            identity = tuple(json.loads(target_id))
+            if len(identity) != 2 or self.group_registry.get(identity[1]) is None:
+                raise LookupError(f"Unknown window {target_id}")
+            state = self.alert_sm._load(identity)
+            alert = {"state": state.alert_state, "score": state.anomaly_score, "count_1m": None}
+            params = self._params_snapshot(lambda key: key == identity).get(identity, [])
+            return classifier.submit(identity, alert, params, requested_at=requested_at)
+        if kind == "service":
+            alert_states = self.alert_sm.states_for_service(target_id)
+            if self.template_registry.count_by_service(target_id) == 0 and not alert_states:
+                raise LookupError(f"Unknown service {target_id!r}")
+            params = {g: entries for (_, g), entries in
+                      self._params_snapshot(lambda key: key[0] == target_id).items()}
+            evidence, candidates, sent_groups = build_service_evidence(
+                target_id, self.group_registry, self.template_registry,
+                alert_states, params, self.doc_matcher,
+            )
+            return classifier.submit_service(
+                target_id, requested_at, evidence, candidates, sent_groups
+            )
+        evidence, candidates = build_template_evidence(
+            target_id, self.template_registry, self.group_registry
+        )
+        return classifier.submit_template(target_id, requested_at, evidence, candidates)
+
+    def _write_failed(self, kind: str, target_id: str, requested_at: float, error: str) -> None:
+        classifier = self.incident_classifier
+        try:
+            if kind == "window":
+                identity = tuple(json.loads(target_id))
+                record = {**classifier._failed(identity, error), "requested_at": requested_at}
+            elif kind == "service":
+                record = classifier._failed_service(target_id, requested_at, error)
+            else:
+                record = classifier._failed_template(target_id, requested_at, error)
+            store = self._analysis_store(kind)
+            if store is not None:
+                store.set(self._store_key(kind, target_id), record)
+        except Exception:  # noqa: BLE001
+            logger.exception("Unable to persist failed LLM request for %s:%s", kind, target_id)
 
     # --- grouping revision activation ---------------------------------------
 
@@ -915,8 +932,9 @@ class RealtimePipeline:
                 self.metrics.drop_group(group_id)
                 if getattr(self, "incident_classifier", None) is not None:
                     self.incident_classifier.drop_group(group_id)
-                    for key in [k for k in self._recent_params if k[1] == group_id]:
-                        del self._recent_params[key]
+                    with self._params_lock:
+                        for key in [k for k in self._recent_params if k[1] == group_id]:
+                            del self._recent_params[key]
             if outcome.resolution.affected_groups:
                 self.documentation_worker.invalidate_groups(
                     outcome.resolution.affected_groups

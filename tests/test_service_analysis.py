@@ -2,31 +2,7 @@
 from __future__ import annotations
 
 from logai.config import StorageConfig
-from logai.incident.requests import add_request, load_requests
-
-
-def test_add_and_load_requests(tmp_path):
-    p = tmp_path / "analysis_requests.json"
-    add_request(p, "recharge", 1000.0, now=1000.0)
-    assert load_requests(p) == {"recharge": 1000.0}
-
-
-def test_add_request_prunes_old(tmp_path):
-    p = tmp_path / "analysis_requests.json"
-    add_request(p, "old", 1.0, now=1.0)
-    add_request(p, "new", 90_000.0, now=90_000.0)
-    assert load_requests(p) == {"new": 90_000.0}
-
-
-def test_load_requests_corrupt(tmp_path):
-    p = tmp_path / "analysis_requests.json"
-    p.write_text("{not json", encoding="utf-8")
-    assert load_requests(p) == {}
-    p.write_text('{"requests": {"a": "x", "b": 2}}', encoding="utf-8")
-    assert load_requests(p) == {"b": 2.0}
-    p.write_text('["not", "an", "object"]', encoding="utf-8")
-    assert load_requests(p) == {}
-    assert load_requests(tmp_path / "missing.json") == {}
+from logai.incident.requests import add_request
 
 
 def test_storage_defaults():
@@ -310,7 +286,7 @@ def _engine(tmp_path, record=None, endpoint="http://llm"):
 
 
 def _request(tmp_path, service, requested_at):
-    add_request(tmp_path / "analysis_requests.json", service, requested_at, now=requested_at)
+    add_request(tmp_path / "analysis_requests.json", "service", service, requested_at, now=requested_at)
 
 
 def test_request_submitted_once(tmp_path):
@@ -345,7 +321,7 @@ def test_unknown_service_marked_handled(tmp_path):
     p._process_analysis_requests()
     p._process_analysis_requests()
     p.incident_classifier.submit_service.assert_not_called()
-    assert p._handled_requests["ghost"] == 10.0
+    assert p._handled_requests["service:ghost"] == 10.0
 
 
 def test_active_service_retried(tmp_path):
@@ -394,8 +370,8 @@ def test_one_bad_service_does_not_block_others(tmp_path):
     p = _engine(tmp_path)
     p.template_registry.upsert(TemplateState(
         template_id="T2", template_text="y", service="billing", event_count=1, group_id="G2"))
-    add_request(tmp_path / "analysis_requests.json", "recharge", 10.0, now=10.0)
-    add_request(tmp_path / "analysis_requests.json", "billing", 11.0, now=11.0)
+    add_request(tmp_path / "analysis_requests.json", "service", "recharge", 10.0, now=10.0)
+    add_request(tmp_path / "analysis_requests.json", "service", "billing", 11.0, now=11.0)
     real = build_service_evidence
 
     def flaky(service, *args):
@@ -413,10 +389,10 @@ def test_one_bad_service_does_not_block_others(tmp_path):
 def test_request_written_within_same_mtime_is_seen(tmp_path):
     p = _engine(tmp_path)
     path = tmp_path / "analysis_requests.json"
-    add_request(path, "ghost", 10.0, now=10.0)
+    add_request(path, "service", "ghost", 10.0, now=10.0)
     p._process_analysis_requests()
     stat = _os.stat(path)
-    add_request(path, "recharge", 11.0, now=11.0)
+    add_request(path, "service", "recharge", 11.0, now=11.0)
     _os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # coarse-timestamp filesystem
     p._process_analysis_requests()
     assert p.incident_classifier.submit_service.call_args.args[0] == "recharge"

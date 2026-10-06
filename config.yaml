@@ -113,6 +113,7 @@ storage:
   service_analysis_file: "service_analysis.json"
   analysis_requests_file: "analysis_requests.json"
   llm_profiles_file: "llm_profiles.json"
+  template_triage_file: "template_triage.json"
 
 # LLM incident classification on ALERTING. Disabled while endpoint is empty;
 # set LOGAI_LLM_ENDPOINT (OpenAI-compatible /chat/completions URL).

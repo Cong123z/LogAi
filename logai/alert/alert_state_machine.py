@@ -164,16 +164,6 @@ class AlertStateMachine:
         """
         return list(self._non_normal)
 
-    def keys_in_states(self, states: Set[str]) -> Set[Tuple[str, str]]:
-        """Persisted (service, group_id) cells whose alert_state is in `states`.
-        Legacy plain-string keys are skipped."""
-        return {
-            identity
-            for key, raw in self._store.all().items()
-            if isinstance(raw, dict) and raw.get("alert_state") in states
-            and isinstance(identity := _parse_group_id_key(key), tuple)
-        }
-
     def states_for_service(self, service: str) -> Dict[str, Tuple[str, float]]:
         """group_id -> (alert_state, anomaly_score) for this service's persisted windows."""
         result: Dict[str, Tuple[str, float]] = {}

@@ -99,9 +99,11 @@ class IncidentClassifier:
         session: Optional[requests.Session] = None,
         on_result: Optional[Callable[[str], None]] = None,
         service_store: Optional[JSONStore] = None,
+        template_store: Optional[JSONStore] = None,
     ):
         self.config = config
         self.service_store = service_store
+        self.template_store = template_store
         self.matcher = matcher
         self.groups = groups
         self.templates = templates
@@ -109,9 +111,11 @@ class IncidentClassifier:
         self._session = session or requests.Session()
         self._on_result = on_result or (lambda result: None)
         self._queue: "queue.Queue[tuple]" = queue.Queue(maxsize=QUEUE_SIZE)
-        # Window tuples and ("service", name) keys share one set; the tag keeps
-        # a service named like a window from ever colliding with it.
+        # Window tuples and ("service"|"template", id) keys share one set; the
+        # tag keeps a service named like a window from ever colliding with it.
         self._active: set[tuple] = set()
+        # Active jobs whose record was deleted meanwhile: their result is dropped.
+        self._cancelled: set[tuple] = set()
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -126,9 +130,11 @@ class IncidentClassifier:
             if isinstance(record, dict) and record.get("status") == "pending":
                 identity = _parse_group_id_key(key)
                 if isinstance(identity, tuple) and len(identity) == 2:
-                    self.store.set(key, self._failed(
+                    failed = self._failed(
                         identity, "Interrupted by engine restart before analysis finished"
-                    ), flush=False)
+                    )
+                    failed["requested_at"] = record.get("requested_at")
+                    self.store.set(key, failed, flush=False)
         self.store.flush()
         if self.service_store is not None:
             for service, record in self.service_store.all().items():
@@ -138,6 +144,14 @@ class IncidentClassifier:
                         "Interrupted by engine restart before analysis finished",
                     ), flush=False)
             self.service_store.flush()
+        if self.template_store is not None:
+            for template_id, record in self.template_store.all().items():
+                if isinstance(record, dict) and record.get("status") == "pending":
+                    self.template_store.set(template_id, self._failed_template(
+                        template_id, record.get("requested_at"),
+                        "Interrupted by engine restart before analysis finished",
+                    ), flush=False)
+            self.template_store.flush()
 
     @property
     def enabled(self) -> bool:
@@ -146,83 +160,116 @@ class IncidentClassifier:
 
     # -- engine-facing API ---------------------------------------------------
 
-    def submit(
-        self, window_key: WindowKey, alert: Dict[str, Any],
-        recent_params: List[Tuple[str, List[str]]],
+    def _enqueue(
+        self, active_key: tuple, store: Optional[JSONStore], store_key: str,
+        pending: Dict[str, Any], failed: Callable[[str], Dict[str, Any]], job: tuple,
     ) -> bool:
-        """Queue one analysis without blocking. False when the key is already
-        queued/in flight or the queue is full."""
+        """Write the pending record, then queue the job without blocking.
+        False when there is no store, the key is already queued/in flight, the
+        pending record cannot be written, or the queue is full."""
+        if store is None:
+            return False
         with self._lock:
-            if window_key in self._active:
+            if active_key in self._active:
                 return False
-            self._active.add(window_key)
-        service, group_id = window_key
+            self._active.add(active_key)
+            self._cancelled.discard(active_key)
         # Pending goes first so the worker's final record can never be
         # overwritten by it.
         try:
-            self.store.set(group_id_key(window_key), {
-                "status": "pending", "service": service, "group_id": group_id,
-                "queued_at": time.time(),
-            })
-        except Exception:  # noqa: BLE001 - never raise into the poll loop
-            logger.exception("Unable to persist pending incident analysis for %s", window_key)
+            store.set(store_key, {**pending, "status": "pending", "queued_at": time.time()})
+        except Exception:  # noqa: BLE001 - never raise into the caller's loop
+            logger.exception("Unable to persist pending analysis for %s", active_key)
             with self._lock:
-                self._active.discard(window_key)
+                self._active.discard(active_key)
             return False
         try:
-            self._queue.put_nowait(("window", window_key, alert, summarize_parameters(recent_params)))
+            # ponytail: one worker serves every job kind, so a slow job delays
+            # those queued behind it; add workers if latency matters.
+            self._queue.put_nowait((active_key, job))
         except queue.Full:
-            logger.warning("Incident analysis queue full; dropping %s", window_key)
+            logger.warning("Analysis queue full; dropping %s", active_key)
             with self._lock:
-                self._active.discard(window_key)
-            self.store.set(group_id_key(window_key), self._failed(
-                window_key, "Analysis queue is full; incident was not analyzed"
-            ))
+                self._active.discard(active_key)
+            store.set(store_key, failed("Analysis queue is full; nothing was analyzed"))
             self._on_result("dropped")
             return False
         return True
+
+    def submit(
+        self, window_key: WindowKey, alert: Dict[str, Any],
+        recent_params: List[Tuple[str, List[str]]], requested_at: Optional[float] = None,
+    ) -> bool:
+        """Queue one (service, group) window analysis."""
+        service, group_id = window_key
+
+        def failed(error: str) -> Dict[str, Any]:
+            return {**self._failed(window_key, error), "requested_at": requested_at}
+
+        return self._enqueue(
+            window_key, self.store, group_id_key(window_key),
+            {"service": service, "group_id": group_id, "requested_at": requested_at},
+            failed,
+            (self.process, window_key, alert, summarize_parameters(recent_params), requested_at),
+        )
 
     def submit_service(
         self, service: str, requested_at: float, evidence: Dict[str, Any],
         candidates: Dict[str, str], sent_groups: set[str],
     ) -> bool:
-        """Queue one whole-service analysis without blocking. False when there
-        is no service store, the service is already queued/in flight, the
-        pending record cannot be written, or the queue is full."""
-        if self.service_store is None:
+        """Queue one whole-service analysis."""
+        return self._enqueue(
+            ("service", service), self.service_store, service,
+            {"service": service, "requested_at": requested_at},
+            lambda error: self._failed_service(service, requested_at, error),
+            (self.process_service, service, requested_at, evidence, candidates, sent_groups),
+        )
+
+    def submit_template(
+        self, template_id: str, requested_at: float, evidence: Dict[str, Any],
+        candidates: Dict[str, str],
+    ) -> bool:
+        """Queue one unknown-template triage."""
+        return self._enqueue(
+            ("template", template_id), self.template_store, template_id,
+            {"template_id": template_id, "requested_at": requested_at},
+            lambda error: self._failed_template(template_id, requested_at, error),
+            (self.process_template, template_id, requested_at, evidence, candidates),
+        )
+
+    def delete_record(self, kind: str, target_id: str) -> bool:
+        """Remove one analysis; an in-flight job for it will not write it back."""
+        if kind == "window":
+            try:
+                identity = tuple(json.loads(target_id))
+            except (TypeError, ValueError):
+                return False
+            active_key, store, store_key = identity, self.store, group_id_key(identity)
+        elif kind == "service":
+            active_key, store, store_key = ("service", target_id), self.service_store, target_id
+        elif kind == "template":
+            active_key, store, store_key = ("template", target_id), self.template_store, target_id
+        else:
             return False
-        active_key = ("service", service)
         with self._lock:
             if active_key in self._active:
-                return False
-            self._active.add(active_key)
-        try:
-            self.service_store.set(service, {
-                "status": "pending", "service": service,
-                "requested_at": requested_at, "queued_at": time.time(),
-            })
-        except Exception:  # noqa: BLE001 - never raise into the poll loop
-            logger.exception("Unable to persist pending service analysis for %s", service)
-            with self._lock:
-                self._active.discard(active_key)
+                self._cancelled.add(active_key)
+        if store is None or store.get(store_key) is None:
             return False
-        try:
-            # ponytail: one worker serves alert and service jobs, so a slow
-            # service analysis delays alert analyses queued behind it; add a
-            # second worker if alert latency matters.
-            self._queue.put_nowait(
-                ("service", service, requested_at, evidence, candidates, sent_groups)
-            )
-        except queue.Full:
-            logger.warning("Analysis queue full; dropping service %s", service)
-            with self._lock:
-                self._active.discard(active_key)
-            self.service_store.set(service, self._failed_service(
-                service, requested_at, "Analysis queue is full; service was not analyzed"
-            ))
-            self._on_result("dropped")
-            return False
+        store.delete(store_key)
         return True
+
+    def _persist(self, active_key: tuple, store: Optional[JSONStore], store_key: str,
+                 record: Dict[str, Any]) -> None:
+        with self._lock:
+            if active_key in self._cancelled:
+                self._cancelled.discard(active_key)
+                return  # deleted while running: do not resurrect it
+        try:
+            if store is not None:
+                store.set(store_key, record)
+        except Exception:  # noqa: BLE001
+            logger.exception("Unable to persist analysis for %s", active_key)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -254,23 +301,21 @@ class IncidentClassifier:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                kind, *job = self._queue.get(timeout=0.5)
+                active_key, (fn, *args) = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            active_key = job[0] if kind == "window" else ("service", job[0])
             try:
-                if kind == "window":
-                    self.process(*job)
-                else:
-                    self.process_service(*job)
+                fn(*args)
             finally:
                 with self._lock:
                     self._active.discard(active_key)
+                    self._cancelled.discard(active_key)
 
     # -- one analysis ----------------------------------------------------------
 
     def process(
-        self, window_key: WindowKey, alert: Dict[str, Any], parameters: List[Dict[str, Any]]
+        self, window_key: WindowKey, alert: Dict[str, Any], parameters: List[Dict[str, Any]],
+        requested_at: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Evidence -> LLM -> validation -> persist. Never raises."""
         cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
@@ -286,10 +331,8 @@ class IncidentClassifier:
             result = "failed"
         self._note_outcome(record)
         record["model"] = cfg.model
-        try:
-            self.store.set(group_id_key(window_key), record)
-        except Exception:  # noqa: BLE001
-            logger.exception("Unable to persist incident analysis for %s", window_key)
+        record["requested_at"] = requested_at
+        self._persist(window_key, self.store, group_id_key(window_key), record)
         self._on_result(result)
         return record
 
@@ -321,13 +364,49 @@ class IncidentClassifier:
             result = "service_failed"
         self._note_outcome(record)
         record["model"] = cfg.model
-        try:
-            if self.service_store is not None:
-                self.service_store.set(service, record)
-        except Exception:  # noqa: BLE001
-            logger.exception("Unable to persist service analysis for %s", service)
+        self._persist(("service", service), self.service_store, service, record)
         self._on_result(result)
         return record
+
+    def process_template(
+        self, template_id: str, requested_at: float, evidence: Dict[str, Any],
+        candidates: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Unknown-template triage: LLM -> validation -> persist. Never raises."""
+        from logai.incident.template_triage import (
+            TEMPLATE_SYSTEM_PROMPT,
+            validate_template_reply,
+        )
+
+        cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
+        try:
+            content = self._call(evidence, TEMPLATE_SYSTEM_PROMPT, cfg=cfg)
+            record = {
+                "status": "done", "template_id": template_id, "requested_at": requested_at,
+                "analyzed_at": time.time(),
+                **validate_template_reply(self._parse(content), candidates),
+                "error": None,
+            }
+            result = "template_done"
+        except Exception as exc:  # noqa: BLE001 - analysis is advisory enrichment
+            logger.warning("Template triage failed for %s: %s", template_id, exc)
+            record = self._failed_template(template_id, requested_at, str(exc))
+            result = "template_failed"
+        self._note_outcome(record)
+        record["model"] = cfg.model
+        self._persist(("template", template_id), self.template_store, template_id, record)
+        self._on_result(result)
+        return record
+
+    def _failed_template(
+        self, template_id: str, requested_at: Optional[float], error: str
+    ) -> Dict[str, Any]:
+        return {
+            "status": "failed", "template_id": template_id, "requested_at": requested_at,
+            "analyzed_at": time.time(), "model": self.config.model, "verdict": None,
+            "reasoning": "", "confidence": 0.0, "suggested_group_id": None,
+            "suggested_group_rep": "", "error": error[:ERROR_LIMIT],
+        }
 
     def _note_outcome(self, record: Dict[str, Any]) -> None:
         if record.get("status") == "failed":

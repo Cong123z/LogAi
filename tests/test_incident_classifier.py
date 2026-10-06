@@ -65,15 +65,6 @@ def test_top_k_empty_corpus(tmp_path):
     assert matcher.top_k(np.array([1.0, 0.0, 0.0]), 5) == []
 
 
-def test_keys_in_states(tmp_path):
-    store = JSONStore(tmp_path / "anomaly_state.json")
-    store.bulk_set({
-        json.dumps(["api", "GA"]): {"group_id": ["api", "GA"], "timestamp": 1.0, "alert_state": "ALERTING"},
-        json.dumps(["api", "GB"]): {"group_id": ["api", "GB"], "timestamp": 1.0, "alert_state": "NORMAL"},
-        "GC": {"group_id": "GC", "timestamp": 1.0, "alert_state": "ALERTING"},
-    })
-    sm = AlertStateMachine(AlertConfig(), store)
-    assert sm.keys_in_states({"ALERTING", "COOLING"}) == {("api", "GA")}
 
 
 # --- Task 2: LLMConfig + IncidentClassifier ---------------------------------
@@ -304,26 +295,8 @@ def _state(key, alert_state):
     return AnomalyState(group_id=key, timestamp=1.0, anomaly_score=0.9, alert_state=alert_state)
 
 
-def test_episode_triggers_once_per_episode(tmp_path):
-    p = _pipeline(tmp_path)
-    p.incident_classifier = MagicMock()
-    for s in ["NORMAL", "WARMING", "ALERTING", "COOLING", "ALERTING", "COOLING",
-              "NORMAL", "WARMING", "ALERTING"]:
-        p._track_alert_episodes([_result(WK)], [_state(WK, s)])
-    assert p.incident_classifier.submit.call_count == 2
-    key, alert, params = p.incident_classifier.submit.call_args.args
-    assert key == WK and alert == {"state": "ALERTING", "score": 0.9, "count_1m": 12}
-    assert params == []
 
 
-def test_restart_seeded_episode_not_retriggered(tmp_path):
-    (tmp_path / "anomaly_state.json").write_text(json.dumps({
-        json.dumps(list(WK)): {"group_id": list(WK), "timestamp": 1.0, "alert_state": "ALERTING"}
-    }), encoding="utf-8")
-    p = _pipeline(tmp_path)
-    p.incident_classifier = MagicMock()
-    p._track_alert_episodes([_result(WK)], [_state(WK, "ALERTING")])
-    p.incident_classifier.submit.assert_not_called()
 
 
 def test_params_buffered_without_placeholders(tmp_path):
@@ -350,7 +323,6 @@ def test_disabled_when_no_endpoint(tmp_path):
     # The classifier always exists (a web profile can enable it at runtime)
     # but stays disabled while no endpoint is configured.
     assert p.incident_classifier is not None and not p.incident_classifier.enabled
-    p._track_alert_episodes([_result(WK)], [_state(WK, "ALERTING")])
 
 
 # --- Final review fixes -------------------------------------------------------
