@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from flask import Flask, jsonify, request, send_from_directory
 
 from logai.alert.alert_state_machine import group_id_key
+from logai.incident.profiles import LLMProfileStore, ProfileError
 from logai.incident.requests import add_request, load_requests
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.documentation import (
@@ -50,6 +51,7 @@ def create_app(
     grouping_stale_seconds: float = 45.0,
     service_analysis_path: str | None = None,
     analysis_requests_path: str | None = None,
+    llm_profiles_path: str | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     base = Path(data_dir)
@@ -66,6 +68,7 @@ def create_app(
     )
 
     service_analysis_file = Path(service_analysis_path or base / "service_analysis.json")
+    llm_profiles = LLMProfileStore(llm_profiles_path or base / "llm_profiles.json")
     analysis_requests_file = Path(analysis_requests_path or base / "analysis_requests.json")
 
     def _load_json(filename: str) -> Dict[str, Any]:
@@ -707,6 +710,78 @@ def create_app(
             logger.exception("Unable to write analysis request")
             return jsonify({"error": "storage_error", "message": str(exc)}), 500
         return jsonify({"state": "requested", "requested_at": requested_at}), 202
+
+    # ── LLM profiles (keys go in, only hints come out) ──
+
+    def _profile_error(exc: Exception):
+        if isinstance(exc, KeyError):
+            return jsonify({"error": "not_found", "message": str(exc.args[0])}), 404
+        return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+
+    def _json_body() -> Optional[Dict[str, Any]]:
+        payload = request.get_json(silent=True)
+        return payload if isinstance(payload, dict) else None
+
+    @app.route("/api/llm-profiles", methods=["GET"])
+    def list_llm_profiles():
+        status = grouping.synchronization_status(stale_seconds=grouping_stale_seconds)
+        runtime = status.get("runtime") or {}
+        return jsonify({
+            **llm_profiles.public_view(),
+            "engine": {
+                "alive": status.get("state") != "engine_unavailable",
+                "llm_enabled": runtime.get("llm_enabled") is True,
+                "llm_profile_id": runtime.get("llm_profile_id"),
+            },
+        })
+
+    @app.route("/api/llm-profiles", methods=["POST"])
+    def create_llm_profile():
+        payload = _json_body()
+        if payload is None:
+            return jsonify({"error": "invalid_request", "message": "JSON body is required"}), 400
+        try:
+            profile = llm_profiles.create(
+                name=payload.get("name"), endpoint=payload.get("endpoint"),
+                api_key=payload.get("api_key"), model=payload.get("model"),
+                activate=payload.get("activate") is True,
+            )
+        except ProfileError as exc:
+            return _profile_error(exc)
+        return jsonify({"profile": profile}), 201
+
+    @app.route("/api/llm-profiles/active", methods=["PUT"])
+    def set_active_llm_profile():
+        payload = _json_body()
+        if payload is None or not (payload.get("profile_id") is None or isinstance(payload.get("profile_id"), str)):
+            return jsonify({"error": "invalid_request", "message": "profile_id must be a string or null"}), 400
+        try:
+            llm_profiles.set_active(payload.get("profile_id"))
+        except KeyError as exc:
+            return _profile_error(exc)
+        return jsonify({"active_profile_id": payload.get("profile_id")})
+
+    @app.route("/api/llm-profiles/<profile_id>", methods=["PUT"])
+    def update_llm_profile(profile_id: str):
+        payload = _json_body()
+        if payload is None:
+            return jsonify({"error": "invalid_request", "message": "JSON body is required"}), 400
+        fields = {k: payload[k] for k in ("name", "endpoint", "model", "api_key") if k in payload}
+        try:
+            profile = llm_profiles.update(profile_id, **fields)
+        except (KeyError, ProfileError) as exc:
+            return _profile_error(exc)
+        return jsonify({"profile": profile})
+
+    @app.route("/api/llm-profiles/<profile_id>", methods=["DELETE"])
+    def delete_llm_profile(profile_id: str):
+        try:
+            llm_profiles.delete(profile_id)
+        except KeyError as exc:
+            return _profile_error(exc)
+        except ProfileError as exc:
+            return jsonify({"error": "profile_active", "message": str(exc)}), 409
+        return jsonify({"deleted_id": profile_id})
 
     @app.route("/api/documentation", methods=["GET"])
     def list_documentation():

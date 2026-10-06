@@ -63,6 +63,9 @@ def main():
         analysis_requests_path=_storage_path(
             web_base, config.storage.analysis_requests_file
         ),
+        llm_profiles_path=_storage_path(
+            web_base, config.storage.llm_profiles_file
+        ),
     )
     print(f"Template Explorer running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
