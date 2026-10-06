@@ -9,7 +9,6 @@ templates just wait for the next training run.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections import deque
 from typing import Any, Optional, Tuple, Union
@@ -142,8 +141,6 @@ class RealtimePipeline:
         self._analysis_requests_path = (
             f"{config.storage.base_dir}/{config.storage.analysis_requests_file}"
         )
-        self._analysis_requests: dict[str, float] = {}
-        self._analysis_requests_mtime: Optional[int] = None
         self._handled_requests: dict[str, float] = {}
         self._recent_params: dict[Tuple[str, str], deque] = {}
         # Windows already analyzed in their current episode. COOLING is still
@@ -645,20 +642,16 @@ class RealtimePipeline:
 
         A request is new when its requested_at is newer than both what this
         process already handled and the stored record's requested_at (the
-        latter keeps it restart-safe). Never raises into the poll loop.
+        latter keeps it restart-safe). A request that cannot run gets a failed
+        record, so the web never waits on it. Never raises into the poll loop.
         """
         classifier = getattr(self, "incident_classifier", None)
         if classifier is None or classifier.service_store is None:
             return
-        try:
+        # The file is tiny; reading it every loop avoids missing a write that
+        # lands within the filesystem's mtime granularity.
+        for service, requested_at in load_requests(self._analysis_requests_path).items():
             try:
-                mtime = os.stat(self._analysis_requests_path).st_mtime_ns
-            except FileNotFoundError:
-                return
-            if mtime != self._analysis_requests_mtime:
-                self._analysis_requests = load_requests(self._analysis_requests_path)
-                self._analysis_requests_mtime = mtime
-            for service, requested_at in self._analysis_requests.items():
                 record = classifier.service_store.get(service) or {}
                 if requested_at <= max(
                     self._handled_requests.get(service, 0.0),
@@ -667,9 +660,7 @@ class RealtimePipeline:
                     continue
                 alert_states = self.alert_sm.states_for_service(service)
                 if self.template_registry.count_by_service(service) == 0 and not alert_states:
-                    logger.info("Ignoring analysis request for unknown service %r", service)
-                    self._handled_requests[service] = requested_at
-                    continue
+                    raise LookupError(f"Unknown service {service!r}")
                 evidence, candidates, sent_groups = build_service_evidence(
                     service,
                     self.group_registry,
@@ -682,8 +673,15 @@ class RealtimePipeline:
                     service, requested_at, evidence, candidates, sent_groups
                 ):
                     self._handled_requests[service] = requested_at
-        except Exception as exc:  # noqa: BLE001 - enrichment must not stop the loop
-            logger.warning("Service analysis request handling failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001 - one bad request must not block others
+                logger.warning("Service analysis request for %r failed: %s", service, exc)
+                self._handled_requests[service] = requested_at
+                try:
+                    classifier.service_store.set(
+                        service, classifier._failed_service(service, requested_at, str(exc))
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("Unable to persist failed service analysis for %r", service)
 
     # --- grouping revision activation ---------------------------------------
 

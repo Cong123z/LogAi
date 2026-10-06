@@ -1785,7 +1785,7 @@
       llm_disabled: 'LLM analysis is disabled',
       analysis_pending: 'Analysis already running',
     };
-    const sa = {services: [], analyses: {}, selected: null, busy: false, suggestions: []};
+    const sa = {services: [], analyses: {}, selected: null, busy: false, suggestions: [], renderedSignature: null};
 
     async function fetchServiceAnalysis() {
       const resp = await fetch('/api/service-analysis');
@@ -1813,6 +1813,11 @@
       const a = sa.selected ? sa.analyses[sa.selected] : null;
       const running = Boolean(a && (a.status === 'requested' || a.status === 'pending'));
       $saRun.disabled = !sa.selected || sa.busy || running;
+      // The alerts refresh calls this every 2s; rebuilding unchanged content
+      // would wipe the reader's text selection, scroll position and focus.
+      const signature = JSON.stringify([sa.selected, a || null]);
+      if (signature === sa.renderedSignature) return;
+      sa.renderedSignature = signature;
       $saCard.removeAttribute('aria-busy');
       sa.suggestions = [];
       if (!sa.selected) { $saCard.innerHTML = '<p class="sync-status">No services yet.</p>'; return; }

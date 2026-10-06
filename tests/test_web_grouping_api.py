@@ -271,11 +271,26 @@ def test_get_service_analysis():
             "billing": {"status": "done", "service": "billing", "requested_at": 5.0},
         }), encoding="utf-8")
         from logai.incident.requests import add_request
-        add_request(base / "analysis_requests.json", "billing", 9.0, now=9.0)
+        recent = time.time()
+        add_request(base / "analysis_requests.json", "billing", recent, now=recent)
         listing = client.get("/api/service-analysis").get_json()
         assert listing["services"] == ["api", "billing"]
         assert listing["analyses"]["api"]["health"] == "healthy"
         assert listing["analyses"]["billing"] == {"status": "requested", "service": "billing",
-                                                  "requested_at": 9.0}
+                                                  "requested_at": recent}
+    finally:
+        temporary.cleanup()
+
+
+def test_stale_requested_entry_does_not_block():
+    temporary, base, client = _client()
+    try:
+        _heartbeat(base)
+        from logai.incident.requests import add_request
+        old = time.time() - 3600
+        add_request(base / "analysis_requests.json", "api", old, now=old)
+        record = client.get("/api/service-analysis").get_json()["analyses"]["api"]
+        assert record["status"] == "failed" and "did not pick up" in record["error"]
+        assert client.post("/api/service-analysis", json={"service": "api"}).status_code == 202
     finally:
         temporary.cleanup()

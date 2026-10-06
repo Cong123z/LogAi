@@ -35,6 +35,8 @@ from logai.storage.grouping import (
 logger = logging.getLogger("logai.web")
 
 PENDING_GROUP_ID = "UNASSIGNED_PENDING"
+# A request the engine has not picked up within this time is shown as failed.
+STALE_REQUEST_SECONDS = 600
 
 
 def create_app(
@@ -659,9 +661,17 @@ def create_app(
         for service, requested_at in load_requests(analysis_requests_file).items():
             record = records.get(service)
             if not isinstance(record, dict) or requested_at > float(record.get("requested_at") or 0.0):
-                records[service] = {
-                    "status": "requested", "service": service, "requested_at": requested_at,
-                }
+                if time.time() - requested_at > STALE_REQUEST_SECONDS:
+                    # Never picked up (engine down or LLM disabled): stop
+                    # blocking the button so the user can retry.
+                    records[service] = {
+                        "status": "failed", "service": service, "requested_at": requested_at,
+                        "error": "The engine did not pick up this request; try again",
+                    }
+                else:
+                    records[service] = {
+                        "status": "requested", "service": service, "requested_at": requested_at,
+                    }
         return records
 
     @app.route("/api/service-analysis", methods=["GET"])

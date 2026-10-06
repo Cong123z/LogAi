@@ -375,3 +375,48 @@ def test_pickup_never_raises(tmp_path):
     with patch("logai.realtime.realtime_pipeline.build_service_evidence", side_effect=RuntimeError("boom")):
         assert p._process_analysis_requests() is None
     p.incident_classifier.submit_service.assert_not_called()
+
+
+# --- Final review fixes ---------------------------------------------------------
+
+import os as _os
+
+
+def test_unknown_service_writes_failed_record(tmp_path):
+    p = _engine(tmp_path)
+    _request(tmp_path, "ghost", 10.0)
+    p._process_analysis_requests()
+    record = p.incident_classifier.service_store.get("ghost")
+    assert record["status"] == "failed" and record["requested_at"] == 10.0
+
+
+def test_one_bad_service_does_not_block_others(tmp_path):
+    p = _engine(tmp_path)
+    p.template_registry.upsert(TemplateState(
+        template_id="T2", template_text="y", service="billing", event_count=1, group_id="G2"))
+    add_request(tmp_path / "analysis_requests.json", "recharge", 10.0, now=10.0)
+    add_request(tmp_path / "analysis_requests.json", "billing", 11.0, now=11.0)
+    real = build_service_evidence
+
+    def flaky(service, *args):
+        if service == "recharge":
+            raise RuntimeError("boom")
+        return real(service, *args)
+
+    with patch("logai.realtime.realtime_pipeline.build_service_evidence", side_effect=flaky):
+        p._process_analysis_requests()
+    assert p.incident_classifier.submit_service.call_args.args[0] == "billing"
+    record = p.incident_classifier.service_store.get("recharge")
+    assert record["status"] == "failed" and record["requested_at"] == 10.0 and "boom" in record["error"]
+
+
+def test_request_written_within_same_mtime_is_seen(tmp_path):
+    p = _engine(tmp_path)
+    path = tmp_path / "analysis_requests.json"
+    add_request(path, "ghost", 10.0, now=10.0)
+    p._process_analysis_requests()
+    stat = _os.stat(path)
+    add_request(path, "recharge", 11.0, now=11.0)
+    _os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # coarse-timestamp filesystem
+    p._process_analysis_requests()
+    assert p.incident_classifier.submit_service.call_args.args[0] == "recharge"
