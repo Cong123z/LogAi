@@ -564,52 +564,35 @@ poll rồi chấm **một lượt**.
   → registry flush → `dedup.gc()` → `checkpoint.commit()` (chỉ khi có cursor thật
   từ stream). Chi tiết ở §10.3.
 
-### 7.6 LLM incident classification
+### 7.6 LLM analysis theo yêu cầu (AI Insights)
 
-Bật khi `llm.endpoint` (`LOGAI_LLM_ENDPOINT`) khác rỗng; khi rỗng realtime chạy y
-như trước.
+LLM **không bao giờ được gọi tự động**; mọi phân tích do người dùng yêu cầu từ trang
+**AI Insights** của Web UI. Có ba loại:
 
-- **Trigger**: sau `transition_batch()`, mỗi cửa sổ `(service, group_id)` vừa vào
-  ALERTING ở một *episode* mới được `submit` một lần. Episode chỉ kết thúc khi về
-  NORMAL; COOLING → ALERTING không trigger lại. Khi khởi động, các cửa sổ đang
-  ALERTING/COOLING trong `anomaly_state.json` được coi là đã phân tích (restart
-  không trigger lại).
-- **Evidence**: templates của group (ưu tiên cùng service, tối đa 10), trạng thái
-  alert, top giá trị parameter theo slot từ 200 event gần nhất của cửa sổ (bỏ
-  `<*>`; số/ID đã bị preprocessor mask nên không rời cluster), và top-k tài liệu
-  gần nhất theo cosine với centroid (`DocumentationMatcher.top_k`).
-- **Thực thi**: daemon thread `IncidentClassifier` với queue bounded 100; poll loop
-  không bao giờ chờ LLM. Retry 408/429/5xx; mọi lỗi được ghi `status=failed`,
-  không raise vào engine. Metric `logai_llm_requests_total{result}`.
-- **Hallucination guard**: `documentation_id` không thuộc danh sách candidate bị
-  coi là `null`; khi không có tài liệu hợp lệ thì bắt buộc có `suggestion`.
-- **Ownership**: `data/incident_analysis.json` chỉ engine ghi; web chỉ đọc và gắn
-  vào `/api/alerts` (`analysis`). Kết quả là tư vấn, không ghi vào field
-  documentation của `GroupState`. Suggestion có thể lưu thành tài liệu mới qua
-  nút "Save as document" (dùng `POST /api/documentation` sẵn có).
+| Loại | Đối tượng | Kết quả | File (engine ghi) |
+|---|---|---|---|
+| `window` | một cửa sổ `(service, group_id)` | khớp 1 tài liệu trong top-5 candidate, hoặc `suggestion` | `incident_analysis.json` |
+| `service` | toàn bộ một service | `health`, `summary`, tối đa 10 `issues` | `service_analysis.json` |
+| `template` | một template chưa có group (`UNASSIGNED_PENDING`) | `verdict` suspicious/benign/unsure + group gợi ý (top-5 theo embedding) hoặc `"new"` | `template_triage.json` |
 
-### 7.7 On-demand service analysis
-
-Phân tích toàn bộ một service theo yêu cầu (mọi alert state), chạy trên cùng
-worker `IncidentClassifier` như một loại job thứ hai.
-
-- **Request**: Web UI (panel "Service analysis" trong tab Alerts) gọi
-  `POST /api/service-analysis {service}`; web ghi `data/analysis_requests.json`
-  (`{service: requested_at}`, web là writer duy nhất, entry > 24h bị bỏ). Trả về
-  404 service lạ, 503 engine heartbeat cũ, 409 `llm_disabled` (heartbeat
-  `runtime.llm_enabled=false`), 409 `analysis_pending`.
-- **Pickup**: mỗi vòng poll, engine đọc lại file khi mtime đổi và submit mỗi
-  request đúng một lần: `requested_at` phải mới hơn cả bản đã xử lý trong RAM lẫn
-  `requested_at` của record đã lưu (an toàn khi restart). Service không có
-  template/cửa sổ nào bị bỏ qua.
-- **Evidence** (`logai/incident/service_analysis.py`): các group có template của
-  service hoặc có cửa sổ alert `(service, g)`; xếp theo alert state → level cao
-  nhất → event count, tối đa 20 group; mỗi group 3 template và top parameter;
-  candidate docs = top 3/group từ embeddings, khử trùng, tối đa 15.
-- **Kết quả**: `{health: healthy|degraded|critical|unknown, summary, issues[≤10]}`;
-  mỗi issue chỉ được tham chiếu group/doc đã gửi, issue không có doc hợp lệ lẫn
-  suggestion bị loại. Lưu ở `data/service_analysis.json` (chỉ engine ghi, key là
-  service); web chỉ đọc qua `GET /api/service-analysis`.
+- **Request**: web ghi `analysis_requests.json` (schema v2, chỉ web ghi):
+  `{"<kind>:<id>": {"action": "analyze"|"delete", "at": ts}}`, giữ hành động mới
+  nhất mỗi key, bỏ entry > 24h. API: `GET /api/insights`, `POST /api/insights/analyze
+  {kind, id}` (`kind="templates_all"` xếp tối đa 50 template), `POST
+  /api/insights/delete {kind, id}`.
+- **Engine**: control timer 2s (chạy cả khi Elasticsearch down) đọc file, submit mỗi
+  request đúng một lần (an toàn khi restart nhờ `requested_at` lưu trong record) vào
+  worker `IncidentClassifier`. Request không chạy được (target không tồn tại, lỗi)
+  nhận record `failed`. Request web chưa được nhận sau 10 phút hiển thị `failed`.
+- **Xóa**: chỉ engine ghi file kết quả, nên xóa cũng đi qua request; job đang chạy cho
+  record vừa xóa sẽ không ghi lại kết quả.
+- **Hallucination guard**: chỉ chấp nhận document id / group id nằm trong danh sách
+  candidate đã gửi.
+- **Save as document**: `POST /api/documentation` nhận `assign_group_ids`; tài liệu mới
+  thành manual documentation của các group đó (bỏ qua kèm lý do nếu grouping đang
+  pending). **Move to group** cho template dùng `PUT /api/templates/<id>/group` sẵn có.
+- **Lý do không chạy được**: heartbeat runtime có `llm_status`/`llm_reason`
+  (`ok|disabled|error`), hiển thị trên banner Alerts, AI Insights và LLM profiles.
 
 ### 7.8 LLM profiles
 
