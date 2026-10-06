@@ -516,6 +516,23 @@
     .ai-suggestion { background:var(--yellow-bg); color:var(--yellow); border-color:transparent; }
     .ai-failed { background:var(--red-bg); color:var(--red); border-color:transparent; }
     .ai-pending { color:var(--text-dim); }
+    .service-analysis { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:16px 20px; margin-bottom:16px; }
+    .service-analysis-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .service-analysis-controls h2 { font-size:15px; margin:0 8px 0 0; }
+    .service-analysis-controls label { color:var(--text-dim); font-size:13px; }
+    .service-analysis-controls .btn:focus-visible, #service-analysis-select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .service-analysis-card { margin-top:14px; }
+    .health-healthy { background:var(--green-bg); color:var(--green); }
+    .health-degraded { background:var(--yellow-bg); color:var(--yellow); }
+    .health-critical { background:var(--red-bg); color:var(--red); }
+    .health-unknown { background:var(--gray-bg); color:var(--gray); }
+    .sa-meta { color:var(--text-dim); font-size:12px; margin-left:8px; }
+    .sa-summary { margin:10px 0 14px; line-height:1.5; }
+    .sa-issues { margin:0; padding-left:20px; display:flex; flex-direction:column; gap:14px; }
+    .sa-issue-title { font-weight:600; }
+    .sa-chips { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0; }
+    .sa-reasoning { color:var(--text-dim); font-size:13px; line-height:1.5; margin:4px 0; }
+    .sa-error { color:var(--red); }
     .ai-text { white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px; font-size:13px; margin-top:6px; }
 
     /* ── Responsive ───────────────────────────────────────────────── */
@@ -720,6 +737,16 @@
           </div>
           <div class="live-status"><span class="live-dot"></span><span id="alert-last-updated">Waiting for alert state...</span></div>
         </div>
+        <section class="service-analysis" aria-labelledby="service-analysis-heading">
+          <div class="service-analysis-controls">
+            <h2 id="service-analysis-heading">Service analysis</h2>
+            <label for="service-analysis-select">Service</label>
+            <select id="service-analysis-select" class="filter-select"></select>
+            <button type="button" class="btn btn-primary" id="service-analysis-run">Analyze service</button>
+            <span id="service-analysis-status" class="sync-status sa-error" aria-live="polite"></span>
+          </div>
+          <div id="service-analysis-card" class="service-analysis-card"></div>
+        </section>
         <div class="table-wrap">
           <table>
             <thead><tr><th data-alert-sort="alert_state" class="sorted">State <span class="sort-arrow">▼</span></th><th data-alert-sort="level">Level <span class="sort-arrow"></span></th><th data-alert-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-alert-sort="service">Service <span class="sort-arrow"></span></th><th data-alert-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-alert-sort="anomaly_score">Score <span class="sort-arrow"></span></th><th data-alert-sort="consecutive_anomaly_count">Consecutive <span class="sort-arrow"></span></th><th data-alert-sort="timestamp">Last evaluation <span class="sort-arrow"></span></th><th>AI analysis</th><th>Representative Template</th></tr></thead>
@@ -1731,14 +1758,118 @@
     document.addEventListener('keydown', event => {
       if (event.key === 'Escape' && $aiModal.classList.contains('open')) closeAiAnalysis();
     });
-    document.getElementById('ai-save-document').addEventListener('click', () => {
-      const suggestion = aiSuggestion;
-      if (!suggestion) return;
-      $aiModal.classList.remove('open');
+    async function prefillDocumentEditor(suggestion) {
+      // The Alerts tab never loads the corpus, so fetch its revision before
+      // saving or the POST would be rejected as a revision conflict.
+      try { state.documentRevision = (await fetchDocumentation()).revision; } catch (_) {}
       openDocumentEditor();
       document.getElementById('document-title').value = suggestion.title || '';
       document.getElementById('document-text').value = suggestion.text || '';
       document.getElementById('document-error-code').value = suggestion.error_code || '';
+    }
+    document.getElementById('ai-save-document').addEventListener('click', () => {
+      const suggestion = aiSuggestion;
+      if (!suggestion) return;
+      $aiModal.classList.remove('open');
+      prefillDocumentEditor(suggestion);
+    });
+
+    // ── Service analysis ──
+    const $saSelect = document.getElementById('service-analysis-select');
+    const $saRun = document.getElementById('service-analysis-run');
+    const $saStatus = document.getElementById('service-analysis-status');
+    const $saCard = document.getElementById('service-analysis-card');
+    const SA_HEALTH = {healthy:'Healthy', degraded:'Degraded', critical:'Critical'};
+    const SA_ERRORS = {
+      engine_unavailable: 'Engine unavailable',
+      llm_disabled: 'LLM analysis is disabled',
+      analysis_pending: 'Analysis already running',
+    };
+    const sa = {services: [], analyses: {}, selected: null, busy: false, suggestions: []};
+
+    async function fetchServiceAnalysis() {
+      const resp = await fetch('/api/service-analysis');
+      if (!resp.ok) throw new Error('Unable to load service analysis');
+      return resp.json();
+    }
+
+    function renderServiceAnalysis(data) {
+      const services = data.services || [];
+      sa.analyses = data.analyses || {};
+      if (!services.includes(sa.selected)) sa.selected = services[0] || null;
+      // Rebuild the options only when the list changes, so a refresh never
+      // disturbs someone using the select.
+      if (JSON.stringify(services) !== JSON.stringify(sa.services)) {
+        sa.services = services;
+        $saSelect.innerHTML = services.map(name =>
+          `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+      }
+      $saSelect.value = sa.selected || '';
+      $saSelect.disabled = !services.length;
+      renderServiceAnalysisCard();
+    }
+
+    function renderServiceAnalysisCard() {
+      const a = sa.selected ? sa.analyses[sa.selected] : null;
+      const running = Boolean(a && (a.status === 'requested' || a.status === 'pending'));
+      $saRun.disabled = !sa.selected || sa.busy || running;
+      $saCard.removeAttribute('aria-busy');
+      sa.suggestions = [];
+      if (!sa.selected) { $saCard.innerHTML = '<p class="sync-status">No services yet.</p>'; return; }
+      if (!a) { $saCard.innerHTML = '<p class="sync-status">No analysis yet for this service.</p>'; return; }
+      if (running) {
+        $saCard.setAttribute('aria-busy', 'true');
+        $saCard.innerHTML = '<p class="sync-status">Analyzing…</p>';
+        return;
+      }
+      const when = a.analyzed_at ? formatFullTs(a.analyzed_at) : '';
+      if (a.status === 'failed') {
+        $saCard.innerHTML = `<p class="sa-error">Analysis failed: ${escapeHtml(a.error || 'unknown error')}</p><p class="sync-status">${escapeHtml(when)}</p>`;
+        return;
+      }
+      const health = SA_HEALTH[a.health] ? a.health : 'unknown';
+      const issues = a.issues || [];
+      sa.suggestions = issues.map(issue => issue.suggestion);
+      $saCard.innerHTML = `
+        <div><span class="badge health-${health}">${SA_HEALTH[health] || 'Unknown'}</span><span class="sa-meta">Analyzed ${escapeHtml(when)}${a.model ? ' · ' + escapeHtml(a.model) : ''}</span></div>
+        <p class="sa-summary">${escapeHtml(a.summary || '')}</p>
+        ${issues.length ? `<ol class="sa-issues">${issues.map((issue, index) => `
+          <li>
+            <div class="sa-issue-title">${escapeHtml(issue.title)}</div>
+            ${(issue.group_ids || []).length ? `<div class="sa-chips">${issue.group_ids.map(g => `<span class="tmpl-id">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
+            ${issue.reasoning ? `<p class="sa-reasoning">${escapeHtml(issue.reasoning)}</p>` : ''}
+            ${issue.documentation_id
+              ? `<span class="badge ai-matched">${escapeHtml(issue.documentation_id)}${issue.document_title ? ' — ' + escapeHtml(issue.document_title) : ''}</span>`
+              : `<div class="detail-value"><strong>${escapeHtml(issue.suggestion.title)}</strong>${issue.suggestion.error_code ? ` <span class="tmpl-id">${escapeHtml(issue.suggestion.error_code)}</span>` : ''}</div>
+                 <div class="ai-text">${escapeHtml(issue.suggestion.text)}</div>
+                 <div class="form-actions" style="justify-content:flex-start;margin-top:8px"><button type="button" class="btn btn-primary" data-sa-issue="${index}">Save as document</button></div>`}
+          </li>`).join('')}</ol>` : '<p class="sync-status">No issues found.</p>'}`;
+    }
+
+    $saSelect.addEventListener('change', () => {
+      sa.selected = $saSelect.value;
+      $saStatus.textContent = '';
+      renderServiceAnalysisCard();
+    });
+    $saRun.addEventListener('click', async () => {
+      if (!sa.selected || sa.busy) return;
+      sa.busy = true;
+      $saStatus.textContent = '';
+      renderServiceAnalysisCard();
+      try {
+        await apiMutation('/api/service-analysis', 'POST', {service: sa.selected});
+        renderServiceAnalysis(await fetchServiceAnalysis());
+      } catch (err) {
+        $saStatus.textContent = SA_ERRORS[err.payload && err.payload.error] || err.message;
+      } finally {
+        sa.busy = false;
+        renderServiceAnalysisCard();
+      }
+    });
+    $saCard.addEventListener('click', event => {
+      const button = event.target.closest('[data-sa-issue]');
+      const suggestion = button && sa.suggestions[Number(button.dataset.saIssue)];
+      if (suggestion) prefillDocumentEditor(suggestion);
     });
     document.getElementById('delete-document-confirm').addEventListener('click', confirmDocumentDeletion);
     document.getElementById('clear-document-confirm').addEventListener('click', confirmClearDocumentation);
@@ -1963,7 +2094,11 @@
           state.documentationMutationsBlocked = Boolean(groups.documentation_mutations_blocked);
           renderGroups(state.groups);
         } else if (state.activeView === 'alerting') {
-          renderAlerts(await fetchAlerts());
+          const [alerts, services] = await Promise.all([
+            fetchAlerts(), fetchServiceAnalysis().catch(() => null),
+          ]);
+          renderAlerts(alerts);
+          if (services) renderServiceAnalysis(services);
         } else {
           renderDocumentation(await fetchDocumentation());
         }
