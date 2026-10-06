@@ -611,6 +611,25 @@ worker `IncidentClassifier` như một loại job thứ hai.
   suggestion bị loại. Lưu ở `data/service_analysis.json` (chỉ engine ghi, key là
   service); web chỉ đọc qua `GET /api/service-analysis`.
 
+### 7.8 LLM profiles
+
+Nguồn LLM (endpoint / api_key / model) được quản lý từ Web UI (view "LLM
+profiles"), không cần sửa env hay restart.
+
+- **Lưu trữ**: `data/llm_profiles.json`, chỉ web ghi (atomic, mode `0600` vì chứa
+  API key). API không bao giờ trả key về browser, chỉ trả `api_key_hint`
+  (vd `sk-…W7h`); sửa profile mà để trống key thì giữ key cũ.
+- **Endpoint**: nhập base URL (`https://host` hoặc `.../v1`) sẽ được chuẩn hóa thành
+  `.../v1/chat/completions`; path khác được giữ nguyên.
+- **Active profile**: một profile active cho toàn hệ thống (`PUT
+  /api/llm-profiles/active`). Engine đọc lại mỗi vòng poll và đổi `LLMConfig` của
+  `IncidentClassifier` tại chỗ; `null` = dùng cấu hình env `LOGAI_LLM_*` (server
+  default). Không có profile và không có env endpoint ⇒ phân tích LLM tắt.
+- **Heartbeat** runtime báo `llm_enabled` và `llm_profile_id` (không có key) để UI
+  hiển thị profile engine đang thực sự dùng.
+- **Không có xác thực**: ai truy cập được Web UI đều có thể tạo/đổi profile (và do
+  đó chuyển hướng log evidence tới endpoint khác). Chỉ expose UI trong mạng tin cậy.
+
 ## 8. Module ownership và boundary mapping
 
 | Module | Trách nhiệm | Input | Output | State sở hữu |

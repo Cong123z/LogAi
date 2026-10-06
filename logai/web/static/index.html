@@ -605,6 +605,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
           Documentation
         </a>
+        <a href="#llm" data-view="llm">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
+          LLM profiles
+        </a>
       </nav>
       <button class="btn sidebar-reload" id="reload-app" title="Reload application">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>Reload</span>
@@ -767,6 +771,23 @@
           </table>
         </div>
       </section>
+
+      <section class="view groups-section" id="view-llm">
+        <div class="section-heading">
+          <div class="sync-status" id="llm-engine-status" aria-live="polite">Loading profiles...</div>
+          <div class="btn-row">
+            <button class="btn" id="llm-use-default-btn">Use server default</button>
+            <button class="btn btn-primary" id="add-llm-profile-btn">Add profile</button>
+          </div>
+        </div>
+        <p class="sa-error" id="llm-action-status" aria-live="polite"></p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Model</th><th>Endpoint</th><th>API key</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="llm-tbody"><tr><td colspan="6" class="loading">Loading profiles...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -780,6 +801,22 @@
         <div class="form-field"><label for="document-error-code">Error code</label><input id="document-error-code" maxlength="100"></div>
         <div class="form-error" id="document-error"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="document-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="llm-modal" role="dialog" aria-modal="true" aria-labelledby="llm-modal-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="llm-modal-title">Add LLM profile</h2><button class="modal-close" data-close="llm-modal" aria-label="Close">&times;</button></div>
+      <form id="llm-form" autocomplete="off">
+        <input type="hidden" id="llm-id">
+        <div class="form-field"><label for="llm-name">Name</label><input id="llm-name" maxlength="100" required></div>
+        <div class="form-field"><label for="llm-endpoint">Endpoint</label><input id="llm-endpoint" type="url" maxlength="500" required placeholder="https://api.example.com" aria-describedby="llm-endpoint-help"><div class="sync-status" id="llm-endpoint-help">OpenAI-compatible. A base URL such as https://host gets /v1/chat/completions added.</div></div>
+        <div class="form-field"><label for="llm-model">Model</label><input id="llm-model" maxlength="200" required placeholder="gpt-5.6-luna"></div>
+        <div class="form-field"><label for="llm-key">API key</label><input id="llm-key" type="password" maxlength="500" autocomplete="new-password" aria-describedby="llm-key-help"><div class="sync-status" id="llm-key-help">Stored on the server and never shown again.</div></div>
+        <div class="form-field" id="llm-activate-field"><label><input type="checkbox" id="llm-activate" checked> Use this profile now</label></div>
+        <div class="form-error" id="llm-error"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close="llm-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
       </form>
     </div>
   </div>
@@ -1774,6 +1811,131 @@
       prefillDocumentEditor(suggestion);
     });
 
+    // ── LLM profiles ──
+    const $llmTbody = document.getElementById('llm-tbody');
+    const $llmModal = document.getElementById('llm-modal');
+    const $llmStatus = document.getElementById('llm-engine-status');
+    const $llmAction = document.getElementById('llm-action-status');
+    const llm = {profiles: [], activeId: null, signature: null};
+
+    async function fetchLlmProfiles() {
+      const resp = await fetch('/api/llm-profiles');
+      if (!resp.ok) throw new Error('Unable to load LLM profiles');
+      return resp.json();
+    }
+
+    function renderLlmProfiles(data) {
+      // Polled every few seconds; skip unchanged renders to keep focus.
+      const signature = JSON.stringify(data);
+      if (signature === llm.signature) return;
+      llm.signature = signature;
+      llm.profiles = data.profiles || [];
+      llm.activeId = data.active_profile_id;
+      const engine = data.engine || {};
+      const active = llm.profiles.find(p => p.id === llm.activeId);
+      if (!engine.alive) $llmStatus.textContent = 'Engine offline: changes apply when it starts.';
+      else if (engine.llm_profile_id && engine.llm_profile_id === llm.activeId) $llmStatus.textContent = `Engine is using profile "${active ? active.name : engine.llm_profile_id}".`;
+      else if (llm.activeId) $llmStatus.textContent = 'Waiting for the engine to switch profile…';
+      else if (engine.llm_enabled) $llmStatus.textContent = 'Engine is using the server default configuration.';
+      else $llmStatus.textContent = 'LLM analysis is disabled: no active profile and no server default.';
+      document.getElementById('llm-use-default-btn').disabled = !llm.activeId;
+      if (!llm.profiles.length) {
+        $llmTbody.innerHTML = '<tr><td colspan="6" class="empty-state">No profiles yet. Add one to choose the LLM used for analysis.</td></tr>';
+        return;
+      }
+      $llmTbody.innerHTML = llm.profiles.map(p => {
+        const isActive = p.id === llm.activeId;
+        const status = isActive
+          ? `<span class="badge health-healthy">Active</span>${engine.llm_profile_id === p.id ? ' <span class="sa-meta">in use</span>' : ''}`
+          : `<button type="button" class="btn" data-llm-use="${escapeHtml(p.id)}" aria-label="Use profile ${escapeHtml(p.name)}">Use</button>`;
+        return `<tr>
+          <td>${escapeHtml(p.name)}</td>
+          <td><span class="tmpl-id">${escapeHtml(p.model)}</span></td>
+          <td><div class="tmpl-text">${escapeHtml(p.endpoint)}</div></td>
+          <td><span class="tmpl-id">${escapeHtml(p.api_key_hint || '—')}</span></td>
+          <td>${status}</td>
+          <td><div class="btn-row">
+            <button type="button" class="btn" data-llm-edit="${escapeHtml(p.id)}" aria-label="Edit profile ${escapeHtml(p.name)}">Edit</button>
+            <button type="button" class="btn btn-danger" data-llm-delete="${escapeHtml(p.id)}" aria-label="Delete profile ${escapeHtml(p.name)}">Delete</button>
+          </div></td>
+        </tr>`;
+      }).join('');
+    }
+
+    async function reloadLlmProfiles() {
+      llm.signature = null;
+      renderLlmProfiles(await fetchLlmProfiles());
+    }
+
+    function openLlmEditor(profile = null) {
+      document.getElementById('llm-modal-title').textContent = profile ? 'Edit LLM profile' : 'Add LLM profile';
+      document.getElementById('llm-id').value = profile ? profile.id : '';
+      document.getElementById('llm-name').value = profile ? profile.name : '';
+      document.getElementById('llm-endpoint').value = profile ? profile.endpoint : '';
+      document.getElementById('llm-model').value = profile ? profile.model : '';
+      const key = document.getElementById('llm-key');
+      key.value = '';
+      key.required = !profile;
+      key.placeholder = profile ? `Current: ${profile.api_key_hint || 'none'} (leave blank to keep)` : '';
+      document.getElementById('llm-activate-field').hidden = Boolean(profile);
+      document.getElementById('llm-error').textContent = '';
+      $llmModal.classList.add('open');
+      document.getElementById('llm-name').focus();
+    }
+
+    document.getElementById('add-llm-profile-btn').addEventListener('click', () => openLlmEditor());
+    document.getElementById('llm-use-default-btn').addEventListener('click', async () => {
+      $llmAction.textContent = '';
+      try { await apiMutation('/api/llm-profiles/active', 'PUT', {profile_id: null}); await reloadLlmProfiles(); }
+      catch (err) { $llmAction.textContent = err.message; }
+    });
+    document.getElementById('llm-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const id = document.getElementById('llm-id').value;
+      const payload = {
+        name: document.getElementById('llm-name').value,
+        endpoint: document.getElementById('llm-endpoint').value,
+        model: document.getElementById('llm-model').value,
+        api_key: document.getElementById('llm-key').value,
+      };
+      if (!id) payload.activate = document.getElementById('llm-activate').checked;
+      const submit = event.submitter;
+      if (submit) submit.disabled = true;
+      try {
+        await apiMutation(id ? `/api/llm-profiles/${encodeURIComponent(id)}` : '/api/llm-profiles', id ? 'PUT' : 'POST', payload);
+        document.getElementById('llm-key').value = '';
+        $llmModal.classList.remove('open');
+        await reloadLlmProfiles();
+      } catch (err) {
+        document.getElementById('llm-error').textContent = err.message;
+      } finally {
+        if (submit) submit.disabled = false;
+      }
+    });
+    $llmTbody.addEventListener('click', async event => {
+      const use = event.target.closest('[data-llm-use]');
+      const edit = event.target.closest('[data-llm-edit]');
+      const del = event.target.closest('[data-llm-delete]');
+      $llmAction.textContent = '';
+      try {
+        if (use) {
+          await apiMutation('/api/llm-profiles/active', 'PUT', {profile_id: use.dataset.llmUse});
+        } else if (edit) {
+          openLlmEditor(llm.profiles.find(p => p.id === edit.dataset.llmEdit));
+          return;
+        } else if (del) {
+          const profile = llm.profiles.find(p => p.id === del.dataset.llmDelete);
+          if (!profile || !window.confirm(`Delete LLM profile "${profile.name}"?`)) return;
+          await apiMutation(`/api/llm-profiles/${encodeURIComponent(profile.id)}`, 'DELETE', {});
+        } else {
+          return;
+        }
+        await reloadLlmProfiles();
+      } catch (err) {
+        $llmAction.textContent = err.message;
+      }
+    });
+
     // ── Service analysis ──
     const $saSelect = document.getElementById('service-analysis-select');
     const $saRun = document.getElementById('service-analysis-run');
@@ -2007,6 +2169,7 @@
       groups: 'Semantic Groups',
       alerting: 'Alerting',
       documentation: 'Documentation',
+      llm: 'LLM profiles',
     };
     const viewOrder = Object.keys(viewTitles);
 
@@ -2042,6 +2205,7 @@
       }
       loadData();
       if (view === 'alerting') state.alertRefreshTimer = setInterval(loadData, 2000);
+      if (view === 'llm') state.alertRefreshTimer = setInterval(loadData, 3000);
     }
 
     document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => {
@@ -2104,6 +2268,8 @@
           ]);
           renderAlerts(alerts);
           if (services) renderServiceAnalysis(services);
+        } else if (state.activeView === 'llm') {
+          renderLlmProfiles(await fetchLlmProfiles());
         } else {
           renderDocumentation(await fetchDocumentation());
         }
