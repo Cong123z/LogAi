@@ -18,6 +18,12 @@ Exposes:
     logai_retry_total
     logai_processing_latency_seconds (Histogram)
     logai_queue_depth (Gauge)
+
+  LLM analysis metrics:
+    logai_llm_requests_total{result}
+    logai_llm_request_duration_seconds{kind} (Histogram)
+    logai_llm_tokens_total{kind, type}
+    logai_llm_retries_total{kind, reason}
 """
 from __future__ import annotations
 
@@ -141,7 +147,33 @@ class MetricsExporter:
             "LLM incident analyses by result",
             ["result"],
         )
+        self.logai_llm_request_duration_seconds = Histogram(
+            "logai_llm_request_duration_seconds",
+            "Time spent waiting for the LLM per analysis job, retries included",
+            ["kind"],
+            buckets=(1, 2, 5, 10, 20, 30, 60, 120),
+        )
+        self.logai_llm_tokens_total = Counter(
+            "logai_llm_tokens_total",
+            "LLM tokens reported by the endpoint",
+            ["kind", "type"],
+        )
+        self.logai_llm_retries_total = Counter(
+            "logai_llm_retries_total",
+            "LLM calls repeated within a job",
+            ["kind", "reason"],
+        )
         self._last_grouping_revision_labels: Tuple[str, str] | None = None
+
+    def record_llm_call(self, kind: str, meta: dict) -> None:
+        """One finished analysis job (see IncidentClassifier._finish_call)."""
+        self.logai_llm_request_duration_seconds.labels(kind=kind).observe(meta["duration_s"])
+        for token_type, key in (("prompt", "prompt_tokens"), ("completion", "completion_tokens")):
+            count = (meta.get("usage") or {}).get(key)
+            if count:
+                self.logai_llm_tokens_total.labels(kind=kind, type=token_type).inc(count)
+        for reason in meta.get("retries") or []:
+            self.logai_llm_retries_total.labels(kind=kind, reason=reason).inc()
 
     def start(self) -> None:
         start_http_server(self.config.http_port, addr=self.config.http_host)

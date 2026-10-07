@@ -2132,7 +2132,13 @@
 
     function insMeta(a) {
       if (!a || !a.analyzed_at) return '';
-      return `<p class="ins-meta">Analyzed ${escapeHtml(formatFullTs(a.analyzed_at))}${a.model ? ' · ' + escapeHtml(a.model) : ''}${a.language ? ' · ' + escapeHtml(a.language.toUpperCase()) : ''}</p>`;
+      const kTokens = n => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+      const cost = [
+        typeof a.duration_s === 'number' ? `${a.duration_s.toFixed(1)} s` : '',
+        a.usage ? `${kTokens(a.usage.prompt_tokens || 0)} → ${kTokens(a.usage.completion_tokens || 0)} tokens` : '',
+        a.attempts > 1 ? 'retried' : '',
+      ].filter(Boolean).map(part => ' · ' + escapeHtml(part)).join('');
+      return `<p class="ins-meta">Analyzed ${escapeHtml(formatFullTs(a.analyzed_at))}${a.model ? ' · ' + escapeHtml(a.model) : ''}${a.language ? ' · ' + escapeHtml(a.language.toUpperCase()) : ''}${cost}</p>`;
     }
 
     const INS_CASE_BUTTON = '<button type="button" class="btn" data-ins-action="case">Save as service incident</button>';

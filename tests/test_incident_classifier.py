@@ -177,9 +177,10 @@ def test_hallucinated_id_downgraded(tmp_path):
 
 
 def test_malformed_json_failed(tmp_path):
-    clf, _, _, results = _classifier(tmp_path, [_reply("not json at all")])
+    clf, session, _, results = _classifier(tmp_path, [_reply("not json at all"), _reply("still not")])
     rec = clf.process(KEY, ALERT, [])
     assert rec["status"] == "failed" and rec["error"]
+    assert len(session.calls) == 2  # asked again once with a JSON reminder
     assert results == ["failed"]
 
 
@@ -526,3 +527,121 @@ def test_pipeline_counts_activity_and_sends_window_context(tmp_path):
     # new template, no 24 h baseline yet: ERROR level stands in for "elevated"
     assert [(e["text"], e["count_15m"], e["reasons"]) for e in context["signature"]] == [
         ("login failed", 3, ["elevated", "new"])]
+
+
+
+# --- LLM reliability: truncation/JSON retry, budget, deadline, priority, cost --
+
+from logai.incident.classifier import JSON_REMINDER
+
+VALID = {"documentation_id": "DOC-001", "reasoning": "db", "suggestion": None}
+
+
+def _raw(content, finish_reason="stop", usage=None):
+    payload = {"choices": [{"message": {"content": content}, "finish_reason": finish_reason}]}
+    if usage:
+        payload["usage"] = usage
+    return FakeResponse(200, payload)
+
+
+def test_cut_off_reply_is_asked_again_with_twice_the_budget(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [
+        _raw('{"documentation_id": "DOC', "length", {"prompt_tokens": 1000, "completion_tokens": 800}),
+        _raw(json.dumps(VALID), usage={"prompt_tokens": 1000, "completion_tokens": 120}),
+    ])
+    rec = clf.process(KEY, ALERT, [])
+    assert rec["status"] == "done" and rec["attempts"] == 2
+    assert [c["json"]["max_tokens"] for c in session.calls] == [800, 1600]
+    assert rec["usage"] == {"prompt_tokens": 2000, "completion_tokens": 920}
+    assert isinstance(rec["duration_s"], float)
+
+
+def test_cut_off_twice_fails_with_a_clear_error(tmp_path):
+    clf, _, _, _ = _classifier(tmp_path, [_raw("{", "length"), _raw("{", "length")])
+    rec = clf.process(KEY, ALERT, [])
+    assert rec["status"] == "failed" and "cut off at 1600 tokens" in rec["error"]
+
+
+def test_invalid_json_is_asked_again_with_a_reminder(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [_reply("Sure! Here is my analysis."), _reply(VALID)])
+    rec = clf.process(KEY, ALERT, [])
+    assert rec["status"] == "done" and rec["attempts"] == 2
+    prompts = [c["json"]["messages"][0]["content"] for c in session.calls]
+    assert not prompts[0].endswith(JSON_REMINDER) and prompts[1].endswith(JSON_REMINDER)
+    assert [c["json"]["max_tokens"] for c in session.calls] == [800, 800]
+
+
+def test_vietnamese_gets_a_bigger_token_budget(tmp_path):
+    from test_service_analysis import SVC_EVIDENCE, SVC_REPLY
+
+    clf, session, _, _ = _classifier(tmp_path, [_reply(VALID), _reply(VALID), _reply(SVC_REPLY)])
+    clf.service_store = JSONStore(tmp_path / "service_analysis.json")
+    clf.process(KEY, ALERT, [], language="vi")
+    clf.process(KEY, ALERT, [], language="en")
+    clf.process_service("api", 1.0, SVC_EVIDENCE, {"DOC-001": "t"}, {"G1"}, "vi")
+    assert [c["json"]["max_tokens"] for c in session.calls] == [1200, 800, 3000]
+
+
+def test_urgent_jobs_run_before_template_triage(tmp_path):
+    clf, _, _, _ = _classifier(tmp_path, [])
+    clf.service_store = JSONStore(tmp_path / "service_analysis.json")
+    clf.template_store = JSONStore(tmp_path / "template_triage.json")
+    assert clf.submit_template("T7", 1.0, {}, {})
+    assert clf.submit(KEY, ALERT, [])
+    assert clf.submit_template("T8", 2.0, {}, {})
+    assert clf.submit_service("api", 3.0, {}, {}, set())
+    order = [clf._queue.get_nowait()[2] for _ in range(4)]  # worker not started
+    assert order == [KEY, ("service", "api"), ("template", "T7"), ("template", "T8")]
+
+
+class TimeoutSession:
+    def __init__(self):
+        self.calls = 0
+
+    def post(self, url, **kwargs):
+        self.calls += 1
+        raise requests.Timeout("read timed out")
+
+
+def test_read_timeout_is_retried_only_once(tmp_path):
+    clf, _, _, _ = _classifier(tmp_path, [], max_retries=5)
+    clf._session = session = TimeoutSession()
+    rec = clf.process(KEY, ALERT, [])
+    assert session.calls == 2 and rec["status"] == "failed" and "timed out" in rec["error"]
+
+
+def test_job_deadline_stops_retries(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [FakeResponse(503, {})] * 3,
+                                     timeout_seconds=60, job_deadline_seconds=1)
+    rec = clf.process(KEY, ALERT, [])
+    assert len(session.calls) == 1  # a retry could not finish before the deadline
+    assert rec["status"] == "failed" and "did not answer within 1 s" in rec["error"]
+
+
+def test_call_cost_reported_for_done_and_failed_jobs(tmp_path):
+    reported = []
+    clf, _, store, _ = _classifier(tmp_path, [
+        _raw(json.dumps(VALID), usage={"prompt_tokens": 900, "completion_tokens": 100}),
+        FakeResponse(400, {}),
+    ])
+    clf._on_call = lambda kind, meta: reported.append((kind, dict(meta)))
+    clf.process(KEY, ALERT, [])
+    failed = clf.process(KEY, ALERT, [])
+    assert failed["status"] == "failed" and failed["attempts"] == 1 and failed["usage"] is None
+    assert [kind for kind, _ in reported] == ["window", "window"]
+    assert reported[0][1]["usage"] == {"prompt_tokens": 900, "completion_tokens": 100}
+    assert "duration_s" in store.get(STORE_KEY)
+
+
+def test_metrics_record_llm_call():
+    from logai.metrics.prometheus_exporter import MetricsExporter
+
+    fake = MagicMock()
+    MetricsExporter.record_llm_call(fake, "service", {
+        "duration_s": 12.5, "usage": {"prompt_tokens": 4000, "completion_tokens": 900},
+        "retries": ["length"]})
+    fake.logai_llm_request_duration_seconds.labels.assert_called_with(kind="service")
+    fake.logai_llm_request_duration_seconds.labels().observe.assert_called_with(12.5)
+    fake.logai_llm_tokens_total.labels.assert_any_call(kind="service", type="prompt")
+    fake.logai_llm_tokens_total.labels.assert_any_call(kind="service", type="completion")
+    fake.logai_llm_retries_total.labels.assert_called_with(kind="service", reason="length")

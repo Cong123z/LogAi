@@ -125,6 +125,7 @@ llm:
   retry_backoff_seconds: 1.0
   max_candidates: 5
   max_tokens: 800
+  job_deadline_seconds: 150
 
 grouping:
   heartbeat_interval_seconds: 5

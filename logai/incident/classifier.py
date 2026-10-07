@@ -10,6 +10,7 @@ reads it). Nothing here ever raises into the poll loop.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import queue
@@ -76,6 +77,13 @@ MAX_CANDIDATE_TEXT = 2000
 MAX_PARAMETER_VALUE = 200
 TITLE_LIMIT, TEXT_LIMIT, ERROR_CODE_LIMIT, ERROR_LIMIT = 200, 20_000, 100, 500
 QUEUE_SIZE = 100
+SERVICE_MIN_TOKENS = 2000
+MAX_TOKENS_CAP = 8000
+# Vietnamese text costs about twice the tokens of English.
+LANGUAGE_TOKEN_FACTOR = {"vi": 1.5}
+JSON_REMINDER = " Your previous reply was not valid JSON; reply with one JSON object only."
+# Urgent analyses run before template triage, which can be queued 50 at a time.
+PRIORITY_URGENT, PRIORITY_TRIAGE = 0, 1
 
 WindowKey = Tuple[str, str]
 
@@ -122,6 +130,26 @@ def clean_suggestion(raw: Any) -> Optional[Dict[str, str]]:
     }
 
 
+def _new_meta() -> Dict[str, Any]:
+    """Cost of one job: HTTP time, LLM answers asked, token usage, retries."""
+    return {"duration_s": 0.0, "attempts": 0, "usage": None, "retries": []}
+
+
+def _add_usage(meta: Dict[str, Any], usage: Any) -> None:
+    if not isinstance(usage, dict):
+        return
+    total = meta["usage"] or {"prompt_tokens": 0, "completion_tokens": 0}
+    for key in total:
+        if isinstance(usage.get(key), int):
+            total[key] += usage[key]
+    meta["usage"] = total
+
+
+def _budget(max_tokens: int, language: str) -> int:
+    """max_tokens for a reply in `language` (Vietnamese needs more tokens)."""
+    return int(max_tokens * LANGUAGE_TOKEN_FACTOR.get(language, 1.0))
+
+
 def similar_case(reply: Dict[str, Any], past: Dict[str, str]) -> Dict[str, Any]:
     """similar_case_id/title, kept only when that past incident was offered."""
     case_id = reply.get("similar_case_id")
@@ -143,6 +171,7 @@ class IncidentClassifier:
         service_store: Optional[JSONStore] = None,
         template_store: Optional[JSONStore] = None,
         cases_path: Optional[str] = None,
+        on_call: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ):
         self.config = config
         self.cases_path = cases_path
@@ -154,7 +183,11 @@ class IncidentClassifier:
         self.store = store
         self._session = session or requests.Session()
         self._on_result = on_result or (lambda result: None)
-        self._queue: "queue.Queue[tuple]" = queue.Queue(maxsize=QUEUE_SIZE)
+        # Called once per job with (kind, meta): duration, tokens, retries.
+        self._on_call = on_call or (lambda kind, meta: None)
+        # (priority, seq, active_key, job): seq keeps FIFO order within a priority.
+        self._queue: "queue.PriorityQueue[tuple]" = queue.PriorityQueue(maxsize=QUEUE_SIZE)
+        self._seq = itertools.count()
         # Window tuples and ("service"|"template", id) keys share one set; the
         # tag keeps a service named like a window from ever colliding with it.
         self._active: set[tuple] = set()
@@ -207,6 +240,7 @@ class IncidentClassifier:
     def _enqueue(
         self, active_key: tuple, store: Optional[JSONStore], store_key: str,
         pending: Dict[str, Any], failed: Callable[[str], Dict[str, Any]], job: tuple,
+        priority: int = PRIORITY_URGENT,
     ) -> bool:
         """Write the pending record, then queue the job without blocking.
         False when there is no store, the key is already queued/in flight, the
@@ -228,9 +262,9 @@ class IncidentClassifier:
                 self._active.discard(active_key)
             return False
         try:
-            # ponytail: one worker serves every job kind, so a slow job delays
-            # those queued behind it; add workers if latency matters.
-            self._queue.put_nowait((active_key, job))
+            # ponytail: one worker serves every job kind; priority keeps triage
+            # batches from delaying urgent analyses, add workers if latency matters.
+            self._queue.put_nowait((priority, next(self._seq), active_key, job))
         except queue.Full:
             logger.warning("Analysis queue full; dropping %s", active_key)
             with self._lock:
@@ -287,6 +321,7 @@ class IncidentClassifier:
             {"template_id": template_id, "requested_at": requested_at, "language": language},
             lambda error: self._failed_template(template_id, requested_at, error),
             (self.process_template, template_id, requested_at, evidence, candidates, language),
+            priority=PRIORITY_TRIAGE,
         )
 
     def delete_record(self, kind: str, target_id: str) -> bool:
@@ -353,7 +388,7 @@ class IncidentClassifier:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                active_key, (fn, *args) = self._queue.get(timeout=0.5)
+                _, _, active_key, (fn, *args) = self._queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             try:
@@ -373,6 +408,7 @@ class IncidentClassifier:
         """Evidence -> LLM -> validation -> persist. Never raises."""
         cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
         recalled: List[Dict[str, Any]] = []
+        meta = _new_meta()
         try:
             evidence, candidates = self._evidence(window_key, alert, parameters, context)
             # The engine's own recall: kept even if the LLM call below fails.
@@ -380,9 +416,10 @@ class IncidentClassifier:
             past = {case["id"]: case["title"] for case in evidence["past_incidents"]}
             record = self._validate(
                 window_key,
-                self._parse(self._call(
-                    evidence, SYSTEM_PROMPT + language_instruction(language), cfg=cfg
-                )),
+                self._ask(
+                    evidence, SYSTEM_PROMPT + language_instruction(language),
+                    _budget(cfg.max_tokens, language), cfg, meta,
+                ),
                 candidates, past,
             )
             result = "matched" if record["documentation_id"] else "suggested"
@@ -395,6 +432,7 @@ class IncidentClassifier:
         record["requested_at"] = requested_at
         record["language"] = language
         record["recalled"] = recalled
+        self._finish_call("window", group_id_key(window_key), record, meta, result)
         self._persist(window_key, self.store, group_id_key(window_key), record)
         self._on_result(result)
         return record
@@ -412,12 +450,12 @@ class IncidentClassifier:
 
         cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
         past = {case["id"]: case["title"] for case in evidence.get("past_incidents", [])}
+        meta = _new_meta()
         try:
-            content = self._call(
+            reply = self._ask(
                 evidence, SERVICE_SYSTEM_PROMPT + language_instruction(language),
-                max(cfg.max_tokens, 2000), cfg=cfg,
+                _budget(max(cfg.max_tokens, SERVICE_MIN_TOKENS), language), cfg, meta,
             )
-            reply = self._parse(content)
             record = {
                 "status": "done", "service": service, "requested_at": requested_at,
                 "analyzed_at": time.time(), "model": self.config.model,
@@ -437,6 +475,7 @@ class IncidentClassifier:
         record["model"] = cfg.model
         record["language"] = language
         record["recalled"] = recall_summary(evidence.get("past_incidents"))
+        self._finish_call("service", service, record, meta, result)
         self._persist(("service", service), self.service_store, service, record)
         self._on_result(result)
         return record
@@ -452,14 +491,16 @@ class IncidentClassifier:
         )
 
         cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
+        meta = _new_meta()
         try:
-            content = self._call(
-                evidence, TEMPLATE_SYSTEM_PROMPT + language_instruction(language), cfg=cfg
+            reply = self._ask(
+                evidence, TEMPLATE_SYSTEM_PROMPT + language_instruction(language),
+                _budget(cfg.max_tokens, language), cfg, meta,
             )
             record = {
                 "status": "done", "template_id": template_id, "requested_at": requested_at,
                 "analyzed_at": time.time(),
-                **validate_template_reply(self._parse(content), candidates),
+                **validate_template_reply(reply, candidates),
                 "error": None,
             }
             result = "template_done"
@@ -470,6 +511,7 @@ class IncidentClassifier:
         self._note_outcome(record)
         record["model"] = cfg.model
         record["language"] = language
+        self._finish_call("template", template_id, record, meta, result)
         self._persist(("template", template_id), self.template_store, template_id, record)
         self._on_result(result)
         return record
@@ -577,13 +619,67 @@ class IncidentClassifier:
         }
         return evidence, {entry.doc_id: entry.title for entry, _ in hits}
 
+    def _finish_call(
+        self, kind: str, key: str, record: Dict[str, Any], meta: Dict[str, Any], result: str,
+    ) -> None:
+        """Store the call's cost on the record, log it and report it."""
+        record["duration_s"] = round(meta["duration_s"], 2)
+        record["attempts"] = meta["attempts"]
+        record["usage"] = meta["usage"]
+        usage = meta["usage"] or {}
+        logger.info(
+            "LLM %s %s: %s in %.1fs, %s attempt(s), tokens %s -> %s%s", kind, key, result,
+            meta["duration_s"], meta["attempts"], usage.get("prompt_tokens", "?"),
+            usage.get("completion_tokens", "?"),
+            f", retries {meta['retries']}" if meta["retries"] else "",
+        )
+        try:
+            self._on_call(kind, meta)
+        except Exception:  # noqa: BLE001 - metrics must never fail an analysis
+            logger.exception("LLM call metrics failed")
+
+    def _ask(
+        self, evidence: Dict[str, Any], system_prompt: str, max_tokens: int,
+        cfg: LLMConfig, meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """One LLM answer as a JSON object. A reply cut off at max_tokens is
+        asked again with twice the budget; a reply that is not JSON is asked
+        again once with a reminder. Both stay inside cfg.job_deadline_seconds."""
+        deadline = time.monotonic() + cfg.job_deadline_seconds
+        content, finish = self._call(evidence, system_prompt, max_tokens, cfg, meta, deadline)
+        if finish != "length":
+            try:
+                return self._parse(content)
+            except ValueError:
+                reason = "json"
+        else:
+            reason = "length"
+        if time.monotonic() + cfg.timeout_seconds > deadline:
+            raise RuntimeError(f"LLM did not answer within {cfg.job_deadline_seconds:.0f} s")
+        meta["retries"].append(reason)
+        if reason == "length":
+            max_tokens = min(max_tokens * 2, MAX_TOKENS_CAP)
+        else:
+            system_prompt += JSON_REMINDER
+        content, finish = self._call(evidence, system_prompt, max_tokens, cfg, meta, deadline)
+        if finish == "length":
+            raise ValueError(f"LLM reply was cut off at {max_tokens} tokens")
+        return self._parse(content)
+
     def _call(
         self, evidence: Dict[str, Any], system_prompt: str = SYSTEM_PROMPT,
         max_tokens: Optional[int] = None, cfg: Optional[LLMConfig] = None,
-    ) -> str:
+        meta: Optional[Dict[str, Any]] = None, deadline: Optional[float] = None,
+    ) -> Tuple[str, str]:
+        """(content, finish_reason) of one answer; retries connection errors
+        and retryable HTTP codes, a read timeout at most once, never past
+        `deadline` (monotonic)."""
         # One config for the whole request, retries included: a profile switch
         # meanwhile must never send this key to the other profile's host.
         cfg = cfg or self.config
+        meta = meta if meta is not None else _new_meta()
+        if deadline is None:
+            deadline = time.monotonic() + cfg.job_deadline_seconds
         headers = {"Content-Type": "application/json"}
         if cfg.api_key:
             headers["Authorization"] = f"Bearer {cfg.api_key}"
@@ -596,23 +692,43 @@ class IncidentClassifier:
             "temperature": 0,
             "max_tokens": max_tokens or cfg.max_tokens,
         }
+        meta["attempts"] += 1
+        timeouts = 0
         attempts = cfg.max_retries + 1
         for attempt in range(attempts):
+            started = time.monotonic()
             try:
                 response = self._session.post(
                     cfg.endpoint, headers=headers, json=body,
                     timeout=cfg.timeout_seconds,
                 )
-            except (requests.ConnectionError, requests.Timeout) as exc:
+            except requests.Timeout as exc:
                 error: Exception = exc
+                timeouts += 1
+                reason = "timeout"
+            except requests.ConnectionError as exc:
+                error, reason = exc, "http"
             else:
                 if response.status_code not in _RETRYABLE_STATUS_CODES:
+                    meta["duration_s"] += time.monotonic() - started
                     if response.status_code >= 400:
                         raise RuntimeError(f"LLM returned HTTP {response.status_code}")
-                    return str(response.json()["choices"][0]["message"]["content"])
-                error = RuntimeError(f"LLM returned HTTP {response.status_code}")
-            if attempt + 1 < attempts:
-                time.sleep(cfg.retry_backoff_seconds * (2 ** attempt))
+                    payload = response.json()
+                    _add_usage(meta, payload.get("usage"))
+                    choice = payload["choices"][0]
+                    finish = str(choice.get("finish_reason") or "stop")
+                    return str(choice["message"]["content"]), finish
+                error, reason = RuntimeError(f"LLM returned HTTP {response.status_code}"), "http"
+            meta["duration_s"] += time.monotonic() - started
+            if attempt + 1 >= attempts or (reason == "timeout" and timeouts > 1):
+                break
+            backoff = cfg.retry_backoff_seconds * (2 ** attempt)
+            if time.monotonic() + backoff + cfg.timeout_seconds > deadline:
+                raise RuntimeError(
+                    f"LLM did not answer within {cfg.job_deadline_seconds:.0f} s ({error})"
+                )
+            meta["retries"].append(reason)
+            time.sleep(backoff)
         raise error
 
     @staticmethod

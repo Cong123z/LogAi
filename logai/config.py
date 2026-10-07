@@ -99,6 +99,9 @@ class LLMConfig:
     retry_backoff_seconds: float = 1.0
     max_candidates: int = 5
     max_tokens: int = 800
+    # One job (all retries included) gives up after this long, so a stuck
+    # endpoint cannot hold the single LLM worker for minutes.
+    job_deadline_seconds: float = 150.0
 
 
 @dataclass

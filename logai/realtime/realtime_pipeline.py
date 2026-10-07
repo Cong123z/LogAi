@@ -154,6 +154,7 @@ class RealtimePipeline:
                 f"{config.storage.base_dir}/{config.storage.template_triage_file}"
             ),
             cases_path=f"{config.storage.base_dir}/{config.storage.incident_cases_file}",
+            on_call=lambda kind, meta: self.metrics.record_llm_call(kind, meta),
         )
         # On-demand whole-service analysis requests (web-owned file).
         self._analysis_requests_path = (

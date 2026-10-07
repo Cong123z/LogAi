@@ -635,6 +635,15 @@ LLM **không bao giờ được gọi tự động**; mọi phân tích do ngư�
   hiện có, `template_registry.json`); client chỉ gửi `keep_texts` và `add_template_ids`.
   Template thêm tay có `reasons: ["manual"]` và không có số liệu. Prompt nói incident do
   người viết: khi khớp, ưu tiên root cause / resolution của nó.
+- **Độ tin cậy và tốc độ của LLM worker**: một worker, nhưng hàng đợi có ưu tiên — phân
+  tích window/service chạy trước triage template (một lần "Triage all" xếp tới 50 job).
+  Reply bị cắt ở `max_tokens` (`finish_reason: length`) được hỏi lại một lần với gấp đôi
+  budget (tối đa 8000); reply không phải JSON được hỏi lại một lần kèm lời nhắc. Budget
+  ×1.5 cho tiếng Việt (window 800 → 1200, service 2000 → 3000). Read timeout chỉ retry một
+  lần; `llm.job_deadline_seconds` (150) giới hạn mỗi job kể cả retry. Mỗi record lưu
+  `duration_s`, `attempts`, `usage` (token do endpoint báo); UI hiện "12.3 s · 4.1k → 905
+  tokens · retried"; Prometheus: `logai_llm_request_duration_seconds{kind}`,
+  `logai_llm_tokens_total{kind,type}`, `logai_llm_retries_total{kind,reason}`.
 - **Ngôn ngữ trả lời**: chọn English / Tiếng Việt trên trang AI Insights (lưu trong
   browser), gửi kèm mỗi request (`language` trong `analysis_requests.json`); `vi` thêm một
   câu vào system prompt để mọi trường văn bản tự do là tiếng Việt. Record và case lưu
