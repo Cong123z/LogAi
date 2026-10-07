@@ -1,7 +1,8 @@
 """LLM incident classification for alerting (service, group) windows.
 
-When a window enters ALERTING the realtime pipeline submits it here. A daemon
-worker sends the incident evidence (templates, alert state, extracted template
+When the web requests analysis of a window, the realtime pipeline submits it
+here. A daemon worker sends the incident evidence (rate vs baseline, templates
+with their age, unknown templates seen around the alert, extracted template
 parameters) plus the closest corpus documents to an OpenAI-compatible
 /chat/completions endpoint and asks it to pick one document or suggest a fix.
 The result is persisted to incident_analysis.json (engine-owned; the web only
@@ -22,6 +23,11 @@ import requests
 from logai.alert.alert_state_machine import _parse_group_id_key, group_id_key
 from logai.config import LLMConfig
 from logai.docmatch.doc_matcher import DocumentationMatcher
+from logai.features.template_activity import is_active, recent
+from logai.grouping import PENDING_GROUP_ID
+from logai.incident.cases import load_cases, recall_summary, similar_cases
+from logai.incident.requests import DEFAULT_LANGUAGE
+from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.parsing.preprocessor import PLACEHOLDER
 from logai.storage.base import JSONStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
@@ -29,15 +35,43 @@ from logai.storage.registries import GroupRegistry, TemplateRegistry
 logger = logging.getLogger("logai.incident")
 
 SYSTEM_PROMPT = (
-    "You are an SRE incident classifier. Choose the single candidate document "
-    "that explains and resolves this incident, or none. If none fits, propose a "
+    "You are an SRE incident classifier for one alerting (service, group) log "
+    "window. alert.rate compares the current event rate with the window's own "
+    "baseline. Counts are recent only (count_15m / count_30m: events in the "
+    "last 15 / 30 minutes); rate_per_min is the current rate, baseline_per_min "
+    "the template's normal rate over the last 24 h and ratio how many times "
+    "normal it runs now (null while unknown). Each template has "
+    "age_at_alert_minutes: how long before the alert it was first seen (a "
+    "template that is new at alert time is a strong signal). unknown_templates "
+    "are recent templates of the same service that belong to no group yet. "
+    "past_incidents are human-confirmed earlier incidents of this service whose "
+    "error pattern overlaps its current one; each has a then-vs-now comparison "
+    "per template (now null: not abnormal now) and only_now templates that are "
+    "new this time; judge severity mainly by ratio, since absolute rates depend "
+    "on overall traffic. Past incidents are written and curated by people from "
+    "experience: when one fits, prefer its root cause and resolution over a new "
+    "suggestion and give its id as similar_case_id. Choose the single candidate document that "
+    "explains and resolves this incident, or none. If none fits, propose a "
     "concise remediation. Reply with JSON only: "
     '{"documentation_id": "<candidate id>" | null, "confidence": 0.0-1.0, '
     '"reasoning": "...", "suggestion": {"title": "...", "text": "...", '
-    '"error_code": "..."} | null}'
+    '"error_code": "..."} | null, "similar_case_id": "<past incident id>" | null}'
 )
+
+
+def language_instruction(language: str) -> str:
+    """Appended to a system prompt; English needs nothing."""
+    if language == "vi":
+        return (
+            " Write every free-text field (reasoning, summary, titles, text) in "
+            "Vietnamese. Keep JSON keys, ids, enum values and log template text unchanged."
+        )
+    return ""
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 MAX_TEMPLATES = 10
+MAX_UNKNOWN_TEMPLATES = 10
+# Group members first seen this recently before the alert are listed first.
+NEW_TEMPLATE_SECONDS = 3600
 MAX_CANDIDATE_TEXT = 2000
 MAX_PARAMETER_VALUE = 200
 TITLE_LIMIT, TEXT_LIMIT, ERROR_CODE_LIMIT, ERROR_LIMIT = 200, 20_000, 100, 500
@@ -88,6 +122,14 @@ def clean_suggestion(raw: Any) -> Optional[Dict[str, str]]:
     }
 
 
+def similar_case(reply: Dict[str, Any], past: Dict[str, str]) -> Dict[str, Any]:
+    """similar_case_id/title, kept only when that past incident was offered."""
+    case_id = reply.get("similar_case_id")
+    if not isinstance(case_id, str) or case_id not in past:
+        return {"similar_case_id": None, "similar_case_title": ""}
+    return {"similar_case_id": case_id, "similar_case_title": past[case_id]}
+
+
 class IncidentClassifier:
     def __init__(
         self,
@@ -100,8 +142,10 @@ class IncidentClassifier:
         on_result: Optional[Callable[[str], None]] = None,
         service_store: Optional[JSONStore] = None,
         template_store: Optional[JSONStore] = None,
+        cases_path: Optional[str] = None,
     ):
         self.config = config
+        self.cases_path = cases_path
         self.service_store = service_store
         self.template_store = template_store
         self.matcher = matcher
@@ -199,8 +243,11 @@ class IncidentClassifier:
     def submit(
         self, window_key: WindowKey, alert: Dict[str, Any],
         recent_params: List[Tuple[str, List[str]]], requested_at: Optional[float] = None,
+        language: str = DEFAULT_LANGUAGE, context: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Queue one (service, group) window analysis."""
+        """Queue one (service, group) window analysis. `context` carries the
+        service's recent per-template counts ("activity") and its current error
+        signature ("signature", see service_analysis.service_signature)."""
         service, group_id = window_key
 
         def failed(error: str) -> Dict[str, Any]:
@@ -208,33 +255,38 @@ class IncidentClassifier:
 
         return self._enqueue(
             window_key, self.store, group_id_key(window_key),
-            {"service": service, "group_id": group_id, "requested_at": requested_at},
+            {"service": service, "group_id": group_id, "requested_at": requested_at,
+             "language": language},
             failed,
-            (self.process, window_key, alert, summarize_parameters(recent_params), requested_at),
+            (self.process, window_key, alert, summarize_parameters(recent_params), requested_at,
+             language, context),
         )
 
     def submit_service(
         self, service: str, requested_at: float, evidence: Dict[str, Any],
-        candidates: Dict[str, str], sent_groups: set[str],
+        candidates: Dict[str, str], sent_groups: set[str], language: str = DEFAULT_LANGUAGE,
+        signature: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Queue one whole-service analysis."""
+        """Queue one whole-service analysis. `signature` ({template_texts,
+        occurred_at}) is stored so the web can save the result as an incident."""
         return self._enqueue(
             ("service", service), self.service_store, service,
-            {"service": service, "requested_at": requested_at},
+            {"service": service, "requested_at": requested_at, "language": language},
             lambda error: self._failed_service(service, requested_at, error),
-            (self.process_service, service, requested_at, evidence, candidates, sent_groups),
+            (self.process_service, service, requested_at, evidence, candidates, sent_groups,
+             language, signature),
         )
 
     def submit_template(
         self, template_id: str, requested_at: float, evidence: Dict[str, Any],
-        candidates: Dict[str, str],
+        candidates: Dict[str, str], language: str = DEFAULT_LANGUAGE,
     ) -> bool:
         """Queue one unknown-template triage."""
         return self._enqueue(
             ("template", template_id), self.template_store, template_id,
-            {"template_id": template_id, "requested_at": requested_at},
+            {"template_id": template_id, "requested_at": requested_at, "language": language},
             lambda error: self._failed_template(template_id, requested_at, error),
-            (self.process_template, template_id, requested_at, evidence, candidates),
+            (self.process_template, template_id, requested_at, evidence, candidates, language),
         )
 
     def delete_record(self, kind: str, target_id: str) -> bool:
@@ -315,14 +367,23 @@ class IncidentClassifier:
 
     def process(
         self, window_key: WindowKey, alert: Dict[str, Any], parameters: List[Dict[str, Any]],
-        requested_at: Optional[float] = None,
+        requested_at: Optional[float] = None, language: str = DEFAULT_LANGUAGE,
+        context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Evidence -> LLM -> validation -> persist. Never raises."""
         cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
+        recalled: List[Dict[str, Any]] = []
         try:
-            evidence, candidates = self._evidence(window_key, alert, parameters)
+            evidence, candidates = self._evidence(window_key, alert, parameters, context)
+            # The engine's own recall: kept even if the LLM call below fails.
+            recalled = recall_summary(evidence["past_incidents"])
+            past = {case["id"]: case["title"] for case in evidence["past_incidents"]}
             record = self._validate(
-                window_key, self._parse(self._call(evidence, cfg=cfg)), candidates
+                window_key,
+                self._parse(self._call(
+                    evidence, SYSTEM_PROMPT + language_instruction(language), cfg=cfg
+                )),
+                candidates, past,
             )
             result = "matched" if record["documentation_id"] else "suggested"
         except Exception as exc:  # noqa: BLE001 - analysis is advisory enrichment
@@ -332,13 +393,16 @@ class IncidentClassifier:
         self._note_outcome(record)
         record["model"] = cfg.model
         record["requested_at"] = requested_at
+        record["language"] = language
+        record["recalled"] = recalled
         self._persist(window_key, self.store, group_id_key(window_key), record)
         self._on_result(result)
         return record
 
     def process_service(
         self, service: str, requested_at: float, evidence: Dict[str, Any],
-        candidates: Dict[str, str], sent_groups: set[str],
+        candidates: Dict[str, str], sent_groups: set[str], language: str = DEFAULT_LANGUAGE,
+        signature: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Whole-service analysis: LLM -> validation -> persist. Never raises."""
         from logai.incident.service_analysis import (
@@ -347,14 +411,21 @@ class IncidentClassifier:
         )
 
         cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
+        past = {case["id"]: case["title"] for case in evidence.get("past_incidents", [])}
         try:
             content = self._call(
-                evidence, SERVICE_SYSTEM_PROMPT, max(cfg.max_tokens, 2000), cfg=cfg
+                evidence, SERVICE_SYSTEM_PROMPT + language_instruction(language),
+                max(cfg.max_tokens, 2000), cfg=cfg,
             )
+            reply = self._parse(content)
             record = {
                 "status": "done", "service": service, "requested_at": requested_at,
                 "analyzed_at": time.time(), "model": self.config.model,
-                **validate_service_reply(self._parse(content), candidates, sent_groups),
+                **validate_service_reply(reply, candidates, sent_groups),
+                # An incident describes the whole service: one pick, not per issue.
+                **similar_case(reply, past),
+                # The service's error pattern; the web saves it with an incident.
+                "signature": signature or {},
                 "error": None,
             }
             result = "service_done"
@@ -364,13 +435,15 @@ class IncidentClassifier:
             result = "service_failed"
         self._note_outcome(record)
         record["model"] = cfg.model
+        record["language"] = language
+        record["recalled"] = recall_summary(evidence.get("past_incidents"))
         self._persist(("service", service), self.service_store, service, record)
         self._on_result(result)
         return record
 
     def process_template(
         self, template_id: str, requested_at: float, evidence: Dict[str, Any],
-        candidates: Dict[str, str],
+        candidates: Dict[str, str], language: str = DEFAULT_LANGUAGE,
     ) -> Dict[str, Any]:
         """Unknown-template triage: LLM -> validation -> persist. Never raises."""
         from logai.incident.template_triage import (
@@ -380,7 +453,9 @@ class IncidentClassifier:
 
         cfg = self.config  # snapshot: a profile switch mid-job must not mix configs
         try:
-            content = self._call(evidence, TEMPLATE_SYSTEM_PROMPT, cfg=cfg)
+            content = self._call(
+                evidence, TEMPLATE_SYSTEM_PROMPT + language_instruction(language), cfg=cfg
+            )
             record = {
                 "status": "done", "template_id": template_id, "requested_at": requested_at,
                 "analyzed_at": time.time(),
@@ -394,6 +469,7 @@ class IncidentClassifier:
             result = "template_failed"
         self._note_outcome(record)
         record["model"] = cfg.model
+        record["language"] = language
         self._persist(("template", template_id), self.template_store, template_id, record)
         self._on_result(result)
         return record
@@ -426,16 +502,41 @@ class IncidentClassifier:
         }
 
     def _evidence(
-        self, window_key: WindowKey, alert: Dict[str, Any], parameters: List[Dict[str, Any]]
+        self, window_key: WindowKey, alert: Dict[str, Any], parameters: List[Dict[str, Any]],
+        context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, str]]:
         service, group_id = window_key
+        activity = (context or {}).get("activity") or {}
         group = self.groups.get(group_id)
         members = [
             state for template_id in (group.template_ids if group else [])
             if (state := self.templates.get(template_id)) is not None
         ]
         same_service = [state for state in members if state.service == service]
-        members = sorted(same_service or members, key=lambda s: (-s.event_count, s.template_id))
+        alert_at = float(alert.get("at") or time.time())
+        members = sorted(same_service or members, key=lambda s: (
+            alert_at - s.first_seen >= NEW_TEMPLATE_SECONDS,
+            -recent(activity, s.template_id)["count_30m"], s.template_id,
+        ))
+        unknown = sorted(
+            (
+                s for s in self.templates.all_templates()
+                if s.service == service and is_active(activity, s.template_id)
+                and (not s.group_id or s.group_id == PENDING_GROUP_ID)
+            ),
+            key=lambda s: (
+                -LEVEL_RANK.get(str(s.level).upper(), LEVEL_RANK[DEFAULT_LEVEL]),
+                -activity[s.template_id]["count_30m"], s.template_id,
+            ),
+        )[:MAX_UNKNOWN_TEMPLATES]
+
+        def describe(s) -> Dict[str, Any]:
+            return {
+                "id": s.template_id, "text": s.template_text, "level": s.level,
+                **recent(activity, s.template_id),
+                "age_at_alert_minutes": round((alert_at - s.first_seen) / 60.0, 1),
+            }
+
         hits = self.matcher.top_k(self.groups.get_centroid(group_id), self.config.max_candidates)
         evidence = {
             "service": service,
@@ -443,12 +544,17 @@ class IncidentClassifier:
             "alert": alert,
             "group": {
                 "representative_template": group.representative_template if group else "",
-                "event_count": group.event_count if group else 0,
+                **{
+                    window: sum(recent(activity, s.template_id)[window] for s in members)
+                    for window in ("count_15m", "count_30m")
+                },
             },
-            "templates": [
-                {"id": s.template_id, "text": s.template_text, "level": s.level, "count": s.event_count}
-                for s in members[:MAX_TEMPLATES]
-            ],
+            "templates": [describe(s) for s in members[:MAX_TEMPLATES]],
+            "unknown_templates": [describe(s) for s in unknown],
+            "past_incidents": similar_cases(
+                load_cases(self.cases_path) if self.cases_path else [], service,
+                (context or {}).get("signature") or [],
+            ),
             "parameters": [
                 {
                     **item,
@@ -525,7 +631,8 @@ class IncidentClassifier:
         raise ValueError("LLM reply contains no JSON object")
 
     def _validate(
-        self, window_key: WindowKey, reply: Dict[str, Any], candidates: Dict[str, str]
+        self, window_key: WindowKey, reply: Dict[str, Any], candidates: Dict[str, str],
+        past: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         doc_id = reply.get("documentation_id")
         # Hallucination guard: only a document we offered may be chosen.
@@ -552,6 +659,7 @@ class IncidentClassifier:
             "confidence": confidence,
             "reasoning": str(reply.get("reasoning") or "")[:TEXT_LIMIT],
             "suggestion": suggestion,
+            **similar_case(reply, past or {}),
             "error": None,
         }
 

@@ -25,6 +25,7 @@ from logai.docmatch.doc_matcher import DocumentationMatcher
 from logai.docmatch.refresh_worker import DocumentationRefreshWorker
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
+from logai.features.template_activity import TemplateActivity
 from logai.grouping import PENDING_GROUP_ID
 from logai.grouping.assignment_manager import (
     GroupAssignmentError,
@@ -32,8 +33,9 @@ from logai.grouping.assignment_manager import (
 )
 from logai.incident.classifier import IncidentClassifier
 from logai.incident.profiles import LLMProfileStore
-from logai.incident.requests import load_requests, parse_key
-from logai.incident.service_analysis import build_service_evidence
+from logai.incident.cases import load_cases
+from logai.incident.requests import DEFAULT_LANGUAGE, load_requests, parse_key
+from logai.incident.service_analysis import build_service_evidence, service_signature
 from logai.incident.template_triage import build_template_evidence
 from logai.metrics.prometheus_exporter import MetricsExporter
 from logai.models import (
@@ -90,6 +92,13 @@ class RealtimePipeline:
             f"{config.storage.base_dir}/{config.storage.doc_embeddings_file}",
         )
         self.feature_engine = FeatureEngine(config.features)
+        # Recent per-template counts and each template's normal rate: the only
+        # counts LLM evidence uses. Reloaded so a restart keeps the baseline.
+        self._template_activity_path = (
+            f"{config.storage.base_dir}/{config.storage.template_activity_file}"
+        )
+        self.template_activity = TemplateActivity.load(self._template_activity_path)
+        self._template_activity_saved_at = time.monotonic()
         self.model_store = ModelStore(config.storage.model_dir)
         self.anomaly_model = GlobalAnomalyModel(config.anomaly, self.model_store)
         self.anomaly_models = self.anomaly_model  # backward compatibility alias
@@ -144,6 +153,7 @@ class RealtimePipeline:
             template_store=JSONStore(
                 f"{config.storage.base_dir}/{config.storage.template_triage_file}"
             ),
+            cases_path=f"{config.storage.base_dir}/{config.storage.incident_cases_file}",
         )
         # On-demand whole-service analysis requests (web-owned file).
         self._analysis_requests_path = (
@@ -227,6 +237,7 @@ class RealtimePipeline:
             self._poll_loop()
         finally:
             self._control_stop.set()
+            self._save_template_activity(force=True)
 
     def _poll_loop(self) -> None:
         consecutive_poll_failures = 0
@@ -427,6 +438,7 @@ class RealtimePipeline:
                 return True  # idempotency: already processed this event_id
 
             parsed = self.parser.parse(raw)
+            self.template_activity.record(raw.service, parsed.template_id, raw.timestamp)
             grouped = self._assign_group(parsed)
             self.metrics.record_raw_event(parsed)
 
@@ -640,11 +652,28 @@ class RealtimePipeline:
         return classifier is not None and classifier.enabled
 
     CONTROL_INTERVAL_SECONDS = 2.0
+    TEMPLATE_ACTIVITY_SAVE_SECONDS = 300.0
 
     def _control_tick(self) -> None:
         self._refresh_llm_profile()
         self._process_analysis_requests()
         self._heartbeat_grouping()
+        self._save_template_activity()
+
+    def _save_template_activity(self, force: bool = False) -> None:
+        """Persist per-template baselines every few minutes (and on shutdown);
+        losing them only means the baseline rebuilds."""
+        if getattr(self, "template_activity", None) is None:
+            return
+        if not force and time.monotonic() - self._template_activity_saved_at < (
+            self.TEMPLATE_ACTIVITY_SAVE_SECONDS
+        ):
+            return
+        self._template_activity_saved_at = time.monotonic()
+        try:
+            self.template_activity.save(self._template_activity_path)
+        except OSError as exc:
+            logger.warning("Unable to save template activity: %s", exc)
 
     def _control_loop(self) -> None:
         """Runs until run_forever's poll loop exits."""
@@ -755,7 +784,9 @@ class RealtimePipeline:
             return
         enabled = self._llm_enabled()
         # The file is tiny; reading it every tick avoids mtime-granularity misses.
-        for key, (action, requested_at) in load_requests(self._analysis_requests_path).items():
+        for key, (action, requested_at, language) in load_requests(
+            self._analysis_requests_path
+        ).items():
             parsed = parse_key(key)
             if parsed is None or requested_at <= self._handled_requests.get(key, 0.0):
                 continue
@@ -773,40 +804,70 @@ class RealtimePipeline:
                 if requested_at <= float(record.get("requested_at") or 0.0):
                     self._handled_requests[key] = requested_at
                     continue
-                if self._submit_request(kind, target_id, requested_at):
+                if self._submit_request(kind, target_id, requested_at, language):
                     self._handled_requests[key] = requested_at
             except Exception as exc:  # noqa: BLE001 - one bad request must not block others
                 logger.warning("LLM request %s failed: %s", key, exc)
                 self._handled_requests[key] = requested_at
                 self._write_failed(kind, target_id, requested_at, str(exc))
 
-    def _submit_request(self, kind: str, target_id: str, requested_at: float) -> bool:
+    def _submit_request(
+        self, kind: str, target_id: str, requested_at: float,
+        language: str = DEFAULT_LANGUAGE,
+    ) -> bool:
         classifier = self.incident_classifier
+        # Everything is measured at the request time on the event clock, so a
+        # replay at any speed gets the same numbers as live traffic.
+        now = self._now_event_time()
         if kind == "window":
             identity = tuple(json.loads(target_id))
             if len(identity) != 2 or self.group_registry.get(identity[1]) is None:
                 raise LookupError(f"Unknown window {target_id}")
             state = self.alert_sm._load(identity)
-            alert = {"state": state.alert_state, "score": state.anomaly_score, "count_1m": None}
+            # `at` (last scored event) anchors template ages.
+            rate = self.feature_engine.describe(identity, now)
+            alert = {
+                "state": state.alert_state, "score": state.anomaly_score,
+                "at": state.timestamp or now,
+                "count_1m": rate["count_1m"] if rate else None, "rate": rate,
+            }
             params = self._params_snapshot(lambda key: key == identity).get(identity, [])
-            return classifier.submit(identity, alert, params, requested_at=requested_at)
+            activity = self.template_activity.counts(now, identity[0])
+            signature = service_signature(
+                identity[0], self.template_registry,
+                self.alert_sm.states_for_service(identity[0]), activity, now,
+            )
+            return classifier.submit(
+                identity, alert, params, requested_at=requested_at, language=language,
+                context={"activity": activity, "signature": signature["templates"]},
+            )
         if kind == "service":
             alert_states = self.alert_sm.states_for_service(target_id)
             if self.template_registry.count_by_service(target_id) == 0 and not alert_states:
                 raise LookupError(f"Unknown service {target_id!r}")
             params = {g: entries for (_, g), entries in
                       self._params_snapshot(lambda key: key[0] == target_id).items()}
+            activity = self.template_activity.counts(now, target_id)
+            signature = service_signature(
+                target_id, self.template_registry, alert_states, activity, now
+            )
             evidence, candidates, sent_groups = build_service_evidence(
                 target_id, self.group_registry, self.template_registry,
                 alert_states, params, self.doc_matcher,
+                load_cases(classifier.cases_path) if classifier.cases_path else (),
+                activity, signature["templates"],
             )
             return classifier.submit_service(
-                target_id, requested_at, evidence, candidates, sent_groups
+                target_id, requested_at, evidence, candidates, sent_groups, language,
+                {**signature, "occurred_at": now},
             )
         evidence, candidates = build_template_evidence(
-            target_id, self.template_registry, self.group_registry
+            target_id, self.template_registry, self.group_registry,
+            self.template_activity.counts(now),
         )
-        return classifier.submit_template(target_id, requested_at, evidence, candidates)
+        return classifier.submit_template(
+            target_id, requested_at, evidence, candidates, language
+        )
 
     def _write_failed(self, kind: str, target_id: str, requested_at: float, error: str) -> None:
         classifier = self.incident_classifier

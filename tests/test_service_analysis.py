@@ -82,8 +82,10 @@ def test_evidence_per_service_counts(tmp_path):
     groups, templates, matcher = _fixture(tmp_path)
     evidence, _, _ = build_service_evidence("recharge", groups, templates, {}, {}, matcher)
     g1 = next(g for g in evidence["groups"] if g["group_id"] == "G1")
-    assert g1["event_count"] == 50 and g1["level"] == "ERROR"
-    assert g1["templates"] == [{"id": "T1", "text": "text T1", "level": "ERROR", "count": 50}]
+    assert g1["count_30m"] == 0 and g1["level"] == "ERROR" and "event_count" not in g1
+    assert g1["templates"] == [{"id": "T1", "text": "text T1", "level": "ERROR", "count_15m": 0,
+                                "count_30m": 0, "rate_per_min": 0.0, "baseline_per_min": None,
+                                "ratio": None}]
     assert g1["representative_template"] == "rep G1"
     assert "G3" not in {g["group_id"] for g in evidence["groups"]}
 
@@ -296,8 +298,9 @@ def test_request_submitted_once(tmp_path):
     p._process_analysis_requests()
     submit = p.incident_classifier.submit_service
     assert submit.call_count == 1
-    service, requested_at, evidence, candidates, sent = submit.call_args.args
-    assert (service, requested_at, evidence["service"]) == ("recharge", 10.0, "recharge")
+    service, requested_at, evidence, candidates, sent, language, signature = submit.call_args.args
+    assert (service, requested_at, evidence["service"], language) == ("recharge", 10.0, "recharge", "en")
+    assert set(signature) == {"templates", "totals", "occurred_at"}
 
 
 def test_handled_across_restart(tmp_path):
@@ -396,3 +399,88 @@ def test_request_written_within_same_mtime_is_seen(tmp_path):
     _os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))  # coarse-timestamp filesystem
     p._process_analysis_requests()
     assert p.incident_classifier.submit_service.call_args.args[0] == "recharge"
+
+
+# --- Incident history ------------------------------------------------------------
+
+def test_service_evidence_past_incidents(tmp_path):
+    groups, templates, matcher = _fixture(tmp_path)
+    cases = [{"id": "CASE-0001", "service": "recharge", "template_texts": ["text T1"], "title": "t"},
+             {"id": "CASE-0002", "service": "api", "template_texts": ["text T1"], "title": "t"}]
+    evidence, _, _ = build_service_evidence("recharge", groups, templates, {}, {}, matcher, cases,
+                                            signature=["text T1", "text T2"])
+    assert [c["id"] for c in evidence["past_incidents"]] == ["CASE-0001"]
+
+
+def test_service_record_keeps_signature_recall_and_one_guarded_case_id(tmp_path):
+    reply = {**SVC_REPLY, "similar_case_id": "CASE-0001",
+             "issues": [{**SVC_REPLY["issues"][0], "similar_case_id": "CASE-0001"}]}
+    clf, session, _, _ = _svc_classifier(tmp_path, [tic._reply(reply), tic._reply(
+        {**SVC_REPLY, "similar_case_id": "CASE-9"}), tic._reply("not json")])
+    past = [{"id": "CASE-0001", "title": "earlier", "overlap": 0.8, "occurred_at": 3.0,
+             "comparison": [], "only_now": ["x"], "root_cause": "not copied"}]
+    evidence = {**SVC_EVIDENCE,
+                "groups": [{"group_id": "G1", "templates": [{"id": "T1", "text": "text T1"}]}],
+                "past_incidents": past}
+    signature = {"templates": [{"text": "text T1"}], "occurred_at": 9.0}
+    rec = clf.process_service("recharge", 5.0, evidence, {"DOC-001": "title DOC-001"}, {"G1"}, "vi",
+                              signature)
+    assert rec["signature"] == signature and rec["language"] == "vi"
+    assert (rec["similar_case_id"], rec["similar_case_title"]) == ("CASE-0001", "earlier")
+    assert "similar_case_id" not in rec["issues"][0]  # one pick per service, not per issue
+    assert rec["recalled"] == [{"id": "CASE-0001", "title": "earlier", "overlap": 0.8,
+                                "occurred_at": 3.0, "comparison": [], "only_now": ["x"]}]
+    assert "in Vietnamese" in session.calls[0]["json"]["messages"][0]["content"]
+    rec = clf.process_service("recharge", 6.0, evidence, {}, {"G1"})
+    assert rec["similar_case_id"] is None  # never offered
+    rec = clf.process_service("recharge", 7.0, evidence, {}, {"G1"})
+    assert rec["status"] == "failed" and rec["recalled"][0]["id"] == "CASE-0001"  # recall survives
+
+
+def test_recent_counts_rank_groups_and_list_unknown_templates(tmp_path):
+    groups, templates, matcher = _fixture(tmp_path)
+    _template(templates, "U1", "recharge", "ERROR", 1, "UNASSIGNED_PENDING")
+    _template(templates, "U2", "recharge", "ERROR", 1, "UNASSIGNED_PENDING")  # not recent
+    activity = {"T2": {"count_15m": 5, "count_30m": 8}, "U1": {"count_15m": 1, "count_30m": 4}}
+    evidence, _, _ = build_service_evidence("recharge", groups, templates, {}, {}, matcher,
+                                            activity=activity)
+    # G2 (INFO, active) now ranks above G1 (ERROR, silent for 30 min)
+    assert [g["group_id"] for g in evidence["groups"]] == ["G2", "G1"]
+    assert (evidence["groups"][0]["count_15m"], evidence["groups"][0]["count_30m"]) == (5, 8)
+    assert [t["id"] for t in evidence["unknown_templates"]] == ["U1"]
+    assert evidence["unknown_templates"][0]["count_30m"] == 4
+
+
+def test_service_signature_keeps_only_the_abnormal_part(tmp_path):
+    from logai.incident.service_analysis import service_signature
+
+    groups, templates, matcher = _fixture(tmp_path)
+    now = 1_000_000.0
+    for tid, level, gid, first_seen in [
+        ("S_HOT", "INFO", "G2", 0.0),          # 20x its normal rate
+        ("S_CHRONIC", "WARN", "G2", 0.0),      # WARN, but at its usual rate
+        ("S_INFO", "INFO", "G2", 0.0),         # normal background traffic
+        ("S_ALERT", "INFO", "G9", 0.0),        # its group is alerting
+        ("S_NEW", "INFO", "G2", now - 60),     # first seen a minute ago
+        ("S_UNK", "INFO", "UNASSIGNED_PENDING", 0.0),
+        ("S_COLD", "ERROR", "G2", 0.0),        # no baseline yet: ERROR stands in
+        ("S_QUIET", "ERROR", "G2", 0.0),       # silent for 30 min
+    ]:
+        templates.upsert(TemplateState(template_id=tid, template_text=f"text {tid}", service="recharge",
+                                       level=level, group_id=gid, first_seen=first_seen))
+
+    def numbers(n, ratio, baseline=1.0):
+        return {"count_15m": n, "count_30m": n, "rate_per_min": n / 15, "baseline_per_min": baseline,
+                "ratio": ratio}
+
+    activity = {"S_HOT": numbers(300, 20.0), "S_CHRONIC": numbers(60, 1.0), "S_INFO": numbers(900, 1.0),
+                "S_ALERT": numbers(30, 1.0), "S_NEW": numbers(20, 1.3), "S_UNK": numbers(70, 1.0),
+                "S_COLD": numbers(10, None, None), "S_QUIET": numbers(0, 0.0)}
+    signature = service_signature("recharge", templates, {"G9": ("ALERTING", 0.9)}, activity, now)
+    entries = signature["templates"]
+    # busiest first; chronic WARN, normal INFO and silent templates are left out
+    assert [(e["template_id"], e["reasons"]) for e in entries] == [
+        ("S_HOT", ["elevated"]), ("S_UNK", ["unknown"]), ("S_ALERT", ["alerting"]),
+        ("S_NEW", ["new"]), ("S_COLD", ["elevated"])]
+    assert entries[0]["ratio"] == 20.0 and entries[0]["group_state"] == "NORMAL"
+    assert signature["totals"] == {"events_15m": 1390, "error_events_15m": 10}

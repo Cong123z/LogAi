@@ -150,3 +150,135 @@ def test_save_document_skips_assignment_while_grouping_pending():
         assert body["assignment_skipped"][0]["reason"] == "grouping_pending"
     finally:
         temporary.cleanup()
+
+
+# --- Incident history + language ----------------------------------------------
+
+def test_create_service_incident_then_delete():
+    temporary, base, client = _client()
+    try:
+        _write(base, "service_analysis.json", {
+            "api": {"status": "done", "service": "api", "language": "vi", "analyzed_at": 8.0,
+                    "issues": [{"title": "t", "group_ids": ["G1", "G2"]}, {"title": "u", "group_ids": ["G2"]}],
+                    "signature": {"template_texts": ["db timeout <*>", "socket closed"], "occurred_at": 42.0}},
+            "quiet": {"status": "done", "service": "quiet", "issues": [], "signature": {"template_texts": []}},
+        })
+        fields = {"title": "DB down", "root_cause": "failover", "resolution": "restart"}
+        response = client.post("/api/incident-cases", json={
+            "service": "api", "template_texts": ["forged"], **fields})
+        assert response.status_code == 201, response.get_json()
+        case = response.get_json()
+        assert case["template_texts"] == ["db timeout <*>", "socket closed"]
+        assert case["group_ids"] == ["G1", "G2"] and case["occurred_at"] == 42.0
+        assert case["language"] == "vi" and case["service"] == "api"
+        assert client.post("/api/incident-cases", json={"service": "ghost", **fields}).status_code == 404
+        assert client.post("/api/incident-cases", json={"service": "quiet", **fields}).status_code == 400
+        assert client.post("/api/incident-cases", json={"service": "api", "title": ""}).status_code == 400
+        listed = client.get("/api/incident-cases").get_json()["cases"]
+        assert [c["id"] for c in listed] == ["CASE-0001"]
+        assert client.delete("/api/incident-cases/CASE-0001").status_code == 200
+        assert client.delete("/api/incident-cases/CASE-0001").status_code == 404
+    finally:
+        temporary.cleanup()
+
+
+def test_analyze_language_stored_and_validated():
+    temporary, base, client = _client()
+    try:
+        _beat(base)
+        bad = client.post("/api/insights/analyze", json={"kind": "service", "id": "api", "language": "fr"})
+        assert bad.status_code == 400
+        ok = client.post("/api/insights/analyze", json={"kind": "service", "id": "api", "language": "vi"})
+        assert ok.status_code == 202
+        assert load_requests(base / "analysis_requests.json")["service:api"][2] == "vi"
+    finally:
+        temporary.cleanup()
+
+
+def test_incident_keeps_pattern_numbers_from_the_analysis():
+    temporary, base, client = _client()
+    try:
+        _write(base, "service_analysis.json", {"api": {
+            "status": "done", "service": "api", "issues": [],
+            "signature": {
+                "templates": [{"text": "db timeout <*>", "level": "ERROR", "rate_per_min": 300.0,
+                               "baseline_per_min": 7.5, "ratio": 40.0, "reasons": ["elevated"]}],
+                "totals": {"events_15m": 31000, "error_events_15m": 4800}, "occurred_at": 42.0}}})
+        response = client.post("/api/incident-cases", json={
+            "service": "api", "title": "DB down", "root_cause": "failover",
+            "pattern": [{"text": "forged", "ratio": 1.0}]})
+        assert response.status_code == 201, response.get_json()
+        case = response.get_json()
+        assert case["template_texts"] == ["db timeout <*>"]
+        assert case["pattern"][0]["ratio"] == 40.0 and case["pattern"][0]["reasons"] == ["elevated"]
+        assert case["totals"] == {"events_15m": 31000, "error_events_15m": 4800}
+    finally:
+        temporary.cleanup()
+
+
+def _registry(base):
+    _write(base, "template_registry.json", {
+        "T1": {"template_id": "T1", "template_text": "db timeout <*>", "service": "api", "level": "ERROR",
+               "group_id": "G1"},
+        "T2": {"template_id": "T2", "template_text": "receive message", "service": "api", "level": "INFO",
+               "group_id": "G2"},
+        "T3": {"template_id": "T3", "template_text": "pool exhausted", "service": "api", "level": "ERROR",
+               "group_id": None},
+        "W1": {"template_id": "W1", "template_text": "web thing", "service": "web", "level": "ERROR"},
+    })
+
+
+def test_save_from_analysis_can_drop_noise_and_add_templates():
+    temporary, base, client = _client()
+    try:
+        _registry(base)
+        _write(base, "service_analysis.json", {"api": {"status": "done", "service": "api", "issues": [],
+            "signature": {"templates": [{"text": "db timeout <*>", "ratio": 40.0},
+                                        {"text": "receive message", "ratio": 5.0}], "occurred_at": 9.0}}})
+        response = client.post("/api/incident-cases", json={
+            "service": "api", "title": "DB", "root_cause": "pool", "keep_texts": ["db timeout <*>"],
+            "add_template_ids": ["T3"]})
+        assert response.status_code == 201, response.get_json()
+        case = response.get_json()
+        assert case["template_texts"] == ["db timeout <*>", "pool exhausted"]
+        assert case["pattern"][0]["ratio"] == 40.0 and case["pattern"][1]["reasons"] == ["manual"]
+        empty = client.post("/api/incident-cases", json={
+            "service": "api", "title": "DB", "root_cause": "pool", "keep_texts": []})
+        assert empty.status_code == 400
+    finally:
+        temporary.cleanup()
+
+
+def test_write_incident_by_hand_and_edit_it():
+    temporary, base, client = _client()
+    try:
+        _registry(base)
+        response = client.post("/api/incident-cases", json={
+            "service": "api", "manual": True, "add_template_ids": ["T1", "T3"],
+            "title": "Pool exhausted", "root_cause": "from experience", "resolution": "restart pool"})
+        assert response.status_code == 201, response.get_json()
+        case = response.get_json()
+        assert case["source"] == {"kind": "manual"} and case["occurred_at"] is None
+        assert case["template_texts"] == ["db timeout <*>", "pool exhausted"]
+        assert client.post("/api/incident-cases", json={
+            "service": "api", "manual": True, "add_template_ids": ["W1"], "title": "x",
+            "root_cause": "y"}).status_code == 400  # another service's template
+        assert client.post("/api/incident-cases", json={
+            "service": "api", "manual": True, "title": "x", "root_cause": "y"}).status_code == 400
+
+        edited = client.put(f"/api/incident-cases/{case['id']}", json={
+            "title": "Pool exhausted at peak", "root_cause": "pool of 20 too small",
+            "resolution": "raise to 80", "documentation_id": "DOC-005",
+            "keep_texts": ["pool exhausted"], "add_template_ids": ["T2"]})
+        assert edited.status_code == 200, edited.get_json()
+        body = edited.get_json()
+        assert body["template_texts"] == ["pool exhausted", "receive message"]
+        assert body["documentation_id"] == "DOC-005" and body["updated_at"]
+        assert client.put("/api/incident-cases/CASE-0404", json={
+            "title": "x", "root_cause": "y"}).status_code == 404
+        assert client.put(f"/api/incident-cases/{case['id']}", json={
+            "title": "", "root_cause": "y"}).status_code == 400
+        incidents = client.get("/api/insights").get_json()["incidents"]
+        assert incidents[case["id"]]["root_cause"] == "pool of 20 too small"
+    finally:
+        temporary.cleanup()

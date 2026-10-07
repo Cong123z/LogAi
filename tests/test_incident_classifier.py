@@ -244,9 +244,16 @@ def test_request_body(tmp_path):
     body = session.calls[0]["json"]
     assert body["model"] == "m" and body["temperature"] == 0 and body["max_tokens"] == 800
     evidence = _evidence(session)
-    assert set(evidence) == {"service", "group_id", "alert", "group", "templates", "parameters", "candidates"}
+    assert set(evidence) == {"service", "group_id", "alert", "group", "templates",
+                             "unknown_templates", "past_incidents", "parameters", "candidates"}
     assert evidence["candidates"][0]["id"] == "DOC-001"
-    assert evidence["templates"] == [{"id": "T1", "text": "db timeout <*>", "level": "ERROR", "count": 9}]
+    # all-time counts are never sent; recent counts are 0 without activity
+    assert evidence["templates"] == [{"id": "T1", "text": "db timeout <*>", "level": "ERROR",
+                                      "count_15m": 0, "count_30m": 0, "rate_per_min": 0.0,
+                                      "baseline_per_min": None, "ratio": None,
+                                      "age_at_alert_minutes": 0.0}]
+    assert evidence["group"] == {"representative_template": "db timeout <*>",
+                                 "count_15m": 0, "count_30m": 0}
     assert "Authorization" not in session.calls[0]["headers"]
 
     clf, session, _, _ = _classifier(tmp_path, [_reply(
@@ -364,3 +371,158 @@ def test_parameter_evidence_bounded(tmp_path):
     params = _evidence(session)["parameters"]
     assert [p["template_id"] for p in params] == ["T1"]
     assert len(params[0]["top_values"][0][0]) == 200
+
+
+# --- Richer evidence: rate vs baseline, template age, unknown templates
+
+def test_template_age_and_unknown_templates_in_evidence(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [_reply(
+        {"documentation_id": "DOC-001", "reasoning": "db"})])
+    at = 100_000.0
+    for state in [
+        # group member first seen 5 min before the alert: listed before T1 (old, busier)
+        TemplateState(template_id="T_NEW", template_text="pool exhausted", service="api",
+                      level="ERROR", first_seen=at - 300, last_seen=at, event_count=2, group_id="GA"),
+        TemplateState(template_id="T1", template_text="db timeout <*>", service="api",
+                      level="ERROR", first_seen=at - 86_400, last_seen=at, event_count=9, group_id="GA"),
+        # pending, recent, same service: kept, ERROR before the busier INFO
+        TemplateState(template_id="U_INFO", template_text="retry <*>", service="api",
+                      level="INFO", first_seen=at - 60, last_seen=at - 10, event_count=50,
+                      group_id="UNASSIGNED_PENDING"),
+        TemplateState(template_id="U_ERR", template_text="socket closed", service="api",
+                      level="ERROR", first_seen=at - 120, last_seen=at, event_count=3,
+                      group_id="UNASSIGNED_PENDING"),
+        # dropped: no recent events, other service
+        TemplateState(template_id="U_OLD", template_text="old", service="api",
+                      first_seen=at - 7200, last_seen=at - 3600, group_id="UNASSIGNED_PENDING"),
+        TemplateState(template_id="U_SVC", template_text="other", service="web",
+                      first_seen=at, last_seen=at, group_id="UNASSIGNED_PENDING"),
+    ]:
+        clf.templates.upsert(state)
+    clf.groups.upsert(GroupState(group_id="GA", service="api", template_ids=["T1", "T_NEW"]))
+    activity = {"T_NEW": {"count_15m": 2, "count_30m": 2}, "T1": {"count_15m": 4, "count_30m": 7},
+                "U_INFO": {"count_15m": 50, "count_30m": 50}, "U_ERR": {"count_15m": 3, "count_30m": 3}}
+    clf.process(KEY, {**ALERT, "at": at}, [], context={"activity": activity})
+    evidence = _evidence(session)
+    assert [(t["id"], t["age_at_alert_minutes"], t["count_30m"]) for t in evidence["templates"]] == [
+        ("T_NEW", 5.0, 2), ("T1", 1440.0, 7)]
+    assert "count" not in evidence["templates"][0]
+    assert evidence["group"]["count_15m"] == 6 and evidence["group"]["count_30m"] == 9
+    assert [t["id"] for t in evidence["unknown_templates"]] == ["U_ERR", "U_INFO"]
+    assert evidence["unknown_templates"][0]["age_at_alert_minutes"] == 2.0
+
+
+def test_feature_engine_describe_rate_vs_baseline():
+    from logai.config import FeatureConfig
+    from logai.features.feature_engine import FeatureEngine
+
+    engine = FeatureEngine(FeatureConfig(), origin=0.0)
+    key = ("api", "GA")
+    assert engine.describe(key, 10.0) is None and key not in engine.live_window_keys()
+    for minute in range(10):  # 6/min baseline for 10 minutes
+        for i in range(6):
+            engine.update(key, minute * 60.0 + i * 10.0)
+    for i in range(60):  # then 60 events in the last minute
+        engine.update(key, 600.0 + i)
+    rate = engine.describe(key, 660.0)
+    assert rate["rate_1m_per_min"] == 60.0 and rate["count_1m"] == 60
+    assert rate["baseline_1m_median_per_min"] == 6.0 and rate["baseline_minutes"] == 10
+    assert rate["ratio_to_baseline"] == 10.0 and "10.0x" in rate["summary"]
+    assert engine.describe(key, 900.0)["count_1m"] == 0  # read-only: nothing pruned/advanced
+    assert engine.describe(key, 660.0)["count_1m"] == 60
+
+
+def test_window_request_carries_rate_and_alert_time(tmp_path):
+    p = _pipeline(tmp_path)
+    p.incident_classifier.submit = MagicMock(return_value=True)
+    p.group_registry.upsert(GroupState(group_id="G_AUTH", service="auth"))
+    for i in range(5):
+        p.feature_engine.update(WK, 1000.0 + i)
+    p._event_clock, p._event_clock_wall = 1005.0, __import__("time").monotonic()
+    p._submit_request("window", json.dumps(list(WK)), 10.0)
+    _, alert, _ = p.incident_classifier.submit.call_args.args
+    assert alert["count_1m"] == 5 and alert["rate"]["count_1m"] == 5
+    assert alert["at"] >= 1005.0  # no scored state yet -> request time on the event clock
+
+
+# --- Incident history + output language ---------------------------------------
+
+from logai.incident.cases import add_case
+
+
+def _with_case(tmp_path, clf, texts=("db timeout <*>",)):
+    clf.cases_path = str(tmp_path / "incident_cases.json")
+    return add_case(clf.cases_path, {"service": "api", "group_ids": ["GA"], "template_texts": list(texts),
+                                     "title": "DB down", "root_cause": "primary failover"})
+
+
+def test_past_incident_matched_on_service_signature(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [
+        _reply({"documentation_id": "DOC-001", "reasoning": "same as before",
+                "similar_case_id": "CASE-0001"}),
+        _reply({"documentation_id": "DOC-001", "reasoning": "x", "similar_case_id": "CASE-0999"}),
+    ])
+    _with_case(tmp_path, clf, texts=("db timeout <*>", "pool exhausted"))
+    context = {"signature": ["pool exhausted", "db timeout <*>", "socket closed"]}
+    rec = clf.process(KEY, ALERT, [], context=context)
+    past = _evidence(session)["past_incidents"]
+    assert [(c["id"], c["overlap"]) for c in past] == [("CASE-0001", 1.0)]
+    assert (rec["similar_case_id"], rec["similar_case_title"]) == ("CASE-0001", "DB down")
+    assert "signature" not in rec  # incidents are saved from service analyses only
+    assert [(r["id"], r["overlap"]) for r in rec["recalled"]] == [("CASE-0001", 1.0)]
+    assert "root_cause" not in rec["recalled"][0]  # the page reads the current text
+    rec = clf.process(KEY, ALERT, [], context=context)  # an id never offered is dropped
+    assert rec["status"] == "done" and rec["similar_case_id"] is None
+
+
+def test_unrelated_case_not_offered(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [_reply({"documentation_id": "DOC-001", "reasoning": "x"})])
+    _with_case(tmp_path, clf, texts=("something else", "and more"))
+    clf.process(KEY, ALERT, [])
+    assert _evidence(session)["past_incidents"] == []
+
+
+def test_language_instruction_and_record(tmp_path):
+    from logai.incident.classifier import SYSTEM_PROMPT
+
+    clf, session, store, _ = _classifier(tmp_path, [
+        _reply({"documentation_id": "DOC-001", "reasoning": "x"}),
+        _reply({"documentation_id": "DOC-001", "reasoning": "x"}),
+    ])
+    assert clf.process(KEY, ALERT, [], language="vi")["language"] == "vi"
+    assert "in Vietnamese" in session.calls[0]["json"]["messages"][0]["content"]
+    clf.process(KEY, ALERT, [])
+    assert session.calls[1]["json"]["messages"][0]["content"] == SYSTEM_PROMPT
+    assert store.get(STORE_KEY)["language"] == "en"
+
+
+def test_window_request_language_reaches_submit(tmp_path):
+    from logai.incident.requests import add_request
+
+    p = _pipeline(tmp_path)
+    p.incident_classifier.submit = MagicMock(return_value=True)
+    p.group_registry.upsert(GroupState(group_id="G_AUTH", service="auth"))
+    add_request(tmp_path / "analysis_requests.json", "window", json.dumps(list(WK)), 10.0,
+                now=10.0, language="vi")
+    p._process_analysis_requests()
+    assert p.incident_classifier.submit.call_args.kwargs["language"] == "vi"
+
+
+def test_pipeline_counts_activity_and_sends_window_context(tmp_path):
+    p = _pipeline(tmp_path)
+    p.incident_classifier.submit = MagicMock(return_value=True)
+    p._assign_group = lambda parsed: GroupedEvent(parsed=parsed, group_id="G_AUTH")
+    p.group_registry.upsert(GroupState(group_id="G_AUTH", service="auth"))
+    for i in range(3):
+        p._process_one(RawLog(timestamp=1000.0 + i, service="auth", level="ERROR",
+                              event_id=f"e{i}", message="login failed for user"))
+    template_id = next(iter(p.template_activity.counts(1003.0, "auth")))
+    p.template_registry.upsert(TemplateState(template_id=template_id, template_text="login failed",
+                                             service="auth", level="ERROR", group_id="G_AUTH"))
+    p._event_clock, p._event_clock_wall = 1003.0, __import__("time").monotonic()
+    p._submit_request("window", json.dumps(list(WK)), 10.0)
+    context = p.incident_classifier.submit.call_args.kwargs["context"]
+    assert context["activity"][template_id]["count_15m"] == 3
+    # new template, no 24 h baseline yet: ERROR level stands in for "elevated"
+    assert [(e["text"], e["count_15m"], e["reasons"]) for e in context["signature"]] == [
+        ("login failed", 3, ["elevated", "new"])]

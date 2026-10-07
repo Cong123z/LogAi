@@ -198,6 +198,8 @@ class StorageConfig:
     analysis_requests_file: str = "analysis_requests.json"
     llm_profiles_file: str = "llm_profiles.json"
     template_triage_file: str = "template_triage.json"
+    incident_cases_file: str = "incident_cases.json"
+    template_activity_file: str = "template_activity.json"
 
 
 @dataclass

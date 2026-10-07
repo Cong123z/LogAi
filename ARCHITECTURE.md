@@ -586,8 +586,59 @@ LLM **không bao giờ được gọi tự động**; mọi phân tích do ngư�
   nhận record `failed`. Request web chưa được nhận sau 10 phút hiển thị `failed`.
 - **Xóa**: chỉ engine ghi file kết quả, nên xóa cũng đi qua request; job đang chạy cho
   record vừa xóa sẽ không ghi lại kết quả.
-- **Hallucination guard**: chỉ chấp nhận document id / group id nằm trong danh sách
+- **Chỉ dùng số đếm gần đây + mức bình thường của từng template**: LLM không bao giờ nhận
+  `event_count` tích lũy. `TemplateActivity` (realtime) đếm event theo `(service,
+  template)` bằng hai chuỗi: bucket 1 phút trong 30 phút (`count_15m`/`count_30m`,
+  `rate_per_min`) và bucket 1 giờ trong 24 giờ → `baseline_per_min` = median các giờ đã
+  đóng (giờ im lặng = 0, giờ trước khi engine bắt đầu = chưa biết; cần ≥ 3 giờ) và
+  `ratio` = rate hiện tại / max(baseline, 0.1/phút). Lưu vào `template_activity.json`
+  mỗi 5 phút và khi dừng, nạp lại khi khởi động. Template im lặng nhưng có trong 24h vẫn
+  được liệt kê với count 0 (dấu hiệu log "biến mất").
+- **Evidence của `window`**: `alert.rate` từ `FeatureEngine.describe()` (rate 10s/1m/5m,
+  median/spread baseline 1m, tỉ lệ so với median, kèm câu tóm tắt; đọc dưới lock, không
+  làm thay đổi window), `alert.at` (thời điểm event được chấm điểm cuối), mỗi template
+  có `age_at_alert_minutes` (template mới < 1h được xếp trước), và `unknown_templates`:
+  tối đa 10 template chưa có group của cùng service có event trong 30 phút (ERROR/WARN
+  trước). Evidence của `service` cũng có `unknown_templates`; group được xếp theo
+  (alert, có hoạt động gần đây, level, `count_30m`).
+- **Hallucination guard**: chỉ chấp nhận document id / group id / `similar_case_id` nằm trong danh sách
   candidate đã gửi.
+- **Incident history** (`incident_cases.json`, chỉ web ghi; trang riêng "Incidents" `#incidents`): một
+  incident mô tả **cả service** đang gặp sự cố gì (không chia theo group). Khác corpus
+  runbook (ít, tái sử dụng, khớp bằng embedding), mỗi incident là một sự cố **đã được người
+  xác nhận**: root cause, resolution, runbook liên kết, thời điểm, các group liên quan, và
+  **error pattern** của service. Error pattern = `service_signature()`: các template của
+  service có event trong 30 phút VÀ bất thường: `ratio` ≥ 3 (khi chưa có baseline thì WARN
+  trở lên thay thế), thuộc group không NORMAL, chưa có group, hoặc mới xuất hiện < 1h;
+  warning mãn tính ở mức thường ngày bị loại. Mỗi template trong pattern giữ số liệu
+  (rate, baseline, ratio, level, group, `reasons`), kèm `totals` của service (event và
+  event ERROR trong 15 phút); trang Incidents hiển thị thành bảng. Chỉ lưu khi người dùng bấm "Save as service incident" trên một phân tích service
+  `done`; pattern lấy từ record (`signature`), không từ client. Mỗi phân tích window và
+  service mới tính pattern hiện tại của service, `past_incidents` = các incident cùng
+  service có overlap (= tỉ lệ template của incident có mặt trong pattern hiện tại) ≥ 0.5,
+  tối đa 3 (window) / 5 (service); Việc khớp chỉ so sánh template text; mỗi incident khớp được gửi kèm `comparison` then-vs-now theo từng template (`now` null = không còn bất thường) và `only_now` (template chỉ có lần này); LLM so mức độ chủ yếu bằng `ratio`. LLM trả `similar_case_id` nếu một incident khớp. API:
+  `GET/POST /api/incident-cases` (POST `{service, title, root_cause, resolution,
+  documentation_id?}`), `DELETE /api/incident-cases/<id>`.
+- **Recall hiển thị cho người dùng**: mỗi record phân tích window/service lưu `recalled`
+  (id, title, overlap, occurred_at, `comparison`, `only_now`) = kết quả khớp của chính
+  engine, có cả khi LLM lỗi; record không chép nội dung incident. Trang AI Insights hiện
+  panel "↺ This happened before" ở đầu phân tích với root cause / resolution / runbook
+  **hiện tại** của incident (từ `incidents` trong `GET /api/insights`, nên chỉnh sửa hiện
+  ngay trên phân tích cũ), bảng then-vs-now, "New this time", và link sang trang Incidents;
+  danh sách Alerts/Services có dấu "↺ CASE-…". Phân tích service chỉ còn một
+  `similar_case_id` cấp service (không theo từng issue).
+- **Incident viết từ kinh nghiệm**: một editor dùng cho ba chế độ — lưu từ phân tích
+  service, sửa (`PUT /api/incident-cases/<id>`), và viết tay (`POST` với `manual: true`).
+  Người dùng sửa title / root cause / resolution / runbook và **curate error pattern**: bỏ
+  template traffic bình thường, thêm template của cùng service (tìm qua `/api/templates`).
+  Pattern luôn do server dựng từ dữ liệu engine đã ghi (signature của phân tích, pattern
+  hiện có, `template_registry.json`); client chỉ gửi `keep_texts` và `add_template_ids`.
+  Template thêm tay có `reasons: ["manual"]` và không có số liệu. Prompt nói incident do
+  người viết: khi khớp, ưu tiên root cause / resolution của nó.
+- **Ngôn ngữ trả lời**: chọn English / Tiếng Việt trên trang AI Insights (lưu trong
+  browser), gửi kèm mỗi request (`language` trong `analysis_requests.json`); `vi` thêm một
+  câu vào system prompt để mọi trường văn bản tự do là tiếng Việt. Record và case lưu
+  `language`. UI vẫn tiếng Anh; kết quả cũ không được dịch lại.
 - **Save as document**: `POST /api/documentation` nhận `assign_group_ids`; tài liệu mới
   thành manual documentation của các group đó (bỏ qua kèm lý do nếu grouping đang
   pending). **Move to group** cho template dùng `PUT /api/templates/<id>/group` sẵn có.

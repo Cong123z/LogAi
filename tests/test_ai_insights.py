@@ -18,8 +18,8 @@ def test_add_and_load_v2(tmp_path):
     add_request(p, "template", "T00042", 100.0, now=100.0)
     add_request(p, "service", "recharge", 101.0, action="delete", now=101.0)
     assert load_requests(p) == {
-        "template:T00042": ("analyze", 100.0),
-        "service:recharge": ("delete", 101.0),
+        "template:T00042": ("analyze", 100.0, "en"),
+        "service:recharge": ("delete", 101.0, "en"),
     }
     raw = json.loads(p.read_text())
     assert raw["schema_version"] == 2
@@ -30,13 +30,13 @@ def test_latest_action_wins_and_prune(tmp_path):
     add_request(p, "service", "old", 1.0, now=1.0)
     add_request(p, "service", "x", 90_000.0, now=90_000.0)
     add_request(p, "service", "x", 90_001.0, action="delete", now=90_001.0)
-    assert load_requests(p) == {"service:x": ("delete", 90_001.0)}
+    assert load_requests(p) == {"service:x": ("delete", 90_001.0, "en")}
 
 
 def test_v1_file_reads_as_service_analyze(tmp_path):
     p = tmp_path / "analysis_requests.json"
     p.write_text(json.dumps({"schema_version": 1, "requests": {"recharge": 5.0}}))
-    assert load_requests(p) == {"service:recharge": ("analyze", 5.0)}
+    assert load_requests(p) == {"service:recharge": ("analyze", 5.0, "en")}
 
 
 def test_corrupt_or_bad_entries(tmp_path):
@@ -49,7 +49,7 @@ def test_corrupt_or_bad_entries(tmp_path):
         "nokind": {"action": "analyze", "at": 1.0},
         "template:T1": {"action": "analyze", "at": 2.0},
     }}))
-    assert load_requests(p) == {"template:T1": ("analyze", 2.0)}
+    assert load_requests(p) == {"template:T1": ("analyze", 2.0, "en")}
 
 
 # --- template triage evidence + validation ------------------------------------

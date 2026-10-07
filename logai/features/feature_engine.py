@@ -23,6 +23,7 @@ that is normally silent keeps a near-zero baseline.
 from __future__ import annotations
 
 import math
+import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
@@ -142,6 +143,9 @@ class FeatureEngine:
         # Window key is (service, group_id). The body is key-agnostic (it only
         # stores/reads by the key), so re-keying per service is a type change.
         self._windows: Dict[Tuple[str, str], _GroupWindow] = defaultdict(self._create_window)
+        # The poll thread mutates windows; the control thread reads them via
+        # describe() for LLM evidence. Uncontended, so the hot path barely pays.
+        self._lock = threading.Lock()
 
     @property
     def origin(self) -> Optional[float]:
@@ -202,28 +206,71 @@ class FeatureEngine:
         `timestamp` and return the freshly computed feature vector for that
         (service, group) cell. The param keeps the name `group_id` because it is
         echoed straight into FeatureVector.group_id; it now carries a tuple."""
-        if self._origin is None:
-            self._origin = timestamp
-        gw = self._windows[group_id]
-        self._advance(gw, timestamp)
-        gw.bucket_10s_count += 1
-        gw.bucket_1m_count += 1
+        with self._lock:
+            if self._origin is None:
+                self._origin = timestamp
+            gw = self._windows[group_id]
+            self._advance(gw, timestamp)
+            gw.bucket_10s_count += 1
+            gw.bucket_1m_count += 1
 
-        gw.ts_10s = self._append_sorted(gw.ts_10s, timestamp)
-        gw.ts_1m = self._append_sorted(gw.ts_1m, timestamp)
-        gw.ts_5m = self._append_sorted(gw.ts_5m, timestamp)
+            gw.ts_10s = self._append_sorted(gw.ts_10s, timestamp)
+            gw.ts_1m = self._append_sorted(gw.ts_1m, timestamp)
+            gw.ts_5m = self._append_sorted(gw.ts_5m, timestamp)
 
-        self._prune(gw, timestamp)
-        return self._compute(group_id, gw, timestamp)
+            self._prune(gw, timestamp)
+            return self._compute(group_id, gw, timestamp)
 
     def snapshot(self, group_id: Tuple[str, str], timestamp: float) -> FeatureVector:
         """Compute the current feature vector without adding a new event -
         useful for periodic re-evaluation of idle (service, group) cells."""
-        gw = self._windows[group_id]
-        if self._origin is not None and timestamp >= self._origin:
-            self._advance(gw, timestamp)
-        self._prune(gw, timestamp)
-        return self._compute(group_id, gw, timestamp)
+        with self._lock:
+            gw = self._windows[group_id]
+            if self._origin is not None and timestamp >= self._origin:
+                self._advance(gw, timestamp)
+            self._prune(gw, timestamp)
+            return self._compute(group_id, gw, timestamp)
+
+    def describe(self, group_id: Tuple[str, str], now: float) -> Optional[Dict[str, object]]:
+        """Read-only rate-vs-baseline summary of one window for LLM evidence
+        (rates in events/min), or None when the window has no events. Safe to
+        call from another thread; never creates or advances a window."""
+        with self._lock:
+            gw = self._windows.get(group_id)
+            if gw is None or not gw.ts_5m:
+                return None
+            w10, w1m, w5m = self.config.windows_seconds
+            count_10s = sum(1 for ts in gw.ts_10s if now - ts <= w10)
+            count_1m = sum(1 for ts in gw.ts_1m if now - ts <= w1m)
+            count_5m = sum(1 for ts in gw.ts_5m if now - ts <= w5m)
+            baseline_minutes = len(gw.hist_1m)
+            median_1m = gw.hist_1m.median() * 60.0
+            spread_1m = gw.hist_1m.robust_std() * 60.0
+            last_event = gw.ts_5m[-1]
+        rate_1m = count_1m * 60.0 / w1m
+        ratio = rate_1m / median_1m if median_1m > 0 else None
+        if baseline_minutes < MIN_BASELINE_1M_BUCKETS:
+            summary = (f"1m rate {rate_1m:.1f}/min; baseline not established yet "
+                       f"({baseline_minutes} min of history)")
+        elif ratio is None:
+            summary = (f"1m rate {rate_1m:.1f}/min; this window is normally silent "
+                       f"(baseline median 0/min over the last {baseline_minutes} min)")
+        else:
+            summary = (f"1m rate {rate_1m:.1f}/min is {ratio:.1f}x the baseline median "
+                       f"{median_1m:.1f}/min (spread {spread_1m:.1f}/min, "
+                       f"last {baseline_minutes} min)")
+        return {
+            "summary": summary,
+            "rate_10s_per_min": round(count_10s * 60.0 / w10, 2),
+            "rate_1m_per_min": round(rate_1m, 2),
+            "rate_5m_per_min": round(count_5m * 60.0 / w5m, 2),
+            "count_1m": count_1m,
+            "baseline_1m_median_per_min": round(median_1m, 2),
+            "baseline_1m_spread_per_min": round(spread_1m, 2),
+            "baseline_minutes": baseline_minutes,
+            "ratio_to_baseline": round(ratio, 2) if ratio is not None else None,
+            "seconds_since_last_event": round(max(0.0, now - last_event), 1),
+        }
 
     def live_window_keys(self) -> Iterable[Tuple[str, str]]:
         """(service, group) keys that currently have a window (received at least
@@ -231,7 +278,8 @@ class FeatureEngine:
         tick can iterate while events append new keys. Memory-only: empty after a
         restart until traffic repopulates - the idle tick unions this with the
         persisted alert set for that reason."""
-        return list(self._windows.keys())
+        with self._lock:
+            return list(self._windows.keys())
 
     def last_event_ts(self, group_id: Tuple[str, str]) -> Optional[float]:
         """Timestamp of the most recent event recorded for a (service, group)
@@ -244,9 +292,10 @@ class FeatureEngine:
 
     def drop_group(self, group_id: str) -> int:
         """Remove every service window for a deleted semantic group."""
-        keys = [key for key in self._windows.keys() if key[1] == group_id]
-        for key in keys:
-            self._windows.pop(key, None)
+        with self._lock:
+            keys = [key for key in self._windows.keys() if key[1] == group_id]
+            for key in keys:
+                self._windows.pop(key, None)
         return len(keys)
 
     def _compute(

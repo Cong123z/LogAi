@@ -15,7 +15,14 @@ from flask import Flask, jsonify, request, send_from_directory
 
 from logai.alert.alert_state_machine import group_id_key
 from logai.incident.profiles import LLMProfileStore, ProfileError, ProfileStoreUnreadable
-from logai.incident.requests import add_request, load_requests, request_key
+from logai.incident.cases import add_case, delete_case, load_cases, update_case
+from logai.incident.requests import (
+    DEFAULT_LANGUAGE,
+    LANGUAGES,
+    add_request,
+    load_requests,
+    request_key,
+)
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.documentation import (
     DocumentInUse,
@@ -73,6 +80,7 @@ def create_app(
     service_analysis_file = Path(service_analysis_path or base / "service_analysis.json")
     template_triage_file = Path(template_triage_path or base / "template_triage.json")
     incident_analysis_file = base / "incident_analysis.json"
+    incident_cases_file = base / "incident_cases.json"
     llm_profiles = LLMProfileStore(llm_profiles_path or base / "llm_profiles.json")
     analysis_requests_file = Path(analysis_requests_path or base / "analysis_requests.json")
 
@@ -715,7 +723,7 @@ def create_app(
         records = _read_records(_record_files[kind])
         now = time.time()
         prefix = f"{kind}:"
-        for key, (action, at) in load_requests(analysis_requests_file).items():
+        for key, (action, at, language) in load_requests(analysis_requests_file).items():
             if not key.startswith(prefix):
                 continue
             target = key[len(prefix):]
@@ -731,7 +739,7 @@ def create_app(
                     "error": "The engine did not pick up this request; try again",
                 }
             else:
-                records[target] = {"status": "requested", "requested_at": at}
+                records[target] = {"status": "requested", "requested_at": at, "language": language}
         return records
 
     def _known_services() -> List[str]:
@@ -799,6 +807,13 @@ def create_app(
             "window_counts": counts,
             "services": [{"service": name, "analysis": services.get(name)} for name in _known_services()],
             "templates": templates,
+            # Current incident text for the recall panel: edits show on old analyses too.
+            "incidents": {
+                c["id"]: {key: c.get(key) for key in (
+                    "service", "title", "root_cause", "resolution", "documentation_id",
+                    "occurred_at", "updated_at")}
+                for c in load_cases(incident_cases_file) if c.get("id")
+            },
             "grouping_revision": grouping_revision,
         })
 
@@ -816,6 +831,9 @@ def create_app(
         kind, target_id = payload.get("kind"), payload.get("id")
         if kind not in {"window", "service", "template", "templates_all"}:
             return jsonify({"error": "invalid_request", "message": "unknown kind"}), 400
+        language = payload.get("language", DEFAULT_LANGUAGE)
+        if language not in LANGUAGES:
+            return jsonify({"error": "invalid_request", "message": "unknown language"}), 400
         blocked = _llm_unavailable()
         if blocked is not None:
             return blocked
@@ -829,7 +847,8 @@ def create_app(
                 current = triage.get(template["template_id"])
                 if isinstance(current, dict) and current.get("status") in {"requested", "pending"}:
                     continue
-                add_request(analysis_requests_file, "template", template["template_id"], now)
+                add_request(analysis_requests_file, "template", template["template_id"], now,
+                            language=language)
                 queued += 1
             return jsonify({"state": "requested", "queued": queued}), 202
         if not isinstance(target_id, str) or not _target_exists(kind, target_id):
@@ -839,7 +858,7 @@ def create_app(
             return jsonify({
                 "error": "analysis_pending", "message": "An analysis for this item is already running",
             }), 409
-        add_request(analysis_requests_file, kind, target_id, now)
+        add_request(analysis_requests_file, kind, target_id, now, language=language)
         return jsonify({"state": "requested", "requested_at": now}), 202
 
     @app.route("/api/insights/delete", methods=["POST"])
@@ -852,6 +871,120 @@ def create_app(
             return jsonify({"error": "not_found", "message": target_id}), 404
         add_request(analysis_requests_file, kind, target_id, time.time(), action="delete")
         return jsonify({"state": "deleting", "key": request_key(kind, target_id)}), 202
+
+    # ── Incident history (human-confirmed analyses, fed back to the LLM) ──
+
+    @app.route("/api/incident-cases", methods=["GET"])
+    def list_incident_cases():
+        return jsonify({"cases": load_cases(incident_cases_file)})
+
+    def _curated_pattern(
+        service: str, base: List[Any], keep_texts: Any, add_template_ids: Any,
+    ) -> List[Dict[str, Any]]:
+        """The incident's error pattern after a person's edits. `base` is what
+        the engine recorded (analysis signature or the incident's pattern);
+        the client only says which of those texts to keep and which template
+        ids of the same service to add. Raises ValueError for bad input."""
+        entries = [e if isinstance(e, dict) else {"text": e} for e in base
+                   if isinstance(e, (dict, str))]
+        if keep_texts is not None:
+            if not isinstance(keep_texts, list) or not all(isinstance(t, str) for t in keep_texts):
+                raise ValueError("keep_texts must be a list of template texts")
+            keep = set(keep_texts)
+            entries = [e for e in entries if e.get("text") in keep]
+        if add_template_ids:
+            if not isinstance(add_template_ids, list) or \
+                    not all(isinstance(t, str) for t in add_template_ids):
+                raise ValueError("add_template_ids must be a list of template ids")
+            registry = _load_json("template_registry.json")
+            present = {e.get("text") for e in entries}
+            for template_id in add_template_ids:
+                template = registry.get(template_id)
+                if not isinstance(template, dict) or template.get("service") != service:
+                    raise ValueError(f"Template {template_id} is not a template of {service}")
+                if template.get("template_text") in present:
+                    continue
+                present.add(template.get("template_text"))
+                entries.append({
+                    "text": template.get("template_text"), "template_id": template_id,
+                    "level": template.get("level"), "group_id": template.get("group_id"),
+                    "reasons": ["manual"],
+                })
+        return entries
+
+    def _incident_text(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {key: payload.get(key) for key in ("title", "root_cause", "resolution", "documentation_id")}
+
+    @app.route("/api/incident-cases", methods=["POST"])
+    def create_incident_case():
+        """Save an incident of a whole service, either from its finished
+        service analysis (the engine's recorded error pattern, optionally
+        trimmed or extended) or written by hand from chosen templates."""
+        payload = _json_body() or {}
+        service = payload.get("service")
+        if not isinstance(service, str) or not service:
+            return jsonify({"error": "invalid_request", "message": "service is required"}), 400
+        if payload.get("manual") is True:
+            base: List[Any] = []
+            fields: Dict[str, Any] = {"occurred_at": None, "group_ids": [], "totals": None,
+                                      "language": None, "source": {"kind": "manual"}}
+        else:
+            record = _read_records(service_analysis_file).get(service)
+            if not isinstance(record, dict) or record.get("status") != "done":
+                return jsonify({"error": "not_found",
+                                "message": "Analyze this service first; no finished analysis"}), 404
+            signature = record.get("signature") or {}
+            # Analyses made before numbers were recorded only have plain texts.
+            base = signature.get("templates") or signature.get("template_texts") or []
+            fields = {
+                "occurred_at": signature.get("occurred_at"), "totals": signature.get("totals"),
+                "group_ids": list(dict.fromkeys(
+                    g for issue in record.get("issues") or [] for g in issue.get("group_ids") or []
+                )),
+                "language": record.get("language"),
+                "source": {"kind": "service", "analyzed_at": record.get("analyzed_at")},
+            }
+        try:
+            pattern = _curated_pattern(service, base, payload.get("keep_texts"),
+                                       payload.get("add_template_ids"))
+            if not pattern:
+                raise ValueError("The error pattern is empty; keep or add at least one template "
+                                 "(re-analyze while the service is having the problem)")
+            case = add_case(incident_cases_file, {
+                "service": service, "pattern": pattern, **fields, **_incident_text(payload),
+            })
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        return jsonify(case), 201
+
+    @app.route("/api/incident-cases/<case_id>", methods=["PUT"])
+    def edit_incident_case(case_id: str):
+        """Rewrite an incident from experience: its text and which templates
+        define it (keep_texts of its pattern, add_template_ids)."""
+        payload = _json_body() or {}
+        case = next((c for c in load_cases(incident_cases_file) if c.get("id") == case_id), None)
+        if case is None:
+            return jsonify({"error": "not_found", "message": case_id}), 404
+        try:
+            pattern = _curated_pattern(
+                case["service"], case.get("pattern") or case.get("template_texts") or [],
+                payload.get("keep_texts"), payload.get("add_template_ids"),
+            )
+            if not pattern:
+                raise ValueError("The error pattern is empty; keep or add at least one template")
+            updated = update_case(incident_cases_file, case_id,
+                                  {"pattern": pattern, **_incident_text(payload)})
+        except KeyError:
+            return jsonify({"error": "not_found", "message": case_id}), 404
+        except ValueError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        return jsonify(updated)
+
+    @app.route("/api/incident-cases/<case_id>", methods=["DELETE"])
+    def delete_incident_case(case_id: str):
+        if not delete_case(incident_cases_file, case_id):
+            return jsonify({"error": "not_found", "message": case_id}), 404
+        return jsonify({"deleted": case_id})
 
     # ── LLM profiles (keys go in, only hints come out) ──
 

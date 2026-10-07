@@ -547,6 +547,16 @@
     .ins-meta { color:var(--text-dim); font-size:12px; }
     .ins-code { font-family:monospace; font-size:13px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; margin:10px 0 14px; word-break:break-word; }
     .ins-section { border-top:1px solid var(--border); padding-top:14px; margin-top:14px; }
+    .inc-recall { background:var(--blue-bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; margin-top:14px; }
+    .inc-recall h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--blue); }
+    .inc-recall-item + .inc-recall-item { border-top:1px solid var(--border); margin-top:12px; padding-top:12px; }
+    .inc-recall p { margin:6px 0; line-height:1.5; white-space:pre-line; }
+    .inc-recall details { margin-top:8px; }
+    .inc-recall summary { cursor:pointer; color:var(--text-dim); font-size:13px; }
+    .inc-pattern { list-style:none; margin:6px 0; padding:0; max-height:220px; overflow:auto; }
+    .inc-pattern li { display:flex; gap:8px; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); font-size:13px; }
+    .inc-pattern li code { flex:1; min-width:0; overflow-wrap:anywhere; }
+    .inc-pattern .btn { padding:2px 8px; font-size:12px; }
     .ins-section h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); margin:0 0 8px; }
     .ins-why { color:var(--text-dim); font-size:13px; line-height:1.5; margin:6px 0; }
     .ins-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
@@ -643,6 +653,10 @@
         <a href="#insights" data-view="insights">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>
           AI Insights
+        </a>
+        <a href="#incidents" data-view="incidents">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 2"/><path d="M3.05 11a9 9 0 1 1 .5 4"/><path d="M3 4v5h5"/></svg>
+          Incidents
         </a>
         <a href="#llm" data-view="llm">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
@@ -813,11 +827,27 @@
           <label for="ins-filter">Show</label>
           <select id="ins-filter" class="filter-select"></select>
           <button type="button" class="btn" id="ins-triage-all" hidden>Triage all unknown</button>
+          <label for="ins-language">AI language</label>
+          <select id="ins-language" class="filter-select"><option value="en">English</option><option value="vi">Tiếng Việt</option></select>
         </div>
         <p class="ins-toast" id="ins-toast" role="status" aria-live="polite"></p>
         <div class="ins-layout">
           <ul class="ins-list" id="ins-list" aria-label="Analyses"></ul>
           <section class="ins-detail" id="ins-detail" aria-live="polite"></section>
+        </div>
+      </section>
+
+      <section class="view" id="view-incidents" aria-label="Incident history">
+        <div class="ins-toolbar">
+          <p class="sync-status" style="margin:0;flex:1">Incidents of whole services, written from experience. When a service shows an incident's error pattern again, the analysis shows it as "This happened before" with its root cause and resolution, and the AI is given it too. Save one from a service analysis in AI Insights, or write one here.</p>
+          <label for="inc-service">Service</label>
+          <select id="inc-service" class="filter-select"></select>
+          <button type="button" class="btn btn-primary" id="inc-new">New incident</button>
+        </div>
+        <p class="ins-toast" id="inc-toast" role="status" aria-live="polite"></p>
+        <div class="ins-layout">
+          <ul class="ins-list" id="inc-list" aria-label="Incidents"></ul>
+          <section class="ins-detail" id="inc-detail" aria-live="polite"></section>
         </div>
       </section>
 
@@ -866,6 +896,30 @@
         <div class="form-field" id="llm-activate-field"><label><input type="checkbox" id="llm-activate" checked> Use this profile now</label></div>
         <div class="form-error" id="llm-error"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="llm-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="incident-modal" role="dialog" aria-modal="true" aria-labelledby="incident-modal-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="incident-modal-title">Incident</h2><button class="modal-close" data-close="incident-modal" aria-label="Close">&times;</button></div>
+      <form id="incident-form">
+        <p class="sync-status" id="incident-modal-help"></p>
+        <div class="form-field" id="incident-service-field"><label for="incident-service">Service</label><select id="incident-service"></select></div>
+        <div class="form-field"><label for="incident-title">Title</label><input id="incident-title" maxlength="200" required></div>
+        <div class="form-field"><label for="incident-root-cause">Root cause</label><textarea id="incident-root-cause" maxlength="4000" required></textarea></div>
+        <div class="form-field"><label for="incident-resolution">Resolution</label><textarea id="incident-resolution" maxlength="4000"></textarea></div>
+        <div class="form-field"><label for="incident-doc">Runbook document ID (optional)</label><input id="incident-doc" maxlength="100" placeholder="DOC-001"></div>
+        <div class="form-field">
+          <label id="incident-pattern-label">Error pattern</label>
+          <div class="sync-status">This incident is recalled when most of these templates are abnormal again. Remove normal traffic and keep the templates that define the problem.</div>
+          <ul class="inc-pattern" id="incident-pattern" aria-labelledby="incident-pattern-label"></ul>
+          <label for="incident-template-search" style="margin-top:8px">Add template</label>
+          <input id="incident-template-search" type="search" autocomplete="off" placeholder="Search this service's templates">
+          <ul class="inc-pattern" id="incident-template-results" aria-live="polite" aria-label="Search results"></ul>
+        </div>
+        <div class="form-error" id="incident-error" role="alert"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close="incident-modal">Cancel</button><button type="submit" class="btn btn-primary">Save incident</button></div>
       </form>
     </div>
   </div>
@@ -1974,6 +2028,12 @@
       services: [['all', 'All services'], ['analyzed', 'Analyzed']],
       templates: [['all', 'All unknown'], ['suspicious', 'Suspicious'], ['untriaged', 'Not triaged']],
     };
+    // Language of the AI's replies, remembered per browser; UI labels stay English.
+    const $insLanguage = document.getElementById('ins-language');
+    try { if (localStorage.getItem('logai.aiLanguage') === 'vi') $insLanguage.value = 'vi'; } catch (e) { /* storage unavailable */ }
+    $insLanguage.addEventListener('change', () => {
+      try { localStorage.setItem('logai.aiLanguage', $insLanguage.value); } catch (e) { /* storage unavailable */ }
+    });
     const INS_ERRORS = {engine_unavailable: 'The analysis engine is not running', analysis_pending: 'An analysis is already running'};
     const $insList = document.getElementById('ins-list');
     const $insDetail = document.getElementById('ins-detail');
@@ -2011,8 +2071,10 @@
     }
 
     function insItemHtml(item, selected) {
-      const status = insightStatus(item.kind, item.analysis);
       const r = item.raw;
+      const status = {...insightStatus(item.kind, item.analysis)};
+      const recalled = item.analysis && item.analysis.recalled;
+      if (recalled && recalled.length) status.label += ` · ↺ ${recalled[0].id}`;
       let badge = '', title = '', sub = '';
       if (item.kind === 'window') {
         badge = `<span class="badge alert-state-${escapeHtml(r.alert_state.toLowerCase())}">${escapeHtml(r.alert_state)}</span>`;
@@ -2070,8 +2132,10 @@
 
     function insMeta(a) {
       if (!a || !a.analyzed_at) return '';
-      return `<p class="ins-meta">Analyzed ${escapeHtml(formatFullTs(a.analyzed_at))}${a.model ? ' · ' + escapeHtml(a.model) : ''}</p>`;
+      return `<p class="ins-meta">Analyzed ${escapeHtml(formatFullTs(a.analyzed_at))}${a.model ? ' · ' + escapeHtml(a.model) : ''}${a.language ? ' · ' + escapeHtml(a.language.toUpperCase()) : ''}</p>`;
     }
+
+    const INS_CASE_BUTTON = '<button type="button" class="btn" data-ins-action="case">Save as service incident</button>';
 
     function insSuggestionHtml(suggestion, groupIds, index) {
       const target = groupIds.length ? ` and assign to ${groupIds.join(', ')}` : '';
@@ -2122,6 +2186,7 @@
               ${issue.documentation_id
                 ? `<span class="badge badge-blue">${escapeHtml(issue.documentation_id)}</span> ${escapeHtml(issue.document_title || '')}`
                 : insSuggestionHtml(issue.suggestion, issue.group_ids || [], index)}
+
             </li>`).join('')}</ol></div>` : '<p class="ins-empty">No issues found.</p>'}`;
       }
       const verdict = ['suspicious', 'benign', 'unsure'].includes(a.verdict) ? a.verdict : 'unsure';
@@ -2136,6 +2201,71 @@
       return `<p><span class="badge badge-${color}">${verdict[0].toUpperCase() + verdict.slice(1)}</span> <span class="ins-meta">Confidence ${Math.round((a.confidence || 0) * 100)}%</span></p>
         <p class="ins-why">${escapeHtml(a.reasoning || '')}</p>${insMeta(a)}
         <div class="ins-section"><h3>Suggested group</h3>${group}</div>`;
+    }
+
+    // "This happened before": incidents the engine recalled for this analysis,
+    // shown with their CURRENT text so edits made from experience appear here.
+    function insRecallHtml(a) {
+      const recalled = (a && a.recalled) || [];
+      if (!recalled.length) return '';
+      const incidents = (ins.data && ins.data.incidents) || {};
+      const fmt = (x, digits = 1) => x === null || x === undefined ? '—' : Number(x).toFixed(digits);
+      const side = v => v ? `${fmt(v.rate_per_min)}/min${v.ratio === null || v.ratio === undefined ? '' : ` · ${fmt(v.ratio)}×`}` : '<span class="ins-meta">not abnormal now</span>';
+      return `<div class="inc-recall" role="region" aria-label="Past incidents"><h3>↺ This happened before</h3>${recalled.map(r => {
+        const c = incidents[r.id];
+        const pct = Math.round((r.overlap || 0) * 100);
+        const used = a.similar_case_id === r.id ? ' · <span class="st-matched">used by the AI ✓</span>' : '';
+        if (!c) return `<div class="inc-recall-item"><span class="ins-meta">${escapeHtml(r.id)} · ${pct}% match · this incident was deleted</span></div>`;
+        const comparison = r.comparison || [];
+        const onlyNow = r.only_now || [];
+        return `<div class="inc-recall-item">
+          <div><strong>${escapeHtml(r.id)}</strong> ${escapeHtml(c.title || '')}</div>
+          <div class="ins-meta">${pct}% of its error pattern is back${c.occurred_at ? ` · last time ${escapeHtml(formatFullTs(c.occurred_at))}` : ''}${used}</div>
+          <p><strong>Root cause:</strong> ${escapeHtml(c.root_cause || '')}</p>
+          ${c.resolution ? `<p><strong>Resolution:</strong> ${escapeHtml(c.resolution)}</p>` : ''}
+          ${c.documentation_id ? `<div>Runbook <span class="badge badge-blue">${escapeHtml(c.documentation_id)}</span></div>` : ''}
+          ${comparison.length ? `<details><summary>Then vs now (${comparison.length} templates)</summary><div class="table-wrap"><table>
+            <thead><tr><th scope="col">Template</th><th scope="col">Then</th><th scope="col">Now</th></tr></thead>
+            <tbody>${comparison.map(row => `<tr><td class="mono">${highlightWildcards(escapeHtml(row.text))}</td><td>${side(row.then)}</td><td>${side(row.now)}</td></tr>`).join('')}</tbody>
+          </table></div></details>` : ''}
+          ${onlyNow.length ? `<details><summary>New this time (${onlyNow.length})</summary>${onlyNow.map(t => `<div class="ins-code">${highlightWildcards(escapeHtml(t))}</div>`).join('')}</details>` : ''}
+          <div class="ins-actions"><a class="btn" href="#incidents" data-open-incident="${escapeHtml(r.id)}">Open in Incidents</a></div>
+        </div>`;
+      }).join('')}</div>`;
+    }
+
+    function incidentPatternHtml(c) {
+      const pattern = c.pattern || [];
+      // Incidents saved before numbers were recorded only have the texts.
+      if (!pattern.length) {
+        return (c.template_texts || []).map(t => `<div class="ins-code">${highlightWildcards(escapeHtml(t))}</div>`).join('');
+      }
+      const num = (value, digits = 1) => value === null || value === undefined ? '—' : Number(value).toFixed(digits);
+      const totals = c.totals || {};
+      return `${totals.events_15m !== null && totals.events_15m !== undefined
+          ? `<p class="ins-meta">Service at the time: ${formatCount(totals.events_15m)} events in 15 min, ${formatCount(totals.error_events_15m || 0)} of them ERROR or worse</p>` : ''}
+        <div class="table-wrap"><table>
+          <thead><tr><th scope="col">Template</th><th scope="col">Level</th><th scope="col">Rate /min</th><th scope="col">Normal /min</th><th scope="col">× normal</th><th scope="col">Why</th></tr></thead>
+          <tbody>${pattern.map(p => `<tr>
+            <td class="mono">${highlightWildcards(escapeHtml(p.text))}</td>
+            <td><span class="badge ${levelBadgeClass(p.level || 'INFO')}">${escapeHtml(p.level || '—')}</span></td>
+            <td>${num(p.rate_per_min)}</td><td>${num(p.baseline_per_min, 2)}</td>
+            <td><strong>${p.ratio === null || p.ratio === undefined ? '—' : num(p.ratio) + '×'}</strong></td>
+            <td>${(p.reasons || []).map(r => `<span class="tmpl-id">${escapeHtml(r)}</span>`).join(' ')}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>`;
+    }
+
+    function incidentDetailHtml(c) {
+      return `<div class="ins-head"><h2>${escapeHtml(c.id)} · ${escapeHtml(c.service)}</h2>
+          <span class="ins-meta">${c.occurred_at ? `occurred ${escapeHtml(formatFullTs(c.occurred_at))}` : 'written by hand'}${c.updated_at ? ` · edited ${escapeHtml(formatFullTs(c.updated_at))}` : ''}${c.language ? ' · ' + escapeHtml(c.language.toUpperCase()) : ''}</span></div>
+        <p><strong>${escapeHtml(c.title || '')}</strong></p>
+        ${(c.group_ids || []).length ? `<div class="ins-chips">${c.group_ids.map(g => `<span class="tmpl-id">${escapeHtml(g)}</span>`).join('')}</div>` : ''}
+        <div class="ins-section"><h3>Root cause</h3><p class="ins-why" style="white-space:pre-line">${escapeHtml(c.root_cause || '')}</p></div>
+        ${c.resolution ? `<div class="ins-section"><h3>Resolution</h3><div class="ai-text" style="white-space:pre-line">${escapeHtml(c.resolution)}</div></div>` : ''}
+        ${c.documentation_id ? `<p>Runbook <span class="badge badge-blue">${escapeHtml(c.documentation_id)}</span></p>` : ''}
+        <div class="ins-section"><h3>Error pattern (${(c.template_texts || []).length} templates)</h3>${incidentPatternHtml(c)}</div>
+        <div class="ins-actions"><button type="button" class="btn btn-primary" data-inc-action="edit">Edit</button><button type="button" class="btn btn-danger" data-ins-action="delete-case">Delete incident</button></div>`;
     }
 
     function insDetailHtml(item) {
@@ -2154,9 +2284,12 @@
             <span class="ins-meta">${formatCount(r.event_count || 0)} events · last seen ${escapeHtml(formatTs(r.last_seen))}</span></div>
           <div class="ins-code">${highlightWildcards(escapeHtml(r.template_text || '—'))}</div>`;
       }
-      const openDoc = item.kind === 'window' && item.analysis && item.analysis.documentation_id
+      const done = item.analysis && item.analysis.status === 'done';
+      const openDoc = item.kind === 'window' && done && item.analysis.documentation_id
         ? '<a class="btn" href="#documentation">Open documentation</a>' : '';
-      return `${head}<div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody(item)}</div>${insActions(item, openDoc)}`;
+      const saveCase = item.kind === 'service' && done ? INS_CASE_BUTTON : '';
+      const recall = item.kind === 'template' ? '' : insRecallHtml(item.analysis);
+      return `${head}${recall}<div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody(item)}</div>${insActions(item, openDoc + saveCase)}`;
     }
 
     function insSelectedItem() {
@@ -2187,7 +2320,7 @@
     document.getElementById('ins-triage-all').addEventListener('click', async event => {
       event.currentTarget.disabled = true;
       try {
-        const result = await apiMutation('/api/insights/analyze', 'POST', {kind: 'templates_all'});
+        const result = await apiMutation('/api/insights/analyze', 'POST', {kind: 'templates_all', language: $insLanguage.value});
         insToast(result.queued ? `Queued ${result.queued} template(s) for triage.` : 'Every unknown template is already triaged or queued.');
         await insReload();
       } catch (err) { insToast(INS_ERRORS[err.payload && err.payload.error] || err.message, true); }
@@ -2203,6 +2336,23 @@
         if (entry && entry.suggestion) prefillDocumentEditor(entry.suggestion, entry.groups);
         return;
       }
+      if (action === 'case') {
+        // One incident = what the whole service is suffering now, pre-filled
+        // from the service analysis: summary + every issue's cause and fix.
+        const a = item.analysis || {};
+        const issues = a.issues || [];
+        const signature = a.signature || {};
+        openIncidentEditor({
+          mode: 'analysis', service: item.id,
+          title: (issues[0] && issues[0].title) || `${item.id} incident`,
+          root_cause: [a.summary, ...issues.map(i => i.reasoning && `- ${i.title}: ${i.reasoning}`)].filter(Boolean).join('\n'),
+          resolution: issues.map(i => i.suggestion ? `- ${i.title}: ${i.suggestion.text}`
+            : i.documentation_id ? `- ${i.title}: see ${i.documentation_id}` : '').filter(Boolean).join('\n'),
+          documentation_id: (issues.find(i => i.documentation_id) || {}).documentation_id || '',
+          rows: signature.templates || (signature.template_texts || []).map(text => ({text})),
+        });
+        return;
+      }
       if (action === 'delete') {
         ins.deleteTarget = item;
         document.getElementById('insight-delete-message').textContent = `The AI analysis of ${item.kind === 'window' ? item.raw.group_id + ' · ' + item.raw.service : item.id} will be deleted.`;
@@ -2213,7 +2363,7 @@
       button.disabled = true;
       try {
         if (action === 'analyze') {
-          await apiMutation('/api/insights/analyze', 'POST', {kind: item.kind, id: item.id});
+          await apiMutation('/api/insights/analyze', 'POST', {kind: item.kind, id: item.id, language: $insLanguage.value});
           insToast('Analysis requested. The result appears here in a few seconds.');
         } else if (action === 'move') {
           const target = button.dataset.insGroup;
@@ -2228,6 +2378,226 @@
         button.disabled = false;
       }
     });
+    // ── Incident history page ──
+    const inc = {cases: [], service: 'all', selected: null, signature: null, toastTimer: null};
+    const $incList = document.getElementById('inc-list');
+    const $incDetail = document.getElementById('inc-detail');
+    const $incService = document.getElementById('inc-service');
+
+    async function fetchIncidents() {
+      const resp = await fetch('/api/incident-cases');
+      if (!resp.ok) throw new Error('Unable to load incidents');
+      return resp.json();
+    }
+
+    function incToast(message, isError = false) {
+      const $toast = document.getElementById('inc-toast');
+      $toast.textContent = message;
+      $toast.className = 'ins-toast' + (isError ? ' ins-toast-error' : '');
+      clearTimeout(inc.toastTimer);
+      inc.toastTimer = setTimeout(() => { $toast.textContent = ''; }, isError ? 10000 : 6000);
+    }
+
+    function renderIncidents(data) {
+      if (data) inc.cases = data.cases || [];
+      const signature = JSON.stringify([inc.cases, inc.service, inc.selected]);
+      if (signature === inc.signature) return;  // keep focus between polls
+      inc.signature = signature;
+      const services = [...new Set(inc.cases.map(c => c.service))].sort();
+      if (inc.service !== 'all' && !services.includes(inc.service)) inc.service = 'all';
+      $incService.innerHTML = [['all', 'All services'], ...services.map(svc => [svc, svc])].map(([value, label]) =>
+        `<option value="${escapeHtml(value)}"${value === inc.service ? ' selected' : ''}>${escapeHtml(label)}</option>`).join('');
+      const items = inc.cases.filter(c => inc.service === 'all' || c.service === inc.service);
+      if (!items.some(c => c.id === inc.selected)) inc.selected = items.length ? items[0].id : null;
+      $incList.innerHTML = items.length
+        ? items.map(c => `<li><button type="button" class="ins-item" data-inc-id="${escapeHtml(c.id)}"${c.id === inc.selected ? ' aria-current="true"' : ''}>
+            <span class="ins-item-top"><span class="ins-item-title">${escapeHtml(c.id)} · ${escapeHtml(c.service)}</span></span>
+            <span class="ins-item-sub">${escapeHtml(c.title || '')}</span>
+            <span class="ins-item-status st-none">${escapeHtml(formatTs(c.occurred_at || c.created_at))}</span>
+          </button></li>`).join('')
+        : '<li class="ins-empty" style="padding:16px">No incidents saved yet. Analyze a service in AI Insights, then use "Save as service incident".</li>';
+      const selected = items.find(c => c.id === inc.selected);
+      $incDetail.innerHTML = selected ? incidentDetailHtml(selected) : '<p class="ins-empty">Select an incident.</p>';
+    }
+
+    $incService.addEventListener('change', () => { inc.service = $incService.value; renderIncidents(); });
+    $incList.addEventListener('click', event => {
+      const button = event.target.closest('[data-inc-id]');
+      if (!button) return;
+      inc.selected = button.dataset.incId;
+      renderIncidents();
+      const again = $incList.querySelector(`[data-inc-id="${CSS.escape(inc.selected)}"]`);
+      if (again) again.focus();
+    });
+    $incDetail.addEventListener('click', async event => {
+      if (event.target.closest('[data-inc-action="edit"]')) {
+        const c = inc.cases.find(x => x.id === inc.selected);
+        if (c) openIncidentEditor({
+          mode: 'edit', caseId: c.id, service: c.service, title: c.title, root_cause: c.root_cause,
+          resolution: c.resolution, documentation_id: c.documentation_id || '',
+          rows: (c.pattern && c.pattern.length ? c.pattern : (c.template_texts || []).map(text => ({text}))),
+        });
+        return;
+      }
+      if (!event.target.closest('[data-ins-action="delete-case"]') || !inc.selected) return;
+      const caseId = inc.selected;
+      if (!window.confirm(`Delete incident ${caseId}? The AI will no longer see it.`)) return;
+      try {
+        await apiMutation(`/api/incident-cases/${encodeURIComponent(caseId)}`, 'DELETE', {});
+        incToast(`${caseId} deleted.`);
+        inc.signature = null;
+        renderIncidents(await fetchIncidents());
+      } catch (err) { incToast(err.message, true); }
+    });
+
+    // ── Incident editor: save from analysis, edit, or write by hand ──
+    const incEditor = {mode: null, caseId: null, service: null, rows: [], searchTimer: null, searchSeq: 0};
+    const $incForm = document.getElementById('incident-form');
+    const $incPattern = document.getElementById('incident-pattern');
+    const $incResults = document.getElementById('incident-template-results');
+    const $incSearch = document.getElementById('incident-template-search');
+    const $incServiceSelect = document.getElementById('incident-service');
+    const INC_HELP = {
+      analysis: 'Saves what the whole service is suffering now. The error pattern below is what the engine measured during this analysis.',
+      edit: 'Rewrite this incident from experience. The next time its pattern comes back, people and the AI see your root cause and resolution.',
+      new: 'Write an incident from experience: pick the service and the templates that show this problem.',
+    };
+
+    async function openIncidentEditor(opts) {
+      Object.assign(incEditor, {
+        mode: opts.mode, caseId: opts.caseId || null, service: opts.service || null,
+        rows: (opts.rows || []).filter(r => r && r.text).map(r => ({...r, added: false})),
+      });
+      document.getElementById('incident-modal-title').textContent =
+        {analysis: 'Save as service incident', edit: `Edit ${opts.caseId}`, new: 'New incident'}[opts.mode];
+      document.getElementById('incident-modal-help').textContent = INC_HELP[opts.mode];
+      document.getElementById('incident-title').value = opts.title || '';
+      document.getElementById('incident-root-cause').value = opts.root_cause || '';
+      document.getElementById('incident-resolution').value = opts.resolution || '';
+      document.getElementById('incident-doc').value = opts.documentation_id || '';
+      document.getElementById('incident-error').textContent = '';
+      $incSearch.value = '';
+      $incResults.innerHTML = '';
+      document.getElementById('incident-service-field').hidden = opts.mode !== 'new';
+      if (opts.mode === 'new') {
+        $incServiceSelect.innerHTML = '<option value="">Loading services…</option>';
+        try {
+          const resp = await fetch('/api/templates?per_page=1');
+          const services = ((await resp.json()).stats || {}).services || [];
+          $incServiceSelect.innerHTML = services.map(svc => `<option value="${escapeHtml(svc)}">${escapeHtml(svc)}</option>`).join('');
+          incEditor.service = services.includes(inc.service) ? inc.service : (services[0] || null);
+          if (incEditor.service) $incServiceSelect.value = incEditor.service;
+        } catch (err) { $incServiceSelect.innerHTML = ''; }
+      }
+      renderIncidentPattern();
+      document.getElementById('incident-modal').classList.add('open');
+      document.getElementById(opts.mode === 'new' ? 'incident-service' : 'incident-title').focus();
+    }
+
+    function renderIncidentPattern() {
+      const fmt = x => x === null || x === undefined ? '' : ` · ${Number(x).toFixed(1)}× normal`;
+      $incPattern.innerHTML = incEditor.rows.length
+        ? incEditor.rows.map((row, index) => `<li><code>${highlightWildcards(escapeHtml(row.text))}</code>
+            <span class="ins-meta">${escapeHtml(row.level || '')}${fmt(row.ratio)}${row.added ? ' · added' : ''}</span>
+            <button type="button" class="btn" data-pattern-remove="${index}" aria-label="Remove ${escapeHtml(row.text)}">Remove</button></li>`).join('')
+        : '<li class="ins-empty">No templates yet. Search below and add the templates that show this problem.</li>';
+    }
+
+    $incPattern.addEventListener('click', event => {
+      const button = event.target.closest('[data-pattern-remove]');
+      if (!button) return;
+      incEditor.rows.splice(Number(button.dataset.patternRemove), 1);
+      renderIncidentPattern();
+    });
+    $incServiceSelect.addEventListener('change', () => {
+      incEditor.service = $incServiceSelect.value;
+      incEditor.rows = [];
+      $incResults.innerHTML = '';
+      renderIncidentPattern();
+    });
+    $incSearch.addEventListener('input', () => {
+      clearTimeout(incEditor.searchTimer);
+      incEditor.searchTimer = setTimeout(searchIncidentTemplates, 250);
+    });
+
+    async function searchIncidentTemplates() {
+      const query = $incSearch.value.trim();
+      const seq = ++incEditor.searchSeq;  // ignore answers to older keystrokes
+      if (!query || !incEditor.service) { $incResults.innerHTML = ''; return; }
+      try {
+        const resp = await fetch(`/api/templates?service=${encodeURIComponent(incEditor.service)}&search=${encodeURIComponent(query)}&per_page=20`);
+        const items = ((await resp.json()).items || []).filter(t => t.service === incEditor.service);
+        if (seq !== incEditor.searchSeq) return;
+        const present = new Set(incEditor.rows.map(row => row.text));
+        incEditor.results = items.filter(t => !present.has(t.template_text));
+        $incResults.innerHTML = incEditor.results.length
+          ? incEditor.results.map((t, index) => `<li><code>${highlightWildcards(escapeHtml(t.template_text))}</code>
+              <span class="ins-meta">${escapeHtml(t.template_id)} · ${escapeHtml(t.level || '')}</span>
+              <button type="button" class="btn" data-pattern-add="${index}">Add</button></li>`).join('')
+          : '<li class="ins-empty">No other matching templates.</li>';
+      } catch (err) {
+        if (seq === incEditor.searchSeq) $incResults.innerHTML = '<li class="ins-empty">Unable to search templates.</li>';
+      }
+    }
+
+    $incResults.addEventListener('click', event => {
+      const button = event.target.closest('[data-pattern-add]');
+      if (!button) return;
+      const t = (incEditor.results || [])[Number(button.dataset.patternAdd)];
+      if (!t) return;
+      incEditor.rows.push({text: t.template_text, level: t.level, template_id: t.template_id, added: true});
+      incEditor.results = incEditor.results.filter(other => other !== t);
+      button.closest('li').remove();
+      renderIncidentPattern();
+    });
+
+    $incForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      const submit = event.submitter;
+      if (submit) submit.disabled = true;
+      const payload = {
+        title: document.getElementById('incident-title').value,
+        root_cause: document.getElementById('incident-root-cause').value,
+        resolution: document.getElementById('incident-resolution').value,
+        documentation_id: document.getElementById('incident-doc').value,
+        add_template_ids: incEditor.rows.filter(row => row.added).map(row => row.template_id),
+      };
+      try {
+        let saved;
+        if (incEditor.mode === 'edit') {
+          payload.keep_texts = incEditor.rows.filter(row => !row.added).map(row => row.text);
+          saved = await apiMutation(`/api/incident-cases/${encodeURIComponent(incEditor.caseId)}`, 'PUT', payload);
+        } else if (incEditor.mode === 'new') {
+          saved = await apiMutation('/api/incident-cases', 'POST', {...payload, service: incEditor.service, manual: true});
+        } else {
+          payload.keep_texts = incEditor.rows.filter(row => !row.added).map(row => row.text);
+          saved = await apiMutation('/api/incident-cases', 'POST', {...payload, service: incEditor.service});
+        }
+        document.getElementById('incident-modal').classList.remove('open');
+        if (incEditor.mode === 'analysis') {
+          insToast(`Saved as ${saved.id} in Incidents. It is recalled when this pattern appears again.`);
+          await insReload();
+        } else {
+          incToast(`${saved.id} saved.`);
+          inc.selected = saved.id;
+          inc.signature = null;
+          renderIncidents(await fetchIncidents());
+        }
+      } catch (err) {
+        document.getElementById('incident-error').textContent = err.message;
+      } finally { if (submit) submit.disabled = false; }
+    });
+
+    document.getElementById('inc-new').addEventListener('click', () => openIncidentEditor({mode: 'new'}));
+    // "Open in Incidents" from a recall panel selects that incident on the page.
+    $insDetail.addEventListener('click', event => {
+      const link = event.target.closest('[data-open-incident]');
+      if (!link) return;
+      inc.selected = link.dataset.openIncident;
+      inc.service = 'all';
+      inc.signature = null;
+    });
+
     document.getElementById('insight-delete-confirm').addEventListener('click', async event => {
       const item = ins.deleteTarget;
       if (!item) return;
@@ -2381,6 +2751,7 @@
       alerting: 'Alerting',
       documentation: 'Documentation',
       insights: 'AI Insights',
+      incidents: 'Incident history',
       llm: 'LLM profiles',
     };
     const viewOrder = Object.keys(viewTitles);
@@ -2417,7 +2788,7 @@
       }
       loadData();
       if (view === 'alerting') state.alertRefreshTimer = setInterval(loadData, 2000);
-      if (view === 'llm' || view === 'insights') state.alertRefreshTimer = setInterval(loadData, 3000);
+      if (view === 'llm' || view === 'insights' || view === 'incidents') state.alertRefreshTimer = setInterval(loadData, 3000);
     }
 
     document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => {
@@ -2480,6 +2851,8 @@
           renderLlmBanner(alerts.llm);
         } else if (state.activeView === 'insights') {
           renderInsights(await fetchInsights());
+        } else if (state.activeView === 'incidents') {
+          renderIncidents(await fetchIncidents());
         } else if (state.activeView === 'llm') {
           renderLlmProfiles(await fetchLlmProfiles());
         } else {

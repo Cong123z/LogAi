@@ -4,10 +4,11 @@ pipeline builds the evidence and the classifier worker validates the reply.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
+from logai.features.template_activity import recent
 from logai.incident.classifier import TEXT_LIMIT
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
@@ -27,10 +28,13 @@ TEMPLATE_SYSTEM_PROMPT = (
 
 
 def build_template_evidence(
-    template_id: str, templates: TemplateRegistry, groups: GroupRegistry
+    template_id: str, templates: TemplateRegistry, groups: GroupRegistry,
+    activity: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """Evidence for one template plus candidate group_id -> representative
-    template (the only groups the LLM may suggest)."""
+    template (the only groups the LLM may suggest). `activity` holds recent
+    per-template counts over all services; all-time counts are never sent."""
+    activity = activity or {}
     state = templates.get(template_id)
     if state is None:
         raise LookupError(f"Unknown template {template_id!r}")
@@ -53,13 +57,13 @@ def build_template_evidence(
             "group_id": group_id,
             "representative_template": group.representative_template,
             "service": group.service,
-            "event_count": group.event_count,
+            "count_30m": sum(recent(activity, t)["count_30m"] for t in group.template_ids),
             "similarity": round(similarity, 4),
         })
     evidence = {
         "template": {
             "id": state.template_id, "text": state.template_text, "service": state.service,
-            "level": state.level, "count": state.event_count,
+            "level": state.level, **recent(activity, state.template_id),
             "first_seen": state.first_seen, "last_seen": state.last_seen,
         },
         "candidate_groups": candidate_groups,
