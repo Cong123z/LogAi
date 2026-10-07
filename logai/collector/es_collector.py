@@ -159,7 +159,7 @@ def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
         message=message,
         metadata={k: v for k, v in src.items() if k not in _NOISE_KEYS},
         event_id=hit_id,
-        es_index=index,
+        es_index=str(hit.get("_index") or index),
         es_doc_id=hit_id,
     )
 
@@ -211,6 +211,12 @@ def _parse_timestamp(value: Any) -> float:
     return time.time()
 
 
+def _range_from(start_ts: float) -> Dict[str, Any]:
+    from datetime import datetime, timezone
+    gte_iso = datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat()
+    return {"range": {"@timestamp": {"gte": gte_iso}}}
+
+
 class ElasticsearchCollector:
     _malformed_counter: Optional[Any] = None
     _on_retry_hook: Optional[Callable[[int, BaseException], None]] = None
@@ -223,7 +229,7 @@ class ElasticsearchCollector:
         self._malformed_counter = None
         self._on_retry_hook = None
 
-    def _search(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    def _search(self, body: Dict[str, Any], index: Optional[str] = None) -> Dict[str, Any]:
         """Search with exponential backoff, classifying ES errors.
 
         Non-retryable client errors (400/401/403/404) fail fast instead of
@@ -234,7 +240,10 @@ class ElasticsearchCollector:
         attempt = 0
         while True:
             try:
-                return self.client.search(index=self.config.index, body=body)
+                if index is None:
+                    return self.client.search(index=self.config.index, body=body)
+                # A deleted index must not fail the poll of every other one.
+                return self.client.search(index=index, body=body, ignore_unavailable=True)
             except _ES_NON_RETRYABLE:
                 raise  # fail-fast: no point retrying a 400/401/403/404
             except Exception as exc:  # noqa: BLE001
@@ -254,12 +263,18 @@ class ElasticsearchCollector:
                     self._on_retry_hook(attempt, exc)
                 time.sleep(delay)
 
-    def poll_batch(self) -> Tuple[List[RawLog], Optional[List[Any]]]:
+    def poll_batch(
+        self, index: Optional[str] = None
+    ) -> Tuple[List[RawLog], Optional[List[Any]]]:
         """Fetch a batch and return its cursor without advancing checkpoint.
 
-        The realtime orchestrator commits the cursor only after processing the
-        complete batch and flushing durable state.
+        With `index`, that concrete index is read from its own cursor (or from
+        its floor while it has none); without, the configured index uses the
+        legacy single cursor. The realtime orchestrator commits the cursor only
+        after processing the complete batch and flushing durable state.
         """
+        if index is not None:
+            return self._poll_index(index)
         search_after = self.checkpoint.get_search_after()
         if search_after and len(search_after) >= 2 and isinstance(search_after[1], str):
             # Migration safety: old checkpoint used string _id, which fails with _doc sort.
@@ -283,17 +298,37 @@ class ElasticsearchCollector:
             if start_ts is None:
                 start_ts = time.time()
                 self.checkpoint.set_start_ts(start_ts)
-            from datetime import datetime, timezone
-            gte_iso = datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat()
-            body["query"] = {"range": {"@timestamp": {"gte": gte_iso}}}
+            body["query"] = _range_from(start_ts)
 
-        response = self._search(body)
+        return self._fetch(body, None, self.config.index)
+
+    def _poll_index(self, index: str) -> Tuple[List[RawLog], Optional[List[Any]]]:
+        cursor = self.checkpoint.get_index_cursor(index) or {}
+        body: Dict[str, Any] = {
+            "size": self.config.batch_size,
+            "sort": [{"@timestamp": "asc"}, {"_doc": "asc"}],
+        }
+        if cursor.get("search_after"):
+            body["query"] = {"match_all": {}}
+            body["search_after"] = cursor["search_after"]
+        else:
+            floor_ts = cursor.get("floor_ts")
+            if floor_ts is None:
+                floor_ts = time.time()
+                self.checkpoint.set_index_floors({index: floor_ts})
+            body["query"] = _range_from(floor_ts)
+        return self._fetch(body, index, index)
+
+    def _fetch(
+        self, body: Dict[str, Any], index: Optional[str], label: str
+    ) -> Tuple[List[RawLog], Optional[List[Any]]]:
+        response = self._search(body, index)
         hits = response.get("hits", {}).get("hits", [])
         if not hits:
             return [], None
 
         counter = getattr(self, "_malformed_counter", None)
-        raw_logs = _safe_hits_to_rawlogs(hits, self.config.index, counter)
+        raw_logs = _safe_hits_to_rawlogs(hits, label, counter)
 
         # Cursor must be extracted from the last hit regardless of whether
         # that hit parsed successfully — otherwise the batch would be
@@ -307,6 +342,38 @@ class ElasticsearchCollector:
             )
 
         return raw_logs, last_sort
+
+    def resolve(self, patterns: List[str]) -> Dict[str, List[str]]:
+        """pattern -> sorted concrete open indices (data-stream backing indices
+        included, hidden ones not). A pattern matching nothing maps to [].
+        One attempt, no backoff: the caller retries on its own timer."""
+        result: Dict[str, List[str]] = {}
+        for pattern in patterns:
+            found = self.client.indices.get(
+                index=pattern, expand_wildcards="open", ignore_unavailable=True,
+                allow_no_indices=True,
+            )
+            result[pattern] = sorted(dict(found))
+        return result
+
+    def list_indices(self) -> List[Dict[str, Any]]:
+        """Open, non-hidden indices for the web picker (one attempt)."""
+        response = self.client.cat.indices(format="json", h="index,docs.count,health,status")
+        # elasticsearch-py 8 wraps the list in a ListApiResponse (not a list).
+        rows = getattr(response, "body", response)
+        indices = []
+        for row in rows if isinstance(rows, list) else []:
+            name = str(row.get("index") or "")
+            if not name or name.startswith("."):
+                continue
+            count = row.get("docs.count")
+            indices.append({
+                "index": name,
+                "docs_count": int(count) if str(count or "").isdigit() else None,
+                "health": row.get("health"),
+                "status": row.get("status"),
+            })
+        return sorted(indices, key=lambda item: item["index"])
 
     def run_forever(self) -> Iterator[Tuple[List[RawLog], Optional[List[Any]]]]:
         """Generator that polls indefinitely, sleeping `poll_interval_seconds`

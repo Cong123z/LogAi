@@ -39,6 +39,7 @@ from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import LocalTrainingDedup
 from logai.storage.documentation import DocumentationCorpusStore
 from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
+from logai.storage.index_selection import IndexSelectionStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 from logai.storage.training_event_index import TrainingEventIndex
 
@@ -671,6 +672,14 @@ def run_training_from_elasticsearch(
     lookback = config.training.lookback_seconds if lookback_seconds is None else lookback_seconds
     total_docs = config.training.max_docs if max_docs is None else max_docs
     chunk_size = config.training.batch_size if batch_size is None else batch_size
+
+    # Train on what the realtime engine reads: the web's index selection when
+    # one was saved, else the configured index.
+    selection = IndexSelectionStore(
+        f"{config.storage.base_dir}/{config.storage.es_index_selection_file}"
+    ).load()
+    if selection and selection["entries"]:
+        config.elasticsearch.index = ",".join(e["pattern"] for e in selection["entries"])
 
     checkpoint_file = getattr(
         config.storage, "training_checkpoint_file", "training_checkpoint.json"

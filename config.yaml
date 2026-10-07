@@ -14,6 +14,9 @@ elasticsearch:
   poll_interval_seconds: 1
   batch_size: 2000
   request_timeout_seconds: 30
+  # Indices are chosen on the web "Data sources" page; `index` only seeds the
+  # selection until the first save there.
+  index_refresh_seconds: 30
 
 drain3:
   persistence_path: "data/drain3_state.bin"
@@ -114,6 +117,8 @@ storage:
   analysis_requests_file: "analysis_requests.json"
   llm_profiles_file: "llm_profiles.json"
   template_triage_file: "template_triage.json"
+  es_index_selection_file: "es_index_selection.json"
+  es_index_status_file: "es_index_status.json"
 
 # LLM incident classification on ALERTING. Disabled while endpoint is empty;
 # set LOGAI_LLM_ENDPOINT (OpenAI-compatible /chat/completions URL).

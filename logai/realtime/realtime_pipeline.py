@@ -58,6 +58,12 @@ from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import DedupIndex
 from logai.storage.documentation import DocumentationCorpusStore
 from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
+from logai.storage.index_selection import (
+    IndexSelectionStore,
+    entries_from_config,
+    selection_revision,
+    write_status,
+)
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
 logger = logging.getLogger("logai.realtime")
@@ -197,8 +203,9 @@ class RealtimePipeline:
         # separately from the buffer so mixing idle snapshots (which advance no
         # cursor) never corrupts the checkpoint.
         self._pending_predictions: list[Tuple[str, FeatureVector]] = []
-        self._pending_cursor: Optional[Any] = None
-        self._pending_last_ts: Optional[float] = None
+        # index -> (cursor, last event timestamp) of batches processed since the
+        # last flush; the key None is the legacy single configured-index cursor.
+        self._pending_cursors: dict[Optional[str], Tuple[Any, float]] = {}
         self._buffer_started_at: Optional[float] = None
         self._grouping_initialized = False
         self._grouping_retry_needed = False
@@ -209,6 +216,31 @@ class RealtimePipeline:
         self._last_successful_poll_at: Optional[float] = None
         self._last_processed_event_at: Optional[float] = None
         self._last_checkpoint_commit_at: Optional[float] = None
+
+        # Indices chosen on the web "Data sources" page. Until the web saves a
+        # selection the engine reads config.elasticsearch.index with the legacy
+        # single cursor (_active_indices None); afterwards every concrete index
+        # has its own cursor (see _refresh_index_selection).
+        storage = config.storage
+        self.index_selection = IndexSelectionStore(
+            f"{storage.base_dir}/{storage.es_index_selection_file}"
+        )
+        self._index_status_path = f"{storage.base_dir}/{storage.es_index_status_file}"
+        self._active_indices: Optional[list[str]] = None
+        self._selection_entries: list[dict] = entries_from_config(
+            config.elasticsearch.index, self.checkpoint.get_start_ts() or time.time()
+        )
+        self._resolved: dict[str, list[str]] = {}
+        self._applied_selection_revision: Optional[str] = None
+        self._selection_mtime: Optional[int] = None
+        self._last_resolve_at = float("-inf")
+        self._resolve_error: Optional[str] = None
+        self._index_progress: dict[str, dict] = {}
+        self._index_lock = threading.Lock()
+        self._available_indices: Optional[list] = None
+        self._available_error: Optional[str] = None
+        self._last_index_list_at = float("-inf")
+        self._last_index_status: Optional[dict] = None
 
     def start_metrics_server(self) -> None:
         self.metrics.start()
@@ -246,19 +278,11 @@ class RealtimePipeline:
 
         while True:
             self._refresh_grouping_if_needed()
-            # ── Phase 1: Poll ES ──────────────────────────────────────────
-            try:
-                batch, cursor = self.collector.poll_batch()
-                self._record_es_ok()
-                consecutive_poll_failures = 0
-                self._last_successful_poll_at = time.time()
-                self.metrics.logai_engine_heartbeat_timestamp_seconds.set(
-                    self._last_successful_poll_at
-                )
-                self.metrics.logai_last_successful_poll_timestamp_seconds.set(
-                    self._last_successful_poll_at
-                )
-            except Exception as exc:  # noqa: BLE001
+            self._refresh_index_selection()
+            # ── Phase 1: Poll ES (one batch per selected index) ───────────
+            polled, failures = self._poll_indices()
+            if failures and len(failures) == len(polled) + len(failures):
+                exc = failures[-1]
                 self._record_es_error(exc)
                 consecutive_poll_failures += 1
                 backoff = min(
@@ -276,6 +300,18 @@ class RealtimePipeline:
                 ).inc()
                 time.sleep(backoff)
                 continue
+            if failures:
+                # Some indices failed: count it, keep reading the others.
+                self.metrics.logai_es_poll_errors_total.inc(len(failures))
+            self._record_es_ok()
+            consecutive_poll_failures = 0
+            self._last_successful_poll_at = time.time()
+            self.metrics.logai_engine_heartbeat_timestamp_seconds.set(
+                self._last_successful_poll_at
+            )
+            self.metrics.logai_last_successful_poll_timestamp_seconds.set(
+                self._last_successful_poll_at
+            )
 
             # A command accepted while the ES request was in flight applies to
             # the fetched batch as a whole, before its first event is processed.
@@ -284,20 +320,23 @@ class RealtimePipeline:
             # ── Phase 2: Accumulate batch into the predict buffer ─────────
             # Only parse/group/feature-extract/append here; scoring happens at
             # the flush boundary so 500 events become one vectorized inference.
-            if batch:
-                self.metrics.logai_queue_depth.set(len(batch))
-                self.metrics.logai_events_received_total.inc(len(batch))
+            batch = [raw for _, b, _ in polled for raw in b]
+            for index, index_batch, cursor in polled:
+                if not index_batch:
+                    continue
+                self.metrics.logai_queue_depth.set(len(index_batch))
+                self.metrics.logai_events_received_total.inc(len(index_batch))
                 try:
-                    for raw in batch:
+                    for raw in index_batch:
                         if not self._process_one(raw):
                             raise RuntimeError(
                                 f"Event {raw.event_id} did not reach a terminal state"
                             )
                     # Cursor advances only after a successful flush (Phase 5),
                     # never here - a crash before commit replays idempotently.
-                    self._pending_cursor = cursor
-                    self._pending_last_ts = batch[-1].timestamp
-                    self._event_clock = max(self._event_clock, batch[-1].timestamp)
+                    if cursor is not None:
+                        self._pending_cursors[index] = (cursor, index_batch[-1].timestamp)
+                    self._event_clock = max(self._event_clock, index_batch[-1].timestamp)
                     self._event_clock_wall = time.monotonic()
                 finally:
                     self.metrics.logai_queue_depth.set(0)
@@ -323,7 +362,7 @@ class RealtimePipeline:
                     n >= self.config.anomaly.predict_batch_size
                     or waited >= self.config.anomaly.predict_max_wait_seconds
                 ))
-                or (bool(batch) and self._pending_cursor is not None)
+                or (bool(batch) and bool(self._pending_cursors))
             )
             if should_flush:
                 self._flush_batch()
@@ -349,8 +388,8 @@ class RealtimePipeline:
         """Score the accumulated buffer, then run the durability sequence.
 
         Ordering (unchanged crash-safety contract): predict+apply -> registry
-        flush -> dedup gc -> checkpoint.commit. The cursor advances only when a
-        real stream batch contributed to this flush (`_pending_cursor` set); an
+        flush -> dedup gc -> checkpoint.commit. A cursor advances only when a
+        real stream batch contributed to this flush (`_pending_cursors`); an
         idle-only flush (empty stream) scores snapshots but commits nothing.
         """
         try:
@@ -385,9 +424,14 @@ class RealtimePipeline:
             ).inc()
             raise
 
-        if self._pending_cursor is not None:
+        if self._pending_cursors:
+            cursors = dict(self._pending_cursors)
+            legacy = cursors.pop(None, None)
             try:
-                self.checkpoint.commit(self._pending_cursor, self._pending_last_ts)
+                if legacy is not None:
+                    self.checkpoint.commit(*legacy)
+                if cursors:
+                    self.checkpoint.commit_indices(cursors)
             except Exception:
                 self.metrics.logai_pipeline_errors_total.labels(
                     stage="checkpoint", reason_code="checkpoint_write_failed"
@@ -398,8 +442,7 @@ class RealtimePipeline:
                 self._last_checkpoint_commit_at
             )
 
-        self._pending_cursor = None
-        self._pending_last_ts = None
+        self._pending_cursors = {}
         self._buffer_started_at = None
 
     def _flush_predictions(self) -> None:
@@ -646,6 +689,152 @@ class RealtimePipeline:
         count = self.template_registry.count_by_service(svc)
         self.metrics.set_template_count(svc, count)
 
+    # --- Elasticsearch index selection -----------------------------------------
+
+    def _poll_indices(self) -> Tuple[list, list]:
+        """One batch per selected concrete index: ([(index, batch, cursor)],
+        [exceptions]). Legacy mode polls the configured index once (index None).
+        An index that fails is recorded and skipped; the others still run."""
+        active = getattr(self, "_active_indices", None)
+        polled, failures = [], []
+        for index in ([None] if active is None else active):
+            try:
+                if index is None:
+                    batch, cursor = self.collector.poll_batch()
+                else:
+                    batch, cursor = self.collector.poll_batch(index)
+            except Exception as exc:  # noqa: BLE001
+                failures.append(exc)
+                if index is not None:
+                    self._note_index_poll(index, [], str(exc)[:300])
+                continue
+            polled.append((index, batch, cursor))
+            if index is not None:
+                self._note_index_poll(index, batch, None)
+        return polled, failures
+
+    def _note_index_poll(self, index: str, batch: list, error: Optional[str]) -> None:
+        with self._index_lock:
+            progress = self._index_progress.setdefault(
+                index, {"last_poll_at": None, "last_event_ts": None, "events_total": 0}
+            )
+            progress["last_poll_at"] = time.time()
+            progress["error"] = error
+            if batch:
+                progress["events_total"] += len(batch)
+                progress["last_event_ts"] = max(
+                    progress["last_event_ts"] or 0.0, batch[-1].timestamp
+                )
+
+    def _refresh_index_selection(self) -> bool:
+        """Apply the web's index selection: on a change (or every
+        index_refresh_seconds) resolve patterns to concrete indices, start new
+        ones at their floor and forget removed ones. True when applied."""
+        store = getattr(self, "index_selection", None)
+        if store is None:
+            return False
+        mtime = store.mtime_ns()
+        changed = mtime != self._selection_mtime
+        due = (
+            time.monotonic() - self._last_resolve_at
+            >= self.config.elasticsearch.index_refresh_seconds
+        )
+        if not changed and not (due and self._active_indices is not None):
+            return False
+        self._selection_mtime = mtime
+        self._last_resolve_at = time.monotonic()
+        selection = store.load()
+        if selection is None:
+            return False  # never saved on the web: keep the configured index
+
+        entries = selection["entries"]
+        patterns = [entry["pattern"] for entry in entries]
+        try:
+            resolved = self.collector.resolve(patterns)
+            self._resolve_error = None
+        except Exception as exc:  # noqa: BLE001 - keep reading what is known
+            logger.warning("Unable to resolve Elasticsearch indices: %s", exc)
+            self._resolve_error = str(exc)[:300]
+            resolved = {
+                pattern: self._resolved.get(pattern, [] if "*" in pattern else [pattern])
+                for pattern in patterns
+            }
+        active = sorted({index for indices in resolved.values() for index in indices})
+
+        known = set(self.checkpoint.index_names())
+        legacy_floor = self.checkpoint.legacy_floor()
+        floors: dict[str, float] = {}
+        for entry in entries:
+            for index in resolved.get(entry["pattern"], []):
+                if index in known:
+                    continue
+                # From now: an index first seen under an entry starts at the
+                # entry's added_at. Switching from the legacy cursor starts no
+                # later than where it stopped, so nothing in between is lost.
+                floor_ts = entry["added_at"]
+                if legacy_floor is not None:
+                    floor_ts = min(floor_ts, legacy_floor)
+                floors[index] = min(floors.get(index, floor_ts), floor_ts)
+        dropped = known - set(active)
+
+        if active != self._active_indices or floors or dropped:
+            # Buffered work and cursors belong to the previous selection.
+            if self._pending_predictions or self._pending_cursors:
+                self._flush_batch()
+            self.checkpoint.set_index_floors(floors, drop=dropped)
+            with self._index_lock:
+                for index in dropped:
+                    self._index_progress.pop(index, None)
+            if active != self._active_indices:
+                logger.info(
+                    "Reading %d Elasticsearch index(es) for %d selected pattern(s): %s",
+                    len(active), len(patterns), ", ".join(active) or "none",
+                )
+        self._active_indices = active
+        self._resolved = resolved
+        self._selection_entries = entries
+        self._applied_selection_revision = selection["revision"]
+        return True
+
+    def _publish_index_status(self) -> None:
+        """Write what the engine reads (and can read) for the web; the
+        available-index list is refreshed every index_refresh_seconds."""
+        if getattr(self, "index_selection", None) is None:
+            return
+        if (
+            time.monotonic() - self._last_index_list_at
+            >= self.config.elasticsearch.index_refresh_seconds
+        ):
+            self._last_index_list_at = time.monotonic()
+            try:
+                self._available_indices = self.collector.list_indices()
+                self._available_error = None
+            except Exception as exc:  # noqa: BLE001 - shown on the web page
+                self._available_error = str(exc)[:300]
+        legacy = self._active_indices is None
+        with self._index_lock:
+            progress = {index: dict(value) for index, value in self._index_progress.items()}
+        payload = {
+            "mode": "configured" if legacy else "selected",
+            "selection_revision": (
+                None if legacy else self._applied_selection_revision
+            ),
+            "configured_revision": selection_revision(self._selection_entries),
+            "entries": self._selection_entries,
+            "resolved": None if legacy else self._resolved,
+            "active_indices": None if legacy else self._active_indices,
+            "indices": progress,
+            "available": self._available_indices,
+            "error": self._resolve_error or self._available_error,
+        }
+        if payload == self._last_index_status:
+            return
+        try:
+            write_status(self._index_status_path, {**payload, "updated_at": time.time()})
+            self._last_index_status = payload
+        except OSError as exc:
+            logger.warning("Unable to write index status: %s", exc)
+
     # --- LLM profile ---------------------------------------------------------
 
     def _llm_enabled(self) -> bool:
@@ -660,6 +849,7 @@ class RealtimePipeline:
         self._process_analysis_requests()
         self._heartbeat_grouping()
         self._save_template_activity()
+        self._publish_index_status()
 
     def _save_template_activity(self, force: bool = False) -> None:
         """Persist per-template baselines every few minutes (and on shutdown);
@@ -984,7 +1174,7 @@ class RealtimePipeline:
         self.metrics.set_grouping_revision(snapshot["revision"], "pending")
 
         # Every buffered vector and real cursor belongs to the pre-change map.
-        if self._pending_predictions or self._pending_cursor is not None:
+        if self._pending_predictions or self._pending_cursors:
             self._flush_batch()
         try:
             outcome = self.grouping_manager.apply_realtime(snapshot)

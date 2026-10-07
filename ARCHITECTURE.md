@@ -135,12 +135,37 @@ Quy ước quan trọng:
 - Number hiện được hiểu trực tiếp là **epoch seconds**. Epoch milliseconds
   chưa được normalize và không nên gửi ở trạng thái code hiện tại.
 - `event_id` nội bộ lấy từ Elasticsearch `_id`, không lấy từ payload.
-- Collector hiện gán `es_index` bằng index pattern cấu hình, không phải
-  `_index` thật của hit.
+- `es_index` là `_index` thật của hit.
 - Dedup chỉ dùng `_id`; hai document ở hai index khác nhau nhưng trùng `_id`
   có thể bị xem là cùng event.
-- Query realtime sort theo `@timestamp` tăng dần rồi `_id` tăng dần. Index phải
+- Query realtime sort theo `@timestamp` tăng dần rồi `_doc` tăng dần. Index phải
   có mapping tương thích với sort này.
+
+### 4.1.1 Chọn index trên Web UI (Data sources)
+
+Người dùng chọn nhiều index hoặc pattern (`app-logs-*`) trên trang
+**Data sources** (`#sources`). Web ghi `data/es_index_selection.json`
+(`entries: [{pattern, added_at}]`, chỉ web ghi). Engine kiểm tra mtime file
+mỗi vòng poll (~1 s), resolve pattern ra index cụ thể qua
+`indices.get(expand_wildcards=open)` khi file đổi hoặc mỗi
+`elasticsearch.index_refresh_seconds` (30 s), rồi poll **một batch cho mỗi index
+cụ thể**, mỗi index có cursor riêng. Không cần restart.
+
+- **Đọc từ lúc chọn (không backfill)**: index lần đầu xuất hiện dưới một entry bắt
+  đầu từ `@timestamp >= added_at` của entry đó. Index mới tạo sau (vd index theo
+  ngày) dưới một pattern cũ vì vậy được đọc từ document đầu tiên.
+- Bỏ một index khỏi lựa chọn thì cursor của nó bị xóa; chọn lại = đọc từ lúc chọn lại.
+- Trước lần lưu đầu tiên trên web, engine giữ hành vi cũ: đọc
+  `elasticsearch.index` (`LOGAI_ES_INDEX`) với một cursor duy nhất. Khi chuyển
+  sang lựa chọn, index mới bắt đầu không muộn hơn `last_timestamp` của cursor cũ,
+  phần trùng được dedup theo `_id` loại bỏ.
+- Một index lỗi (vd đã bị xóa) không chặn các index khác; chỉ khi mọi index đều lỗi
+  thì vòng poll mới backoff.
+- Training dùng cùng lựa chọn (các pattern nối bằng dấu phẩy) nếu file tồn tại.
+- Engine ghi `data/es_index_status.json` (chỉ engine ghi): danh sách index có sẵn
+  (`_cat/indices`, làm mới mỗi 30 s), pattern -> index, tiến độ từng index và
+  `selection_revision` đã áp dụng. Web không có thông tin đăng nhập ES; nó chỉ đọc
+  file này.
 
 ### 4.2 Documentation corpus
 
@@ -758,6 +783,11 @@ flush prediction cũ rồi activate revision tại poll/batch boundary. `GET
 /api/grouping/status` phân biệt pending, partial, applied, failed và
 engine_unavailable. `GET /api/health` dùng heartbeat thay vì chỉ kiểm tra port.
 
+`GET /api/es-indices` trả lựa chọn hiện tại kèm trạng thái engine
+(`pending`/`applied`/`no_index_selected`/`engine_unavailable`); `PUT
+/api/es-indices {patterns, revision}` lưu lựa chọn (`202`, `409` khi revision cũ,
+`400` khi tên không hợp lệ).
+
 Chi tiết endpoint, payload, response và hành vi UI nằm tại
 [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
@@ -772,7 +802,9 @@ Chi tiết endpoint, payload, response và hành vi UI nằm tại
 | `data/models/global_v3.pkl` | Pickle | Training | Realtime | Global Isolation Forest với rate-floor features |
 | `data/doc_embeddings.pkl` | Pickle | Doc matcher | Hiện chưa được reuse khi reload | Corpus entries + embeddings |
 | `data/drain3_state.bin` | Drain3 persistence | Parser | Parser | Drain tree/template clusters |
-| `data/checkpoint.json` | JSON object | Collector | Collector | `search_after`, `last_timestamp` |
+| `data/checkpoint.json` | JSON object | Collector + realtime | Collector | `search_after`, `last_timestamp` (cursor cũ), `indices: {index: {search_after, last_timestamp, floor_ts}}` |
+| `data/es_index_selection.json` | JSON object | Web API | Realtime + training + web | Index/pattern được chọn và `added_at` |
+| `data/es_index_status.json` | JSON object | Realtime | Web API | Index có sẵn, pattern -> index, tiến độ từng index, revision đã áp dụng |
 | `data/training_checkpoint.json` | JSON object | Training pipeline | Training collector | Historical `search_after` cursor |
 | `data/training_event_index.jsonl` | Append-only JSONL | Training pipeline | Training pipeline | Lightweight parsed event records for replay (kèm `level`, nguồn để dựng `TemplateState.level`) |
 | `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine + web API | `"[service, group_id]" -> AnomalyState` (tuple được flatten thành chuỗi JSON-list tại seam; key thường `group_id` cũ vẫn đọc được nhưng là ô mồ côi) |
@@ -879,6 +911,9 @@ giữ **đúng thứ tự** durability và chỉ commit khi có cursor thật:
 
 Mọi crash TRƯỚC bước 4 → cursor không advance; dedup mark là in-memory tới `gc`
 nên batch được đọc lại và loại trùng idempotent, không mất/nhân đôi alert.
+
+Với nhiều index (§4.1.1), `_pending_cursors` giữ cursor của từng index đã xử lý;
+bước 4 commit tất cả một lần (`checkpoint.commit_indices`), cùng thứ tự durability.
 
 Historical training có semantics riêng: `stream_historical_batches()` không tự
 ghi checkpoint. Training append và `fsync` event index trước, sau đó mới commit

@@ -69,6 +69,12 @@ def main():
         template_triage_path=_storage_path(
             web_base, config.storage.template_triage_file
         ),
+        index_selection_path=_storage_path(
+            web_base, config.storage.es_index_selection_file
+        ),
+        index_status_path=_storage_path(
+            web_base, config.storage.es_index_status_file
+        ),
     )
     print(f"Template Explorer running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

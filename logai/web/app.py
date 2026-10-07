@@ -31,6 +31,12 @@ from logai.storage.documentation import (
     RevisionConflict,
     group_fingerprint,
 )
+from logai.storage.index_selection import (
+    IndexSelectionConflict,
+    IndexSelectionError,
+    IndexSelectionStore,
+    read_json,
+)
 from logai.storage.grouping import (
     MANUAL_GROUP_RE,
     GroupingCycleError,
@@ -62,6 +68,8 @@ def create_app(
     analysis_requests_path: str | None = None,
     llm_profiles_path: str | None = None,
     template_triage_path: str | None = None,
+    index_selection_path: str | None = None,
+    index_status_path: str | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     base = Path(data_dir)
@@ -82,6 +90,10 @@ def create_app(
     incident_analysis_file = base / "incident_analysis.json"
     incident_cases_file = base / "incident_cases.json"
     llm_profiles = LLMProfileStore(llm_profiles_path or base / "llm_profiles.json")
+    index_selection = IndexSelectionStore(
+        index_selection_path or base / "es_index_selection.json"
+    )
+    index_status_file = Path(index_status_path or base / "es_index_status.json")
     analysis_requests_file = Path(analysis_requests_path or base / "analysis_requests.json")
 
     def _json_body() -> Optional[Dict[str, Any]]:
@@ -1257,6 +1269,64 @@ def create_app(
             return _mutation_error(exc)
 
     # ── Serve the frontend ────────────────────────────────────────────
+
+    # ── Data sources: which Elasticsearch indices the engine reads ──
+
+    def _index_view() -> Dict[str, Any]:
+        """The selection (or, before the first save, the engine's configured
+        index) merged with what the engine reports for it."""
+        selection = index_selection.load()
+        status = read_json(index_status_file)
+        alive = _llm_engine_state()["alive"]
+        if selection is None:
+            entries, revision, source = status.get("entries") or [], None, "configured"
+            applied = status.get("mode") == "configured"
+        else:
+            entries, revision, source = selection["entries"], selection["revision"], "selected"
+            applied = status.get("selection_revision") == revision
+        if not alive:
+            state = "engine_unavailable"
+        elif not applied:
+            state = "pending"
+        elif source == "selected" and not entries:
+            state = "no_index_selected"
+        else:
+            state = "applied"
+        return {
+            "state": state, "source": source, "revision": revision, "entries": entries,
+            "resolved": status.get("resolved"), "active_indices": status.get("active_indices"),
+            "indices": status.get("indices") or {}, "available": status.get("available"),
+            "error": status.get("error"), "status_updated_at": status.get("updated_at"),
+        }
+
+    @app.route("/api/es-indices", methods=["GET"])
+    def get_es_indices():
+        return jsonify(_index_view())
+
+    @app.route("/api/es-indices", methods=["PUT"])
+    def set_es_indices():
+        payload = _json_body()
+        if payload is None or "patterns" not in payload:
+            return jsonify({"error": "invalid_request", "message": "patterns is required"}), 400
+        # Before the first save, keep the engine's start time for the
+        # configured patterns so saving them unchanged never skips logs.
+        known = {
+            entry.get("pattern"): entry.get("added_at")
+            for entry in read_json(index_status_file).get("entries") or []
+            if isinstance(entry, dict) and isinstance(entry.get("added_at"), (int, float))
+        } if index_selection.load() is None else {}
+        try:
+            saved = index_selection.replace(
+                payload["patterns"], payload.get("revision"), known_added_at=known
+            )
+        except IndexSelectionConflict as exc:
+            return jsonify({
+                "error": "revision_conflict", "message": str(exc),
+                "current_revision": exc.current_revision,
+            }), 409
+        except IndexSelectionError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        return jsonify({"state": "pending", **saved}), 202
 
     @app.route("/")
     def index():

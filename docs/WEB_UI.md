@@ -20,6 +20,7 @@ bookmarked directly:
 | Groups | `/#groups` | Group registry plus documentation corpus/overrides |
 | Alerting | `/#alerting` | `anomaly_state.json`, enriched from group/template registries |
 | Documentation | `/#documentation` | Editable corpus and synchronization status |
+| Data sources | `/#sources` | `es_index_selection.json`, `es_index_status.json` |
 
 The sidebar remains fixed on desktop. Reload is available from every view and
 performs a full page refresh. If an API request fails while the server restarts,
@@ -129,6 +130,24 @@ of these synchronization states:
 | `failed` | The engine attempted this revision and recorded an error. |
 | `engine_unavailable` | No refresh-worker status has been written. |
 
+## Data sources
+
+Choose which Elasticsearch indices the engine reads. Tick indices from the
+**Available indices** list (published by the engine, which owns the ES
+credentials) or type a pattern such as `app-logs-*`, then **Save selection**.
+The engine applies it within about a second, with no restart:
+
+- every selected index is read from the moment it is added, with no backfill;
+- a pattern is re-resolved every 30 seconds, and an index created later under it
+  is read from its first document;
+- removing an index stops reading it, and adding it again starts from that moment.
+
+Each selected pattern lists the indices it resolves to, with the last event
+time and the number of events read. The status line shows `Waiting for the
+engine…` until the engine has applied the saved revision. Until the first save,
+the engine reads `elasticsearch.index` (`LOGAI_ES_INDEX`) as before. Two browsers
+saving from the same snapshot get `409`; the page keeps the unsaved changes.
+
 ## HTTP API
 
 | Method and path | Input | Output |
@@ -146,6 +165,8 @@ of these synchronization states:
 | `DELETE /api/documentation/<id>` | `revision`, optional `force` | Protected 409 with affected groups, or confirmed deletion with corpus/override revisions |
 | `PUT /api/groups/<id>/documentation` | `documentation_id`, `override_revision` | Pending assignment and new override revision |
 | `DELETE /api/groups/<id>/documentation` | `override_revision`, `force` | Confirmation-required 409 or pending clear suppression and new override revision |
+| `GET /api/es-indices` | None | Selection (`entries`, `revision`, `source`), engine `state`, `resolved`, per-index progress, `available` indices |
+| `PUT /api/es-indices` | `patterns`, `revision` (`null` before the first save) | Saved selection (`202`); `409` on a stale revision, `400` on an invalid name |
 
 Mutation errors use JSON with an `error` and `message`. Important status codes
 are `400` for invalid input, `404` for an unknown document/group, `409` for a
@@ -191,6 +212,8 @@ volume as the realtime engine.
 | `grouping_status.json` | Training/realtime engine | Per-template results, failure codes, heartbeat, and progress |
 | `group_registry.json` | Training/realtime engine | Group metadata and currently applied documentation match |
 | `anomaly_state.json` | Realtime alert state machine | Latest state for each `(service, group_id)` alert cell |
+| `es_index_selection.json` | Web UI/API | Selected Elasticsearch indices/patterns and when each was added |
+| `es_index_status.json` | Realtime engine | Available indices, pattern resolution, per-index progress, applied revision |
 
 Corpus, override, and status writes use a temporary file followed by
 `os.replace`. The design assumes one realtime writer and one shared data volume;

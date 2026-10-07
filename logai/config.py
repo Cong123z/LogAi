@@ -30,6 +30,9 @@ class ElasticsearchConfig:
     poll_interval_seconds: float = 1.0
     batch_size: int = 500
     request_timeout_seconds: float = 30.0
+    # How often selected index patterns are re-resolved to concrete indices
+    # (and the available-index list republished for the web).
+    index_refresh_seconds: float = 30.0
 
 
 @dataclass
@@ -203,6 +206,8 @@ class StorageConfig:
     template_triage_file: str = "template_triage.json"
     incident_cases_file: str = "incident_cases.json"
     template_activity_file: str = "template_activity.json"
+    es_index_selection_file: str = "es_index_selection.json"
+    es_index_status_file: str = "es_index_status.json"
 
 
 @dataclass
