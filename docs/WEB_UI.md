@@ -22,15 +22,29 @@ bookmarked directly:
 | Documentation | `/#documentation` | Editable corpus and synchronization status |
 | Data sources | `/#sources` | `es_index_selection.json`, `es_index_status.json` |
 
-The sidebar remains fixed on desktop. Reload is available from every view and
-performs a full page refresh. If an API request fails while the server restarts,
-the page displays `Reconnecting...` and retries every two seconds; Chrome does
-not need to be restarted.
+The sidebar groups the views into Monitor (Alerting, AI Insights, Incidents),
+Catalog (Templates, Groups, Documentation) and Settings (Data sources, Retrain,
+LLM profiles). On desktop it stays visible and can be collapsed to an icon rail
+(remembered per browser); between 768 and 1023 px it is an icon rail; on phones
+it becomes a scrolling tab bar at the top, and a horizontal swipe moves between
+views. The top bar shows the page title, an engine health pill (from
+`GET /api/health`, refreshed every five seconds), a light/dark theme toggle and
+Reload. The theme follows the operating system until one is picked; the choice
+is kept in the browser (`logai.theme`). Reload performs a full page refresh. If
+an API request fails while the server restarts, the page displays
+`Reconnecting...` and retries every two seconds; Chrome does not need to be
+restarted.
+
+Every dialog closes with Escape, keeps keyboard focus inside while open and
+returns focus to the control that opened it. Confirmations use an in-page
+dialog instead of the browser's `confirm()`/`alert()`. Template details open in
+a side drawer so the table stays visible.
 
 ## Templates
 
 Templates support search, service and log-level filters, known/unknown status,
-sortable columns, pagination, optional auto-refresh, and a detail dialog.
+sortable columns, pagination with 25/50/100/200 rows per page, optional
+auto-refresh, and a detail drawer.
 Template `level` is the most severe log level observed for that template and is
 monotonically promoted by the pipeline.
 
@@ -71,7 +85,8 @@ applied, preventing an assignment against obsolete group membership.
 ## Alerting
 
 The Alerting view polls `GET /api/alerts` every two seconds only while that view
-is active. It shows all current service/group alert cells and places active
+is active. The status cards double as state filters, and the live indicator
+turns into a stale warning when no update has arrived for ten seconds. It shows all current service/group alert cells and places active
 alerts first by default. Groups without a persisted anomaly state are included
 as `NORMAL`.
 
@@ -252,7 +267,13 @@ it does not provide multi-process transactions or distributed locking.
 
 | File | Responsibility |
 |---|---|
-| `logai/web/static/index.html` | Sidebar views, editing dialogs, sorting, filters, reload/reconnect, alert polling |
+| `logai/web/static/index.html` | Markup only: shell (sidebar, top bar), the nine views and every dialog |
+| `logai/web/static/css/tokens.css` | Color/type tokens for the dark and light themes (WCAG AA pairs) |
+| `logai/web/static/css/app.css` | Layout and components (tables, badges, forms, dialogs), responsive rules |
+| `logai/web/static/js/core.js` | Shared state, formatting/escaping helpers, `apiMutation`, `compareValues`, shared fetchers |
+| `logai/web/static/js/ui.js` | Dialog controller (Escape, focus trap, focus return), `confirmDialog`, character counters |
+| `logai/web/static/js/views/*.js` | One file per view: render, sort, filters, mutations and polling for that view |
+| `logai/web/static/js/main.js` | Router (hash, swipe), `loadData` dispatcher, reconnect, theme, sidebar collapse, health pill |
 | `logai/web/app.py` | Read APIs plus documentation and assignment mutation APIs |
 | `logai/storage/documentation.py` | Validation, revisions, atomic persistence, synchronization status |
 | `logai/storage/grouping.py` | Grouping schemas, revisions, conflicts, status and heartbeat |

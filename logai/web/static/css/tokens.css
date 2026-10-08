@@ -1,0 +1,106 @@
+/* Design tokens. Dark is the default; light follows the OS unless the
+   viewer picked a theme (html[data-theme], remembered in localStorage). */
+:root {
+  color-scheme: dark;
+  --bg: #0f172a;
+  --bg-card: #1b2336;
+  --bg-table: #162032;
+  --bg-row-hover: #232d44;
+  --bg-input: #1e293b;
+  --border: #334155;
+  --border-input: #64748b;
+  --text: #f8fafc;
+  --text-dim: #94a3b8;
+  --text-muted: #8f9db3;
+  --accent: #818cf8;
+  --accent-hover: #a5b4fc;
+  --accent-solid: #4f46e5;
+  --on-accent: #ffffff;
+  --focus-ring: #a5b4fc;
+  --green: #4ade80;
+  --green-bg: rgba(74, 222, 128, 0.12);
+  --orange: #fb923c;
+  --orange-bg: rgba(251, 146, 60, 0.12);
+  --red: #f87171;
+  --red-bg: rgba(248, 113, 113, 0.12);
+  --yellow: #fbbf24;
+  --yellow-bg: rgba(251, 191, 36, 0.12);
+  --blue: #60a5fa;
+  --blue-bg: rgba(96, 165, 250, 0.12);
+  --gray: #94a3b8;
+  --gray-bg: rgba(148, 163, 184, 0.12);
+  --overlay: rgba(2, 6, 23, 0.65);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --radius: 6px;
+  --radius-sm: 4px;
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* The light palette, twice: once for the OS preference, once for a manual pick. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f8fafc;
+    --bg-card: #ffffff;
+    --bg-table: #f1f5f9;
+    --bg-row-hover: #eef2f7;
+    --bg-input: #ffffff;
+    --border: #e2e8f0;
+    --border-input: #7b8698;
+    --text: #0f172a;
+    --text-dim: #475569;
+    --text-muted: #556274;
+    --accent: #4f46e5;
+    --accent-hover: #4338ca;
+    --accent-solid: #4f46e5;
+    --on-accent: #ffffff;
+    --focus-ring: #4f46e5;
+    --green: #166534;
+    --green-bg: rgba(22, 163, 74, 0.12);
+    --orange: #9a3412;
+    --orange-bg: rgba(234, 88, 12, 0.12);
+    --red: #b91c1c;
+    --red-bg: rgba(220, 38, 38, 0.10);
+    --yellow: #854d0e;
+    --yellow-bg: rgba(234, 179, 8, 0.15);
+    --blue: #1d4ed8;
+    --blue-bg: rgba(37, 99, 235, 0.10);
+    --gray: #475569;
+    --gray-bg: rgba(100, 116, 139, 0.12);
+    --overlay: rgba(15, 23, 42, 0.45);
+    --shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-table: #f1f5f9;
+  --bg-row-hover: #eef2f7;
+  --bg-input: #ffffff;
+  --border: #e2e8f0;
+  --border-input: #7b8698;
+  --text: #0f172a;
+  --text-dim: #475569;
+  --text-muted: #556274;
+  --accent: #4f46e5;
+  --accent-hover: #4338ca;
+  --accent-solid: #4f46e5;
+  --on-accent: #ffffff;
+  --focus-ring: #4f46e5;
+  --green: #166534;
+  --green-bg: rgba(22, 163, 74, 0.12);
+  --orange: #9a3412;
+  --orange-bg: rgba(234, 88, 12, 0.12);
+  --red: #b91c1c;
+  --red-bg: rgba(220, 38, 38, 0.10);
+  --yellow: #854d0e;
+  --yellow-bg: rgba(234, 179, 8, 0.15);
+  --blue: #1d4ed8;
+  --blue-bg: rgba(37, 99, 235, 0.10);
+  --gray: #475569;
+  --gray-bg: rgba(100, 116, 139, 0.12);
+  --overlay: rgba(15, 23, 42, 0.45);
+  --shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}

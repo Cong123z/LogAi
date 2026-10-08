@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import time
 import unittest
@@ -284,6 +285,17 @@ class TestWebDocumentationAPI(unittest.TestCase):
 
     def test_ui_exposes_separate_sidebar_views_and_reload(self):
         html = self.client.get("/").get_data(as_text=True)
+        # The page loads its CSS and scripts from /static; check them as one text.
+        for asset in re.findall(r'(?:src|href)="(/static/[^"]+)"', html):
+            response = self.client.get(asset)
+            self.assertEqual(response.status_code, 200, asset)
+            html += response.get_data(as_text=True)
+            response.close()
+        self.assertIn("/static/js/main.js", html)
+        overlays = re.findall(r'<div class="modal-overlay[^"]*"[^>]*>', html)
+        self.assertTrue(overlays)
+        for overlay in overlays:
+            self.assertRegex(overlay, r'role="(alert)?dialog" aria-modal="true"')
         self.assertIn('data-view="templates"', html)
         self.assertIn('data-view="groups"', html)
         self.assertIn('data-view="alerting"', html)
