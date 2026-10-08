@@ -404,14 +404,60 @@ liệu mới) rồi `_train_anomaly_models` feed từng cửa sổ đó qua `Fea
 Nhánh clustering (`_cluster_templates`/`_build_group_registry`/centroids) **vẫn gom
 templates cross-service như cũ** - chỉ có đồng hồ rate là tách theo service.
 
-### 6.2 Group ID rules
+### 6.2 Retrain: giữ template, group đóng băng
 
-- HDBSCAN cluster label `n` trở thành `Gnnnn`, ví dụ `G0002`.
-- Noise label `-1` tạo singleton group `G_SINGLE_nnnn`.
-- Group IDs phụ thuộc kết quả clustering và thứ tự template, nên không được bảo
-  đảm ổn định qua các lần retraining.
-- Template ID ổn định qua restart phụ thuộc việc giữ nguyên
-  `drain3_state.bin`.
+**Template.** Template ID `T{cluster_id}` ổn định vì `drain3_state.bin` được
+giữ và dùng chung giữa training và realtime. Phase 2 **merge** vào registry cũ
+thay vì thay thế: template thấy trong cửa sổ training lấy số liệu của cửa sổ;
+template cũ được giữ kèm embedding. Template **đã có group không bao giờ bị
+xoá**; chỉ template chưa có group mới bị bỏ sau `training.template_ttl_days`
+(mặc định 30, tính theo event time) và khi không override nào tham chiếu.
+Phase 3 chỉ embed template mới hoặc đổi text.
+
+**Group đóng băng** (Phase 4, `_cluster_templates`). Template đã thuộc group nào
+giữ nguyên group đó; ID, thành viên và tài liệu của group cũ không đổi — không
+gộp, tách hay xoá. Chỉ template chưa có group (mới, hoặc pending do realtime
+tạo) được xếp:
+1. vào group cũ gần nhất nếu cosine với centroid ≥
+   `clustering.assignment_similarity_threshold` (cùng quy tắc realtime);
+2. phần còn lại chạy HDBSCAN **chỉ trên chúng** → group mới `G{n:04d}` từ bộ
+   đếm chỉ tăng (ID không bao giờ dùng lại); noise thành group một template
+   (web gắn nhãn `singleton` = `len(template_ids) == 1`, tính khi đọc).
+
+Centroid của group cũ được tính lại theo thành viên (có thể dịch nhẹ khi được
+thêm template). `data/group_lineage.json`: `added` (group cũ → template được
+thêm), `new` (group mới → thành viên), `next_group_number`; ghi sau khi publish
+registry (Phase 8). Khi khởi động, realtime xoá alert state và LLM analysis của
+group không còn trong registry (chỉ xảy ra do thao tác tay trên web).
+
+**Vận hành:** stop engine → train → start. Realtime đọc tiếp từ cursor theo
+index nên log phát sinh lúc dừng không mất (miễn ES còn giữ); feature/alert
+chạy theo event time nên backlog được chấm điểm như lúc live. Cái giá là alert
+trễ đúng bằng thời gian dừng + thời gian đuổi kịp. Theo dõi bằng
+`time() - logai_last_processed_event_timestamp_seconds`.
+
+**Retrain theo lịch** (trang Web **Retrain**). Web ghi `retrain_schedule.json`
+(giờ, ngày, múi giờ, `lookback_hours`, `max_docs`, yêu cầu "retrain now");
+control tick của engine quyết định đến hạn (lần bị lỡ khi engine tắt thì bỏ qua,
+như cron), vòng poll chạy retrain ở biên batch: flush, dừng documentation worker
+và LLM worker, gọi `run_training_from_elasticsearch` ngay trong tiến trình, ghi
+kết quả vào `retrain_status.json` rồi `os.execv` để nạp lại toàn bộ artifacts
+(luôn restart, kể cả khi train lỗi). Trong lúc train, heartbeat riêng trong
+`retrain_status.json` giữ `scripts/healthcheck.py` ở trạng thái ready.
+
+**Rollback.** Ngay trước khi train, engine chép mọi artifact training sẽ ghi
+(registry template/group, embeddings, centroids, doc embeddings, grouping
+status, lineage, Drain3 state, documentation status, `models/`) vào
+`data/retrain_backup/`; `manifest.json` ghi cuối cùng nên backup thiếu manifest
+coi như chưa xong. Train lỗi → khôi phục backup, xoá training checkpoint/event
+index, ghi `failed · rolled back`. Engine bị tắt giữa lúc train (status còn
+`running` khi khởi động) → khôi phục trước khi nạp bất cứ artifact nào, ghi
+`failed`, `interrupted: true`. Khôi phục chạy lại được nếu bị ngắt giữa chừng.
+
+**Lần hẹn bị lỡ.** Khi khởi động, engine lấy mốc còn sống cuối (heartbeat trong
+`grouping_status.json`/`retrain_status.json`, lần lưu lịch) và ghi mỗi giờ hẹn
+rơi vào khoảng tắt máy thành một dòng `missed` (tối đa 20); không chạy bù.
+`missed_checked_until` tránh ghi trùng.
 
 ### 6.3 Điều kiện tạo model
 
@@ -1019,7 +1065,7 @@ thiết kế tương lai:
 | Medium | `logai_retry_total` không được nối với retry helper | Metric luôn không phản ánh retry thật |
 | Medium | Documentation cache chỉ ghi, chưa đọc reuse | Reload embed lại corpus |
 | Medium | Re-run training trên registry cũ có thể cộng lại event counts | Overlapping lookback làm metadata count tăng lặp |
-| Medium | Group IDs không ổn định qua retraining | Dashboard/history theo `group_id` có thể đứt chuỗi |
+| Resolved | Group IDs không ổn định qua retraining | Đối chiếu ID theo overlap + lineage (§6.2) |
 | Operational | Single writer, không có inter-process lock | Không chạy nhiều instance trên cùng volume |
 | Operational | Docker ES tắt security; Grafana dùng password mặc định | Chỉ phù hợp local/demo |
 

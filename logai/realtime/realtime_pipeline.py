@@ -11,13 +11,19 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
+import sys
 import threading
 import time
 from collections import deque
 from typing import Any, Optional, Tuple, Union
 
 from logai.config import AppConfig
-from logai.alert.alert_state_machine import AlertStateMachine, group_id_key
+from logai.alert.alert_state_machine import (
+    AlertStateMachine,
+    _parse_group_id_key,
+    group_id_key,
+)
 from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomalyModels
 from logai.clustering.hdbscan_cluster import GroupClusterer
 from logai.collector.es_collector import ElasticsearchCollector
@@ -65,6 +71,13 @@ from logai.storage.index_selection import (
     write_status,
 )
 from logai.storage.registries import GroupRegistry, TemplateRegistry
+from logai.storage.retrain_schedule import (
+    RetrainScheduleStore,
+    next_run_at,
+    read_json,
+    restore_artifacts,
+    snapshot_artifacts,
+)
 
 logger = logging.getLogger("logai.realtime")
 
@@ -75,6 +88,11 @@ RECENT_PARAMS_PER_WINDOW = 200
 class RealtimePipeline:
     def __init__(self, config: AppConfig):
         self.config = config
+        # Before anything loads artifacts: undo a retrain this engine was
+        # killed in the middle of, and note scheduled runs it was down for.
+        self.retrain_store = RetrainScheduleStore.from_config(config)
+        self._recover_interrupted_retrain()
+        self._record_missed_retrains()
 
         self.checkpoint = CheckpointStore(config.storage)
         self.collector = ElasticsearchCollector(config.elasticsearch, self.checkpoint)
@@ -162,6 +180,7 @@ class RealtimePipeline:
             cases_path=f"{config.storage.base_dir}/{config.storage.incident_cases_file}",
             on_call=lambda kind, meta: self.metrics.record_llm_call(kind, meta),
         )
+        self._drop_vanished_groups(alert_state_store)
         # On-demand whole-service analysis requests (web-owned file).
         self._analysis_requests_path = (
             f"{config.storage.base_dir}/{config.storage.analysis_requests_file}"
@@ -241,6 +260,30 @@ class RealtimePipeline:
         self._available_error: Optional[str] = None
         self._last_index_list_at = float("-inf")
         self._last_index_status: Optional[dict] = None
+        # Retrain from the web "Retrain" page: the control tick decides, the
+        # poll loop runs it at a batch boundary (see _run_retrain).
+        self._started_at = time.time()
+        self._retrain_trigger: Optional[dict] = None
+
+    def _drop_vanished_groups(self, alert_state_store: JSONStore) -> None:
+        """Drop alert state and LLM analyses of groups a retrain merged, split
+        or retired (see group_lineage.json): their IDs are never reused, so the
+        state would otherwise linger forever."""
+        live = {group.group_id for group in self.group_registry.all_groups()}
+        if not live:
+            return  # not trained yet: nothing to compare against
+        vanished = set()
+        for store in (alert_state_store, self.incident_classifier.store):
+            for key in store.all():
+                identity = _parse_group_id_key(key)
+                gid = identity[1] if isinstance(identity, tuple) and len(identity) == 2 else identity
+                if gid not in live:
+                    vanished.add(gid)
+        for gid in vanished:
+            self.alert_sm.drop_group(gid)
+            self.incident_classifier.drop_group(gid)
+        if vanished:
+            logger.info("Dropped state of %d groups that no longer exist", len(vanished))
 
     def start_metrics_server(self) -> None:
         self.metrics.start()
@@ -277,6 +320,9 @@ class RealtimePipeline:
         MAX_POLL_BACKOFF = 300.0  # 5 minutes
 
         while True:
+            trigger = getattr(self, "_retrain_trigger", None)
+            if trigger is not None:
+                self._run_retrain(trigger)
             self._refresh_grouping_if_needed()
             self._refresh_index_selection()
             # ── Phase 1: Poll ES (one batch per selected index) ───────────
@@ -845,11 +891,207 @@ class RealtimePipeline:
     TEMPLATE_ACTIVITY_SAVE_SECONDS = 300.0
 
     def _control_tick(self) -> None:
+        self._check_retrain()
         self._refresh_llm_profile()
         self._process_analysis_requests()
         self._heartbeat_grouping()
         self._save_template_activity()
         self._publish_index_status()
+
+    # --- retrain (web "Retrain" page) -------------------------------------------
+
+    def _check_retrain(self) -> None:
+        """Decide whether a retrain is due; the poll loop runs it. Missed
+        scheduled runs (engine down at the time) are skipped, like cron."""
+        if getattr(self, "retrain_store", None) is None or self._retrain_trigger is not None:
+            return
+        loaded = self.retrain_store.load()
+        schedule, request = loaded["schedule"], loaded["run_request"]
+        status = self.retrain_store.load_status()
+        if request and float(request.get("requested_at") or 0) > float(
+            status.get("handled_request_at") or 0
+        ):
+            self._retrain_trigger = {"trigger": "manual", **request}
+            return
+        upcoming = next_run_at(
+            schedule, max(self._started_at, float(status.get("started_at") or 0))
+        )
+        if upcoming is not None and upcoming <= time.time():
+            self._retrain_trigger = {
+                "trigger": "schedule",
+                "lookback_hours": schedule["lookback_hours"],
+                "max_docs": schedule["max_docs"],
+            }
+            return
+        if status.get("next_run_at") != upcoming:
+            self.retrain_store.write_status({**status, "next_run_at": upcoming})
+
+    def _run_retrain(self, trigger: dict) -> None:
+        """Pause, train in this process, then re-exec so every registry, the
+        model and Drain3 state reload from disk. Logs that arrive meanwhile are
+        read from the per-index checkpoint after the restart."""
+        from logai.training.train_pipeline import run_training_from_elasticsearch
+
+        status = self.retrain_store.load_status()
+        started = time.time()
+        run = {
+            "trigger": trigger["trigger"],
+            "started_at": started,
+            "lookback_hours": trigger["lookback_hours"],
+            "max_docs": trigger["max_docs"],
+        }
+        status.update(run, state="running", heartbeat_at=started, finished_at=None, error=None)
+        if trigger["trigger"] == "manual":
+            status["handled_request_at"] = trigger["requested_at"]
+        status_lock = threading.Lock()
+        self.retrain_store.write_status(status)
+        logger.info("Retrain (%s) starting: lookback=%.1fh max_docs=%d",
+                    run["trigger"], run["lookback_hours"], run["max_docs"])
+
+        done = threading.Event()
+
+        def heartbeat() -> None:  # keeps healthcheck.py ready while training
+            while not done.wait(10):
+                with status_lock:
+                    status["heartbeat_at"] = time.time()
+                    self.retrain_store.write_status(status)
+
+        threading.Thread(target=heartbeat, name="retrain-heartbeat", daemon=True).start()
+        try:
+            if self._pending_predictions or self._pending_cursors:
+                self._flush_batch()
+            self._save_template_activity(force=True)
+            control_stop = getattr(self, "_control_stop", None)
+            if control_stop is not None:
+                control_stop.set()
+            for worker in (self.documentation_worker, self.incident_classifier):
+                if worker is not None:
+                    worker.stop()
+            snapshot_artifacts(self.config)
+            run_training_from_elasticsearch(
+                self.config,
+                lookback_seconds=run["lookback_hours"] * 3600,
+                max_docs=run["max_docs"],
+            )
+            run.update(result="succeeded", **self._retrain_summary(started))
+        except Exception as exc:  # noqa: BLE001 - recorded, then the engine restarts
+            logger.exception("Retrain failed; restoring the artifacts from before it")
+            run.update(result="failed", error=str(exc)[:500], rolled_back=self._restore())
+        finally:
+            done.set()
+            run["duration_seconds"] = time.time() - started
+            with status_lock:
+                status.update(
+                    state=run["result"], finished_at=time.time(),
+                    error=run.get("error"), heartbeat_at=time.time(),
+                    history=[*status.get("history", []), run],
+                )
+                self.retrain_store.write_status(status)
+        logger.info("Retrain %s in %.0fs; restarting the engine", run["result"], run["duration_seconds"])
+        # Always restart: after success to load the new artifacts, after a
+        # failure to reload the restored ones.
+        # ponytail: process re-exec instead of in-place reload; add hot reload
+        # only if restart cost matters
+        self._reexec()
+
+    def _retrain_summary(self, started: float) -> dict:
+        base = self.config.storage.base_dir
+        lineage = JSONStore(f"{base}/{self.config.storage.group_lineage_file}").all()
+        summary = {
+            "templates": len(JSONStore(f"{base}/{self.config.storage.template_registry_file}").all()),
+            "groups": len(JSONStore(f"{base}/{self.config.storage.group_registry_file}").all()),
+        }
+        if float(lineage.get("trained_at") or 0) >= started:
+            added = lineage.get("added") or {}
+            new = lineage.get("new") or {}
+            summary["lineage"] = {
+                "added_templates": sum(len(t) for t in added.values()),
+                "grown_groups": len(added),
+                "new_groups": len(new),
+                "new_group_templates": sum(len(t) for t in new.values()),
+            }
+        return summary
+
+    def _restore(self) -> bool:
+        try:
+            restored = restore_artifacts(self.config)
+        except Exception:  # noqa: BLE001 - reported in the history entry
+            logger.exception("Restoring the pre-retrain artifacts failed")
+            return False
+        if not restored:
+            logger.warning("No complete pre-retrain backup; artifacts left as they are")
+        return restored
+
+    def _recover_interrupted_retrain(self) -> None:
+        """A status still "running" at startup means the engine stopped while
+        retraining: restore the pre-retrain artifacts and record a failure."""
+        status = self.retrain_store.load_status()
+        if status.get("state") != "running":
+            return
+        last = float(status.get("heartbeat_at") or status.get("started_at") or 0)
+        rolled_back = self._restore()
+        logger.warning(
+            "The engine stopped during a retrain (last heartbeat %s); %s",
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(last)),
+            "restored the artifacts from before it" if rolled_back else "no backup to restore",
+        )
+        run = {
+            key: status.get(key)
+            for key in ("trigger", "started_at", "lookback_hours", "max_docs")
+        }
+        run.update(
+            result="failed", interrupted=True, rolled_back=rolled_back,
+            duration_seconds=max(0.0, last - float(status.get("started_at") or last)),
+            error="The engine stopped while retraining"
+            + ("; the previous version was restored" if rolled_back else ""),
+        )
+        status.update(
+            state="failed", finished_at=time.time(), error=run["error"],
+            history=[*status.get("history", []), run],
+        )
+        self.retrain_store.write_status(status)
+
+    def _record_missed_retrains(self) -> None:
+        """Scheduled runs that fell while the engine was down are skipped (like
+        cron) but recorded, so the history shows them."""
+        loaded = self.retrain_store.load()
+        schedule = loaded["schedule"]
+        if not schedule["enabled"]:
+            return
+        status = self.retrain_store.load_status()
+        grouping_status = read_json(
+            f"{self.config.storage.base_dir}/{self.config.storage.grouping_status_file}"
+        )
+        # Last moment the engine is known to have been up (or the schedule saved).
+        since = max(
+            float(value or 0) for value in (
+                grouping_status.get("last_heartbeat_at"), status.get("heartbeat_at"),
+                status.get("finished_at"), status.get("missed_checked_until"),
+                loaded.get("updated_at"),
+            )
+        )
+        if since <= 0:
+            return  # first start: nothing could have been missed
+        now = time.time()
+        missed = []
+        at = since
+        while len(missed) < 20 and (at := next_run_at(schedule, at)) is not None and at <= now:
+            missed.append({
+                "trigger": "schedule", "result": "missed", "started_at": at,
+                "lookback_hours": schedule["lookback_hours"], "max_docs": schedule["max_docs"],
+                "duration_seconds": 0,
+                "error": "The engine was not running at the scheduled time",
+            })
+        status["missed_checked_until"] = now
+        if missed:
+            logger.warning("%d scheduled retrain(s) were missed while the engine was down", len(missed))
+            status["history"] = [*status.get("history", []), *missed]
+        self.retrain_store.write_status(status)
+
+    @staticmethod
+    def _reexec() -> None:
+        logging.shutdown()
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
     def _save_template_activity(self, force: bool = False) -> None:
         """Persist per-template baselines every few minutes (and on shutdown);

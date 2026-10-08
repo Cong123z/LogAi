@@ -36,6 +36,10 @@ class TestWebDocumentationAPI(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_groups_flag_singleton(self):
+        item = self.client.get("/api/groups").get_json()["items"][0]
+        self.assertTrue(item["singleton"])
+
     def test_document_crud_and_revision_conflict(self):
         listing = self.client.get("/api/documentation").get_json()
         created = self.client.post("/api/documentation", json={

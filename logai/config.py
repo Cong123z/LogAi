@@ -179,6 +179,8 @@ class TrainingConfig:
     max_docs: int = 200_000
     lookback_seconds: float = 7 * 24 * 3600
     dedup_buffer_size: int = 10_000
+    # Templates unseen this long are pruned at retrain (unless an override uses them).
+    template_ttl_days: float = 30
 
 
 @dataclass
@@ -208,6 +210,9 @@ class StorageConfig:
     template_activity_file: str = "template_activity.json"
     es_index_selection_file: str = "es_index_selection.json"
     es_index_status_file: str = "es_index_status.json"
+    group_lineage_file: str = "group_lineage.json"
+    retrain_schedule_file: str = "retrain_schedule.json"
+    retrain_status_file: str = "retrain_status.json"
 
 
 @dataclass

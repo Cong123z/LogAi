@@ -57,6 +57,27 @@ curl http://localhost:9108/metrics | grep log_anomaly_score
 curl http://localhost:5555/api/health
 ```
 
+### Retrain
+
+Cách mặc định: trang **Retrain** trên Web UI (`#retrain`) — đặt giờ, ngày trong
+tuần, múi giờ, lookback và max documents, hoặc bấm **Retrain now**. Engine tự
+tạm dừng, train trong chính tiến trình của nó rồi tự khởi động lại; không cần
+dừng container. Đừng chạy thêm job `logai-training` trong lúc engine đang chạy.
+
+Cách thủ công (dự phòng) — dừng engine trong lúc train:
+
+```bash
+docker compose stop logai-engine
+docker compose run --rm logai-training
+docker compose start logai-engine
+```
+
+Template và group cũ được giữ nguyên qua retrain; template mới chỉ được thêm vào
+group cũ hoặc tạo group mới, ghi ở `data/group_lineage.json` (chi tiết:
+`ARCHITECTURE.md` §6.2). Retrain lỗi hoặc bị tắt giữa chừng thì tự rollback. Log phát sinh
+lúc dừng không mất: engine đọc tiếp từ checkpoint. Theo dõi tới khi đuổi kịp:
+`time() - logai_last_processed_event_timestamp_seconds`.
+
 ## Chạy local
 
 ```bash

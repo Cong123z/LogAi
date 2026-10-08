@@ -45,6 +45,7 @@ from logai.models import (
 )
 from logai.realtime.realtime_pipeline import PENDING_GROUP_ID, RealtimePipeline
 from logai.storage.registries import TemplateRegistry
+from logai.storage.grouping import GroupingOverrideStore
 
 
 def _norm(raw) -> str:
@@ -279,6 +280,7 @@ class TestTrainingLevel(unittest.TestCase):
         pipeline = TrainingPipeline.__new__(TrainingPipeline)  # skip heavy __init__
         pipeline.config = cfg
         pipeline.template_registry = TemplateRegistry(cfg.storage)
+        pipeline.grouping_store = GroupingOverrideStore.from_config(cfg)
         # A stub miner: id_to_cluster empty -> _generalized_template_text -> None,
         # so the recorded template_text is used.
         pipeline.parser = MagicMock()
@@ -316,6 +318,7 @@ class TestTrainingLevel(unittest.TestCase):
         pipeline = TrainingPipeline.__new__(TrainingPipeline)
         pipeline.config = cfg
         pipeline.template_registry = TemplateRegistry(cfg.storage)
+        pipeline.grouping_store = GroupingOverrideStore.from_config(cfg)
         pipeline.parser = MagicMock()
         pipeline.parser.miner.drain.id_to_cluster = {}
 

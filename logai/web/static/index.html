@@ -545,6 +545,11 @@
     .ins-detail h2 { font-size:16px; margin:0; }
     .ins-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
     .ins-meta { color:var(--text-dim); font-size:12px; }
+    .rt-form { max-width:720px; }
+    .rt-row { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; }
+    .rt-row .form-field { flex:1 1 200px; }
+    .rt-label { display:block; margin-bottom:6px; font-size:13px; }
+    #rt-days .toggle-btn { padding:8px 12px; }
     .ins-code { font-family:monospace; font-size:13px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; margin:10px 0 14px; word-break:break-word; }
     .ins-section { border-top:1px solid var(--border); padding-top:14px; margin-top:14px; }
     .inc-recall { background:var(--blue-bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; margin-top:14px; }
@@ -666,6 +671,10 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>
           Data sources
         </a>
+        <a href="#retrain" data-view="retrain">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5"/><path d="M9 2h6"/></svg>
+          Retrain
+        </a>
       </nav>
       <button class="btn sidebar-reload" id="reload-app" title="Reload application">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>Reload</span>
@@ -771,7 +780,7 @@
             <div><div class="stat-label">Undocumented</div><div class="stat-value" id="group-stat-undocumented">—</div></div>
           </div>
         </div>
-        <div class="section-heading"><span></span><label class="refresh-toggle"><input type="checkbox" id="undocumented-groups-only"> Undocumented only</label></div>
+        <div class="section-heading"><span></span><span><label class="refresh-toggle"><input type="checkbox" id="undocumented-groups-only"> Undocumented only</label> <label class="refresh-toggle"><input type="checkbox" id="single-groups-only"> Single-template only</label></span></div>
         <div class="table-wrap">
           <table class="group-table">
             <thead><tr><th data-group-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-group-sort="service">Service <span class="sort-arrow"></span></th><th data-group-sort="representative_template">Representative Template <span class="sort-arrow"></span></th><th data-group-sort="error_code" class="sorted">Error code <span class="sort-arrow">▲</span></th><th data-group-sort="documentation_source">Source <span class="sort-arrow"></span></th><th data-group-sort="event_count">Events <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
@@ -903,7 +912,66 @@
           </table>
         </div>
       </section>
+
+      <section class="view groups-section" id="view-retrain" aria-label="Retrain schedule">
+        <div class="section-heading">
+          <div class="sync-status" id="rt-status" aria-live="polite">Loading retrain schedule...</div>
+          <div class="btn-row">
+            <button class="btn" id="rt-run-btn">Retrain now</button>
+          </div>
+        </div>
+        <p class="ins-meta">At the scheduled time the engine pauses log processing, retrains on the chosen window of logs, and restarts itself. Existing groups never change: new templates are only added to them or form new groups. Logs that arrive meanwhile are read after the restart, so alerts are delayed but nothing is lost. If a retrain fails or the engine stops during it, the version from before the retrain is restored. A run missed while the engine was down is skipped and shown in the history.</p>
+        <p class="ins-toast ins-toast-error" id="rt-action-status" aria-live="polite"></p>
+        <form id="rt-form" class="rt-form" autocomplete="off">
+          <h3>Schedule</h3>
+          <div class="form-field"><label><input type="checkbox" id="rt-enabled"> Retrain automatically</label></div>
+          <div class="rt-row">
+            <div class="form-field"><label for="rt-time">Time</label><input type="time" id="rt-time" required></div>
+            <div class="form-field"><label for="rt-timezone">Timezone</label><input id="rt-timezone" list="rt-timezones" required spellcheck="false"><datalist id="rt-timezones"></datalist></div>
+          </div>
+          <div class="form-field">
+            <span class="rt-label" id="rt-days-label">Days</span>
+            <div class="rt-row">
+              <div class="toggle-group" id="rt-days" role="group" aria-labelledby="rt-days-label"></div>
+              <button type="button" class="btn" id="rt-every-day">Every day</button>
+              <button type="button" class="btn" id="rt-weekdays">Mon–Fri</button>
+            </div>
+          </div>
+          <h3>Training data</h3>
+          <div class="rt-row">
+            <div class="form-field"><label for="rt-lookback">Lookback</label>
+              <div class="rt-row"><input type="number" id="rt-lookback" min="0.1" step="any" required><select id="rt-lookback-unit" class="filter-select" aria-label="Lookback unit"><option value="hours">hours</option><option value="days">days</option></select></div>
+            </div>
+            <div class="form-field"><label for="rt-max-docs">Max documents</label><input type="number" id="rt-max-docs" min="1000" max="5000000" step="1000" required></div>
+          </div>
+          <p class="ins-meta">Each retrain reads the logs of the last <em>Lookback</em>. If the window holds more than <em>Max documents</em>, the newest logs are left out. <a href="#" id="rt-defaults">Use defaults</a></p>
+          <div class="btn-row">
+            <button type="button" class="btn" id="rt-discard-btn" disabled>Discard changes</button>
+            <button type="submit" class="btn btn-primary" id="rt-save-btn" disabled>Save schedule</button>
+          </div>
+        </form>
+        <h3>History</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Started</th><th>Trigger</th><th>Lookback</th><th>Max docs</th><th>Duration</th><th>Result</th><th>Templates / groups</th><th>Grouping changes</th></tr></thead>
+            <tbody id="rt-history-tbody"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
     </main>
+  </div>
+
+  <div class="modal-overlay" id="rt-run-modal" role="dialog" aria-modal="true" aria-labelledby="rt-run-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="rt-run-title">Retrain now</h2><button class="modal-close" data-close="rt-run-modal" aria-label="Close">&times;</button></div>
+      <form id="rt-run-form">
+        <p class="ins-meta">The engine pauses log processing while it trains (alerts are delayed until it catches up), then restarts itself. These values apply to this run only.</p>
+        <div class="form-field"><label for="rt-run-lookback">Lookback (hours)</label><input type="number" id="rt-run-lookback" min="0.1" max="720" step="any" required></div>
+        <div class="form-field"><label for="rt-run-max-docs">Max documents</label><input type="number" id="rt-run-max-docs" min="1000" max="5000000" step="1000" required></div>
+        <div class="form-error" id="rt-run-error"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close="rt-run-modal">Cancel</button><button type="submit" class="btn btn-primary">Start retrain</button></div>
+      </form>
+    </div>
   </div>
 
   <div class="modal-overlay" id="document-modal">
@@ -1047,6 +1115,7 @@
       overrideRevision: null,
       assignmentGroup: null,
       undocumentedGroupsOnly: false,
+      singleGroupsOnly: false,
       groups: [],
       groupSort: 'error_code',
       groupOrder: 'asc',
@@ -1185,6 +1254,7 @@
         if (!availableGroupIds.has(groupId)) state.expandedGroups.delete(groupId);
       });
       if (state.undocumentedGroupsOnly) items = items.filter(group => !group.documented);
+      if (state.singleGroupsOnly) items = items.filter(group => group.singleton);
       if (!items.length) {
         $groupsTbody.innerHTML = '<tr><td colspan="7" class="empty-state">No groups found.</td></tr>';
         return;
@@ -1224,7 +1294,7 @@
         `).join('') : '<div class="group-member"><span class="sync-status">No templates recorded.</span></div>';
         return `
           <tr data-group-id="${escapeHtml(g.group_id)}">
-            <td><div class="group-cell"><span class="group-id">${escapeHtml(g.group_id || '—')}</span><button type="button" class="group-expand${expanded ? ' expanded' : ''}" aria-expanded="${expanded}" aria-controls="${memberRowId}" title="${expanded ? 'Hide' : 'Show'} group templates"><span class="group-expand-icon" aria-hidden="true">&#9656;</span><span>${templateLabel}</span></button></div></td>
+            <td><div class="group-cell"><span class="group-id">${escapeHtml(g.group_id || '—')}</span>${g.singleton ? ' <span class="badge badge-unknown" title="Only one template: HDBSCAN found no similar templates for it">single</span>' : ''}<button type="button" class="group-expand${expanded ? ' expanded' : ''}" aria-expanded="${expanded}" aria-controls="${memberRowId}" title="${expanded ? 'Hide' : 'Show'} group templates"><span class="group-expand-icon" aria-hidden="true">&#9656;</span><span>${templateLabel}</span></button></div></td>
             <td>${escapeHtml(g.service || 'unknown')}</td>
             <td><div class="tmpl-text" title="${escapeHtml(g.representative_template || '')}">${highlightWildcards(escapeHtml(g.representative_template || '—'))}</div></td>
             <td>${g.documentation_id ? `<span class="tmpl-id">${escapeHtml(errorCode)}</span>` : '<span class="badge badge-unknown">Undocumented</span>'}</td>
@@ -2871,6 +2941,10 @@
       state.undocumentedGroupsOnly = event.target.checked;
       loadData();
     });
+    document.getElementById('single-groups-only').addEventListener('change', event => {
+      state.singleGroupsOnly = event.target.checked;
+      loadData();
+    });
     document.querySelectorAll('#alert-status-toggle .toggle-btn').forEach(button => {
       button.addEventListener('click', () => {
         document.querySelectorAll('#alert-status-toggle .toggle-btn').forEach(item => item.classList.remove('active'));
@@ -2923,6 +2997,204 @@
       }
     });
 
+    // ── Retrain schedule ──
+    const rt = {data: null, dirty: false};
+    const RT_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const BROWSER_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const $rtStatus = document.getElementById('rt-status');
+    const $rtAction = document.getElementById('rt-action-status');
+    document.getElementById('rt-days').innerHTML = RT_DAYS.map((day, i) =>
+      `<button type="button" class="toggle-btn" data-rt-day="${i}" aria-pressed="false">${day}</button>`).join('');
+    if (Intl.supportedValuesOf) {
+      document.getElementById('rt-timezones').innerHTML = Intl.supportedValuesOf('timeZone')
+        .map(zone => `<option value="${escapeHtml(zone)}">`).join('');
+    }
+
+    async function fetchRetrain() {
+      const resp = await fetch('/api/retrain');
+      if (!resp.ok) throw new Error('Unable to load retrain schedule');
+      return resp.json();
+    }
+
+    function rtSetDays(days) {
+      document.querySelectorAll('[data-rt-day]').forEach(button => {
+        const on = days.includes(Number(button.dataset.rtDay));
+        button.classList.toggle('active', on);
+        button.setAttribute('aria-pressed', String(on));
+      });
+    }
+
+    function rtSetTrainingData(lookbackHours, maxDocs) {
+      const days = lookbackHours >= 24 && lookbackHours % 24 === 0;
+      document.getElementById('rt-lookback').value = days ? lookbackHours / 24 : lookbackHours;
+      document.getElementById('rt-lookback-unit').value = days ? 'days' : 'hours';
+      document.getElementById('rt-max-docs').value = maxDocs;
+    }
+
+    function rtFillForm(data) {
+      const s = data.schedule;
+      document.getElementById('rt-enabled').checked = s.enabled;
+      document.getElementById('rt-time').value = s.time;
+      // Never saved: offer the browser's timezone instead of the UTC default.
+      document.getElementById('rt-timezone').value = data.saved ? s.timezone : BROWSER_ZONE;
+      rtSetDays(s.weekdays);
+      rtSetTrainingData(s.lookback_hours, s.max_docs);
+    }
+
+    function rtReadForm() {
+      const lookback = Number(document.getElementById('rt-lookback').value);
+      const unit = document.getElementById('rt-lookback-unit').value;
+      return {
+        enabled: document.getElementById('rt-enabled').checked,
+        time: document.getElementById('rt-time').value,
+        timezone: document.getElementById('rt-timezone').value.trim(),
+        weekdays: [...document.querySelectorAll('[data-rt-day].active')].map(b => Number(b.dataset.rtDay)),
+        lookback_hours: unit === 'days' ? lookback * 24 : lookback,
+        max_docs: Number(document.getElementById('rt-max-docs').value),
+      };
+    }
+
+    function rtMarkDirty() {
+      rt.dirty = true;
+      document.getElementById('rt-save-btn').disabled = false;
+      document.getElementById('rt-discard-btn').disabled = false;
+    }
+
+    function rtWhen(ts, zone) {
+      if (!ts) return '—';
+      const date = new Date(ts * 1000);
+      const opts = {dateStyle: 'medium', timeStyle: 'short'};
+      let text;
+      try { text = `${date.toLocaleString(undefined, {...opts, timeZone: zone})} (${zone})`; }
+      catch (err) { text = date.toLocaleString(undefined, opts); }
+      return zone && zone !== BROWSER_ZONE ? `${text} · ${date.toLocaleString(undefined, opts)} your time` : text;
+    }
+
+    const rtDuration = seconds => {
+      const s = Math.max(0, Math.round(seconds || 0));
+      return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m`
+        : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+    };
+
+    function rtStatusText(data) {
+      const st = data.status || {};
+      if (data.engine_state === 'retraining') {
+        return `Retraining (${st.trigger || 'manual'}) for ${rtDuration(Date.now() / 1000 - st.started_at)}… The engine restarts when it finishes.`;
+      }
+      const parts = [];
+      if (data.engine_state === 'engine_unavailable') parts.push('The engine is not running (no recent heartbeat).');
+      if (data.run_pending) parts.push('Retrain requested; waiting for the engine to start it…');
+      const last = (st.history || [])[st.history ? st.history.length - 1 : 0];
+      if (last && last.result === 'missed') parts.push(`The retrain scheduled for ${rtWhen(last.started_at, data.schedule.timezone)} was missed: the engine was not running.`);
+      else if (st.state === 'failed') parts.push(`Last retrain failed: ${st.error || 'unknown error'}${last && last.rolled_back && !/restored/.test(st.error || '') ? ' (previous version restored)' : ''}.`);
+      else if (st.state === 'succeeded') parts.push(`Last retrain succeeded ${rtWhen(st.finished_at, data.schedule.timezone)}.`);
+      parts.push(data.schedule.enabled ? `Next retrain: ${rtWhen(data.next_run_at, data.schedule.timezone)}.` : 'Automatic retrain is off.');
+      return parts.join(' ');
+    }
+
+    function renderRetrain(data) {
+      rt.data = data;
+      if (!rt.dirty) rtFillForm(data);
+      const busy = data.engine_state === 'retraining' || data.run_pending;
+      $rtStatus.className = 'sync-status' + ((data.status || {}).state === 'failed' || data.engine_state === 'engine_unavailable' ? ' llm-status-error' : '');
+      $rtStatus.textContent = (rt.dirty ? 'Unsaved changes. ' : '') + rtStatusText(data);
+      const runButton = document.getElementById('rt-run-btn');
+      runButton.disabled = busy;
+      runButton.title = busy ? 'A retrain is already running or waiting to start' : '';
+      const history = [...((data.status || {}).history || [])].reverse();
+      const badge = result => ({succeeded: 'badge-known', missed: 'badge-warn'})[result] || 'badge-red';
+      const resultLabel = run => run.result === 'failed'
+        ? `${run.interrupted ? 'interrupted' : 'failed'}${run.rolled_back ? ' · rolled back' : ''}`
+        : run.result;
+      document.getElementById('rt-history-tbody').innerHTML = history.length ? history.map(run => {
+        const l = run.lineage;
+        const ids = l ? `+${l.added_templates} templates into ${l.grown_groups} groups · ${l.new_groups} new groups` : '—';
+        return `<tr>
+          <td>${escapeHtml(rtWhen(run.started_at, data.schedule.timezone))}</td>
+          <td>${escapeHtml(run.trigger === 'manual' ? 'Manual' : 'Schedule')}</td>
+          <td>${escapeHtml(String(run.lookback_hours))} h</td>
+          <td>${formatCount(run.max_docs || 0)}</td>
+          <td>${escapeHtml(rtDuration(run.duration_seconds))}</td>
+          <td><span class="badge ${badge(run.result)}"${run.error ? ` title="${escapeHtml(run.error)}"` : ''}>${escapeHtml(resultLabel(run))}</span></td>
+          <td>${run.templates != null ? `${formatCount(run.templates)} / ${formatCount(run.groups)}` : '—'}</td>
+          <td><span class="ins-meta">${escapeHtml(ids)}</span></td>
+        </tr>`;
+      }).join('') : '<tr><td colspan="8" class="empty-state">No retrain has run yet.</td></tr>';
+    }
+
+    document.getElementById('rt-form').addEventListener('input', rtMarkDirty);
+    document.getElementById('rt-days').addEventListener('click', event => {
+      const button = event.target.closest('[data-rt-day]');
+      if (!button) return;
+      const on = !button.classList.contains('active');
+      button.classList.toggle('active', on);
+      button.setAttribute('aria-pressed', String(on));
+      rtMarkDirty();
+    });
+    document.getElementById('rt-every-day').addEventListener('click', () => { rtSetDays([0, 1, 2, 3, 4, 5, 6]); rtMarkDirty(); });
+    document.getElementById('rt-weekdays').addEventListener('click', () => { rtSetDays([0, 1, 2, 3, 4]); rtMarkDirty(); });
+    document.getElementById('rt-defaults').addEventListener('click', event => {
+      event.preventDefault();
+      if (!rt.data) return;
+      rtSetTrainingData(rt.data.defaults.lookback_hours, rt.data.defaults.max_docs);
+      rtMarkDirty();
+    });
+    document.getElementById('rt-discard-btn').addEventListener('click', () => {
+      rt.dirty = false;
+      $rtAction.textContent = '';
+      document.getElementById('rt-save-btn').disabled = true;
+      document.getElementById('rt-discard-btn').disabled = true;
+      if (rt.data) renderRetrain(rt.data);
+    });
+    document.getElementById('rt-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const schedule = rtReadForm();
+      if (!schedule.weekdays.length) { $rtAction.textContent = 'Choose at least one day.'; return; }
+      const resp = await fetch('/api/retrain', {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({schedule, revision: rt.data && rt.data.revision}),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        // 409: keep the draft; Discard loads what was saved elsewhere.
+        $rtAction.textContent = resp.status === 409
+          ? 'The schedule was changed elsewhere. Discard to load it, or save again to overwrite.'
+          : (body.message || 'Unable to save the schedule');
+        if (resp.status === 409 && rt.data) rt.data.revision = body.current_revision;
+        return;
+      }
+      $rtAction.textContent = '';
+      rt.dirty = false;
+      document.getElementById('rt-save-btn').disabled = true;
+      document.getElementById('rt-discard-btn').disabled = true;
+      renderRetrain(body);
+    });
+    document.getElementById('rt-run-btn').addEventListener('click', () => {
+      if (!rt.data) return;
+      const s = rt.data.schedule;
+      document.getElementById('rt-run-lookback').value = s.lookback_hours;
+      document.getElementById('rt-run-max-docs').value = s.max_docs;
+      document.getElementById('rt-run-error').textContent = '';
+      document.getElementById('rt-run-modal').classList.add('open');
+    });
+    document.getElementById('rt-run-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const resp = await fetch('/api/retrain/run', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          lookback_hours: Number(document.getElementById('rt-run-lookback').value),
+          max_docs: Number(document.getElementById('rt-run-max-docs').value),
+        }),
+      });
+      const body = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        document.getElementById('rt-run-error').textContent = body.message || 'Unable to start the retrain';
+        return;
+      }
+      document.getElementById('rt-run-modal').classList.remove('open');
+      renderRetrain(body);
+    });
+
     const viewTitles = {
       templates: 'Templates',
       groups: 'Semantic Groups',
@@ -2932,6 +3204,7 @@
       incidents: 'Incident history',
       llm: 'LLM profiles',
       sources: 'Data sources',
+      retrain: 'Retrain',
     };
     const viewOrder = Object.keys(viewTitles);
 
@@ -2966,7 +3239,7 @@
         state.alertRefreshTimer = null;
       }
       loadData();
-      if (view === 'alerting' || view === 'sources') state.alertRefreshTimer = setInterval(loadData, 2000);
+      if (view === 'alerting' || view === 'sources' || view === 'retrain') state.alertRefreshTimer = setInterval(loadData, 2000);
       if (view === 'llm' || view === 'insights' || view === 'incidents') state.alertRefreshTimer = setInterval(loadData, 3000);
     }
 
@@ -3036,6 +3309,8 @@
           renderLlmProfiles(await fetchLlmProfiles());
         } else if (state.activeView === 'sources') {
           renderSources(await fetchSources());
+        } else if (state.activeView === 'retrain') {
+          renderRetrain(await fetchRetrain());
         } else {
           renderDocumentation(await fetchDocumentation());
         }

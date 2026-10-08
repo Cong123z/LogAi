@@ -94,6 +94,7 @@ training:
   max_docs: 500000
   lookback_seconds: 604800
   dedup_buffer_size: 10000
+  template_ttl_days: 30
 
 storage:
   base_dir: "data"
@@ -119,6 +120,9 @@ storage:
   template_triage_file: "template_triage.json"
   es_index_selection_file: "es_index_selection.json"
   es_index_status_file: "es_index_status.json"
+  group_lineage_file: "group_lineage.json"
+  retrain_schedule_file: "retrain_schedule.json"
+  retrain_status_file: "retrain_status.json"
 
 # LLM incident classification on ALERTING. Disabled while endpoint is empty;
 # set LOGAI_LLM_ENDPOINT (OpenAI-compatible /chat/completions URL).

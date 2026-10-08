@@ -116,6 +116,18 @@ kubectl logs -f job/logai-training
 
 Once completed, the trained models and template registries will be saved directly into `logai-data-pvc`.
 
+**Retraining later:** use the web UI's **Retrain** page (`#retrain`) to schedule retrains or start one now; the engine pauses, trains in its own process and restarts itself inside the running pod (readiness stays green via the retrain heartbeat). Do not run the training Job while the engine runs. Manual fallback: stop the realtime pod first. It writes the registries continuously and only reads them at startup.
+
+```bash
+kubectl scale deployment/logai --replicas=0
+kubectl delete job logai-training --ignore-not-found
+kubectl apply -f k8s/training-job.yaml
+kubectl wait --for=condition=complete job/logai-training --timeout=2h
+kubectl scale deployment/logai --replicas=1
+```
+
+Existing groups never change on a retrain: new templates are only added to them or form new groups (recorded in `group_lineage.json`). A failed or interrupted retrain is rolled back to the previous artifacts. Logs written while the pod is down are read from the checkpoint after restart; watch `time() - logai_last_processed_event_timestamp_seconds` fall back to near zero.
+
 ---
 
 ### Step 4: Deploy Realtime Pipeline & Web UI

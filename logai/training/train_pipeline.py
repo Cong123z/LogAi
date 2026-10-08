@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -23,6 +24,7 @@ from logai.docmatch.refresh_worker import DocumentationRefreshWorker
 from logai.clustering.hdbscan_cluster import GroupClusterer, NOISE_LABEL
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
+from logai.grouping import PENDING_GROUP_ID
 from logai.grouping.assignment_manager import GroupAssignmentManager
 from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomalyModels
 from logai.models import (
@@ -34,16 +36,17 @@ from logai.models import (
     TemplateState,
 )
 from logai.parsing.drain3_parser import Drain3Parser, display_template
-from logai.storage.base import ModelStore
+from logai.storage.base import JSONStore, ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import LocalTrainingDedup
-from logai.storage.documentation import DocumentationCorpusStore
+from logai.storage.documentation import DocumentationCorpusStore, DocumentationStoreError
 from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
 from logai.storage.index_selection import IndexSelectionStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 from logai.storage.training_event_index import TrainingEventIndex
 
 logger = logging.getLogger("logai.training")
+_GROUP_NUMBER_RE = re.compile(r"^G(\d+)$")
 
 
 class TrainingPipeline:
@@ -74,6 +77,11 @@ class TrainingPipeline:
         self.event_index = TrainingEventIndex(
             f"{config.storage.base_dir}/{config.storage.training_event_index_file}"
         )
+        self._lineage_store = JSONStore(
+            f"{config.storage.base_dir}/{config.storage.group_lineage_file}"
+        )
+        self._frozen: Dict[str, str] = {}
+        self._lineage: Optional[Dict[str, Any]] = None
 
     def run(
         self,
@@ -191,7 +199,7 @@ class TrainingPipeline:
             "from %d templates; overrides applied=%d unresolved=%d; %d templates without a group",
             time.time() - t_phase5,
             len(groups),
-            sum(1 for group_id in groups if group_id.startswith("G_SINGLE_")),
+            sum(1 for group in groups.values() if len(group.template_ids) == 1),
             len(template_states),
             sum(1 for result in results if result.get("state") == "applied"),
             sum(1 for result in results if result.get("state") == "unresolved"),
@@ -207,6 +215,7 @@ class TrainingPipeline:
         t_phase8 = time.time()
         self.template_registry.flush()
         self.group_registry.replace_all(groups, centroids)
+        self._publish_lineage()
         logger.info(
             "Phase 8 complete in %.2fs: Published %d templates, %d groups, %d centroids",
             time.time() - t_phase8,
@@ -237,6 +246,12 @@ class TrainingPipeline:
             len(self.template_registry.all_templates()),
             len(self.group_registry.all_groups()),
         )
+
+    def _publish_lineage(self) -> None:
+        """Record which groups grew and which were created (after the
+        registries are published, so a failed run never reports one)."""
+        if self._lineage is not None:
+            self._lineage_store.replace_all(self._lineage)
 
     def _write_training_grouping_status(self, resolution: Any) -> None:
         snapshot = self._active_grouping_snapshot
@@ -426,9 +441,21 @@ class TrainingPipeline:
         )
 
     def _rebuild_template_registry(self) -> None:
-        """Rebuild template aggregates from the durable event index."""
-        logger.info("Phase 2: Rebuilding template registry from event index...")
+        """Merge the window's template aggregates into the existing registry.
+
+        Templates seen in the window take its stats; older templates are kept
+        with their embeddings. Group membership is frozen: a template that has
+        a group keeps it and is never pruned; only an ungrouped template is
+        dropped after ``training.template_ttl_days`` unseen.
+        """
+        logger.info("Phase 2: Merging template registry with event index...")
         t_phase2 = time.time()
+        existing = {s.template_id: s for s in self.template_registry.all_templates()}
+        self._frozen = {
+            s.template_id: s.group_id
+            for s in existing.values()
+            if s.group_id and s.group_id != PENDING_GROUP_ID
+        }
         states: Dict[str, TemplateState] = {}
         seen_event_ids: Set[str] = set()
         for record in self.event_index.records():
@@ -472,12 +499,62 @@ class TrainingPipeline:
                 state.level, LEVEL_RANK[DEFAULT_LEVEL]
             ):
                 state.level = event_level
+        seen_in_window = len(states)
+
+        # Event time, not wall clock: a replayed historical window must not
+        # look like every template went silent long ago.
+        newest = max(
+            [s.last_seen for s in states.values()] + [s.last_seen for s in existing.values()],
+            default=time.time(),
+        )
+        cutoff = newest - float(self.config.training.template_ttl_days) * 86400
+        protected = self._override_template_ids()
+        pruned = 0
+        for template_id, old in existing.items():
+            state = states.get(template_id)
+            if state is not None:
+                state.group_id = old.group_id
+                state.first_seen = min(state.first_seen, old.first_seen)
+                if LEVEL_RANK.get(old.level, 0) > LEVEL_RANK.get(state.level, 0):
+                    state.level = old.level
+                continue
+            if (
+                template_id not in self._frozen
+                and old.last_seen < cutoff
+                and template_id not in protected
+            ):
+                pruned += 1
+                continue
+            old.template_text = self._generalized_template_text(template_id) or old.template_text
+            states[template_id] = old
+        # Text changed (Drain3 generalised it further) -> its embedding is stale.
+        for template_id, state in states.items():
+            old = existing.get(template_id)
+            if old is not None and old.template_text != state.template_text:
+                self.template_registry.delete(template_id, flush=False)
         self.template_registry.replace_all(list(states.values()))
         logger.info(
-            "Phase 2 complete in %.2fs: Rebuilt %d unique templates",
+            "Phase 2 complete in %.2fs: %d templates (%d seen in window, %d kept from "
+            "previous runs, %d pruned after %s days unseen)",
             time.time() - t_phase2,
             len(states),
+            seen_in_window,
+            len(states) - seen_in_window,
+            pruned,
+            self.config.training.template_ttl_days,
         )
+
+    def _override_template_ids(self) -> Set[str]:
+        """Templates a grouping override names (as source or anchor): never pruned."""
+        try:
+            assignments = self.grouping_store.load_overrides().get("assignments", {})
+        except GroupingStoreError:
+            return set()  # the Phase 5 load reports the invalid file
+        ids = set(assignments)
+        for value in assignments.values():
+            if isinstance(value, dict) and value.get("target_kind") == "anchor":
+                ids.add(str(value.get("target_id")))
+        return ids
 
     def _generalized_template_text(self, template_id: str) -> Optional[str]:
         """Return Drain3's current generalised template for ``template_id``.
@@ -499,48 +576,93 @@ class TrainingPipeline:
 
     def _embed_templates(self) -> None:
         templates = self.template_registry.all_templates()
-        logger.info("Phase 3: Generating embeddings for %d templates...", len(templates))
+        cached = self.template_registry.all_embeddings()
+        todo = [t for t in templates if t.template_id not in cached]
+        logger.info(
+            "Phase 3: Generating embeddings for %d new/changed templates (%d reused)...",
+            len(todo),
+            len(templates) - len(todo),
+        )
         t_phase3 = time.time()
-        ids = [t.template_id for t in templates]
-        texts = [t.template_text for t in templates]
-        embeddings = self.embedder.embed(texts)
-        for tid, emb in zip(ids, embeddings):
-            self.template_registry.set_embedding(tid, emb, flush=False)
+        if todo:
+            embeddings = self.embedder.embed([t.template_text for t in todo])
+            for state, emb in zip(todo, embeddings):
+                self.template_registry.set_embedding(state.template_id, emb, flush=False)
         self.template_registry.flush()
         logger.info(
             "Phase 3 complete in %.2fs: Generated embeddings for %d templates",
             time.time() - t_phase3,
-            len(templates),
+            len(todo),
         )
 
     def _cluster_templates(self) -> Dict[str, str]:
+        """Existing groups are frozen: their templates and IDs never change.
+        Only templates without a group are placed: into the nearest existing
+        group when similar enough (the same rule realtime uses), otherwise
+        HDBSCAN over just those templates forms new groups with new IDs."""
         embeddings_map = self.template_registry.all_embeddings()
-        ids = list(embeddings_map.keys())
-        if not ids:
-            logger.info("Phase 4: No template embeddings to cluster")
-            return {}
-        logger.info("Phase 4: Clustering %d templates using HDBSCAN...", len(ids))
-        t_phase4 = time.time()
-        matrix = np.array([embeddings_map[i] for i in ids])
-        raw_labels = self.clusterer.cluster(ids, matrix)
-
-        template_to_group: Dict[str, str] = {}
-        next_singleton = 0
-        for tid, label in raw_labels.items():
-            if label == NOISE_LABEL:
-                group_id = f"G_SINGLE_{next_singleton:04d}"
-                next_singleton += 1
-            else:
-                group_id = f"G{label:04d}"
-            template_to_group[tid] = group_id
+        template_to_group = {
+            tid: gid for tid, gid in self._frozen.items() if tid in embeddings_map
+        }
+        candidates = [tid for tid in embeddings_map if tid not in template_to_group]
         logger.info(
-            "Phase 4 complete in %.2fs: Clustered %d templates into %d groups "
-            "(%d HDBSCAN clusters + %d noise singletons)",
+            "Phase 4: %d templates keep their group; placing %d without a group...",
+            len(template_to_group), len(candidates),
+        )
+        t_phase4 = time.time()
+
+        added: Dict[str, List[str]] = defaultdict(list)
+        centroids = self.group_registry.all_centroids()
+        rest: List[str] = []
+        for tid in candidates:
+            gid, _similarity = self.clusterer.assign_to_nearest_group(
+                embeddings_map[tid], centroids
+            )
+            if gid is None:
+                rest.append(tid)
+            else:
+                template_to_group[tid] = gid
+                added[gid].append(tid)
+
+        new: Dict[str, List[str]] = {}
+        lineage = self._lineage_store.all()
+        try:
+            overrides = self.documentation_store.load_overrides().get("overrides", {})
+        except DocumentationStoreError:
+            overrides = {}  # only used to avoid ID collisions
+        next_number = next_group_number(
+            [*template_to_group.values(), *centroids, *overrides],
+            floor=int(lineage.get("next_group_number") or 1),
+        )
+        if rest:
+            raw_labels = self.clusterer.cluster(
+                rest, np.array([embeddings_map[tid] for tid in rest])
+            )
+            # HDBSCAN labels only collect members; noise templates become
+            # single-template groups. Numbered by smallest member for stable IDs.
+            by_label: Dict[Any, List[str]] = defaultdict(list)
+            for tid, label in raw_labels.items():
+                by_label[("noise", tid) if label == NOISE_LABEL else label].append(tid)
+            for members in sorted(by_label.values(), key=min):
+                gid = f"G{next_number:04d}"
+                next_number += 1
+                new[gid] = sorted(members)
+                template_to_group.update({tid: gid for tid in members})
+
+        self._lineage = {
+            "trained_at": time.time(),
+            "next_group_number": next_number,
+            "added": {gid: sorted(tids) for gid, tids in sorted(added.items())},
+            "new": new,
+        }
+        logger.info(
+            "Phase 4 complete in %.2fs: %d templates added to %d existing groups; "
+            "%d new groups from %d templates",
             time.time() - t_phase4,
-            len(ids),
-            len(set(template_to_group.values())),
-            len(set(template_to_group.values())) - next_singleton,
-            next_singleton,
+            sum(len(t) for t in added.values()),
+            len(added),
+            len(new),
+            len(rest),
         )
         return template_to_group
 
@@ -643,6 +765,13 @@ class TrainingPipeline:
     def _flush_all(self) -> None:
         self.template_registry.flush()
         self.group_registry.flush()
+
+
+def next_group_number(ids: Iterable[str], floor: int = 1) -> int:
+    """First counter value above every `G<n>` id seen; IDs are never reused.
+    Manual (`G_MANUAL_*`) and legacy (`G_SINGLE_*`) ids are ignored."""
+    numbers = [int(m.group(1)) for gid in ids if (m := _GROUP_NUMBER_RE.match(str(gid)))]
+    return max([floor - 1, *numbers]) + 1
 
 
 def _format_ts(ts: float) -> str:

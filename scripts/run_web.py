@@ -7,6 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from logai.storage.retrain_schedule import RetrainScheduleStore
 from logai.web.app import create_app
 from logai.config import load_config
 
@@ -75,6 +76,13 @@ def main():
         index_status_path=_storage_path(
             web_base, config.storage.es_index_status_file
         ),
+        retrain_schedule_path=_storage_path(
+            web_base, config.storage.retrain_schedule_file
+        ),
+        retrain_status_path=_storage_path(
+            web_base, config.storage.retrain_status_file
+        ),
+        retrain_defaults=RetrainScheduleStore.from_config(config).defaults,
     )
     print(f"Template Explorer running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

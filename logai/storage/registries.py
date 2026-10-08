@@ -131,10 +131,17 @@ class TemplateRegistry:
                 self._embeddings_dirty = False
 
     def replace_all(self, states: List[TemplateState]) -> None:
-        """Persist a consistent template snapshot for a training run."""
+        """Persist a consistent template snapshot for a training run.
+
+        Embeddings of templates that stay are kept; the caller drops the ones
+        whose text changed.
+        """
         with self._lock:
             self._counts_by_service = {}
-            self._embedding_cache = {}
+            keep = {state.template_id for state in states}
+            self._embedding_cache = {
+                tid: emb for tid, emb in self._embedding_cache.items() if tid in keep
+            }
             self._embeddings_dirty = True
             self._mutation_generation += 1
             self._meta.replace_all({})

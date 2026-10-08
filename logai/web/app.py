@@ -23,7 +23,14 @@ from logai.incident.requests import (
     load_requests,
     request_key,
 )
+from logai.config import AppConfig
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
+from logai.storage.retrain_schedule import (
+    RetrainScheduleConflict,
+    RetrainScheduleError,
+    RetrainScheduleStore,
+    next_run_at,
+)
 from logai.storage.documentation import (
     DocumentInUse,
     DocumentationCorpusStore,
@@ -70,6 +77,9 @@ def create_app(
     template_triage_path: str | None = None,
     index_selection_path: str | None = None,
     index_status_path: str | None = None,
+    retrain_schedule_path: str | None = None,
+    retrain_status_path: str | None = None,
+    retrain_defaults: Dict[str, Any] | None = None,
 ) -> Flask:
     app = Flask(__name__, static_folder=None)
     base = Path(data_dir)
@@ -95,6 +105,12 @@ def create_app(
     )
     index_status_file = Path(index_status_path or base / "es_index_status.json")
     analysis_requests_file = Path(analysis_requests_path or base / "analysis_requests.json")
+    retrain_defaults = retrain_defaults or RetrainScheduleStore.from_config(AppConfig()).defaults
+    retrain = RetrainScheduleStore(
+        retrain_schedule_path or base / "retrain_schedule.json",
+        retrain_status_path or base / "retrain_status.json",
+        retrain_defaults,
+    )
 
     def _json_body() -> Optional[Dict[str, Any]]:
         payload = request.get_json(silent=True)
@@ -551,6 +567,9 @@ def create_app(
                 isinstance(override, dict)
                 and override.get("documentation_id") not in document_ids
             )
+            # Derived, not stored: realtime can add a template to a group
+            # without rebuilding it, so a stored flag would go stale.
+            item["singleton"] = len(item.get("template_ids", [])) == 1
             if service and service not in str(item.get("service", "")).lower():
                 continue
             if documented in ("true", "false") and bool(item.get("documented", False)) != (documented == "true"):
@@ -1327,6 +1346,72 @@ def create_app(
         except IndexSelectionError as exc:
             return jsonify({"error": "invalid_request", "message": str(exc)}), 400
         return jsonify({"state": "pending", **saved}), 202
+
+    def _retrain_view() -> Dict[str, Any]:
+        loaded = retrain.load()
+        status = retrain.load_status()
+        request_at = float((loaded["run_request"] or {}).get("requested_at") or 0)
+        running = status.get("state") == "running" and time.time() - float(
+            status.get("heartbeat_at") or 0
+        ) <= grouping_stale_seconds
+        if running:
+            engine_state = "retraining"
+        elif not _llm_engine_state()["alive"]:
+            engine_state = "engine_unavailable"
+        else:
+            engine_state = "running"
+        return {
+            "schedule": loaded["schedule"],
+            "saved": loaded["saved"],
+            "revision": loaded["revision"],
+            "status": status,
+            "run_pending": request_at > float(status.get("handled_request_at") or 0),
+            # The engine writes next_run_at; until it does, show the expected
+            # time (it skips runs missed while it was down).
+            "next_run_at": status.get("next_run_at")
+            if status.get("next_run_at") is not None
+            else next_run_at(loaded["schedule"], time.time()),
+            "engine_state": engine_state,
+            "defaults": {
+                "lookback_hours": retrain_defaults["lookback_hours"],
+                "max_docs": retrain_defaults["max_docs"],
+            },
+        }
+
+    @app.route("/api/retrain", methods=["GET"])
+    def get_retrain():
+        return jsonify(_retrain_view())
+
+    @app.route("/api/retrain", methods=["PUT"])
+    def set_retrain():
+        payload = _json_body()
+        if payload is None or "schedule" not in payload:
+            return jsonify({"error": "invalid_request", "message": "schedule is required"}), 400
+        try:
+            retrain.save(payload["schedule"], payload.get("revision"))
+        except RetrainScheduleConflict as exc:
+            return jsonify({
+                "error": "revision_conflict", "message": str(exc),
+                "current_revision": exc.current_revision,
+            }), 409
+        except RetrainScheduleError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        return jsonify(_retrain_view())
+
+    @app.route("/api/retrain/run", methods=["POST"])
+    def run_retrain():
+        payload = _json_body() or {}
+        view = _retrain_view()
+        if view["engine_state"] == "retraining" or view["run_pending"]:
+            return jsonify({
+                "error": "retrain_in_progress",
+                "message": "A retrain is already running or waiting to start",
+            }), 409
+        try:
+            retrain.request_run(payload.get("lookback_hours"), payload.get("max_docs"))
+        except RetrainScheduleError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        return jsonify(_retrain_view()), 202
 
     @app.route("/")
     def index():

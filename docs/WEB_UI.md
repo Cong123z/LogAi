@@ -148,6 +148,28 @@ engine…` until the engine has applied the saved revision. Until the first save
 the engine reads `elasticsearch.index` (`LOGAI_ES_INDEX`) as before. Two browsers
 saving from the same snapshot get `409`; the page keeps the unsaved changes.
 
+## Retrain
+
+Set when the engine retrains: **Retrain automatically**, a time, the days
+(chips, or **Every day** / **Mon–Fri**) and a timezone (the browser's zone until
+the first save). **Training data** sets each run's **Lookback** (hours or days,
+at most 720 h) and **Max documents** (1,000–5,000,000); if the window holds more
+logs than that, the newest are left out. **Use defaults** restores
+`training.lookback_seconds` / `training.max_docs`.
+
+At the scheduled time the engine pauses polling, flushes, stops its background
+writers, trains in its own process on the saved index selection, records the
+result, and re-executes itself to load the new artifacts. Logs written meanwhile
+are read from the checkpoint after the restart. Existing groups never change:
+new templates are only added to them or form new groups. If training fails, or
+the engine stops while training, the artifacts from before the retrain are
+restored and the run shows as `failed · rolled back` (or `interrupted`). A run
+missed while the engine was down is skipped and listed as `missed`. **Retrain now** asks for one run, with its own lookback and
+max documents. The status line shows the next run (in the schedule's zone and
+your local time), a running retrain with its elapsed time, or the last error;
+**History** lists the last 20 runs with the templates added to existing
+groups and the new groups, from `group_lineage.json`. Two browsers saving from the same snapshot get `409`.
+
 ## HTTP API
 
 | Method and path | Input | Output |
@@ -167,6 +189,9 @@ saving from the same snapshot get `409`; the page keeps the unsaved changes.
 | `DELETE /api/groups/<id>/documentation` | `override_revision`, `force` | Confirmation-required 409 or pending clear suppression and new override revision |
 | `GET /api/es-indices` | None | Selection (`entries`, `revision`, `source`), engine `state`, `resolved`, per-index progress, `available` indices |
 | `PUT /api/es-indices` | `patterns`, `revision` (`null` before the first save) | Saved selection (`202`); `409` on a stale revision, `400` on an invalid name |
+| `GET /api/retrain` | None | `schedule`, `saved`, `revision`, engine `status` (state, history), `run_pending`, `next_run_at`, `engine_state` (`running` / `retraining` / `engine_unavailable`), `defaults` |
+| `PUT /api/retrain` | `schedule` (`enabled`, `time` HH:MM, `weekdays` 0=Mon…6, `timezone`, `lookback_hours`, `max_docs`), `revision` | Updated view; `400` invalid, `409` stale revision |
+| `POST /api/retrain/run` | Optional `lookback_hours`, `max_docs` (default: the schedule's) | `202`; `400` invalid; `409` while a retrain runs or waits to start |
 
 Mutation errors use JSON with an `error` and `message`. Important status codes
 are `400` for invalid input, `404` for an unknown document/group, `409` for a
@@ -214,6 +239,10 @@ volume as the realtime engine.
 | `anomaly_state.json` | Realtime alert state machine | Latest state for each `(service, group_id)` alert cell |
 | `es_index_selection.json` | Web UI/API | Selected Elasticsearch indices/patterns and when each was added |
 | `es_index_status.json` | Realtime engine | Available indices, pattern resolution, per-index progress, applied revision |
+| `retrain_schedule.json` | Web UI/API | Retrain schedule and "retrain now" requests |
+| `retrain_status.json` | Realtime engine | Retrain state, heartbeat, next run, last 20 runs |
+| `group_lineage.json` | Training | Templates added to existing groups and new groups at the last retrain |
+| `retrain_backup/` | Realtime engine | Artifacts from just before the last retrain, restored if it fails or is interrupted |
 
 Corpus, override, and status writes use a temporary file followed by
 `os.replace`. The design assumes one realtime writer and one shared data volume;
