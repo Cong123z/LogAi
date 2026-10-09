@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+
+from logai.storage.base import atomic_write_json
 
 
 SCHEMA_VERSION = 1
@@ -50,6 +51,51 @@ def grouping_revision(assignments: Dict[str, Any], manual_groups: Dict[str, Any]
     return hashlib.sha256(encoded).hexdigest()
 
 
+def first_nonretryable(results: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return next(
+        (
+            value for value in results.values()
+            if value.get("state") == "unresolved" and not value.get("retryable", False)
+        ),
+        None,
+    )
+
+
+def derive_grouping_state(results: Dict[str, Dict[str, Any]]) -> str:
+    if first_nonretryable(results) is not None:
+        return "failed"
+    applied = sum(value.get("state") == "applied" for value in results.values())
+    unresolved = sum(value.get("state") == "unresolved" for value in results.values())
+    if unresolved and applied:
+        return "partial"
+    if unresolved:
+        return "pending"
+    return "applied"
+
+
+def failed_status(
+    reason_code: str,
+    message: str,
+    *,
+    attempted_revision: Optional[str],
+    previous: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """A non-retryable 'failed' status that keeps the last applied revision."""
+    previous = previous or {}
+    now = time.time()
+    return {
+        "applied_revision": previous.get("applied_revision"),
+        "attempted_revision": attempted_revision,
+        "last_attempt_at": now,
+        "last_applied_at": previous.get("last_applied_at"),
+        "last_heartbeat_at": now,
+        "state": "failed",
+        "error": {"reason_code": reason_code, "message": message[:500], "retryable": False},
+        "results": {},
+        "unresolved": {},
+    }
+
+
 class GroupingOverrideStore:
     """Web-owned override file and engine-owned status file.
 
@@ -76,15 +122,6 @@ class GroupingOverrideStore:
             base / config.storage.grouping_overrides_file,
             base / config.storage.grouping_status_file,
         )
-
-    @staticmethod
-    def _atomic_write(path: Path, payload: Dict[str, Any]) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2, ensure_ascii=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
 
     @staticmethod
     def _read(path: Path) -> Dict[str, Any]:
@@ -220,7 +257,7 @@ class GroupingOverrideStore:
             "manual_groups": manual_groups,
             "next_manual_group_number": next_manual_group_number,
         }
-        self._atomic_write(self.overrides_path, payload)
+        atomic_write_json(self.overrides_path, payload, indent=2)
         self._cached_mtime_ns = self.overrides_path.stat().st_mtime_ns
         self._cached_snapshot = payload
         return payload
@@ -365,7 +402,7 @@ class GroupingOverrideStore:
             value.setdefault("unresolved", {})
             value.setdefault("error", None)
             self.validate_status(value)
-            self._atomic_write(self.status_path, value)
+            atomic_write_json(self.status_path, value, indent=2)
             return value
 
     def update_heartbeat(

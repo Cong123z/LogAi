@@ -14,12 +14,12 @@ Written by the poll thread, read and saved by the control thread.
 from __future__ import annotations
 
 import json
-import os
 import threading
-import uuid
 from collections import deque
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
+
+from logai.storage.base import atomic_write_json
 
 HORIZON_MINUTES = 30
 WINDOWS_MINUTES = (15, 30)
@@ -127,16 +127,7 @@ class TemplateActivity:
                 "minutes": {json.dumps(list(k)): list(v) for k, v in self._minutes.items() if v},
                 "hours": {json.dumps(list(k)): list(v) for k, v in self._hours.items() if v},
             }
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as stream:
-                json.dump(payload, stream)
-            os.replace(tmp, path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        atomic_write_json(path, payload)
 
     @classmethod
     def load(cls, path: str | Path) -> "TemplateActivity":

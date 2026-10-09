@@ -13,14 +13,13 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from logai.incident.requests import DEFAULT_LANGUAGE, LANGUAGES
+from logai.storage.base import atomic_write_json
 
 SCHEMA_VERSION = 2  # 2 adds "pattern" (per-template numbers) and "totals"
 PATTERN_TEXT_LIMIT = 1000
@@ -52,17 +51,7 @@ def _read(path: str | Path) -> Dict[str, Any]:
 
 
 def _write(path: Path, data: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as stream:
-            json.dump({"schema_version": SCHEMA_VERSION, **data}, stream, ensure_ascii=False)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    atomic_write_json(path, {"schema_version": SCHEMA_VERSION, **data}, ensure_ascii=False)
 
 
 def load_cases(path: str | Path) -> List[Dict[str, Any]]:

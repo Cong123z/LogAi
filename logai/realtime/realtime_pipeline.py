@@ -60,7 +60,13 @@ from logai.storage.base import JSONStore, ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import DedupIndex
 from logai.storage.documentation import DocumentationCorpusStore
-from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
+from logai.storage.grouping import (
+    GroupingOverrideStore,
+    GroupingStoreError,
+    derive_grouping_state,
+    failed_status,
+    first_nonretryable,
+)
 from logai.storage.index_selection import (
     IndexSelectionStore,
     entries_from_config,
@@ -1316,23 +1322,6 @@ class RealtimePipeline:
         })
         self._last_grouping_heartbeat = now
 
-    @staticmethod
-    def _derive_grouping_state(results: dict[str, dict[str, Any]]) -> str:
-        if any(
-            value.get("state") == "unresolved" and not value.get("retryable", False)
-            for value in results.values()
-        ):
-            return "failed"
-        applied = sum(value.get("state") == "applied" for value in results.values())
-        unresolved = sum(
-            value.get("state") == "unresolved" for value in results.values()
-        )
-        if unresolved and applied:
-            return "partial"
-        if unresolved:
-            return "pending"
-        return "applied"
-
     def _refresh_grouping_if_needed(self) -> bool:
         # Some embedders/tests construct a lightweight pipeline object without
         # calling __init__. Grouping is optional for that compatibility path.
@@ -1359,21 +1348,9 @@ class RealtimePipeline:
             self.metrics.logai_pipeline_errors_total.labels(
                 stage="grouping", reason_code="invalid_override_schema"
             ).inc()
-            self.grouping_store.write_status({
-                "applied_revision": None,
-                "attempted_revision": None,
-                "last_attempt_at": time.time(),
-                "last_applied_at": None,
-                "last_heartbeat_at": time.time(),
-                "state": "failed",
-                "error": {
-                    "reason_code": "invalid_override_schema",
-                    "message": str(exc)[:500],
-                    "retryable": False,
-                },
-                "results": {},
-                "unresolved": {},
-            })
+            self.grouping_store.write_status(
+                failed_status("invalid_override_schema", str(exc), attempted_revision=None)
+            )
             return False
 
         started = time.monotonic()
@@ -1414,15 +1391,8 @@ class RealtimePipeline:
                 )
 
             results = outcome.resolution.results
-            state = self._derive_grouping_state(results)
-            nonretryable = next(
-                (
-                    value for value in results.values()
-                    if value.get("state") == "unresolved"
-                    and not value.get("retryable", False)
-                ),
-                None,
-            )
+            state = derive_grouping_state(results)
+            nonretryable = first_nonretryable(results)
             applied_revision = (
                 snapshot["revision"]
                 if state == "applied"

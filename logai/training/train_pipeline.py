@@ -39,7 +39,13 @@ from logai.parsing.drain3_parser import Drain3Parser, display_template
 from logai.storage.base import JSONStore, ModelStore
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.documentation import DocumentationCorpusStore, DocumentationStoreError
-from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
+from logai.storage.grouping import (
+    GroupingOverrideStore,
+    GroupingStoreError,
+    derive_grouping_state,
+    failed_status,
+    first_nonretryable,
+)
 from logai.storage.index_selection import IndexSelectionStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 from logai.storage.training_event_index import TrainingEventIndex
@@ -100,21 +106,11 @@ class TrainingPipeline:
                 except GroupingStoreError:
                     pass
                 try:
-                    self.grouping_store.write_status({
-                        "applied_revision": previous.get("applied_revision"),
-                        "attempted_revision": self._active_grouping_snapshot["revision"],
-                        "last_attempt_at": time.time(),
-                        "last_applied_at": previous.get("last_applied_at"),
-                        "last_heartbeat_at": time.time(),
-                        "state": "failed",
-                        "error": {
-                            "reason_code": "engine_exception",
-                            "message": str(exc)[:500],
-                            "retryable": False,
-                        },
-                        "results": {},
-                        "unresolved": {},
-                    })
+                    self.grouping_store.write_status(failed_status(
+                        "engine_exception", str(exc),
+                        attempted_revision=self._active_grouping_snapshot["revision"],
+                        previous=previous,
+                    ))
                 except Exception:  # noqa: BLE001
                     logger.exception("Unable to persist failed grouping training status")
             raise
@@ -140,22 +136,9 @@ class TrainingPipeline:
         try:
             self._active_grouping_snapshot = self.grouping_store.load_overrides()
         except GroupingStoreError as exc:
-            now = time.time()
-            self.grouping_store.write_status({
-                "applied_revision": None,
-                "attempted_revision": None,
-                "last_attempt_at": now,
-                "last_applied_at": None,
-                "last_heartbeat_at": now,
-                "state": "failed",
-                "error": {
-                    "reason_code": "invalid_override_schema",
-                    "message": str(exc)[:500],
-                    "retryable": False,
-                },
-                "results": {},
-                "unresolved": {},
-            })
+            self.grouping_store.write_status(
+                failed_status("invalid_override_schema", str(exc), attempted_revision=None)
+            )
             raise
         template_to_group = self._cluster_templates()
         logger.info("Phase 5: Applying grouping overrides and building groups + centroids...")
@@ -251,27 +234,8 @@ class TrainingPipeline:
         except GroupingStoreError:
             pass
         results = resolution.results
-        has_nonretryable = any(
-            result.get("state") == "unresolved" and not result.get("retryable", False)
-            for result in results.values()
-        )
-        applied = sum(result.get("state") == "applied" for result in results.values())
-        unresolved = sum(result.get("state") == "unresolved" for result in results.values())
-        if has_nonretryable:
-            state = "failed"
-        elif applied and unresolved:
-            state = "partial"
-        elif unresolved:
-            state = "pending"
-        else:
-            state = "applied"
-        first_error = next(
-            (
-                result for result in results.values()
-                if result.get("state") == "unresolved" and not result.get("retryable", False)
-            ),
-            None,
-        )
+        state = derive_grouping_state(results)
+        first_error = first_nonretryable(results)
         now = time.time()
         self.grouping_store.write_status({
             "applied_revision": (

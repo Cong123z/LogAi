@@ -18,8 +18,36 @@ import json
 import os
 import pickle
 import threading
+import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+
+def atomic_write_json(
+    path: str | Path,
+    payload: Any,
+    *,
+    indent: Optional[int] = None,
+    ensure_ascii: bool = True,
+    mode: Optional[int] = None,
+) -> None:
+    """Write JSON via a unique temp file + fsync + os.replace, so readers in
+    another process never see a torn file. `mode` sets the permissions of a
+    newly created file (e.g. 0o600 for secrets)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666 if mode is None else mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=indent, ensure_ascii=ensure_ascii)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # The temp file may hold secrets; never leave it behind.
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class JSONStore:

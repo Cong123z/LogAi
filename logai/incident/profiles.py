@@ -8,13 +8,14 @@ secrets, so it is written with mode 0600.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
+
+from logai.storage.base import atomic_write_json
 
 SCHEMA_VERSION = 1
 NAME_LIMIT, MODEL_LIMIT, KEY_LIMIT, ENDPOINT_LIMIT = 100, 200, 500, 500
@@ -145,20 +146,11 @@ class LLMProfileStore:
     # -- writing ---------------------------------------------------------------
 
     def _write(self, data: Dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + f".{uuid.uuid4().hex}.tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump({"schema_version": SCHEMA_VERSION, **data}, stream,
-                          ensure_ascii=False, indent=2)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(tmp, self.path)
-        except BaseException:
-            # The temp file holds API keys; never leave it behind.
-            tmp.unlink(missing_ok=True)
-            raise
+        # mode 0o600: the file holds API keys.
+        atomic_write_json(
+            self.path, {"schema_version": SCHEMA_VERSION, **data},
+            indent=2, ensure_ascii=False, mode=0o600,
+        )
 
     def create(
         self, *, name: Any, endpoint: Any, api_key: Any, model: Any, activate: bool = False

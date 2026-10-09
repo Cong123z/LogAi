@@ -8,12 +8,12 @@ template (id = template_id). Only the latest action per key is kept.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+
+from logai.storage.base import atomic_write_json
 
 SCHEMA_VERSION = 2
 REQUEST_TTL_SECONDS = 86_400
@@ -83,15 +83,6 @@ def add_request(
         requests[request_key(kind, target_id)] = {
             "action": action, "at": requested_at, "language": language,
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as stream:
-                json.dump({"schema_version": SCHEMA_VERSION, "requests": requests}, stream,
-                          ensure_ascii=False)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(tmp, path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        atomic_write_json(
+            path, {"schema_version": SCHEMA_VERSION, "requests": requests}, ensure_ascii=False
+        )

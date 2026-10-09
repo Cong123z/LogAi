@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+from logai.storage.base import atomic_write_json
 
 SCHEMA_VERSION = 1
 MAX_ENTRIES = 50
@@ -66,17 +66,7 @@ def validate_patterns(raw: Any) -> List[str]:
 
 
 def _atomic_write(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    atomic_write_json(path, payload, indent=2, ensure_ascii=False)
 
 
 def read_json(path: str | Path) -> Dict[str, Any]:

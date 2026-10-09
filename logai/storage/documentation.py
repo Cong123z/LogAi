@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import threading
 import time
@@ -11,6 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 import yaml
+
+from logai.storage.base import atomic_write_json
 
 
 class DocumentationStoreError(ValueError):
@@ -79,15 +80,6 @@ class DocumentationCorpusStore:
             runtime_path(config.doc_matcher.status_path, "documentation_status.json"),
             config.doc_matcher.seed_corpus_path,
         )
-
-    @staticmethod
-    def _atomic_json_write(path: Path, payload: Dict[str, Any]) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=2, ensure_ascii=True)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(tmp, path)
 
     @staticmethod
     def _read_json(path: Path) -> Dict[str, Any]:
@@ -164,7 +156,7 @@ class DocumentationCorpusStore:
             "next_document_number": next_document_number,
             "entries": entries,
         }
-        self._atomic_json_write(self.corpus_path, payload)
+        atomic_write_json(self.corpus_path, payload, indent=2)
         return payload
 
     @staticmethod
@@ -187,7 +179,7 @@ class DocumentationCorpusStore:
             "overrides": overrides,
             "cleared_groups": cleared_groups,
         }
-        self._atomic_json_write(self.overrides_path, payload)
+        atomic_write_json(self.overrides_path, payload, indent=2)
         return payload
 
     def load_corpus(self) -> Dict[str, Any]:
@@ -352,7 +344,7 @@ class DocumentationCorpusStore:
             return {}
 
     def write_status(self, payload: Dict[str, Any]) -> None:
-        self._atomic_json_write(self.status_path, payload)
+        atomic_write_json(self.status_path, payload, indent=2)
 
     def synchronization_status(self) -> Dict[str, Any]:
         corpus = self.load_corpus()

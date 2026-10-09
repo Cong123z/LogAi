@@ -179,7 +179,7 @@ def test_key_rejects_whitespace_and_control_chars(tmp_path):
 
 def test_failed_write_leaves_no_temp_file(tmp_path):
     store = LLMProfileStore(tmp_path / "llm_profiles.json")
-    with patch("logai.incident.profiles.os.replace", side_effect=OSError("disk full")):
+    with patch("logai.storage.base.os.replace", side_effect=OSError("disk full")):
         with pytest.raises(OSError):
             store.create(name="A", endpoint="https://a.io", api_key="k", model="m")
     assert [p.name for p in tmp_path.iterdir()] == []
