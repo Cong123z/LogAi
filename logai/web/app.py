@@ -16,6 +16,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from logai.alert.alert_state_machine import group_id_key
 from logai.incident.profiles import LLMProfileStore, ProfileError, ProfileStoreUnreadable
 from logai.incident.cases import add_case, delete_case, load_cases, update_case
+from logai.incident.history import load_history
 from logai.incident.requests import (
     DEFAULT_LANGUAGE,
     LANGUAGES,
@@ -99,6 +100,7 @@ def create_app(
     template_triage_file = Path(template_triage_path or base / "template_triage.json")
     incident_analysis_file = base / "incident_analysis.json"
     incident_cases_file = base / "incident_cases.json"
+    analysis_history_file = base / "analysis_history.jsonl"
     llm_profiles = LLMProfileStore(llm_profiles_path or base / "llm_profiles.json")
     index_selection = IndexSelectionStore(
         index_selection_path or base / "es_index_selection.json"
@@ -891,6 +893,13 @@ def create_app(
             }), 409
         add_request(analysis_requests_file, kind, target_id, now, language=language)
         return jsonify({"state": "requested", "requested_at": now}), 202
+
+    @app.route("/api/insights/history", methods=["GET"])
+    def insight_history():
+        kind, target_id = request.args.get("kind"), request.args.get("id")
+        if kind not in _record_files or not target_id:
+            return jsonify({"error": "invalid_request", "message": "kind and id are required"}), 400
+        return jsonify({"entries": load_history(analysis_history_file, kind, target_id)})
 
     @app.route("/api/insights/delete", methods=["POST"])
     def delete_insight():

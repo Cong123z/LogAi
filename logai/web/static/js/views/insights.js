@@ -4,6 +4,8 @@ const ins = {
   filter: {windows: 'attention', services: 'all', templates: 'all'},
   selected: {windows: null, services: null, templates: null},
   deleteTarget: null, toastTimer: null,
+  // Earlier analyses of the selected item: fetched when the section is opened.
+  history: {key: null, at: null, entries: null, open: false},
 };
 const INS_FILTERS = {
   windows: [['attention', 'Needs attention'], ['analyzed', 'Analyzed'], ['all', 'All windows']],
@@ -278,8 +280,46 @@ function insDetailHtml(item) {
     ? '<a class="btn" href="#documentation">Open documentation</a>' : '';
   const saveCase = item.kind === 'service' && done ? INS_CASE_BUTTON : '';
   const recall = item.kind === 'template' ? '' : insRecallHtml(item.analysis);
-  return `${head}${recall}<div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody(item)}</div>${insActions(item, openDoc + saveCase)}`;
+  return `${head}${recall}<div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody(item)}</div>${insActions(item, openDoc + saveCase)}${insHistoryHtml(item)}`;
 }
+
+function insHistoryEntryHtml(kind, a) {
+  const headline = kind === 'template' ? `${a.verdict || 'unsure'} · confidence ${Math.round((a.confidence || 0) * 100)}%`
+    : kind === 'service' ? `${a.health || 'unknown'}${(a.issues || []).length ? ` · ${a.issues.length} issue(s)` : ''}`
+    : a.documentation_id ? `Matched ${a.documentation_id} ${a.document_title || ''}` : 'No matching document';
+  const issues = kind === 'service' && (a.issues || []).length
+    ? `<ul>${a.issues.map(issue => `<li>${escapeHtml(issue.title || '')}</li>`).join('')}</ul>` : '';
+  return `<li><strong>${escapeHtml(headline)}</strong>
+    <p class="ins-why">${escapeHtml((kind === 'service' ? a.summary : a.reasoning) || '')}</p>${issues}${insMeta(a)}</li>`;
+}
+
+function insHistoryHtml(item) {
+  const h = ins.history;
+  const current = item.analysis && item.analysis.analyzed_at;
+  const cached = h.key === `${item.kind}:${item.id}` && h.at === current ? h.entries : null;
+  // The newest finished entry is the analysis already shown above.
+  const past = (cached || []).filter(entry => entry.record && entry.record.analyzed_at !== current);
+  const body = !cached ? '<p class="ins-empty" aria-busy="true">Loading…</p>'
+    : past.length ? `<ol class="ins-issues">${past.map(entry => insHistoryEntryHtml(item.kind, entry.record)).join('')}</ol>`
+    : '<p class="ins-empty">No earlier analyses.</p>';
+  return `<details class="ins-section" data-ins-history${cached && h.open ? ' open' : ''}><summary>Previous analyses</summary>${body}</details>`;
+}
+
+$insDetail.addEventListener('toggle', async event => {
+  const $details = event.target;
+  const item = insSelectedItem();
+  if (!$details.matches || !$details.matches('[data-ins-history]') || !item) return;
+  const h = ins.history;
+  h.open = $details.open;
+  const key = `${item.kind}:${item.id}`, at = item.analysis && item.analysis.analyzed_at;
+  if (!h.open || (h.key === key && h.at === at && h.entries)) return;
+  try {
+    const resp = await fetch(`/api/insights/history?kind=${encodeURIComponent(item.kind)}&id=${encodeURIComponent(item.id)}`);
+    if (!resp.ok) throw new Error('Unable to load previous analyses');
+    Object.assign(h, {key, at, entries: (await resp.json()).entries || []});
+    $details.outerHTML = insHistoryHtml(item);
+  } catch (err) { insToast(err.message, true); }
+}, true);  // toggle does not bubble
 
 function insSelectedItem() {
   return insItems(ins.tab).find(item => item.id === ins.selected[ins.tab]);

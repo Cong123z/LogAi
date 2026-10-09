@@ -179,6 +179,7 @@ class RealtimePipeline:
             ),
             cases_path=f"{config.storage.base_dir}/{config.storage.incident_cases_file}",
             on_call=lambda kind, meta: self.metrics.record_llm_call(kind, meta),
+            history_path=f"{config.storage.base_dir}/{config.storage.analysis_history_file}",
         )
         self._drop_vanished_groups(alert_state_store)
         # On-demand whole-service analysis requests (web-owned file).

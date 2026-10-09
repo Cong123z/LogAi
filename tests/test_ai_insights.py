@@ -305,3 +305,25 @@ def test_requests_ignored_while_llm_disabled_but_deletes_apply(tmp_path):
     p._control_tick()
     assert p.incident_classifier.service_store.get("auth") is None
     p.incident_classifier.submit_template.assert_not_called()
+
+
+def test_history_keeps_every_finished_analysis(tmp_path):
+    from logai.web.app import create_app
+
+    clf, _, _ = _clf(tmp_path, [
+        tic._reply(TRIAGE_REPLY),
+        tic._reply({**TRIAGE_REPLY, "verdict": "benign"}),
+        tic._reply("nope"),
+    ])
+    clf.history_path = str(tmp_path / "analysis_history.jsonl")
+    for at in (1.0, 2.0, 3.0):  # done, done, failed
+        clf.process_template("T9", at, {}, {"G0": "rep"})
+    assert clf.template_store.get("T9")["status"] == "failed"
+    with open(clf.history_path, "a", encoding="utf-8") as stream:
+        stream.write('{"torn line\n')  # a crash mid-append must not break reads
+
+    client = create_app(data_dir=str(tmp_path)).test_client()
+    entries = client.get("/api/insights/history?kind=template&id=T9").get_json()["entries"]
+    assert [e["record"]["verdict"] for e in entries] == ["benign", "suspicious"]
+    assert client.get("/api/insights/history?kind=template&id=T8").get_json() == {"entries": []}
+    assert client.get("/api/insights/history?kind=bogus&id=T9").status_code == 400

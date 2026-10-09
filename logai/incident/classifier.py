@@ -30,6 +30,7 @@ from logai.incident.cases import load_cases, recall_summary, similar_cases
 from logai.incident.requests import DEFAULT_LANGUAGE
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.parsing.preprocessor import PLACEHOLDER
+from logai.incident.history import append_history
 from logai.storage.base import JSONStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
@@ -172,8 +173,10 @@ class IncidentClassifier:
         template_store: Optional[JSONStore] = None,
         cases_path: Optional[str] = None,
         on_call: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        history_path: Optional[str] = None,
     ):
         self.config = config
+        self.history_path = history_path
         self.cases_path = cases_path
         self.service_store = service_store
         self.template_store = template_store
@@ -346,7 +349,7 @@ class IncidentClassifier:
         store.delete(store_key)
         return True
 
-    def _persist(self, active_key: tuple, store: Optional[JSONStore], store_key: str,
+    def _persist(self, kind: str, active_key: tuple, store: Optional[JSONStore], store_key: str,
                  record: Dict[str, Any]) -> None:
         with self._lock:
             if active_key in self._cancelled:
@@ -355,6 +358,8 @@ class IncidentClassifier:
         try:
             if store is not None:
                 store.set(store_key, record)
+            if self.history_path and record.get("status") == "done":
+                append_history(self.history_path, kind, store_key, record)
         except Exception:  # noqa: BLE001
             logger.exception("Unable to persist analysis for %s", active_key)
 
@@ -433,7 +438,7 @@ class IncidentClassifier:
         record["language"] = language
         record["recalled"] = recalled
         self._finish_call("window", group_id_key(window_key), record, meta, result)
-        self._persist(window_key, self.store, group_id_key(window_key), record)
+        self._persist("window", window_key, self.store, group_id_key(window_key), record)
         self._on_result(result)
         return record
 
@@ -476,7 +481,7 @@ class IncidentClassifier:
         record["language"] = language
         record["recalled"] = recall_summary(evidence.get("past_incidents"))
         self._finish_call("service", service, record, meta, result)
-        self._persist(("service", service), self.service_store, service, record)
+        self._persist("service", ("service", service), self.service_store, service, record)
         self._on_result(result)
         return record
 
@@ -512,7 +517,7 @@ class IncidentClassifier:
         record["model"] = cfg.model
         record["language"] = language
         self._finish_call("template", template_id, record, meta, result)
-        self._persist(("template", template_id), self.template_store, template_id, record)
+        self._persist("template", ("template", template_id), self.template_store, template_id, record)
         self._on_result(result)
         return record
 
