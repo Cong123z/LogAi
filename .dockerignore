@@ -18,20 +18,29 @@ data/
 tests/
 .pytest_cache/
 
-# ===== Documentation (not used by application code) =====
-ARCHITECTURE.md
-README.md
-TASK.md
-ISSUES_FIXED.md
-KNOWN_ISSUES.md
+# ===== Secrets (passed at runtime via env / Secret, never baked in) =====
+.env
+k8s/.env
+
+# ===== Documentation & notes (not used by application code) =====
+# docs/documentation_corpus.yaml is the corpus seed and must stay.
+*.md
+md
+docs/superpowers/
 
 # ===== Docker & Orchestration (not needed inside image) =====
 Dockerfile
+.dockerignore
 docker-compose.yml
 prometheus.yml
+k8s/
 
 # ===== IDE / Tool Settings =====
 .claude/
+.superpowers/
+graphify-out/
+skills-lock.json
+.gitattributes
 .vscode/
 .idea/
 .DS_Store

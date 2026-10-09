@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
     && find /usr/local/lib/python3.11 -name "*.pyc" -delete \
     # remove build tools now that native extensions (e.g. hdbscan) are compiled
     && apt-get purge -y --auto-remove build-essential \
+    # nothing installs packages at runtime; drop the installers too
+    && pip uninstall -y pip setuptools wheel \
     && rm -rf /var/lib/apt/lists/* /root/.cache
 
 COPY . .
