@@ -3,6 +3,7 @@ const viewTitles = {
   alerting: 'Alerting',
   insights: 'AI Insights',
   incidents: 'Incident history',
+  pipeline: 'Pipeline',
   templates: 'Templates',
   groups: 'Semantic Groups',
   documentation: 'Documentation',
@@ -43,7 +44,7 @@ function setView(view, updateHash = true) {
     state.alertRefreshTimer = null;
   }
   loadData();
-  if (view === 'alerting' || view === 'sources' || view === 'retrain') state.alertRefreshTimer = setInterval(loadData, 2000);
+  if (view === 'alerting' || view === 'pipeline' || view === 'sources' || view === 'retrain') state.alertRefreshTimer = setInterval(loadData, 2000);
   if (view === 'llm' || view === 'insights' || view === 'incidents') state.alertRefreshTimer = setInterval(loadData, 3000);
 }
 
@@ -165,6 +166,8 @@ async function loadData() {
       renderIncidents(await fetchIncidents());
     } else if (state.activeView === 'llm') {
       renderLlmProfiles(await fetchLlmProfiles());
+    } else if (state.activeView === 'pipeline') {
+      renderPipeline(await fetchPipeline());
     } else if (state.activeView === 'sources') {
       renderSources(await fetchSources());
     } else if (state.activeView === 'retrain') {

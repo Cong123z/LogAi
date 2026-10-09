@@ -43,7 +43,7 @@ from logai.incident.cases import load_cases
 from logai.incident.requests import DEFAULT_LANGUAGE, load_requests, parse_key
 from logai.incident.service_analysis import build_service_evidence, service_signature
 from logai.incident.template_triage import build_template_evidence
-from logai.metrics.prometheus_exporter import MetricsExporter
+from logai.metrics.prometheus_exporter import MetricsExporter, pipeline_snapshot
 from logai.models import (
     DEFAULT_LEVEL,
     LEVEL_RANK,
@@ -1319,6 +1319,13 @@ class RealtimePipeline:
             "last_successful_poll_at": self._last_successful_poll_at,
             "last_processed_event_at": self._last_processed_event_at,
             "last_checkpoint_commit_at": self._last_checkpoint_commit_at,
+            "pipeline": {
+                **pipeline_snapshot(),
+                "started_at": self._started_at,
+                "pending_predictions": len(self._pending_predictions),
+                "es_error": getattr(self, "_es_error", None),
+                "es_error_since": getattr(self, "_es_error_since", None),
+            },
         })
         self._last_grouping_heartbeat = now
 

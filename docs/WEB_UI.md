@@ -105,6 +105,28 @@ looks at the group's templates and displays the most severe observed template
 level using `LEVEL_RANK`. Level does not affect the alert-state machine. Alert
 state is calculated from anomaly score, event-volume gating, and hysteresis.
 
+## Pipeline
+
+The Pipeline view is a live performance page for the realtime engine. It polls
+`GET /api/health` (the `pipeline` block of the engine heartbeat) and
+`GET /api/es-indices` every two seconds while the view is active.
+
+- **Throughput:** uptime, logs collected from Elasticsearch, logs processed,
+  processed logs/s, average per-event latency, current batch and predictions
+  waiting to be scored, last processed event time, last checkpoint and poll.
+- **Errors, timeouts and retries:** failed events (DLQ), ES poll errors, ES
+  `_search` retries, malformed hits, LLM read-timeout retries, other LLM
+  retries (cut-off or non-JSON replies) and finished LLM analyses. Non-zero
+  values are highlighted.
+- **Indices being read:** per-index logs read, last event time and error.
+
+Counts are totals since the engine process started (Prometheus client state
+resets on restart). The engine refreshes them every
+`grouping.heartbeat_interval_seconds` (5 s); logs/s is the change in processed
+events between two heartbeats. The throughput sparkline keeps the last 60
+heartbeats in the browser tab only, so it starts empty and has no history.
+While the engine is down the page shows its last reported numbers.
+
 ## Documentation
 
 `docs/documentation_corpus.yaml` is seed data only. On first startup it is
@@ -197,7 +219,7 @@ groups and the new groups, from `group_lineage.json`. Two browsers saving from t
 | `GET /api/templates/<id>` | Template ID in path | Template plus group details |
 | `PUT /api/templates/<id>/group` | `expected_revision` plus `target_group_id` or `create_new` | Accepted assignment revision (`202`) or effective no-op (`200`) |
 | `GET /api/grouping/status` | None | Current revision, engine state, per-template results and retryability |
-| `GET /api/health` | None | Heartbeat-based healthy/degraded/unavailable state and pipeline progress timestamps |
+| `GET /api/health` | None | Heartbeat-based healthy/degraded/unavailable state, pipeline progress timestamps and the `pipeline` counters (Pipeline view) |
 | `GET /api/groups` | Optional `service`, `documented`, `search` | Groups, manual override metadata, override revision |
 | `GET /api/alerts` | None | Current alert rows, total, and counts by alert state |
 | `GET /api/documentation` | None | Entries, group counts, corpus revision, synchronization status |
@@ -271,7 +293,7 @@ it does not provide multi-process transactions or distributed locking.
 
 | File | Responsibility |
 |---|---|
-| `logai/web/static/index.html` | Markup only: shell (sidebar, top bar), the nine views and every dialog |
+| `logai/web/static/index.html` | Markup only: shell (sidebar, top bar), the ten views and every dialog |
 | `logai/web/static/css/tokens.css` | Color/type tokens for the dark and light themes (WCAG AA pairs) |
 | `logai/web/static/css/app.css` | Layout and components (tables, badges, forms, dialogs), responsive rules |
 | `logai/web/static/js/core.js` | Shared state, formatting/escaping helpers, `apiMutation`, `compareValues`, shared fetchers |

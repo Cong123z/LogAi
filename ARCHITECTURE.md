@@ -828,8 +828,13 @@ in-memory and resets on restart; Prometheus keeps the scraped series.
     incidents and LLM profiles.
   - The engine is the only writer of grouping status, applied registries and
     the LLM results.
-- **Views.** The 9 views are hash routes: Alerting, AI Insights, Incidents,
-  Templates, Groups, Documentation, Data sources, Retrain, LLM profiles.
+- **Views.** The 10 views are hash routes: Alerting, AI Insights, Incidents,
+  Pipeline, Templates, Groups, Documentation, Data sources, Retrain, LLM
+  profiles.
+- **Pipeline view.** The heartbeat runtime in `grouping_status.json` carries a
+  `pipeline` block: `pipeline_snapshot()` reads the engine-health counters of
+  §9.1 back from the Prometheus registry, plus start time, buffered
+  predictions and the current Elasticsearch error. Values reset on restart.
 - **Concurrency.** Mutations use optimistic revisions and return 409 on a stale
   snapshot.
 - **Grouping changes.** `PUT /api/templates/<id>/group` returns `202`; the

@@ -22,6 +22,7 @@
   <script defer src="/static/js/views/incidents.js"></script>
   <script defer src="/static/js/views/sources.js"></script>
   <script defer src="/static/js/views/retrain.js"></script>
+  <script defer src="/static/js/views/pipeline.js"></script>
   <script defer src="/static/js/main.js"></script>
 </head>
 <body>
@@ -37,6 +38,7 @@
           <a href="#alerting" data-view="alerting" title="Alerting"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg><span class="nav-label">Alerting</span></a>
           <a href="#insights" data-view="insights" title="AI Insights"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg><span class="nav-label">AI Insights</span></a>
           <a href="#incidents" data-view="incidents" title="Incidents"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4l3 2"/><path d="M3.05 11a9 9 0 1 1 .5 4"/><path d="M3 4v5h5"/></svg><span class="nav-label">Incidents</span></a>
+          <a href="#pipeline" data-view="pipeline" title="Pipeline"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="nav-label">Pipeline</span></a>
         </div>
         <div class="nav-section"><div class="nav-heading">Catalog</div>
           <a href="#templates" data-view="templates" class="active" title="Templates"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg><span class="nav-label">Templates</span></a>
@@ -302,6 +304,35 @@
           <table>
             <thead><tr><th>Read</th><th>Index</th><th>Documents</th><th>Health</th></tr></thead>
             <tbody id="src-available-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view groups-section" id="view-pipeline" aria-label="Pipeline performance">
+        <div class="section-heading">
+          <div class="sync-status" id="pl-status" aria-live="polite">Loading pipeline stats...</div>
+        </div>
+        <details class="how-it-works">
+          <summary>How these numbers work</summary>
+          <ul>
+            <li>Counts are totals since the engine last started; a restart resets them.</li>
+            <li>The engine reports every ~5 s. Throughput is the change between two reports.</li>
+            <li>The chart covers only the time this page has been open.</li>
+          </ul>
+        </details>
+        <h3>Throughput</h3>
+        <div class="stats-row" id="pl-throughput"></div>
+        <figure class="stat-card pl-chart">
+          <svg id="pl-spark" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Processed logs per second"></svg>
+          <figcaption class="pl-sub" id="pl-spark-caption">Collecting samples…</figcaption>
+        </figure>
+        <h3>Errors, timeouts and retries</h3>
+        <div class="stats-row" id="pl-errors"></div>
+        <h3>Indices being read</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Index</th><th>Logs read</th><th>Last event</th><th>Status</th></tr></thead>
+            <tbody id="pl-indices-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
           </table>
         </div>
       </section>

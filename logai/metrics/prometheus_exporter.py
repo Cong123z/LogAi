@@ -29,10 +29,45 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, start_http_server
 
 from logai.config import MetricsConfig
 from logai.models import AlertStateEnum, AnomalyState, GroupState, ParsedEvent
+
+# Sample name -> key in the Pipeline page snapshot (labelled series are summed).
+_PIPELINE_SAMPLES = {
+    "logai_events_received_total": "events_received",
+    "logai_events_processed_total": "events_processed",
+    "logai_events_failed_total": "events_failed",
+    "logai_dlq_records_total": "dlq_records",
+    "logai_es_malformed_hits_total": "malformed_hits",
+    "logai_es_poll_errors_total": "es_poll_errors",
+    "logai_retry_total": "es_retries",
+    "logai_processing_latency_seconds_sum": "latency_sum",
+    "logai_processing_latency_seconds_count": "latency_count",
+    "logai_queue_depth": "batch_size",
+    "logai_llm_requests_total": "llm_requests",
+}
+
+
+def pipeline_snapshot(registry=REGISTRY) -> dict:
+    """Engine counters since process start, for the heartbeat / Pipeline page.
+
+    Read back from the Prometheus registry so the page shows exactly what
+    /metrics exports; LLM retries are split by reason (timeout, json, length).
+    """
+    snap: dict = dict.fromkeys(_PIPELINE_SAMPLES.values(), 0)
+    snap["llm_retries"] = {}
+    names = [*_PIPELINE_SAMPLES, "logai_llm_retries_total"]
+    for family in registry.restricted_registry(names).collect():
+        for sample in family.samples:
+            key = _PIPELINE_SAMPLES.get(sample.name)
+            if key:
+                snap[key] += sample.value
+            elif sample.name == "logai_llm_retries_total":
+                reason = sample.labels.get("reason", "other")
+                snap["llm_retries"][reason] = snap["llm_retries"].get(reason, 0) + sample.value
+    return snap
 
 
 class MetricsExporter:
