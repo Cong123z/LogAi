@@ -1,4 +1,4 @@
-"""Unit tests for BoundedDedupIndex (Issue 2)."""
+"""Unit tests for DedupIndex (Issue 2)."""
 import json
 import shutil
 import tempfile
@@ -9,7 +9,7 @@ from logai.config import StorageConfig
 from logai.storage.dedup import DedupIndex
 
 
-class TestBoundedDedupIndex(unittest.TestCase):
+class TestDedupIndex(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.storage = StorageConfig(

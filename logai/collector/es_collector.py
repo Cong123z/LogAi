@@ -452,16 +452,3 @@ class ElasticsearchCollector:
                     max_docs,
                     search_after[0] if search_after else "the range start",
                 )
-
-    def fetch_historical_range(
-        self, start_ts: float, end_ts: Optional[float] = None, max_docs: int = 200_000
-    ) -> List[RawLog]:
-        """Used by the training pipeline to pull a bounded historical window
-        for building templates/groups/models (plan section 3.1).
-
-        Preserved for backward compatibility, delegates to stream_historical_batches.
-        """
-        results: List[RawLog] = []
-        for batch, _ in self.stream_historical_batches(start_ts, end_ts, max_docs=max_docs):
-            results.extend(batch)
-        return results

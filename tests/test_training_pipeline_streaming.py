@@ -1,6 +1,6 @@
 """Unit and integration tests for Training Pipeline streaming refactor:
 1. Stream batch parsing into Drain3.
-2. LocalTrainingDedup in RAM dropping duplicates without touching realtime dedup.
+2. In-RAM dedup dropping duplicates without touching realtime dedup.
 3. Isolated CheckpointStore (training_checkpoint.json) without touching realtime checkpoint.json.
 4. Resume training capability via initial_search_after cursor and durable event index.
 5. Backward compatibility with in-memory List[RawLog].
@@ -74,7 +74,6 @@ from logai.config import AppConfig
 from logai.anomaly.isolation_forest_model import GLOBAL_MODEL_KEY
 from logai.models import FeatureVector, ParsedEvent, RawLog
 from logai.storage.checkpoint import CheckpointStore
-from logai.storage.dedup import LocalTrainingDedup
 from logai.training.train_pipeline import TrainingPipeline, run_training_from_elasticsearch
 
 

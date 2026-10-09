@@ -26,7 +26,7 @@ from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
 from logai.grouping import PENDING_GROUP_ID
 from logai.grouping.assignment_manager import GroupAssignmentManager
-from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomalyModels
+from logai.anomaly.isolation_forest_model import GlobalAnomalyModel
 from logai.models import (
     DEFAULT_LEVEL,
     LEVEL_RANK,
@@ -38,7 +38,6 @@ from logai.models import (
 from logai.parsing.drain3_parser import Drain3Parser, display_template
 from logai.storage.base import JSONStore, ModelStore
 from logai.storage.checkpoint import CheckpointStore
-from logai.storage.dedup import LocalTrainingDedup
 from logai.storage.documentation import DocumentationCorpusStore, DocumentationStoreError
 from logai.storage.grouping import GroupingOverrideStore, GroupingStoreError
 from logai.storage.index_selection import IndexSelectionStore
@@ -67,7 +66,6 @@ class TrainingPipeline:
         self.feature_engine = FeatureEngine(config.features)
         self.model_store = ModelStore(config.storage.model_dir)
         self.anomaly_model = GlobalAnomalyModel(config.anomaly, self.model_store)
-        self.anomaly_models = self.anomaly_model  # backward compatibility alias
         self.documentation_store = DocumentationCorpusStore.from_config(config)
         config.doc_matcher.corpus_path = str(self.documentation_store.corpus_path)
         self.doc_matcher = DocumentationMatcher(
@@ -91,14 +89,9 @@ class TrainingPipeline:
             Iterable[Tuple[List[RawLog], Optional[List[Any]]]],
         ],
         checkpoint_store: Optional[CheckpointStore] = None,
-        dedup_buffer_size: Optional[int] = None,
     ) -> None:
         try:
-            self._run_impl(
-                historical_logs,
-                checkpoint_store=checkpoint_store,
-                dedup_buffer_size=dedup_buffer_size,
-            )
+            self._run_impl(historical_logs, checkpoint_store=checkpoint_store)
         except Exception as exc:
             if self._active_grouping_snapshot is not None:
                 previous = {}
@@ -134,19 +127,14 @@ class TrainingPipeline:
             Iterable[Tuple[List[RawLog], Optional[List[Any]]]],
         ],
         checkpoint_store: Optional[CheckpointStore] = None,
-        dedup_buffer_size: Optional[int] = None,
     ) -> None:
         t_start_total = time.time()
         logger.info("=== Training pipeline started ===")
-        # Phase 1: Stream parse batches into Drain3 with LocalTrainingDedup & Checkpoint
+        # Phase 1: Stream parse batches into Drain3 with dedup & Checkpoint
         if checkpoint_store is None or checkpoint_store.get_search_after() is None:
             self.event_index.clear()
 
-        self._stream_parse(
-            historical_logs,
-            checkpoint_store=checkpoint_store,
-            dedup_buffer_size=dedup_buffer_size,
-        )
+        self._stream_parse(historical_logs, checkpoint_store=checkpoint_store)
         self._rebuild_template_registry()
         self._embed_templates()
         try:
@@ -316,14 +304,7 @@ class TrainingPipeline:
             Iterable[Tuple[List[RawLog], Optional[List[Any]]]],
         ],
         checkpoint_store: Optional[CheckpointStore] = None,
-        dedup_buffer_size: Optional[int] = None,
     ) -> None:
-        dedup_size = (
-            dedup_buffer_size
-            if dedup_buffer_size is not None
-            else getattr(self.config.training, "dedup_buffer_size", 10_000)
-        )
-        dedup_buffer = LocalTrainingDedup(max_size=dedup_size)
         durable_event_ids: Set[str] = self.event_index.event_ids()
         logger.info(
             "Phase 1 start: Drain3 state %s (%s) restored with %d clusters / %d messages; "
@@ -377,7 +358,7 @@ class TrainingPipeline:
             parsed_batch: List[ParsedEvent] = []
             for raw in batch:
                 # 1. Deduplicate network retries / duplicate logs in RAM
-                if raw.event_id in durable_event_ids or dedup_buffer.is_duplicate(raw.event_id):
+                if raw.event_id in durable_event_ids:
                     continue
 
                 # 2. Parse raw log with Drain3 immediately
@@ -430,12 +411,11 @@ class TrainingPipeline:
             t_wait = time.time()
 
         logger.info(
-            "Phase 1 complete in %.2fs: Parsed %d events across %d batches (dropped %d duplicates); "
+            "Phase 1 complete in %.2fs: Parsed %d events across %d batches; "
             "Drain3 has %d clusters, state %s",
             time.time() - t_phase1,
             parsed_count,
             total_batches,
-            dedup_buffer.duplicates_dropped,
             self.parser.cluster_count(),
             _format_size(_file_size(self.parser.persistence_path)),
         )

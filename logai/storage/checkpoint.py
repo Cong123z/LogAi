@@ -25,9 +25,6 @@ class CheckpointStore:
     def get_last_timestamp(self) -> Optional[float]:
         return self._store.get("last_timestamp")
 
-    def set_last_timestamp(self, ts: float, flush: bool = True) -> None:
-        self._store.set("last_timestamp", ts, flush=flush)
-
     def get_start_ts(self) -> Optional[float]:
         """Epoch time the realtime pipeline first started, used as a floor
         so a fresh (checkpoint-less) start never rewinds into the historical
@@ -91,11 +88,6 @@ class CheckpointStore:
         if self.has_index_cursors():
             return None
         return self.get_last_timestamp() or self.get_start_ts()
-
-    def reset(self) -> None:
-        self._store.set("search_after", None, flush=False)
-        self._store.set("last_timestamp", None, flush=False)
-        self._store.set("start_ts", None)
 
     def clear(self) -> None:
         if self.path.exists():

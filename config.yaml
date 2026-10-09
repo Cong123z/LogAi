@@ -69,7 +69,6 @@ features:
   windows_seconds: [10, 60, 300]
   # Baseline = closed 10s and 1m buckets over this span (time-based, not per event).
   baseline_seconds: 1800
-  history_retention_seconds: 3600
   rate_floor: 0.2
 
 anomaly:
@@ -93,7 +92,6 @@ training:
   batch_size: 2000
   max_docs: 500000
   lookback_seconds: 604800
-  dedup_buffer_size: 10000
   template_ttl_days: 30
 
 storage:
@@ -105,7 +103,6 @@ storage:
   checkpoint_file: "checkpoint.json"
   training_checkpoint_file: "training_checkpoint.json"
   training_event_index_file: "training_event_index.jsonl"
-  window_state_file: "window_state.json"
   anomaly_state_file: "anomaly_state.json"
   dedup_index_file: "dedup_index.json"
   dlq_file: "dlq.jsonl"
@@ -141,9 +138,6 @@ grouping:
   engine_status_stale_seconds: 45
 
 reliability:
-  max_retries: 5
-  backoff_base_seconds: 1
-  backoff_max_seconds: 60
   dedup_ttl_seconds: 86400
   dedup_max_size: 200000
   dedup_flush_interval_seconds: 30

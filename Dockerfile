@@ -3,9 +3,6 @@ FROM python:3.11-slim
 WORKDIR /app
 
 ENV PYTHONPATH=/app
-ENV ELASTIC_SEARCH=http://elasticsearch:9200
-ENV PORT=9018
-ENV UI_PORT=5555
 
 COPY requirements.txt .
 

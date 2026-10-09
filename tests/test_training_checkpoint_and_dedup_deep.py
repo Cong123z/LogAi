@@ -74,7 +74,6 @@ from logai.config import AppConfig
 from logai.anomaly.isolation_forest_model import GLOBAL_MODEL_KEY
 from logai.models import FeatureVector, ParsedEvent, RawLog
 from logai.storage.checkpoint import CheckpointStore
-from logai.storage.dedup import LocalTrainingDedup
 from logai.storage.training_event_index import TrainingEventIndex
 from logai.training.train_pipeline import TrainingPipeline, run_training_from_elasticsearch
 

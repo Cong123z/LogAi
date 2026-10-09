@@ -25,6 +25,7 @@ from logai.incident.requests import (
     request_key,
 )
 from logai.config import AppConfig
+from logai.grouping import PENDING_GROUP_ID
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.retrain_schedule import (
     RetrainScheduleConflict,
@@ -56,7 +57,6 @@ from logai.storage.grouping import (
 
 logger = logging.getLogger("logai.web")
 
-PENDING_GROUP_ID = "UNASSIGNED_PENDING"
 # A request the engine has not picked up within this time is shown as failed.
 STALE_REQUEST_SECONDS = 600
 # Upper bound for "Triage all unknown" so one click cannot flood the LLM queue.
@@ -735,14 +735,6 @@ def create_app(
 
     # ── AI Insights: on-demand LLM analyses ──
 
-    def _read_records(path: Path) -> Dict[str, Any]:
-        try:
-            with open(path, "r", encoding="utf-8") as stream:
-                records = json.load(stream)
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return records if isinstance(records, dict) else {}
-
     _record_files = {
         "window": incident_analysis_file,
         "service": service_analysis_file,
@@ -753,7 +745,7 @@ def create_app(
         """Engine records of one kind, keyed like the request ids, with web
         requests merged in: an analyze request not yet picked up shows as
         'requested' (or failed once stale); a pending delete hides the record."""
-        records = _read_records(_record_files[kind])
+        records = read_json(_record_files[kind])
         now = time.time()
         prefix = f"{kind}:"
         for key, (action, at, language) in load_requests(analysis_requests_file).items():
@@ -774,20 +766,6 @@ def create_app(
             else:
                 records[target] = {"status": "requested", "requested_at": at, "language": language}
         return records
-
-    def _known_services() -> List[str]:
-        services = {
-            str(t.get("service") or "unknown")
-            for t in _load_json("template_registry.json").values() if isinstance(t, dict)
-        }
-        for key in _load_json("anomaly_state.json"):
-            try:
-                decoded = json.loads(key)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(decoded, list) and len(decoded) == 2:
-                services.add(str(decoded[0]))
-        return sorted(services)
 
     def _pending_templates() -> List[Dict[str, Any]]:
         templates = _load_json("template_registry.json")
@@ -969,7 +947,7 @@ def create_app(
             fields: Dict[str, Any] = {"occurred_at": None, "group_ids": [], "totals": None,
                                       "language": None, "source": {"kind": "manual"}}
         else:
-            record = _read_records(service_analysis_file).get(service)
+            record = read_json(service_analysis_file).get(service)
             if not isinstance(record, dict) or record.get("status") != "done":
                 return jsonify({"error": "not_found",
                                 "message": "Analyze this service first; no finished analysis"}), 404

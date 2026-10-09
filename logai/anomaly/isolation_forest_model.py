@@ -70,10 +70,6 @@ class GlobalAnomalyModel:
         """Check if global model exists in memory or store."""
         return self._model is not None or self.model_store.exists(GLOBAL_MODEL_KEY)
 
-    def train_group(self, group_id: str, feature_vectors: List[FeatureVector]) -> bool:
-        """Backward compatibility: delegates to train()."""
-        return self.train(feature_vectors)
-
     def predict(self, feature_vector: FeatureVector) -> Optional[AnomalyResult]:
         """Single-event convenience wrapper over predict_batch().
 
@@ -155,6 +151,3 @@ class GlobalAnomalyModel:
             )
         return results
 
-
-# Backward compatibility alias
-GroupAnomalyModels = GlobalAnomalyModel

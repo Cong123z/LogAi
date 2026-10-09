@@ -229,14 +229,6 @@ class GroupRegistry:
             if flush:
                 self.flush()
 
-    def delete_centroid(self, group_id: str, flush: bool = True) -> None:
-        with self._lock:
-            if group_id in self._centroid_cache:
-                del self._centroid_cache[group_id]
-                self._centroids_dirty = True
-            if flush:
-                self.flush()
-
     def get_centroid(self, group_id: str) -> Optional[np.ndarray]:
         return self._centroid_cache.get(group_id)
 

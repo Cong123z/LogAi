@@ -199,7 +199,7 @@ class TestStuckAlertIdleTick(unittest.TestCase):
         for ts in (1000.0, 1000.5, 1001.0, 1001.5):
             self.pipeline.feature_engine.update(AUTH_KEY, ts)
 
-        far_future = 1000.0 + self.cfg.features.history_retention_seconds + 5000.0
+        far_future = 1000.0 + 3600.0 + 5000.0
         fv = self.pipeline.feature_engine.snapshot(AUTH_KEY, far_future)
         self.assertEqual(fv.z_score_10s, 0.0)
 

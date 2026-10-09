@@ -10,7 +10,6 @@ class TestFeatureVector8D(unittest.TestCase):
         self.config = FeatureConfig(
             windows_seconds=(10, 60, 300),
             baseline_seconds=1800.0,
-            history_retention_seconds=3600.0,
         )
         self.engine = FeatureEngine(self.config)
 

@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from collections import deque
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Tuple
 
 from logai.config import AppConfig
 from logai.alert.alert_state_machine import (
@@ -24,7 +24,7 @@ from logai.alert.alert_state_machine import (
     _parse_group_id_key,
     group_id_key,
 )
-from logai.anomaly.isolation_forest_model import GlobalAnomalyModel, GroupAnomalyModels
+from logai.anomaly.isolation_forest_model import GlobalAnomalyModel
 from logai.clustering.hdbscan_cluster import GroupClusterer
 from logai.collector.es_collector import ElasticsearchCollector
 from logai.docmatch.doc_matcher import DocumentationMatcher
@@ -45,9 +45,6 @@ from logai.incident.service_analysis import build_service_evidence, service_sign
 from logai.incident.template_triage import build_template_evidence
 from logai.metrics.prometheus_exporter import MetricsExporter
 from logai.models import (
-    AlertStateEnum,
-    AnomalyResult,
-    AnomalyState,
     DEFAULT_LEVEL,
     LEVEL_RANK,
     FeatureVector,
@@ -125,7 +122,6 @@ class RealtimePipeline:
         self._template_activity_saved_at = time.monotonic()
         self.model_store = ModelStore(config.storage.model_dir)
         self.anomaly_model = GlobalAnomalyModel(config.anomaly, self.model_store)
-        self.anomaly_models = self.anomaly_model  # backward compatibility alias
         self.documentation_worker = DocumentationRefreshWorker(
             self.documentation_store,
             self.doc_matcher,
@@ -647,24 +643,6 @@ class RealtimePipeline:
         self, group_id: str, timestamp: float, new_template_id: Optional[str] = None
     ) -> None:
         self.group_registry.touch(group_id, timestamp, new_template_id)
-
-    def _match_documentation_if_stale(self, group_id: str) -> None:
-        """Compatibility helper; global refresh is owned by the background worker."""
-        if not self.doc_matcher.ready:
-            return
-        group = self.group_registry.get(group_id)
-        if group is not None and group.documentation_source == "manual":
-            return
-        centroid = self.group_registry.get_centroid(group_id)
-        if group is None or centroid is None:
-            return
-        match = self.doc_matcher.match(group_id, centroid)
-        group.documented = match.documented
-        group.documentation_id = match.documentation_id
-        group.confidence = match.similarity
-        group.error_code = match.error_code
-        group.documentation_source = "automatic" if match.documented else "none"
-        self.group_registry.upsert(group, flush=False)
 
     # --- idle-alert tick ------------------------------------------------------
 

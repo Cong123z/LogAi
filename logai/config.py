@@ -17,10 +17,6 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = ROOT_DIR / "config.yaml"
 
 
-def _env(key: str, default: str) -> str:
-    return os.environ.get(key, default)
-
-
 @dataclass
 class ElasticsearchConfig:
     hosts: list = field(default_factory=lambda: ["http://localhost:9200"])
@@ -136,7 +132,6 @@ class FeatureConfig:
     # seconds feed the z-score / burstiness / slope features. Time-based, so a
     # sustained incident does not become "normal" after a few events.
     baseline_seconds: float = 1800.0
-    history_retention_seconds: float = 3600.0
     # Stabilize ratio-based features when a group's baseline is near zero.
     rate_floor: float = 0.2
 
@@ -178,7 +173,6 @@ class TrainingConfig:
     batch_size: int = 2000
     max_docs: int = 200_000
     lookback_seconds: float = 7 * 24 * 3600
-    dedup_buffer_size: int = 10_000
     # Templates unseen this long are pruned at retrain (unless an override uses them).
     template_ttl_days: float = 30
 
@@ -193,7 +187,6 @@ class StorageConfig:
     checkpoint_file: str = "checkpoint.json"
     training_checkpoint_file: str = "training_checkpoint.json"
     training_event_index_file: str = "training_event_index.jsonl"
-    window_state_file: str = "window_state.json"
     anomaly_state_file: str = "anomaly_state.json"
     dedup_index_file: str = "dedup_index.json"
     dlq_file: str = "dlq.jsonl"
@@ -224,9 +217,6 @@ class GroupingConfig:
 
 @dataclass
 class ReliabilityConfig:
-    max_retries: int = 5
-    backoff_base_seconds: float = 1.0
-    backoff_max_seconds: float = 60.0
     dedup_ttl_seconds: float = 86400.0
     dedup_max_size: int = 200_000
     dedup_flush_interval_seconds: float = 30.0

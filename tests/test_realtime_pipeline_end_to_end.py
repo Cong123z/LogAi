@@ -34,7 +34,6 @@ for mod in [
 
 from logai.config import AppConfig
 from logai.collector.es_collector import ElasticsearchCollector
-from logai.docmatch.doc_matcher import MatchResult
 from logai.models import (
     AlertStateEnum,
     AnomalyResult,
@@ -236,9 +235,6 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
                 is_new_template=True,
             )
         )
-        self.pipeline._match_documentation_if_stale = MagicMock(
-            side_effect=ValueError("incompatible documentation embedding")
-        )
         feature_vector = FeatureVector(group_id="G_AUTH", timestamp=raw.timestamp)
         self.pipeline.feature_engine.update = MagicMock(return_value=feature_vector)
 
@@ -254,28 +250,6 @@ class TestRealtimePipelineEndToEnd(unittest.TestCase):
         )
         self.assertTrue(self.pipeline.dedup.seen(raw.event_id))
         self.assertEqual(self.pipeline.dlq.count(), 0)
-
-    def test_documentation_no_match_clears_stale_metadata(self):
-        """A removed match must not leave an old documentation ID/error code."""
-        group = self.pipeline.group_registry.get("G_AUTH")
-        group.documented = True
-        group.documentation_id = "DOC-OLD"
-        group.error_code = "ERR_OLD"
-        group.confidence = 0.95
-        self.pipeline.group_registry.upsert(group)
-        self.pipeline.group_registry.get_centroid = MagicMock(return_value=[0.1] * 384)
-        self.pipeline.doc_matcher.ready = True
-        self.pipeline.doc_matcher.match = MagicMock(
-            return_value=MatchResult("G_AUTH", None, 0.42, False)
-        )
-
-        self.pipeline._match_documentation_if_stale("G_AUTH")
-
-        updated = self.pipeline.group_registry.get("G_AUTH")
-        self.assertFalse(updated.documented)
-        self.assertIsNone(updated.documentation_id)
-        self.assertEqual(updated.error_code, "")
-        self.assertEqual(updated.confidence, 0.42)
 
     def test_unavailable_documentation_does_not_drop_events_under_load(self):
         """Every grouped event must still reach feature and anomaly stages."""

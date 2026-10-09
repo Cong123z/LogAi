@@ -158,6 +158,3 @@ class ModelStore:
             with open(tmp_path, "wb") as f:
                 pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
             os.replace(tmp_path, p)
-
-    def keys(self) -> list:
-        return [p.stem for p in self.base_dir.glob("*.pkl")]

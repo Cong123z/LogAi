@@ -39,18 +39,6 @@ class ParsedEvent:
     parameters: List[str]
     is_new_template: bool
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "event_id": self.raw.event_id,
-            "timestamp": self.raw.timestamp,
-            "service": self.raw.service,
-            "level": self.raw.level,
-            "template_id": self.template_id,
-            "template": self.template,
-            "parameters": self.parameters,
-            "is_new_template": self.is_new_template,
-        }
-
 
 # Log-level severity ordering used to keep the most severe level seen for a
 # template. Levels arrive as free-form strings from Elasticsearch (app-dependent
@@ -112,20 +100,6 @@ class GroupedEvent:
     parsed: ParsedEvent
     group_id: str
     group_similarity: float = 1.0  # 1.0 for known-template direct mapping
-
-
-@dataclass
-class WindowState:
-    group_id: str
-    window_start: float
-    window_end: float
-    count: int = 0
-    rate: float = 0.0
-    rolling_mean: float = 0.0
-    rolling_std: float = 0.0
-    growth_rate: float = 0.0
-    z_score: float = 0.0
-    burstiness: float = 0.0
 
 
 @dataclass
