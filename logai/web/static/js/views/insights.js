@@ -23,11 +23,7 @@ const $insList = document.getElementById('ins-list');
 const $insDetail = document.getElementById('ins-detail');
 const $insToast = document.getElementById('ins-toast');
 
-async function fetchInsights() {
-  const resp = await fetch('/api/insights');
-  if (!resp.ok) throw new Error('Unable to load AI insights');
-  return resp.json();
-}
+function fetchInsights() { return getJson('/api/insights', 'Unable to load AI insights'); }
 
 function insToast(message, isError = false) {
   $insToast.textContent = message;

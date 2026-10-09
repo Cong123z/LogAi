@@ -4,11 +4,7 @@ const $incList = document.getElementById('inc-list');
 const $incDetail = document.getElementById('inc-detail');
 const $incService = document.getElementById('inc-service');
 
-async function fetchIncidents() {
-  const resp = await fetch('/api/incident-cases');
-  if (!resp.ok) throw new Error('Unable to load incidents');
-  return resp.json();
-}
+function fetchIncidents() { return getJson('/api/incident-cases', 'Unable to load incidents'); }
 
 function incToast(message, isError = false) {
   const $toast = document.getElementById('inc-toast');

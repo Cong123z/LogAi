@@ -51,38 +51,23 @@ def main():
         overrides_path=web_path(config.doc_matcher.overrides_path, "documentation_overrides.json"),
         status_path=web_path(config.doc_matcher.status_path, "documentation_status.json"),
         seed_path=config.doc_matcher.seed_corpus_path,
-        grouping_overrides_path=_storage_path(
-            web_base, config.storage.grouping_overrides_file
-        ),
-        grouping_status_path=_storage_path(
-            web_base, config.storage.grouping_status_file
-        ),
         grouping_stale_seconds=config.grouping.engine_status_stale_seconds,
-        service_analysis_path=_storage_path(
-            web_base, config.storage.service_analysis_file
-        ),
-        analysis_requests_path=_storage_path(
-            web_base, config.storage.analysis_requests_file
-        ),
-        llm_profiles_path=_storage_path(
-            web_base, config.storage.llm_profiles_file
-        ),
-        template_triage_path=_storage_path(
-            web_base, config.storage.template_triage_file
-        ),
-        index_selection_path=_storage_path(
-            web_base, config.storage.es_index_selection_file
-        ),
-        index_status_path=_storage_path(
-            web_base, config.storage.es_index_status_file
-        ),
-        retrain_schedule_path=_storage_path(
-            web_base, config.storage.retrain_schedule_file
-        ),
-        retrain_status_path=_storage_path(
-            web_base, config.storage.retrain_status_file
-        ),
         retrain_defaults=RetrainScheduleStore.from_config(config).defaults,
+        **{
+            f"{name}_path": _storage_path(web_base, getattr(config.storage, f"{field}_file"))
+            for name, field in [
+                ("grouping_overrides", "grouping_overrides"),
+                ("grouping_status", "grouping_status"),
+                ("service_analysis", "service_analysis"),
+                ("analysis_requests", "analysis_requests"),
+                ("llm_profiles", "llm_profiles"),
+                ("template_triage", "template_triage"),
+                ("index_selection", "es_index_selection"),
+                ("index_status", "es_index_status"),
+                ("retrain_schedule", "retrain_schedule"),
+                ("retrain_status", "retrain_status"),
+            ]
+        },
     )
     print(f"Template Explorer running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

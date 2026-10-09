@@ -1,84 +1,18 @@
-# LogAI Engine configuration.
-# Any value here can be overridden at runtime; ES credentials are best set
-# via environment variables instead (see logai/config.py):
-#   LOGAI_ES_HOSTS, LOGAI_ES_USER, LOGAI_ES_PASSWORD,
-#   LOGAI_METRICS_PORT, LOGAI_METRICS_HOST,
-#   LOGAI_STORAGE_BASE_DIR,
-#   LOGAI_WEB_PORT, LOGAI_WEB_HOST, LOGAI_WEB_DATA_DIR
-# See .env.example for the full list of supported variables.
+# LogAI Engine configuration: only values that differ from the defaults in
+# logai/config.py (every setting, its default and its meaning live there).
+# Any key from those dataclasses can be added here to override it.
+# Environment variables override this file; see .env.example.
 
 elasticsearch:
   hosts:
     - "http://elasticsearch:9200"
-  index: "recharge-logs"
-  poll_interval_seconds: 1
-  batch_size: 2000
-  request_timeout_seconds: 30
   # Indices are chosen on the web "Data sources" page; `index` only seeds the
   # selection until the first save there.
-  index_refresh_seconds: 30
-
-drain3:
-  persistence_path: "data/drain3_state.bin"
-  sim_threshold: 0.6
-  depth: 4
-  max_children: 100
-  # Wording-only normalisation before Drain3: removes the date/time/LEVEL/
-  # [thread] prefix (level searched in the first N tokens) and every
-  # timestamp, masks ids/numbers as <*>, keeps words. See
-  # logai/parsing/preprocessor.py.
-  preprocess: true
-  max_chars: 8192
-  max_tokens: 40
-  level_search_tokens: 5
-  # Optional extra Drain3 masking rules applied after preprocessing.
-  masking_rules: []
-
-embedding:
-  model_name: "BAAI/bge-m3"
-  # Required in production through LOGAI_EMBEDDING_ENDPOINT.
-  endpoint: ""
-  # Supported remote response formats: openai or tei.
-  api_format: "openai"
-  dimension: 1024
-  batch_size: 64
-  timeout_seconds: 60
-  max_retries: 3
-  retry_backoff_seconds: 0.5
-  # Ước lượng (không phải tokenizer thật của model) ~4 ký tự/token. Template
-  # vượt ngưỡng này sẽ bị cắt bớt trước khi gửi, để tránh server âm thầm loại
-  # bỏ item quá dài khỏi response (gây lỗi index incomplete/duplicated).
-  max_template_tokens: 1000
-
-clustering:
-  # Conservative grouping: only form/accept groups with strong local support.
-  min_cluster_size: 4
-  min_samples: 2
-  metric: "euclidean"
-  assignment_similarity_threshold: 0.88
-
-doc_matcher:
-  corpus_path: "data/documentation_corpus.json"
-  seed_corpus_path: "docs/documentation_corpus.yaml"
-  overrides_path: "data/documentation_overrides.json"
-  status_path: "data/documentation_status.json"
-  similarity_threshold: 0.75
-  refresh_interval_seconds: 5
-
-features:
-  windows_seconds: [10, 60, 300]
-  # Baseline = closed 10s and 1m buckets over this span (time-based, not per event).
-  baseline_seconds: 1800
-  rate_floor: 0.2
+  index: "recharge-logs"
+  batch_size: 2000
 
 anomaly:
-  contamination: 0.05
-  n_estimators: 100
-  random_state: 42
-  min_training_samples: 30
-  score_alert_threshold: 0.6
   predict_batch_size: 2000
-  predict_max_wait_seconds: 1.0
 
 alert:
   warm_consecutive: 10
@@ -89,59 +23,4 @@ alert:
   min_events_1m: 150
 
 training:
-  batch_size: 2000
   max_docs: 500000
-  lookback_seconds: 604800
-  template_ttl_days: 30
-
-storage:
-  base_dir: "data"
-  template_registry_file: "template_registry.json"
-  template_embeddings_file: "template_embeddings.pkl"
-  group_registry_file: "group_registry.json"
-  group_centroids_file: "group_centroids.pkl"
-  checkpoint_file: "checkpoint.json"
-  training_checkpoint_file: "training_checkpoint.json"
-  training_event_index_file: "training_event_index.jsonl"
-  anomaly_state_file: "anomaly_state.json"
-  dedup_index_file: "dedup_index.json"
-  dlq_file: "dlq.jsonl"
-  model_dir: "data/models"
-  doc_embeddings_file: "doc_embeddings.pkl"
-  grouping_overrides_file: "grouping_overrides.json"
-  grouping_status_file: "grouping_status.json"
-  incident_analysis_file: "incident_analysis.json"
-  service_analysis_file: "service_analysis.json"
-  analysis_requests_file: "analysis_requests.json"
-  llm_profiles_file: "llm_profiles.json"
-  template_triage_file: "template_triage.json"
-  es_index_selection_file: "es_index_selection.json"
-  es_index_status_file: "es_index_status.json"
-  group_lineage_file: "group_lineage.json"
-  retrain_schedule_file: "retrain_schedule.json"
-  retrain_status_file: "retrain_status.json"
-
-# LLM incident classification on ALERTING. Disabled while endpoint is empty;
-# set LOGAI_LLM_ENDPOINT (OpenAI-compatible /chat/completions URL).
-llm:
-  endpoint: ""
-  model: ""
-  timeout_seconds: 60
-  max_retries: 2
-  retry_backoff_seconds: 1.0
-  max_candidates: 5
-  max_tokens: 800
-  job_deadline_seconds: 150
-
-grouping:
-  heartbeat_interval_seconds: 5
-  engine_status_stale_seconds: 45
-
-reliability:
-  dedup_ttl_seconds: 86400
-  dedup_max_size: 200000
-  dedup_flush_interval_seconds: 30
-
-metrics:
-  http_port: 9108
-  http_host: "0.0.0.0"

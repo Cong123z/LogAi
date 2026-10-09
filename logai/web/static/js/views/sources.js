@@ -3,16 +3,11 @@ const src = {data: null, draft: null, signature: null};
 const $srcStatus = document.getElementById('src-status');
 const $srcAction = document.getElementById('src-action-status');
 
-async function fetchSources() {
-  const resp = await fetch('/api/es-indices');
-  if (!resp.ok) throw new Error('Unable to load data sources');
-  return resp.json();
-}
+function fetchSources() { return getJson('/api/es-indices', 'Unable to load data sources'); }
 
 const srcSaved = () => ((src.data && src.data.entries) || []).map(e => e.pattern);
 const srcPatterns = () => src.draft || srcSaved();
 const srcDirty = () => src.draft !== null && JSON.stringify(src.draft) !== JSON.stringify(srcSaved());
-const srcTime = ts => ts ? new Date(ts * 1000).toLocaleString() : '—';
 
 function srcMatches(pattern, index) {
   const re = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\#-]/g, '\\$&')).join('.*') + '$');
@@ -60,7 +55,7 @@ function renderSources(data, force = false) {
     return `<tr>
       <td><span class="tmpl-id">${escapeHtml(pattern)}</span></td>
       <td>${reading}</td>
-      <td><span class="ins-meta">${saved ? escapeHtml(srcTime(addedAt[pattern])) : 'on save'}</span></td>
+      <td><span class="ins-meta">${saved ? escapeHtml(formatFullTs(addedAt[pattern])) : 'on save'}</span></td>
       <td><button type="button" class="btn btn-danger" data-src-remove="${escapeHtml(pattern)}" aria-label="Stop reading ${escapeHtml(pattern)}">Remove</button></td>
     </tr>`;
   }).join('') : '<tr><td colspan="4" class="empty-state">Nothing selected. Tick an index below or add a pattern.</td></tr>';

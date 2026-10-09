@@ -11,11 +11,7 @@ if (Intl.supportedValuesOf) {
     .map(zone => `<option value="${escapeHtml(zone)}">`).join('');
 }
 
-async function fetchRetrain() {
-  const resp = await fetch('/api/retrain');
-  if (!resp.ok) throw new Error('Unable to load retrain schedule');
-  return resp.json();
-}
+function fetchRetrain() { return getJson('/api/retrain', 'Unable to load retrain schedule'); }
 
 function rtSetDays(days) {
   document.querySelectorAll('[data-rt-day]').forEach(button => {

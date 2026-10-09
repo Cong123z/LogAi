@@ -127,28 +127,18 @@ async function fetchTemplates() {
   params.set('page', state.page);
   params.set('per_page', state.perPage);
 
-  const resp = await fetch(`/api/templates?${params}`);
-  if (!resp.ok) throw new Error('Unable to load templates');
+  return getJson(`/api/templates?${params}`, 'Unable to load templates');
+}
+
+async function getJson(url, errorMessage) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(errorMessage);
   return resp.json();
 }
 
-async function fetchGroups() {
-  const resp = await fetch('/api/groups');
-  if (!resp.ok) throw new Error('Unable to load groups');
-  return resp.json();
-}
-
-async function fetchDocumentation() {
-  const resp = await fetch('/api/documentation');
-  if (!resp.ok) throw new Error('Unable to load documentation');
-  return resp.json();
-}
-
-async function fetchAlerts() {
-  const resp = await fetch('/api/alerts');
-  if (!resp.ok) throw new Error('Unable to load alert state');
-  return resp.json();
-}
+function fetchGroups() { return getJson('/api/groups', 'Unable to load groups'); }
+function fetchDocumentation() { return getJson('/api/documentation', 'Unable to load documentation'); }
+function fetchAlerts() { return getJson('/api/alerts', 'Unable to load alert state'); }
 
 
 async function apiMutation(url, method, body) {

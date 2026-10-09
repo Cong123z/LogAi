@@ -23,11 +23,7 @@ const $llmStatus = document.getElementById('llm-engine-status');
 const $llmAction = document.getElementById('llm-action-status');
 const llm = {profiles: [], activeId: null, signature: null};
 
-async function fetchLlmProfiles() {
-  const resp = await fetch('/api/llm-profiles');
-  if (!resp.ok) throw new Error('Unable to load LLM profiles');
-  return resp.json();
-}
+function fetchLlmProfiles() { return getJson('/api/llm-profiles', 'Unable to load LLM profiles'); }
 
 function renderLlmProfiles(data) {
   // Polled every few seconds; skip unchanged renders to keep focus.
