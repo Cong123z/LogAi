@@ -8,8 +8,7 @@ Elasticsearch → LogAI Engine → /metrics (Prometheus) → Grafana
                      └──────→ Web UI :5555
 ```
 
-Chi tiết kiến trúc: [`ARCHITECTURE.md`](ARCHITECTURE.md),
-[`docs/ARCHITECTURE_GUIDE.md`](docs/ARCHITECTURE_GUIDE.md). Web UI/API:
+Chi tiết kiến trúc: [`ARCHITECTURE.md`](ARCHITECTURE.md). Web UI/API:
 [`docs/WEB_UI.md`](docs/WEB_UI.md). Kubernetes: [`k8s/README.md`](k8s/README.md).
 
 ## Cách hoạt động

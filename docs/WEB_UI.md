@@ -16,11 +16,15 @@ bookmarked directly:
 
 | View | URL | Data source |
 |---|---|---|
+| Alerting | `/#alerting` | `anomaly_state.json`, enriched from group/template registries |
+| AI Insights | `/#insights` | LLM result files, `analysis_requests.json`, `analysis_history.jsonl` |
+| Incidents | `/#incidents` | `incident_cases.json` |
 | Templates | `/#templates` | `template_registry.json`, `group_registry.json` |
 | Groups | `/#groups` | Group registry plus documentation corpus/overrides |
-| Alerting | `/#alerting` | `anomaly_state.json`, enriched from group/template registries |
 | Documentation | `/#documentation` | Editable corpus and synchronization status |
 | Data sources | `/#sources` | `es_index_selection.json`, `es_index_status.json` |
+| Retrain | `/#retrain` | `retrain_schedule.json`, `retrain_status.json` |
+| LLM profiles | `/#llm` | `llm_profiles.json` |
 
 The sidebar groups the views into Monitor (Alerting, AI Insights, Incidents),
 Catalog (Templates, Groups, Documentation) and Settings (Data sources, Retrain,
@@ -283,10 +287,3 @@ it does not provide multi-process transactions or distributed locking.
 | `logai/storage/registries.py` | Atomic documentation-field updates on groups |
 | `logai/realtime/realtime_pipeline.py` | Starts and stops the documentation refresh worker |
 | `logai/training/train_pipeline.py` | Initializes and consumes the runtime documentation corpus |
-| `tests/test_web_documentation_api.py` | Web/API, alert enrichment, revision, and assignment coverage |
-| `tests/test_documentation_store.py` | Corpus validation and persistence coverage |
-| `tests/test_group_documentation_refresh.py` | Automatic/manual/stale refresh behavior |
-| `tests/test_grouping_store.py` | Grouping persistence, conflicts, cycles, freshness |
-| `tests/test_group_assignment_manager.py` | Resolution, centroids, deletes, snapshot replacement |
-| `tests/test_web_grouping_api.py` | Mutation/read contracts and orphan alert filtering |
-| `tests/test_realtime_grouping_refresh.py` | Batch boundary and write-failure behavior |

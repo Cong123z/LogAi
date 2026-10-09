@@ -1,114 +1,100 @@
 # LogAI Engine Architecture
 
-Tài liệu này mô tả kiến trúc **đang được triển khai trong code** tại ngày
-2026-09-08. Khi tài liệu và code khác nhau, code là nguồn xác nhận behavior
-thực tế; sai lệch phải được cập nhật lại tại đây và trong
-`KNOWN_ISSUES.md`/`ISSUES_FIXED.md`.
+This document describes the architecture **as implemented in the code**. When
+the document and the code disagree, the code (and its tests) is the source of
+truth, and this document must be corrected.
 
-## 1. Mục tiêu và phạm vi
+Related docs: [`README.md`](README.md) (run/deploy),
+[`docs/WEB_UI.md`](docs/WEB_UI.md) (Web UI behavior and the full HTTP API),
+[`k8s/README.md`](k8s/README.md) (Kubernetes).
 
-LogAI Engine đọc application logs từ Elasticsearch, chuẩn hóa message thành
-template, gom các template tương tự thành semantic group, đối chiếu group với
-documentation corpus, phát hiện bất thường theo lưu lượng log và xuất kết quả
-qua Prometheus.
+## 1. Purpose and scope
 
-Hệ thống gồm hai workflow độc lập nhưng dùng chung artifacts:
+LogAI Engine reads application logs from Elasticsearch, normalizes each message
+into a template, clusters similar templates into semantic groups, matches
+groups against a documentation corpus, detects anomalies in log rates, and
+exports the results through Prometheus and a web UI.
 
-- **Training**: batch/offline, tạo template registry, group registry,
-  centroids, documentation matches và Global Isolation Forest.
-- **Realtime**: long-running, poll log mới, dùng artifacts đã train để assign,
-  predict và xuất metrics. Realtime không chạy HDBSCAN và không retrain model.
+Two independent workflows share the same artifacts:
 
-Ngoài phạm vi hiện tại:
+- **Training**: batch/offline. Builds the template registry, group registry,
+  centroids, documentation matches and the global Isolation Forest.
+- **Realtime**: long-running. Polls new logs, uses the trained artifacts to
+  assign, predict and export metrics. Realtime never runs HDBSCAN and never
+  retrains the model (except a scheduled retrain, §6.4, which runs training
+  in-process and restarts).
 
-- Thu thập log trực tiếp từ file, Kafka hoặc agent khác Elasticsearch.
-- Giao diện truy vấn REST/GraphQL cho kết quả phân tích.
-- Tự động gửi notification; hệ thống chỉ xuất alert state qua metrics.
-- Multi-instance active-active trên cùng state directory.
-- Quản lý vòng đời/replay DLQ tự động.
+Out of scope:
+
+- Collecting logs from files, Kafka or agents other than Elasticsearch.
+- Sending notifications; alert state is only exported (metrics + web UI).
+- Multiple active instances sharing one state directory.
+- Automatic DLQ replay.
 
 ## 2. System context
 
 ```mermaid
 flowchart LR
-    APP[Application / Log producer]
-    ES[(Elasticsearch<br/>app-logs-*)]
-    TRAIN[Training Pipeline<br/>one-off / scheduled]
-    RT[Realtime Pipeline<br/>long-running]
+    APP[Application / log producer]
+    ES[(Elasticsearch)]
+    TRAIN[Training pipeline<br/>one-off / scheduled]
+    RT[Realtime pipeline<br/>long-running]
     DATA[(File-based state<br/>data/)]
-    WEB[Desktop Web UI<br/>:5555]
+    WEB[Web UI<br/>:5555]
     METRICS[Prometheus endpoint<br/>:9108/metrics]
     PROM[(Prometheus)]
     GRAF[Grafana]
-    SEED[Documentation seed<br/>YAML]
-    DOCS[Runtime documentation corpus<br/>JSON]
+    EMB[BGE-M3 embedding service]
+    LLM[LLM endpoint<br/>optional]
 
     APP -->|index documents| ES
     ES -->|historical range| TRAIN
     ES -->|poll + search_after| RT
-    SEED -->|initialize once| DOCS
-    WEB -->|edit corpus / overrides| DOCS
-    WEB -->|read registries / alert state| DATA
-    DOCS --> TRAIN
-    DOCS --> RT
+    TRAIN --> EMB
+    RT --> EMB
+    RT -->|on user request| LLM
     TRAIN -->|registries, centroids, model| DATA
-    DATA -->|load/update state| RT
+    DATA <-->|load / update state| RT
+    WEB <-->|read state, write intents| DATA
     RT --> METRICS
-    PROM -->|scrape every 10s| METRICS
+    PROM -->|scrape| METRICS
     GRAF --> PROM
 ```
 
-Trong Docker Compose, Elasticsearch, LogAI Engine, Prometheus và Grafana chạy
-thành bốn services. Volume `logai-data` giữ artifacts qua restart container.
+Docker Compose runs only the LogAI containers (`logai-engine`, `logai-web`, the
+one-off `logai-training`, optional Grafana). Elasticsearch and Prometheus are
+expected to exist already on the external `aiops-net` network. The named
+volume `logai-data` holds all artifacts across container restarts.
 
-## 3. Nguồn cấu hình và thứ tự ưu tiên
+The web process and the engine never call each other: they communicate only
+through files in `data/`. The web writes *intent* files (documentation,
+grouping overrides, index selection, retrain schedule, analysis requests, LLM
+profiles); the engine writes *status/result* files.
 
-`logai/config.py` định nghĩa các dataclass cấu hình. Giá trị được resolve theo
-thứ tự sau, lớp sau ghi đè lớp trước:
+## 3. Configuration
 
-1. Default trong dataclass.
-2. File YAML, mặc định là `config.yaml`.
-3. Environment variables được hỗ trợ trực tiếp.
+`logai/config.py` defines the configuration dataclasses. Values resolve in this
+order, later layers overriding earlier ones:
 
-Environment overrides hiện có:
+1. Dataclass defaults (every setting and its meaning is documented there).
+2. YAML file, `config.yaml` by default. It only lists values that differ from
+   the defaults; any dataclass field can be added.
+3. Environment variables (`LOGAI_ES_*`, `LOGAI_METRICS_*`,
+   `LOGAI_STORAGE_BASE_DIR`, `LOGAI_DOCUMENTATION_CORPUS_PATH`,
+   `LOGAI_EMBEDDING_*`, `LOGAI_LLM_*`). The full list with comments is in
+   [`.env.example`](.env.example); the web process additionally reads
+   `LOGAI_WEB_HOST`, `LOGAI_WEB_PORT`, `LOGAI_WEB_DATA_DIR`.
 
-| Variable | Đích |
-|---|---|
-| `LOGAI_ES_HOSTS` | `elasticsearch.hosts`, phân tách bằng dấu phẩy |
-| `LOGAI_ES_USER` | `elasticsearch.username` |
-| `LOGAI_ES_PASSWORD` | `elasticsearch.password` |
-| `LOGAI_METRICS_PORT` | `metrics.http_port` |
-| `LOGAI_METRICS_HOST` | `metrics.http_host` |
-| `LOGAI_STORAGE_BASE_DIR` | Storage base, model directory, Drain3 path và ba documentation runtime paths |
-| `LOGAI_DOCUMENTATION_CORPUS_PATH` | Override riêng `doc_matcher.corpus_path` sau storage base |
-| `LOGAI_EMBEDDING_ENDPOINT` | Required remote embedding HTTP endpoint |
-| `LOGAI_EMBEDDING_API_FORMAT` | `openai` or `tei` response contract |
-| `LOGAI_EMBEDDING_API_KEY` | Optional bearer token |
-| `LOGAI_EMBEDDING_MODEL` | Remote model identifier, default `BAAI/bge-m3` |
-| `LOGAI_EMBEDDING_DIMENSION` | Expected dense-vector dimension, default `1024` |
-| `LOGAI_EMBEDDING_BATCH_SIZE` | Maximum texts sent per request |
-| `LOGAI_EMBEDDING_TIMEOUT_SECONDS` | Per-request HTTP timeout |
-| `LOGAI_EMBEDDING_MAX_RETRIES` | Retry count for transient failures |
-| `LOGAI_LLM_ENDPOINT` | OpenAI-compatible `/chat/completions` URL cho LLM incident classification; rỗng = tắt |
-| `LOGAI_LLM_API_KEY` | Optional bearer token cho LLM endpoint |
-| `LOGAI_LLM_MODEL` | Model name gửi trong request LLM |
+`LOGAI_STORAGE_BASE_DIR` moves the storage base, the model directory, the
+Drain3 state and the three documentation runtime files together.
 
-Các cấu hình khác chỉ thay đổi qua YAML hoặc code. `ReliabilityConfig` có các
-giá trị retry, nhưng decorator của Elasticsearch collector hiện dùng trực tiếp
-default của `retry_with_backoff`; các giá trị `reliability.max_retries` và
-`backoff_*` chưa được truyền vào collector.
-
-Historical training sử dụng section `training` trong `config.yaml` cho
-`batch_size`, `max_docs`, `lookback_seconds` và `dedup_buffer_size`. CLI chỉ
-override `lookback_seconds` khi truyền `--lookback-hours`; các giá trị còn lại
-được lấy từ file config.
+The CLI of `scripts/run_training.py` only overrides `lookback_seconds`
+(`--lookback-hours`); `batch_size` and `max_docs` come from config, or from the
+retrain schedule when training runs in-process (§6.4).
 
 ## 4. External input contract
 
 ### 4.1 Elasticsearch document
-
-Log producer ghi document vào index khớp `elasticsearch.index`, mặc định
-`app-logs-*`.
 
 ```json
 {
@@ -121,60 +107,59 @@ Log producer ghi document vào index khớp `elasticsearch.index`, mặc định
 }
 ```
 
-| Field | Kiểu được code chấp nhận | Bắt buộc thực tế | Default/behavior |
+| Field | Accepted type | Required in practice | Default / behavior |
 |---|---|---:|---|
-| `@timestamp` | ISO8601 string hoặc number | Nên có | Thiếu/không parse được thì dùng thời gian xử lý hiện tại |
-| `service` | string | Không | `"unknown"` |
-| `level` | string | Không | `"INFO"` |
-| `message` | string | Không | `""` |
-| field khác | JSON-compatible | Không | Được giữ trong `RawLog.metadata` |
+| `@timestamp` | ISO8601 string or number | Should exist | Missing/unparseable → processing time |
+| `service` (or `service.name`, then `service_code2`) | string | No | `"unknown"` |
+| `level` (or `log.level`, then the 3rd token of the message) | string | No | `"INFO"` |
+| `message` | string | No | `""` |
+| other fields | JSON-compatible | No | Kept in `RawLog.metadata` (noise keys such as `ecs`, `agent`, `host`, `log` are dropped) |
 
-Quy ước quan trọng:
+Rules:
 
-- ISO8601 có hậu tố `Z` được đổi thành `+00:00` rồi parse.
-- Number hiện được hiểu trực tiếp là **epoch seconds**. Epoch milliseconds
-  chưa được normalize và không nên gửi ở trạng thái code hiện tại.
-- `event_id` nội bộ lấy từ Elasticsearch `_id`, không lấy từ payload.
-- `es_index` là `_index` thật của hit.
-- Dedup chỉ dùng `_id`; hai document ở hai index khác nhau nhưng trùng `_id`
-  có thể bị xem là cùng event.
-- Query realtime sort theo `@timestamp` tăng dần rồi `_doc` tăng dần. Index phải
-  có mapping tương thích với sort này.
+- ISO8601 with a `Z` suffix is parsed as `+00:00`.
+- A number is read as **epoch seconds**; epoch milliseconds are not normalized.
+- `event_id` comes from the Elasticsearch `_id`, not from the payload, and
+  `es_index` is the hit's real `_index`.
+- Dedup uses `_id` only: two documents in different indices with the same
+  `_id` are treated as the same event.
+- Realtime queries sort by `@timestamp` asc, then `_doc` asc; the index mapping
+  must support that sort.
 
-### 4.1.1 Chọn index trên Web UI (Data sources)
+### 4.2 Index selection (Data sources page)
 
-Người dùng chọn nhiều index hoặc pattern (`app-logs-*`) trên trang
-**Data sources** (`#sources`). Web ghi `data/es_index_selection.json`
-(`entries: [{pattern, added_at}]`, chỉ web ghi). Engine kiểm tra mtime file
-mỗi vòng poll (~1 s), resolve pattern ra index cụ thể qua
-`indices.get(expand_wildcards=open)` khi file đổi hoặc mỗi
-`elasticsearch.index_refresh_seconds` (30 s), rồi poll **một batch cho mỗi index
-cụ thể**, mỗi index có cursor riêng. Không cần restart.
+The user picks indices or patterns (`app-logs-*`) on the **Data sources** page.
 
-- **Đọc từ lúc chọn (không backfill)**: index lần đầu xuất hiện dưới một entry bắt
-  đầu từ `@timestamp >= added_at` của entry đó. Index mới tạo sau (vd index theo
-  ngày) dưới một pattern cũ vì vậy được đọc từ document đầu tiên.
-- Bỏ một index khỏi lựa chọn thì cursor của nó bị xóa; chọn lại = đọc từ lúc chọn lại.
-- Trước lần lưu đầu tiên trên web, engine giữ hành vi cũ: đọc
-  `elasticsearch.index` (`LOGAI_ES_INDEX`) với một cursor duy nhất. Khi chuyển
-  sang lựa chọn, index mới bắt đầu không muộn hơn `last_timestamp` của cursor cũ,
-  phần trùng được dedup theo `_id` loại bỏ.
-- Một index lỗi (vd đã bị xóa) không chặn các index khác; chỉ khi mọi index đều lỗi
-  thì vòng poll mới backoff.
-- Training dùng cùng lựa chọn (các pattern nối bằng dấu phẩy) nếu file tồn tại.
-- Engine ghi `data/es_index_status.json` (chỉ engine ghi): danh sách index có sẵn
-  (`_cat/indices`, làm mới mỗi 30 s), pattern -> index, tiến độ từng index và
-  `selection_revision` đã áp dụng. Web không có thông tin đăng nhập ES; nó chỉ đọc
-  file này.
+- The web writes `data/es_index_selection.json` (`entries: [{pattern, added_at}]`).
+- The engine checks the file's mtime on every poll (~1 s). It resolves patterns
+  to concrete indices (`indices.get(expand_wildcards=open)`) when the file
+  changes or every `elasticsearch.index_refresh_seconds`. It then polls **one
+  batch per concrete index**, each with its own cursor. No restart needed.
+- **No backfill**: an index first seen under an entry starts at
+  `@timestamp >= added_at` of that entry. An index created later under an
+  existing pattern (e.g. a daily index) is read from its first document.
+- Removing an index drops its cursor; selecting it again starts from that moment.
+- Before the first save on the web, the engine keeps the legacy behavior: it
+  reads `elasticsearch.index` (`LOGAI_ES_INDEX`) with a single cursor. When the
+  selection takes over, new indices start no later than the legacy cursor's
+  `last_timestamp`; the overlap is removed by `_id` dedup.
+- A failing index (e.g. deleted) does not block the others; the poll loop backs
+  off only when every index fails.
+- Training uses the same selection (patterns joined by commas) when the file
+  exists.
+- The engine writes `data/es_index_status.json`: available indices
+  (`_cat/indices`, refreshed every 30 s), pattern → indices, per-index progress
+  and the applied `selection_revision`. The web has no ES credentials and only
+  reads this file.
 
-### 4.2 Documentation corpus
+### 4.3 Documentation corpus
 
-`docs/documentation_corpus.yaml` là seed chỉ dùng ở lần khởi tạo đầu tiên.
-Runtime source of truth là `data/documentation_corpus.json`, được quản lý qua
-Template Explorer. `data/documentation_overrides.json` lưu lựa chọn document
-thủ công theo group; lựa chọn này thắng automatic cosine match cho tới khi bị
-xóa. Engine kiểm tra revision mỗi 5 giây và cập nhật Group Registry mà không
-restart hay retrain anomaly model.
+`docs/documentation_corpus.yaml` is a seed used only on first start. The
+runtime source of truth is `data/documentation_corpus.json`, edited in the web
+UI. `data/documentation_overrides.json` stores manual document choices per
+group; a manual choice wins over the automatic cosine match until it is
+cleared. The engine checks revisions every `doc_matcher.refresh_interval_seconds`
+(5 s) and updates the group registry without restarting or retraining.
 
 ```yaml
 - id: DOC-DB-001
@@ -183,189 +168,172 @@ restart hay retrain anomaly model.
   error_code: ERR_DB_TIMEOUT
 ```
 
-| Field | Kiểu | Bắt buộc | Vai trò |
+| Field | Type | Required | Role |
 |---|---|---:|---|
-| `id` | string/coercible to string | Có | Stable documentation identifier |
-| `title` | string | Không | Metadata hiển thị; default rỗng |
-| `text` | string | Có | Nội dung dùng để tạo embedding |
-| `error_code` | string | Không | Ghi vào `GroupState` khi match thành công |
+| `id` | string | Yes | Stable document identifier |
+| `title` | string | No | Display metadata |
+| `text` | string | Yes | Text that is embedded for matching |
+| `error_code` | string | No | Copied to `GroupState` on a match |
 
-Document tạo qua API nhận ID tăng tuần tự (`DOC-001`, `DOC-002`, ...). Corpus
-lưu bộ đếm monotonic riêng nên ID đã xóa không được tái sử dụng; ID từ seed và
-legacy corpus được giữ nguyên. Bộ đếm không tham gia corpus revision vì không
-thay đổi nội dung dùng cho matching.
+- Documents created through the API get sequential IDs (`DOC-001`, ...). A
+  monotonic counter guarantees deleted IDs are never reused; seed IDs are kept.
+- Web mutations use optimistic revisions: two browsers editing the same snapshot
+  get HTTP 409 instead of overwriting each other.
+- A document used by any active group (manual or automatic) cannot be deleted
+  until that assignment changes.
+- Overrides store a fingerprint of the group's membership for audit; a manual
+  assignment stays attached to the group ID when membership changes.
+- Documentation mutations are blocked while a grouping revision is pending, so
+  nothing is written from a stale snapshot.
 
-Corpus hiện là dữ liệu demo và phải được thay bằng runbook/knowledge base thật
-trước production.
-
-Web mutation dùng optimistic revision. Hai browser cùng sửa một snapshot sẽ
-nhận HTTP 409 thay vì ghi đè lẫn nhau. Mọi file được ghi qua temporary file và
-`os.replace`. Document đang được bất kỳ active group nào sử dụng (manual hoặc
-automatic) không thể bị xóa cho tới khi assignment được đổi hoặc clear. Override
-lưu fingerprint của group membership để audit, nhưng manual assignment là intent
-gắn với group ID và không bị suspend khi membership thay đổi. Documentation
-mutation bị chặn trong lúc grouping revision chưa apply để không ghi từ snapshot cũ.
+The shipped corpus is demo data and must be replaced by a real runbook /
+knowledge base before production.
 
 ## 5. Core data contracts
 
-Các schema dưới đây là dataclass trong `logai/models.py`.
+Dataclasses in `logai/models.py`.
 
 ### 5.1 RawLog
 
-Output chuẩn hóa của collector và input của parser.
+Normalized collector output; parser input.
 
-| Field | Kiểu | Ý nghĩa |
+| Field | Type | Meaning |
 |---|---|---|
 | `timestamp` | `float` | Epoch seconds UTC |
-| `service` | `str` | Tên service sinh log |
+| `service` | `str` | Service that produced the log |
 | `level` | `str` | Log level |
 | `message` | `str` | Raw message |
-| `metadata` | `Dict[str, Any]` | Các field Elasticsearch còn lại |
+| `metadata` | `Dict[str, Any]` | Remaining Elasticsearch fields |
 | `event_id` | `str` | Elasticsearch `_id` |
-| `es_index` | `Optional[str]` | Hiện là configured index pattern |
+| `es_index` | `Optional[str]` | Elasticsearch `_index` |
 | `es_doc_id` | `Optional[str]` | Elasticsearch `_id` |
 
 ### 5.2 ParsedEvent
 
-Output của Drain3 parser.
+Drain3 parser output.
 
-| Field | Kiểu | Ý nghĩa |
+| Field | Type | Meaning |
 |---|---|---|
-| `raw` | `RawLog` | Event gốc |
-| `template_id` | `str` | `T` + Drain3 cluster ID, zero-padded 5 chữ số |
-| `template` | `str` | Message template chứa wildcard `<*>` |
-| `parameters` | `List[str]` | Giá trị wildcard trích xuất best-effort |
-| `is_new_template` | `bool` | `true` khi Drain3 tạo cluster mới |
-
-Parameter extraction chỉ hoạt động khi số token của template và message bằng
-nhau. Nếu không, `parameters` là list rỗng.
+| `raw` | `RawLog` | Original event |
+| `template_id` | `str` | `T` + Drain3 cluster ID, zero-padded to 5 digits |
+| `template` | `str` | Template with `<*>` wildcards |
+| `parameters` | `List[str]` | Best-effort wildcard values (empty when token counts differ) |
+| `is_new_template` | `bool` | `true` when Drain3 created a new cluster |
 
 ### 5.3 TemplateState
 
-Metadata persisted theo `template_id`.
+Persisted per `template_id` in `template_registry.json`.
 
-| Field | Kiểu | Default | Ý nghĩa |
+| Field | Type | Default | Meaning |
 |---|---|---|---|
-| `template_id` | `str` | bắt buộc | Registry key |
-| `template_text` | `str` | bắt buộc | Template mới nhất |
-| `service` | `str` | bắt buộc | Service gắn với template |
-| `level` | `str` | `"INFO"` | Level **nặng nhất từng ghi nhận** của template (monotonic, không bao giờ tụt cấp). Xếp hạng theo `LEVEL_RANK`; `WARN`/`WARNING` cùng hạng, `FATAL`/`CRITICAL` cùng hạng. Level lạ (không có trong `LEVEL_RANK`) được xử lý ở hạng `INFO` nên không bao giờ lấn át `ERROR`. Có default để `template_registry.json` cũ (sinh trước khi có field này) vẫn load được. |
-| `module` | `str` | `""` | Chưa được pipeline populate |
-| `first_seen` | `float` | current time | Event sớm nhất |
-| `last_seen` | `float` | current time | Event gần nhất |
-| `event_count` | `int` | `0` | Tổng event đã ghi nhận |
-| `group_id` | `Optional[str]` | `None` | Semantic group hoặc pending |
-
-`DEFAULT_LEVEL` và `LEVEL_RANK` là hằng số module-level trong `logai/models.py`;
-việc promote level được viết inline tại các call site (không có helper trung gian).
+| `template_id` | `str` | required | Registry key |
+| `template_text` | `str` | required | Latest template text |
+| `service` | `str` | required | Service of the template |
+| `level` | `str` | `"INFO"` | **Most severe level ever seen** (monotonic). Ranked by `LEVEL_RANK`; `WARN`/`WARNING` and `FATAL`/`CRITICAL` rank equal; unknown levels rank as `INFO` |
+| `module` | `str` | `""` | Not populated by the pipeline |
+| `first_seen` / `last_seen` | `float` | now | Earliest / latest event |
+| `event_count` | `int` | `0` | Events recorded |
+| `group_id` | `Optional[str]` | `None` | Semantic group, or `None` while pending |
 
 ### 5.4 GroupState
 
-Metadata persisted theo `group_id`.
+Persisted per `group_id` in `group_registry.json`.
 
-| Field | Kiểu | Default | Ý nghĩa |
+| Field | Type | Default | Meaning |
 |---|---|---|---|
-| `group_id` | `str` | bắt buộc | Registry key |
-| `service` | `str` | `""` | Service của representative template |
-| `module` | `str` | `""` | Chưa được pipeline populate |
-| `template_ids` | `List[str]` | `[]` | Templates thuộc group |
-| `representative_template` | `str` | `""` | Template đại diện |
-| `error_code` | `str` | `""` | Error code từ documentation match |
-| `documented` | `bool` | `false` | Có vượt doc similarity threshold |
-| `documentation_id` | `Optional[str]` | `None` | ID tài liệu match tốt nhất |
-| `confidence` | `float` | `0.0` | Cosine similarity với documentation |
-| `documentation_source` | `str` | `"automatic"` | Nguồn match: `automatic`, `manual`, `stale_override` (document không còn trong corpus), hoặc `none` |
-| `severity` | `str` | `"unknown"` | Chưa được pipeline populate |
-| `first_seen` | `float` | current time | Mốc sớm nhất của group |
-| `last_seen` | `float` | current time | Mốc gần nhất của group |
-| `event_count` | `int` | `0` | Tổng event của group |
-| `active` | `bool` | `true` | Chưa có lifecycle tự động thay đổi |
+| `group_id` | `str` | required | Registry key |
+| `service` | `str` | `""` | Service of the representative template (first template for multi-service groups) |
+| `module` | `str` | `""` | Not populated by the pipeline |
+| `template_ids` | `List[str]` | `[]` | Member templates |
+| `representative_template` | `str` | `""` | Representative template |
+| `error_code` | `str` | `""` | From the documentation match |
+| `documented` | `bool` | `false` | Similarity passed the doc threshold |
+| `documentation_id` | `Optional[str]` | `None` | Best matching document |
+| `confidence` | `float` | `0.0` | Cosine similarity with that document |
+| `documentation_source` | `str` | `"automatic"` | `automatic`, `manual`, `stale_override` (document gone) or `none` |
+| `severity` | `str` | `"unknown"` | Not populated by the pipeline |
+| `first_seen` / `last_seen` | `float` | now | Group time range |
+| `event_count` | `int` | `0` | Events in the group |
+| `active` | `bool` | `true` | No automatic lifecycle changes it |
 
-Training aggregate `event_count`, `first_seen`, `last_seen` từ
-`TemplateRegistry`, có độ phức tạp O(T) theo số template thay vì O(N) theo số
-event. Với group chứa nhiều service, service của template đầu tiên được chọn.
+Training aggregates `event_count`, `first_seen`, `last_seen` from the template
+registry: O(templates), not O(events).
 
 ### 5.5 GroupedEvent
 
-| Field | Kiểu | Ý nghĩa |
+| Field | Type | Meaning |
 |---|---|---|
-| `parsed` | `ParsedEvent` | Event đã parse |
-| `group_id` | `str` | Group được assign |
-| `group_similarity` | `float` | `1.0` với known template, cosine similarity với template mới |
+| `parsed` | `ParsedEvent` | Parsed event |
+| `group_id` | `str` | Assigned group |
+| `group_similarity` | `float` | `1.0` for a known template; cosine similarity for a newly assigned one |
 
 ### 5.6 FeatureVector
 
-Vector model vẫn có tám chiều, không chứa volume tuyệt đối và không dùng
-normalizer riêng. `count_1m` đi kèm `FeatureVector` dưới dạng metadata để gate
-alert nhưng bị loại khỏi `as_vector()`. Baseline được tính từ lịch sử trước khi
-append sample mới và các tỷ lệ có numerical guards.
+Eight dimensionless features. Absolute volume is not a model dimension:
+`count_1m` travels with the vector as metadata to gate alerts but is excluded
+from `as_vector()`. Baselines are computed from history *before* appending the
+new sample, and ratios have numerical guards.
 
-`FeatureVector.group_id` là **`Tuple[str, str]` = `(service, group_id)`**: cửa sổ
-trượt được tách theo từng service trong cùng một semantic group, để baseline rate
-của một service không bị trung bình lẫn với các service khác cùng group. Đây là
-nhãn định danh, **không** phải feature — `as_vector()` vẫn đúng 8 chiều. Khi ghi
-xuống `anomaly_state.json`, tuple được flatten thành chuỗi JSON-list duy nhất tại
-seam của `AlertStateMachine` (`group_id_key`), vì JSON object không cho key là tuple.
+`FeatureVector.group_id` is a **`Tuple[str, str]` = `(service, group_id)`**:
+sliding windows are split per service inside a semantic group so one service's
+baseline is not averaged with another's. It is an identity label, not a
+feature. In `anomaly_state.json` the tuple is flattened to a JSON-list string
+at the `AlertStateMachine` seam (`group_id_key`), because JSON keys cannot be
+tuples.
 
-| Field | Công thức/ý nghĩa | Clipping |
+| Field | Formula | Clip |
 |---|---|---|
-| `z_score_10s` | `(rate_10s - mu10) / (sigma10 + eps)`; độ lệch chuẩn hóa 10s | `[-10, 10]` |
-| `z_score_1m` | `(rate_1m - mu1m) / (sigma1m + eps)`; độ lệch chuẩn hóa 1m | `[-10, 10]` |
-| `short_growth_rate` | `rate_10s / max(rate_1m, rate_floor)`; tỷ lệ tăng trưởng tức thì 10s vs 1m | `[0, 6]` |
-| `growth_rate` | `rate_1m / (rate_5m + eps)`; tỷ lệ tăng trưởng 1m vs 5m | `[0, 5]` |
-| `burstiness_10s` | `sigma10^2 / max(mu10, rate_floor)^2`; CV^2 có sàn cho baseline thưa | `[0, 20]` |
+| `z_score_10s` | `(rate_10s - mu10) / (sigma10 + eps)` | `[-10, 10]` |
+| `z_score_1m` | `(rate_1m - mu1m) / (sigma1m + eps)` | `[-10, 10]` |
+| `short_growth_rate` | `rate_10s / max(rate_1m, rate_floor)` | `[0, 6]` |
+| `growth_rate` | `rate_1m / (rate_5m + eps)` | `[0, 5]` |
+| `burstiness_10s` | `sigma10^2 / max(mu10, rate_floor)^2` | `[0, 20]` |
 | `rate_delta_norm` | `(rate_1m - rate_5m) / (sigma1m + eps)` | `[-10, 10]` |
-| `slope_norm` | Linear slope của rate 1m history chia mu1m | `[-10, 10]` |
-| `spike_ratio_10s` | Max recent 10s rate chia `max(mu10, rate_floor)` | `[0, 20]` |
+| `slope_norm` | Linear slope of 1m rate history / mu1m | `[-10, 10]` |
+| `spike_ratio_10s` | Max recent 10s rate / `max(mu10, rate_floor)` | `[0, 20]` |
 
-`FeatureVector.as_vector()` luôn trả feature theo đúng thứ tự trên. Event đầu
-của group tạo neutral baseline `[0, 0, 1, 1, 0, 0, 0, 1]`.
+`as_vector()` always returns this order. A window's first event yields the
+neutral baseline `[0, 0, 1, 1, 0, 0, 0, 1]`. Baselines are time-based: closed
+10 s and 1 m buckets over `features.baseline_seconds`.
 
-### 5.7 AnomalyResult và AnomalyState
+### 5.7 AnomalyResult and AnomalyState
 
-`AnomalyResult` là output stateless của model:
+`AnomalyResult` is the stateless model output:
 
-| Field | Kiểu | Ý nghĩa |
+| Field | Type | Meaning |
 |---|---|---|
-| `group_id` | `Tuple[str, str]` | Cửa sổ `(service, group_id)` được predict (echo từ FeatureVector) |
-| `timestamp` | `float` | Timestamp của feature vector |
-| `anomaly_score` | `float` | Score clamp trong `[0, 1]` |
-| `anomaly` | `bool` | IF outlier hoặc score vượt threshold |
-| `model_version` | `str` | Hiện là `if-global-v3` |
-| `count_1m` | `int \| None` | Metadata volume; không phải chiều model |
+| `group_id` | `Tuple[str, str]` | `(service, group_id)` window |
+| `timestamp` | `float` | Feature vector timestamp |
+| `anomaly_score` | `float` | Score clamped to `[0, 1]` |
+| `anomaly` | `bool` | IF outlier or score ≥ `score_alert_threshold` |
+| `model_version` | `str` | `if-global-v3` |
+| `count_1m` | `int \| None` | Volume metadata, not a model dimension |
 
-`AnomalyState` bổ sung `consecutive_anomaly_count` và `alert_state` để persist
-hysteresis theo cửa sổ `(service, group_id)`. Alert states gồm `NORMAL`,
-`WARMING`, `ALERTING`, `COOLING`.
+`AnomalyState` adds `consecutive_anomaly_count` and `alert_state` to persist
+hysteresis per window. States: `NORMAL`, `WARMING`, `ALERTING`, `COOLING`.
 
-Điểm cao chỉ được phép leo thang alert khi `count_1m >=
-alert.min_events_1m`. **Vì cửa sổ giờ tách theo service, ngưỡng volume này áp
-dụng trên số event của RIÊNG service đó trong một phút**, không phải tổng group —
-một service ít log trong group nhiều service có thể dưới ngưỡng và không leo thang
-(ngưỡng `min_events_1m` cần tune lại theo tỉ lệ số service). Điểm từ mẫu thiếu
-volume vẫn được export để quan sát, nhưng state machine coi mẫu đó là tín hiệu phục
-hồi. `count_1m=None` giữ hành vi cũ cho caller không cung cấp metadata.
-
-`WindowState` cũng được khai báo trong models nhưng hiện không được pipeline sử
-dụng hoặc persist.
+A high score may only escalate when `count_1m >= alert.min_events_1m`. Because
+windows are per service, this threshold applies to **that service's** events
+per minute, not the whole group. Under-volume scores are still exported but
+the state machine treats them as recovery signals.
 
 ## 6. Training pipeline
 
-Entry point: `scripts/run_training.py`.
+Entry point: `scripts/run_training.py` (or in-process retrain, §6.4).
 
 ```mermaid
 flowchart TD
     A[Historical Elasticsearch range]
-    B[List RawLog<br/>max 200,000 mặc định]
-    C[Sort by timestamp + Drain3 parse]
+    B[Stream RawLog batches<br/>up to training.max_docs]
+    C[Drain3 parse per batch]
     D[Template Registry]
     E[Template embeddings]
-    F[HDBSCAN]
+    F[HDBSCAN on ungrouped templates]
     G[Template to Group mapping]
-    H[Group Registry<br/>aggregate from templates]
+    H[Group Registry<br/>aggregated from templates]
     I[Normalized centroids]
     J[Documentation matching]
-    K[Events grouped chronologically]
+    K[Events bucketed by service, group]
     L[8D feature generation]
     M[Global Isolation Forest]
     N[(data/ artifacts)]
@@ -381,106 +349,115 @@ flowchart TD
     M --> N
 ```
 
-### 6.1 Trình tự xử lý
+### 6.1 Steps
 
-| Bước | Module | Input | Output/state |
+| Step | Module | Input | Output / state |
 |---:|---|---|---|
-| 1 | `ElasticsearchCollector.stream_historical_batches` | `start_ts`, `end_ts`, `max_docs`, `batch_size`, cursor | Iterator của `(List[RawLog], cursor)` |
-| 2 | `Drain3Parser` | Raw logs sorted theo timestamp, từng batch | Drain3 state + durable training event index |
-| 3 | `TrainingPipeline._rebuild_template_registry` | Durable event index | Template metadata (kèm `level` = max severity các event của template) |
-| 4 | `TemplateEmbedder` | Template texts | L2-normalized vectors |
-| 5 | `GroupClusterer.cluster` | Template IDs + embedding matrix | HDBSCAN labels |
-| 6 | `TrainingPipeline._cluster_templates` | Labels | `template_id -> group_id` |
-| 7 | `TrainingPipeline._build_group_registry` | Mapping + Template Registry | Group metadata |
-| 8 | `GroupClusterer.compute_centroid` | Embeddings trong group | L2-normalized centroid |
-| 9 | `DocumentationMatcher.match_all` | Group centroids | Match metadata trong Group Registry |
-| 10 | `TrainingPipeline._group_events` | Event index + `template_id -> group_id` | Bucket timestamps theo `(service, group_id)` |
-| 11 | `FeatureEngine` (per window) | Events của từng `(service, group)`, chronological | `FeatureVector` list (8 chiều) |
-| 12 | `GlobalAnomalyModel.train` | Feature vectors replay từ event index | `models/global_v3.pkl` |
+| 1 | `ElasticsearchCollector.stream_historical_batches` | `start_ts`, `end_ts`, `max_docs`, `batch_size`, cursor | Iterator of `(List[RawLog], cursor)` |
+| 2 | `Drain3Parser` | Each batch, in timestamp order | Drain3 state + durable training event index |
+| 3 | `TrainingPipeline._rebuild_template_registry` | Event index | Template metadata (incl. max-severity `level`) |
+| 4 | `TemplateEmbedder` | New or changed template texts | L2-normalized vectors |
+| 5 | `TrainingPipeline._cluster_templates` | Ungrouped templates + embeddings | `template_id -> group_id` (§6.2) |
+| 6 | `TrainingPipeline` (Phase 5) | Mapping + grouping overrides | Group registry + centroids |
+| 7 | `DocumentationMatcher.match_all`, then `DocumentationRefreshWorker.refresh_once` | Centroids, corpus, manual overrides | Documentation fields in the group registry |
+| 8 | `TrainingPipeline._group_events` | Event index + mapping | Timestamps per `(service, group_id)` |
+| 9 | `FeatureEngine` per window | Chronological timestamps | `FeatureVector` list |
+| 10 | `GlobalAnomalyModel.train` | All feature vectors | `models/global_v3.pkl` |
 
-Toàn bộ cửa sổ feature/alert được tách theo service: `_group_events` gộp event theo
-`(service, group_id)` (service đã có sẵn trong mỗi event-index record, không cần dữ
-liệu mới) rồi `_train_anomaly_models` feed từng cửa sổ đó qua `FeatureEngine.update`.
-Nhánh clustering (`_cluster_templates`/`_build_group_registry`/centroids) **vẫn gom
-templates cross-service như cũ** - chỉ có đồng hồ rate là tách theo service.
+Events with an `event_id` already in the event index (a resumed run, or a
+duplicate across batch boundaries) are skipped before parsing. The Drain3
+state is saved once per batch, then the event index, then the cursor (§10.3).
 
-### 6.2 Retrain: giữ template, group đóng băng
+Clustering still groups templates **across services**; only the rate clocks
+(features/alerts) are split per service.
 
-**Template.** Template ID `T{cluster_id}` ổn định vì `drain3_state.bin` được
-giữ và dùng chung giữa training và realtime. Phase 2 **merge** vào registry cũ
-thay vì thay thế: template thấy trong cửa sổ training lấy số liệu của cửa sổ;
-template cũ được giữ kèm embedding. Template **đã có group không bao giờ bị
-xoá**; chỉ template chưa có group mới bị bỏ sau `training.template_ttl_days`
-(mặc định 30, tính theo event time) và khi không override nào tham chiếu.
-Phase 3 chỉ embed template mới hoặc đổi text.
+The Isolation Forest is only fitted when the number of feature vectors is at
+least `anomaly.min_training_samples` (30). Otherwise registries are still
+written but no new model is created, and realtime skips prediction while
+`models/global_v3.pkl` is missing.
 
-**Group đóng băng** (Phase 4, `_cluster_templates`). Template đã thuộc group nào
-giữ nguyên group đó; ID, thành viên và tài liệu của group cũ không đổi — không
-gộp, tách hay xoá. Chỉ template chưa có group (mới, hoặc pending do realtime
-tạo) được xếp:
-1. vào group cũ gần nhất nếu cosine với centroid ≥
-   `clustering.assignment_similarity_threshold` (cùng quy tắc realtime);
-2. phần còn lại chạy HDBSCAN **chỉ trên chúng** → group mới `G{n:04d}` từ bộ
-   đếm chỉ tăng (ID không bao giờ dùng lại); noise thành group một template
-   (web gắn nhãn `singleton` = `len(template_ids) == 1`, tính khi đọc).
+### 6.2 Retrain: templates kept, groups frozen
 
-Centroid của group cũ được tính lại theo thành viên (có thể dịch nhẹ khi được
-thêm template). `data/group_lineage.json`: `added` (group cũ → template được
-thêm), `new` (group mới → thành viên), `next_group_number`; ghi sau khi publish
-registry (Phase 8). Khi khởi động, realtime xoá alert state và LLM analysis của
-group không còn trong registry (chỉ xảy ra do thao tác tay trên web).
+**Templates.** IDs (`T{cluster_id}`) are stable because `drain3_state.bin` is
+kept and shared by training and realtime. Phase 2 **merges** into the existing
+registry: a template seen in the training window takes that window's counts
+(so overlapping lookbacks do not double-count); older templates are kept with
+their embeddings. A template that has a group is **never deleted**; only
+ungrouped templates are pruned after `training.template_ttl_days` (30, by event
+time) and only when no override references them. Phase 3 embeds only new or
+changed template texts.
 
-**Vận hành:** stop engine → train → start. Realtime đọc tiếp từ cursor theo
-index nên log phát sinh lúc dừng không mất (miễn ES còn giữ); feature/alert
-chạy theo event time nên backlog được chấm điểm như lúc live. Cái giá là alert
-trễ đúng bằng thời gian dừng + thời gian đuổi kịp. Theo dõi bằng
+**Frozen groups.** A template that already belongs to a group stays there;
+existing group IDs, members and documentation never change (no merge, split or
+delete). Only ungrouped templates (new, or pending from realtime) are placed:
+
+1. into the nearest existing group when cosine similarity with its centroid is
+   ≥ `clustering.assignment_similarity_threshold` (same rule as realtime);
+2. the rest go through HDBSCAN **among themselves** → new groups `G{n:04d}`
+   from a monotonic counter (IDs are never reused); noise becomes one-template
+   groups (shown as `singleton` in the web).
+
+Existing centroids are recomputed from their members. `data/group_lineage.json`
+records `added` (old group → added templates), `new` (new group → members) and
+`next_group_number`; it is written after the registries are published. On
+start, realtime drops alert state and LLM analyses of groups no longer in the
+registry (only possible after manual web actions).
+
+### 6.3 Manual retrain
+
+Stop the engine → train → start. Realtime resumes from its per-index cursors,
+so logs produced meanwhile are not lost (as long as ES retains them). Features
+and alerts run on event time, so the backlog is scored as if live; alerts are
+delayed by the downtime plus catch-up time. Track catch-up with
 `time() - logai_last_processed_event_timestamp_seconds`.
 
-**Retrain theo lịch** (trang Web **Retrain**). Web ghi `retrain_schedule.json`
-(giờ, ngày, múi giờ, `lookback_hours`, `max_docs`, yêu cầu "retrain now");
-control tick của engine quyết định đến hạn (lần bị lỡ khi engine tắt thì bỏ qua,
-như cron), vòng poll chạy retrain ở biên batch: flush, dừng documentation worker
-và LLM worker, gọi `run_training_from_elasticsearch` ngay trong tiến trình, ghi
-kết quả vào `retrain_status.json` rồi `os.execv` để nạp lại toàn bộ artifacts
-(luôn restart, kể cả khi train lỗi). Trong lúc train, heartbeat riêng trong
-`retrain_status.json` giữ `scripts/healthcheck.py` ở trạng thái ready.
+### 6.4 Scheduled retrain (web **Retrain** page)
 
-**Rollback.** Ngay trước khi train, engine chép mọi artifact training sẽ ghi
-(registry template/group, embeddings, centroids, doc embeddings, grouping
-status, lineage, Drain3 state, documentation status, `models/`) vào
-`data/retrain_backup/`; `manifest.json` ghi cuối cùng nên backup thiếu manifest
-coi như chưa xong. Train lỗi → khôi phục backup, xoá training checkpoint/event
-index, ghi `failed · rolled back`. Engine bị tắt giữa lúc train (status còn
-`running` khi khởi động) → khôi phục trước khi nạp bất cứ artifact nào, ghi
-`failed`, `interrupted: true`. Khôi phục chạy lại được nếu bị ngắt giữa chừng.
+- The web writes `retrain_schedule.json` (time, weekdays, time zone,
+  `lookback_hours`, `max_docs`, or a "retrain now" request).
+- The engine's control tick decides when a run is due. A run missed while the
+  engine was down is skipped, as with cron.
+- At a batch boundary the poll loop:
+  1. flushes;
+  2. stops the documentation and LLM workers;
+  3. runs `run_training_from_elasticsearch` in-process;
+  4. writes the result to `retrain_status.json`;
+  5. `os.execv`s itself to reload every artifact. It always restarts, even if
+     training failed.
+- During training a heartbeat in `retrain_status.json` keeps
+  `scripts/healthcheck.py` ready.
 
-**Lần hẹn bị lỡ.** Khi khởi động, engine lấy mốc còn sống cuối (heartbeat trong
-`grouping_status.json`/`retrain_status.json`, lần lưu lịch) và ghi mỗi giờ hẹn
-rơi vào khoảng tắt máy thành một dòng `missed` (tối đa 20); không chạy bù.
-`missed_checked_until` tránh ghi trùng.
+**Rollback.**
+- Just before training, every artifact that training writes is copied to
+  `data/retrain_backup/`: template/group registries, embeddings, centroids, doc
+  embeddings, grouping status, lineage, Drain3 state, documentation status and
+  `models/`.
+- `manifest.json` is written last, so a backup without a manifest is
+  incomplete.
+- If training fails, the backup is restored, the training checkpoint and event
+  index are deleted, and the status reads `failed · rolled back`.
+- If the engine is killed mid-training (status still `running` at start), it
+  restores before loading anything and records `failed`, `interrupted: true`.
+- Restore is safe to repeat if it is itself interrupted.
 
-### 6.3 Điều kiện tạo model
-
-Global model chỉ được fit khi tổng số feature vectors không nhỏ hơn
-`anomaly.min_training_samples`, mặc định 30. Nếu không đủ mẫu, training vẫn ghi
-registries nhưng không tạo model mới; realtime sẽ bỏ qua anomaly prediction nếu
-không tìm thấy `models/global_v3.pkl`.
+**Missed runs.** On start, the engine takes its last sign of life (heartbeats
+in `grouping_status.json` / `retrain_status.json`, or the last schedule save).
+Each scheduled time inside the downtime becomes a `missed` entry (at most 20);
+missed runs are not executed afterwards. `missed_checked_until` prevents
+duplicates.
 
 ## 7. Realtime pipeline
 
 Entry point: `scripts/run_realtime.py`.
 
-Suy luận anomaly được **micro-batch** (TODO #7): mỗi event chỉ parse/group/feature
-rồi **append `(window_key, FeatureVector)`** vào buffer `_pending_predictions`,
-trong đó `window_key = (service, group_id)`; toàn bộ buffer được chấm bằng **một**
-`predict_batch` tại **biên flush** (xem §7.5).
-Luồng per-event (hộp liền) và luồng flush (hộp nét đứt bên dưới) là hai giai đoạn
-tách biệt trong cùng vòng lặp poll.
+Inference is **micro-batched**: each event is parsed, grouped and featurized,
+then `(window_key, FeatureVector)` is appended to `_pending_predictions`
+(`window_key = (service, group_id)`). The whole buffer is scored by **one**
+`predict_batch` at the flush boundary (§7.5).
 
 ```mermaid
 flowchart TD
-    A[Poll Elasticsearch batch]
-    B[Fetch batch + cursor<br/>checkpoint not advanced]
+    A[Poll Elasticsearch batch<br/>one per selected index]
     C{event_id seen?}
     D[Drain3 parse]
     E{Known template<br/>with group_id?}
@@ -489,388 +466,416 @@ flowchart TD
     H[Nearest centroid]
     I{similarity >= threshold?}
     J[Assign existing group]
-    K[Persist as Pending<br/>group_id = None]
+    K[Persist as pending<br/>group_id = None]
     L[Raw/template metrics]
-    M[Documentation refresh + match]
     N[Feature update]
-    U[Append fv vào buffer<br/>_pending_predictions]
+    U[Append fv to<br/>_pending_predictions]
     R[Mark dedup]
     S[DLQ on exception]
-    T[Skip processing<br/>latency vẫn được observe]
+    T[Skip]
 
-    A --> B --> C
+    A --> C
     C -->|yes| T
     C -->|no| D --> E
     E -->|yes| F --> L
     E -->|no| G --> H --> I
     I -->|yes| J --> L
     I -->|no| K --> L --> R
-    L --> M --> N --> U --> R
+    L --> N --> U --> R
     D -. exception .-> S
-    F -. exception .-> S
     G -. exception .-> S
-    M -. exception .-> S
     N -. exception .-> S
 
     R -.-> FL
-    subgraph FL[Biên flush - count OR time, whichever first]
+    subgraph FL[Flush boundary - count OR time, whichever first]
       direction TB
-      V[Idle tick: snapshot<br/>nhóm silent -> cùng buffer]
-      W[predict_batch<br/>một lượt duy nhất]
-      X[Alert transition tuần tự trong RAM<br/>bulk persist final states một lần]
-      Y[Prometheus anomaly/alert gauge]
+      V[Idle tick: snapshot<br/>silent windows into the same buffer]
+      W[predict_batch<br/>single pass]
+      X[Alert transitions in order in RAM<br/>bulk persist final states once]
+      Y[Prometheus anomaly/alert gauges]
       Z[registry flush -> dedup gc -><br/>checkpoint commit]
       V --> W --> X --> Y --> Z
     end
 ```
 
-### 7.1 Known template path (Fast-path)
+### 7.1 Known template (fast path)
 
-Nếu `TemplateRegistry` đã có template và `group_id`:
+If the template registry already has the template with a `group_id`:
 
-1. Không tạo embedding mới (bỏ qua remote BGE-M3 request).
-2. Không cluster hay so khớp centroids (bỏ qua HDBSCAN/Centroids).
-3. Không tính toán lại template metrics (bỏ qua `_update_template_metrics`).
-4. Cập nhật template `last_seen`, `event_count`, và promote `level` nếu event có
-   severity cao hơn (monotonic).
-5. Cập nhật group `last_seen`, `event_count`.
-6. Chạy documentation match, feature generation (8D dimensionless vector) rồi
-   **append feature vector vào buffer** `_pending_predictions`. Prediction
-   (`if-global-v3`) và alert **không** chạy tại đây — được dời sang biên flush
-   theo batch (§7.5).
+1. No embedding request, no centroid comparison, no template-count update.
+2. Update the template's `last_seen`, `event_count`, and promote `level` if this
+   event is more severe.
+3. Update the group's `last_seen`, `event_count`.
+4. Update features and append the vector to the prediction buffer.
 
-`group_similarity` được đặt là `1.0` để biểu thị direct mapping, không phải
-cosine similarity được tính lại.
+`group_similarity` is `1.0` (direct mapping, not a recomputed cosine).
 
-### 7.2 Unknown/pending template path
+### 7.2 Unknown / pending template
 
-Nếu template mới hoặc chưa có `group_id`:
+If the template is new or has no `group_id`:
 
-1. Tạo embedding cho template qua `embedder.embed_one()`.
-2. So cosine similarity với tất cả group centroids.
-3. Nếu best score đạt `assignment_similarity_threshold`, gắn template vào
-   group gần nhất.
-4. Nếu không đạt, lưu template với `group_id = None` và chờ training tiếp theo.
-5. Khi lưu template vào `TemplateRegistry`, hàm `upsert()` xác định liệu đây có
-   phải template mới toanh (`is_new=True`) hay không. Nếu `is_new=True`, pipeline
-   kích hoạt `_update_template_metrics()` cập nhật Prometheus gauge
-   `app_log_templates_total{service}` thông qua bộ đếm $O(1)$ trong RAM. Template
-   mới được khởi tạo `level` bằng level của chính event đó (đã `.upper()`).
-6. Nếu template đã tồn tại (ví dụ đã lưu Pending ở sự kiện trước), `is_new=False`
-   và không tăng đếm trùng lặp; `level` vẫn được promote nếu event mới có severity
-   cao hơn.
+1. Embed it via `embedder.embed_one()`.
+2. Compare cosine similarity with every group centroid.
+3. If the best score reaches `assignment_similarity_threshold`, assign the
+   template to that group.
+4. Otherwise store it with `group_id = None` (shown as Unknown) until the next
+   training.
+5. A brand-new template (`upsert()` returns `is_new=True`) updates the
+   `app_log_templates_total{service}` gauge from an O(1) in-memory per-service
+   counter; its `level` starts as the event's level.
 
-Pending event vẫn được tính raw metrics và mark dedup processed, nhưng
-không có feature vector, anomaly score hoặc alert state.
+Pending events still update raw metrics and are marked in dedup, but produce no
+feature vector, anomaly score or alert state.
 
 ### 7.3 Documentation refresh
 
-Corpus được reload khi khoảng thời gian từ lần refresh gần nhất vượt
-`doc_matcher.refresh_interval_seconds`, mặc định 300 giây. Reload hiện embed lại
-toàn bộ corpus và ghi `doc_embeddings.pkl`; persisted cache chưa được đọc để
-tránh recompute.
+`DocumentationRefreshWorker` runs in the background. Every
+`doc_matcher.refresh_interval_seconds` (5 s) it compares the corpus/override
+revisions with the last applied ones; on change (or for groups invalidated by a
+grouping change) it reloads the matcher and rewrites documentation fields of
+the affected groups (manual overrides win). Corpus embeddings are cached in
+`doc_embeddings.pkl` keyed by the embedding model signature and reused on
+start and reload, so only new or changed texts are embedded.
 
-### 7.4 Anomaly và alert
+### 7.4 Anomaly and alert
 
-Isolation Forest trả `decision_function` với giá trị cao hơn là bình thường.
-Engine chuyển thành:
+Isolation Forest's `decision_function` is higher for normal points. The engine
+converts it to:
 
 ```text
 anomaly_score = clamp(0.5 - decision_function, 0, 1)
 ```
 
-`AnomalyResult.anomaly` là true nếu `decision_function < 0` (tương đương chính xác
-IF `predict() == -1`, nên lời gọi `predict()` thừa đã bị bỏ — xem §7.5) hoặc score
-đạt `score_alert_threshold`. Alert state machine dùng trực tiếp `score_high` và
-`score_low`, không dùng boolean `anomaly` để transition.
-
-Với default config:
+`AnomalyResult.anomaly` is true when `decision_function < 0` (exactly IF's
+`predict() == -1`) or the score reaches `score_alert_threshold`. The alert state
+machine uses `score_high` / `score_low` directly, not the boolean.
 
 ```mermaid
 stateDiagram-v2
     [*] --> NORMAL
-    NORMAL --> WARMING: 2 high scores liên tiếp
-    WARMING --> ALERTING: tổng 3 high scores liên tiếp
-    WARMING --> NORMAL: score không high
-    ALERTING --> COOLING: 1 low score
-    COOLING --> NORMAL: 3 low scores liên tiếp
-    COOLING --> ALERTING: high score
+    NORMAL --> WARMING: warm_consecutive high scores
+    WARMING --> ALERTING: alert_consecutive high scores in total
+    WARMING --> NORMAL: a score that is not high
+    ALERTING --> COOLING: a low score
+    COOLING --> NORMAL: cool_consecutive low scores
+    COOLING --> ALERTING: a high score
 ```
 
-Score nằm giữa `score_low` và `score_high` reset countdown tương ứng nhưng không
-luôn thay đổi state.
+Defaults are 2 / 3 / 3 consecutive scores; the shipped `config.yaml` uses
+10 / 30 / 10 with `score_high=0.65`, `score_low=0.52`, `min_events_1m=150`. A
+score between `score_low` and `score_high` resets the relevant countdown but
+does not necessarily change state.
 
-### 7.5 Micro-batch inference ở phase predict (TODO #7)
+### 7.5 Micro-batch inference
 
-Per-event predict là điểm nghẽn CPU chính (~6 ms/log, trần ~165 logs/s), vì mỗi
-event chấm một ma trận `(1, 8)` và `predict()` cũ duyệt rừng **2 lần**
-(`decision_function` **và** `model.predict`). Giải pháp: gom feature vector qua các
-poll rồi chấm **một lượt**.
+Per-event prediction scores a `(1, 8)` matrix each time and is the main CPU
+cost. Instead, vectors are buffered across polls and scored in one pass.
 
-- **`GlobalAnomalyModel.predict_batch(fvs) -> List[Optional[AnomalyResult]]`**: gom
-  các vector hợp lệ thành `X = (N, 8)`, gọi `decision_function(X)` **đúng 1 lần**;
-  output cùng thứ tự & độ dài input, chèn `None` cho vector chưa-train/sai-chiều.
-  `predict()` đơn ủy quyền `predict_batch([fv])[0]` (một code path). Đo thực tế:
-  batch 500 vector ~0.0045s (≈111.000 logs/s).
-- **Hai ngưỡng flush config được (whichever-first)**: flush khi buffer đạt
-  `anomaly.predict_batch_size` (mặc định 500) **HOẶC** đã đợi
-  `anomaly.predict_max_wait_seconds` (mặc định 1.0s) kể từ entry đầu. Vòng lặp ngủ
-  `min(poll_interval, thời-gian-còn-lại)` để timer 1s luôn hiệu lực;
-  `elasticsearch.poll_interval_seconds` hạ 5→1 để nhịp thức ≤ max_wait.
-- **Idle-tick gộp chung buffer**: mỗi `alert.idle_eval_seconds`, các **cửa sổ
-  `(service, group)`** cần re-evaluate được `snapshot()` và append vào **cùng**
-  buffer, chấm chung một `predict_batch`. Tập cửa sổ = `alert_sm.groups_not_normal()`
-  (non-NORMAL, **persist** qua restart) ∪ `feature_engine.live_window_keys()` (mọi
-  cửa sổ đang có window, để refresh NORMAL). **Silence guard là PER-CELL** qua
-  `feature_engine.last_event_ts(cell)`: chỉ bỏ qua cửa sổ còn nhận log (per-event
-  path đang sở hữu nó), nên một service im lặng nằm trong group có service khác vẫn
-  đang bắn vẫn được làm mát. Một cell non-NORMAL chưa có window sau restart có
-  `last_event_ts() is None` → vẫn được snapshot → vector trung tính → cool-down.
-- **Tương đương per-event 100%**: giữ **một entry / EVENT** (không collapse theo
-  group), `transition_batch()` apply theo đúng thứ tự trong RAM và trả mọi state
-  trung gian cho metrics. Chỉ final state của mỗi **cửa sổ** được `bulk_set()` một
-  lần xuống `anomaly_state.json` (key là tuple flatten), tránh serialize toàn file
-  cho từng event.
-- **Crash-safety**: `_flush_batch()` giữ nguyên thứ tự durability — predict+apply
-  → registry flush → `dedup.gc()` → `checkpoint.commit()` (chỉ khi có cursor thật
-  từ stream). Chi tiết ở §10.3.
+- **`GlobalAnomalyModel.predict_batch(fvs)`**: stacks valid vectors into
+  `X = (N, 8)` and calls `decision_function(X)` once. The output has the same
+  order and length as the input, with `None` for an untrained model or a wrong
+  dimension. `predict()` delegates to `predict_batch([fv])[0]`. A batch of 500
+  vectors takes ~4.5 ms.
+- **Two flush thresholds, whichever comes first**:
+  - the buffer reaches `anomaly.predict_batch_size`, or
+  - `anomaly.predict_max_wait_seconds` (1 s) has passed since the first entry.
 
-### 7.6 LLM analysis theo yêu cầu (AI Insights)
+  The loop sleeps `min(poll_interval, remaining)` so the timer always applies.
+- **Idle tick shares the buffer.** Every `alert.idle_eval_seconds`, windows that
+  need re-evaluation are `snapshot()`ed into the same buffer:
+  - Which windows: `alert_sm.groups_not_normal()` (non-NORMAL, persisted
+    across restarts) ∪ `feature_engine.live_window_keys()`.
+  - The silence guard is **per window** (`feature_engine.last_event_ts(cell)`):
+    a window that is still receiving logs is left to the per-event path, so a
+    silent service inside a busy group still cools down.
+  - A non-NORMAL window with no in-memory window after a restart snapshots to a
+    neutral vector and cools down.
+- **Same results as per-event scoring**:
+  - One entry per **event**; vectors are not collapsed per group.
+  - `transition_batch()` applies transitions in order in RAM and returns every
+    intermediate state for metrics.
+  - Only each window's final state is `bulk_set()` into `anomaly_state.json`,
+    once per flush.
+- **Crash safety**: `_flush_batch()` keeps the durability order described in
+  §10.3.
 
-LLM **không bao giờ được gọi tự động**; mọi phân tích do người dùng yêu cầu từ trang
-**AI Insights** của Web UI. Có ba loại:
+### 7.6 On-demand LLM analysis (AI Insights)
 
-| Loại | Đối tượng | Kết quả | File (engine ghi) |
+The LLM is **never called automatically**; every analysis is requested by a
+user from the **AI Insights** page. Three kinds:
+
+| Kind | Target | Result | File (engine writes) |
 |---|---|---|---|
-| `window` | một cửa sổ `(service, group_id)` | khớp 1 tài liệu trong top-5 candidate, hoặc `suggestion` | `incident_analysis.json` |
-| `service` | toàn bộ một service | `health`, `summary`, tối đa 10 `issues` | `service_analysis.json` |
-| `template` | một template chưa có group (`UNASSIGNED_PENDING`) | `verdict` suspicious/benign/unsure + group gợi ý (top-5 theo embedding) hoặc `"new"` | `template_triage.json` |
+| `window` | one `(service, group_id)` window | one of the top-5 candidate documents, or a `suggestion` | `incident_analysis.json` |
+| `service` | a whole service | `health`, `summary`, up to 10 `issues` | `service_analysis.json` |
+| `template` | an ungrouped template | `verdict` suspicious/benign/unsure + suggested group (top-5 by embedding) or `"new"` | `template_triage.json` |
 
-- **Request**: web ghi `analysis_requests.json` (schema v2, chỉ web ghi):
-  `{"<kind>:<id>": {"action": "analyze"|"delete", "at": ts}}`, giữ hành động mới
-  nhất mỗi key, bỏ entry > 24h. API: `GET /api/insights`, `POST /api/insights/analyze
-  {kind, id}` (`kind="templates_all"` xếp tối đa 50 template), `POST
-  /api/insights/delete {kind, id}`.
-- **Engine**: control timer 2s (chạy cả khi Elasticsearch down) đọc file, submit mỗi
-  request đúng một lần (an toàn khi restart nhờ `requested_at` lưu trong record) vào
-  worker `IncidentClassifier`. Request không chạy được (target không tồn tại, lỗi)
-  nhận record `failed`. Request web chưa được nhận sau 10 phút hiển thị `failed`.
-- **Xóa**: chỉ engine ghi file kết quả, nên xóa cũng đi qua request; job đang chạy cho
-  record vừa xóa sẽ không ghi lại kết quả.
-- **Chỉ dùng số đếm gần đây + mức bình thường của từng template**: LLM không bao giờ nhận
-  `event_count` tích lũy. `TemplateActivity` (realtime) đếm event theo `(service,
-  template)` bằng hai chuỗi: bucket 1 phút trong 30 phút (`count_15m`/`count_30m`,
-  `rate_per_min`) và bucket 1 giờ trong 24 giờ → `baseline_per_min` = median các giờ đã
-  đóng (giờ im lặng = 0, giờ trước khi engine bắt đầu = chưa biết; cần ≥ 3 giờ) và
-  `ratio` = rate hiện tại / max(baseline, 0.1/phút). Lưu vào `template_activity.json`
-  mỗi 5 phút và khi dừng, nạp lại khi khởi động. Template im lặng nhưng có trong 24h vẫn
-  được liệt kê với count 0 (dấu hiệu log "biến mất").
-- **Evidence của `window`**: `alert.rate` từ `FeatureEngine.describe()` (rate 10s/1m/5m,
-  median/spread baseline 1m, tỉ lệ so với median, kèm câu tóm tắt; đọc dưới lock, không
-  làm thay đổi window), `alert.at` (thời điểm event được chấm điểm cuối), mỗi template
-  có `age_at_alert_minutes` (template mới < 1h được xếp trước), và `unknown_templates`:
-  tối đa 10 template chưa có group của cùng service có event trong 30 phút (ERROR/WARN
-  trước). Evidence của `service` cũng có `unknown_templates`; group được xếp theo
-  (alert, có hoạt động gần đây, level, `count_30m`).
-- **Hallucination guard**: chỉ chấp nhận document id / group id / `similar_case_id` nằm trong danh sách
-  candidate đã gửi.
-- **Incident history** (`incident_cases.json`, chỉ web ghi; trang riêng "Incidents" `#incidents`): một
-  incident mô tả **cả service** đang gặp sự cố gì (không chia theo group). Khác corpus
-  runbook (ít, tái sử dụng, khớp bằng embedding), mỗi incident là một sự cố **đã được người
-  xác nhận**: root cause, resolution, runbook liên kết, thời điểm, các group liên quan, và
-  **error pattern** của service. Error pattern = `service_signature()`: các template của
-  service có event trong 30 phút VÀ bất thường: `ratio` ≥ 3 (khi chưa có baseline thì WARN
-  trở lên thay thế), thuộc group không NORMAL, chưa có group, hoặc mới xuất hiện < 1h;
-  warning mãn tính ở mức thường ngày bị loại. Mỗi template trong pattern giữ số liệu
-  (rate, baseline, ratio, level, group, `reasons`), kèm `totals` của service (event và
-  event ERROR trong 15 phút); trang Incidents hiển thị thành bảng. Chỉ lưu khi người dùng bấm "Save as service incident" trên một phân tích service
-  `done`; pattern lấy từ record (`signature`), không từ client. Mỗi phân tích window và
-  service mới tính pattern hiện tại của service, `past_incidents` = các incident cùng
-  service có overlap (= tỉ lệ template của incident có mặt trong pattern hiện tại) ≥ 0.5,
-  tối đa 3 (window) / 5 (service); Việc khớp chỉ so sánh template text; mỗi incident khớp được gửi kèm `comparison` then-vs-now theo từng template (`now` null = không còn bất thường) và `only_now` (template chỉ có lần này); LLM so mức độ chủ yếu bằng `ratio`. LLM trả `similar_case_id` nếu một incident khớp. API:
-  `GET/POST /api/incident-cases` (POST `{service, title, root_cause, resolution,
-  documentation_id?}`), `DELETE /api/incident-cases/<id>`.
-- **Recall hiển thị cho người dùng**: mỗi record phân tích window/service lưu `recalled`
-  (id, title, overlap, occurred_at, `comparison`, `only_now`) = kết quả khớp của chính
-  engine, có cả khi LLM lỗi; record không chép nội dung incident. Trang AI Insights hiện
-  panel "↺ This happened before" ở đầu phân tích với root cause / resolution / runbook
-  **hiện tại** của incident (từ `incidents` trong `GET /api/insights`, nên chỉnh sửa hiện
-  ngay trên phân tích cũ), bảng then-vs-now, "New this time", và link sang trang Incidents;
-  danh sách Alerts/Services có dấu "↺ CASE-…". Phân tích service chỉ còn một
-  `similar_case_id` cấp service (không theo từng issue).
-- **Incident viết từ kinh nghiệm**: một editor dùng cho ba chế độ — lưu từ phân tích
-  service, sửa (`PUT /api/incident-cases/<id>`), và viết tay (`POST` với `manual: true`).
-  Người dùng sửa title / root cause / resolution / runbook và **curate error pattern**: bỏ
-  template traffic bình thường, thêm template của cùng service (tìm qua `/api/templates`).
-  Pattern luôn do server dựng từ dữ liệu engine đã ghi (signature của phân tích, pattern
-  hiện có, `template_registry.json`); client chỉ gửi `keep_texts` và `add_template_ids`.
-  Template thêm tay có `reasons: ["manual"]` và không có số liệu. Prompt nói incident do
-  người viết: khi khớp, ưu tiên root cause / resolution của nó.
-- **Độ tin cậy và tốc độ của LLM worker**: một worker, nhưng hàng đợi có ưu tiên — phân
-  tích window/service chạy trước triage template (một lần "Triage all" xếp tới 50 job).
-  Reply bị cắt ở `max_tokens` (`finish_reason: length`) được hỏi lại một lần với gấp đôi
-  budget (tối đa 8000); reply không phải JSON được hỏi lại một lần kèm lời nhắc. Budget
-  ×1.5 cho tiếng Việt (window 800 → 1200, service 2000 → 3000). Read timeout chỉ retry một
-  lần; `llm.job_deadline_seconds` (150) giới hạn mỗi job kể cả retry. Mỗi record lưu
-  `duration_s`, `attempts`, `usage` (token do endpoint báo); UI hiện "12.3 s · 4.1k → 905
-  tokens · retried"; Prometheus: `logai_llm_request_duration_seconds{kind}`,
-  `logai_llm_tokens_total{kind,type}`, `logai_llm_retries_total{kind,reason}`.
-- **Ngôn ngữ trả lời**: chọn English / Tiếng Việt trên trang AI Insights (lưu trong
-  browser), gửi kèm mỗi request (`language` trong `analysis_requests.json`); `vi` thêm một
-  câu vào system prompt để mọi trường văn bản tự do là tiếng Việt. Record và case lưu
-  `language`. UI vẫn tiếng Anh; kết quả cũ không được dịch lại.
-- **Save as document**: `POST /api/documentation` nhận `assign_group_ids`; tài liệu mới
-  thành manual documentation của các group đó (bỏ qua kèm lý do nếu grouping đang
-  pending). **Move to group** cho template dùng `PUT /api/templates/<id>/group` sẵn có.
-- **Lý do không chạy được**: heartbeat runtime có `llm_status`/`llm_reason`
-  (`ok|disabled|error`), hiển thị trên banner Alerts, AI Insights và LLM profiles.
+**Requests and the worker**
 
-### 7.8 LLM profiles
+- **Requests.** The web writes `analysis_requests.json` (schema v2):
+  `{"<kind>:<id>": {"action": "analyze"|"delete", "at": ts, "language": ...}}`.
+  - It keeps only the latest action per key and drops entries older than 24 h.
+  - `kind="templates_all"` queues up to 50 templates.
+  - The endpoints are listed in [`docs/WEB_UI.md`](docs/WEB_UI.md).
+- **Engine.** A 2 s control timer, which keeps running while Elasticsearch is
+  down, reads the file and submits each request exactly once.
+  - Restarts are safe because each record stores `requested_at`.
+  - A request that cannot run (missing target, error) gets a `failed` record.
+  - A request the engine has not picked up after 10 minutes shows as `failed`
+    in the web.
+- **Delete.** Only the engine writes result files, so deletes also go through a
+  request. A job still running for a deleted record does not write it back.
+- **History.** Every finished analysis is also appended to
+  `analysis_history.jsonl`, which is append-only and never rewritten. The web
+  reads it to show earlier answers for the same target.
 
-Nguồn LLM (endpoint / api_key / model) được quản lý từ Web UI (view "LLM
-profiles"), không cần sửa env hay restart.
+**What the LLM is sent**
 
-- **Lưu trữ**: `data/llm_profiles.json`, chỉ web ghi (atomic, mode `0600` vì chứa
-  API key). API không bao giờ trả key về browser, chỉ trả `api_key_hint`
-  (vd `sk-…W7h`); sửa profile mà để trống key thì giữ key cũ.
-- **Endpoint**: nhập base URL (`https://host` hoặc `.../v1`) sẽ được chuẩn hóa thành
-  `.../v1/chat/completions`; path khác được giữ nguyên.
-- **Active profile**: một profile active cho toàn hệ thống (`PUT
-  /api/llm-profiles/active`). Engine đọc lại mỗi vòng poll và đổi `LLMConfig` của
-  `IncidentClassifier` tại chỗ; `null` = dùng cấu hình env `LOGAI_LLM_*` (server
-  default). Không có profile và không có env endpoint ⇒ phân tích LLM tắt.
-- **Heartbeat** runtime báo `llm_enabled` và `llm_profile_id` (không có key) để UI
-  hiển thị profile engine đang thực sự dùng.
-- **Không có xác thực**: ai truy cập được Web UI đều có thể tạo/đổi profile (và do
-  đó chuyển hướng log evidence tới endpoint khác). Chỉ expose UI trong mạng tin cậy.
-  Engine cũng sẽ POST tới bất kỳ host nào được nhập (kể cả địa chỉ nội bộ — SSRF);
-  nếu cần siết lại, thêm allowlist host qua env. Đổi host của một profile bắt buộc
-  nhập lại API key, để key đã lưu không bị gửi tới host mới.
+- **Recent counts only, plus each template's normal level.** The LLM never
+  receives cumulative `event_count`. `TemplateActivity` counts events per
+  `(service, template)` in two series:
+  - 1-minute buckets over 30 minutes → `count_15m`, `count_30m`, `rate_per_min`;
+  - 1-hour buckets over 24 hours → `baseline_per_min` = median of the closed
+    hours (silent hours count as 0; hours before the engine started are
+    unknown; at least 3 hours are needed).
 
-## 8. Module ownership và boundary mapping
+  `ratio` = current rate / max(baseline, 0.1/min). The counts are saved to
+  `template_activity.json` every 5 minutes and on stop. Templates silent now but
+  active in the last 24 h are still listed with count 0, as a sign that logs
+  "disappeared".
+- **`window` evidence:**
+  - `alert.rate` from `FeatureEngine.describe()`: 10s/1m/5m rates, the median
+    and spread of the 1m baseline, and the ratio to the median, with a summary
+    sentence. It is read under a lock and does not mutate the window.
+  - `alert.at`, the last scored event time.
+  - `age_at_alert_minutes` for each template; templates younger than 1 h come
+    first.
+  - `unknown_templates`: up to 10 ungrouped templates of the same service with
+    events in the last 30 minutes, ERROR/WARN first.
+- **`service` evidence** also includes `unknown_templates`. Groups are ordered
+  by alert state, recent activity, level, then `count_30m`.
+- **Hallucination guard.** Only document IDs, group IDs and `similar_case_id`
+  values from the candidate lists that were sent are accepted.
 
-| Module | Trách nhiệm | Input | Output | State sở hữu |
-|---|---|---|---|---|
-| `logai/config.py` | Load và merge cấu hình | YAML + environment | `AppConfig` | Không |
-| `logai/models.py` | Data contracts dùng chung | Field values | Dataclass instances | Không |
-| `collector/es_collector.py` | Poll realtime và stream historical | ES config + checkpoint | `RawLog` batches/cursor | Realtime hoặc training cursor qua CheckpointStore |
-| `parsing/drain3_parser.py` | Mine template và extract parameters | `RawLog` | `ParsedEvent` | `drain3_state.bin` |
-| `embedding/embedder.py` | Encode text thành normalized vector | Template/doc text | NumPy matrix/vector | Model in-memory/Hugging Face cache |
-| `clustering/hdbscan_cluster.py` | Offline clustering, centroid, realtime nearest-group | IDs + vectors | Labels, centroid, assignment | Không |
-| `docmatch/doc_matcher.py` | Load runtime corpus và cosine match | JSON corpus + centroids | `MatchResult` | Corpus/embeddings in-memory + cache file |
-| `docmatch/refresh_worker.py` | Theo dõi revision và refresh group documentation | Corpus + overrides + registries | Group documentation updates | `documentation_status.json` |
-| `features/feature_engine.py` | Sliding-window aggregation | `(service, group_id)`, timestamp | `FeatureVector` | Per-`(service, group)` windows in-memory |
-| `anomaly/isolation_forest_model.py` | Train/load/predict global IF | Feature vectors | `AnomalyResult` | `models/global_v3.pkl` + in-memory model |
-| `alert/alert_state_machine.py` | Hysteresis theo group | `AnomalyResult` | `AnomalyState` | `anomaly_state.json` |
-| `metrics/prometheus_exporter.py` | Expose/update metrics | Parsed/group/anomaly state | `/metrics` | Prometheus client in-memory |
-| `storage/base.py` | Atomic JSON/pickle/model persistence | Python objects | Files | File contents |
-| `storage/registries.py` | Template/group metadata và vectors | State dataclasses/vectors | Registry lookup/list | Registry files + caches |
-| `storage/documentation.py` | Validate/revision/persist corpus và manual overrides | JSON mutation payloads + YAML seed | Versioned corpus/override snapshots | Documentation JSON files |
-| `storage/checkpoint.py` | Persist Elasticsearch cursor | sort values/timestamp | Current checkpoint | `checkpoint.json` hoặc `training_checkpoint.json` |
-| `storage/dedup.py` | Event idempotency theo TTL | `event_id` | seen/not seen | `dedup_index.json` |
-| `reliability/retry.py` | Exponential backoff + jitter | Callable | Result hoặc re-raised error | Không |
-| `reliability/dlq.py` | Ghi và đọc failed events | Payload + error | JSONL records | `dlq.jsonl` |
-| `training/train_pipeline.py` | Orchestrate batch training | Historical `RawLog` list | Training artifacts | Qua registries/model stores |
-| `realtime/realtime_pipeline.py` | Orchestrate streaming processing | Realtime batches | Metrics + updated state/DLQ | Qua component stores |
-| `web/app.py` | Desktop UI API và documentation mutations | Registry/state files + HTTP requests | JSON API + static UI | Corpus/override files qua `DocumentationCorpusStore` |
+**Incidents**
 
-Ownership rule: orchestrator quyết định thứ tự và nhánh xử lý; module chuyên
-biệt không được tự gọi ngược orchestrator. `models.py` và `config.py` là shared
-contracts, không chứa business workflow.
+- **Incident history** (`incident_cases.json`; only the web writes it; shown on
+  the **Incidents** page). An incident describes what a **whole service** went
+  through and was **confirmed by a person**: root cause, resolution, linked
+  runbook, time, related groups, and the service's **error pattern**.
+- **Error pattern** = `service_signature()`: the service's templates with
+  events in the last 30 minutes that are also abnormal, meaning any of:
+  - `ratio` ≥ 3 (WARN or above stands in while there is no baseline);
+  - the template's group is not NORMAL;
+  - the template is ungrouped;
+  - the template is younger than 1 h.
 
-## 9. External output contracts
+  Chronic warnings at their usual level are excluded. Each pattern entry keeps
+  rate, baseline, ratio, level, group and `reasons`, plus service `totals`
+  (events and ERROR events over 15 minutes).
+- **Saving and matching.**
+  - An incident is saved with "Save as service incident" on a `done` service
+    analysis. The pattern comes from the stored record (`signature`), never
+    from the client.
+  - Every new window/service analysis computes the service's current pattern.
+    `past_incidents` are same-service incidents whose overlap (the share of the
+    incident's templates present now) is ≥ 0.5: at most 3 for a window, 5 for a
+    service.
+  - Matching compares template text only.
+  - Each matched incident is sent with a per-template then-vs-now `comparison`
+    (`now` null = no longer abnormal) and `only_now` (templates new this time).
+  - The LLM compares severity mainly by `ratio` and returns `similar_case_id`
+    when an incident matches.
+- **Recall shown to the user.**
+  - Each window/service record stores `recalled`: the engine's own matches,
+    present even when the LLM fails. It holds IDs and comparisons, not copies
+    of incident content.
+  - AI Insights shows "↺ This happened before" with the incident's **current**
+    root cause, resolution and runbook (so edits show on old analyses), the
+    then-vs-now table and "New this time".
+  - The Alerts and Services lists show a "↺ CASE-…" badge.
+- **Hand-written incidents.** One editor serves three modes: saving from a
+  service analysis, editing (`PUT /api/incident-cases/<id>`) and writing by hand
+  (`POST` with `manual: true`).
+  - Users curate the error pattern: they remove normal-traffic templates and
+    add templates of the same service.
+  - The server always rebuilds the pattern from engine data; the client sends
+    only `keep_texts` and `add_template_ids`.
+  - Hand-added templates carry `reasons: ["manual"]` and no numbers.
+  - The prompt says incidents are written by people: when one matches, its
+    root cause and resolution take priority.
+
+**Worker reliability and output**
+
+- **Worker reliability and speed.** There is one worker with a priority queue:
+  window/service analyses run before template triage.
+  - A reply cut off at `max_tokens` (`finish_reason: length`) is retried once
+    with double the budget (at most 8000).
+  - A non-JSON reply is retried once with a reminder.
+  - Budgets are ×1.5 for Vietnamese.
+  - A read timeout is retried only once, and `llm.job_deadline_seconds` (150)
+    bounds each job including retries.
+  - Records store `duration_s`, `attempts` and `usage`.
+  - Metrics: `logai_llm_request_duration_seconds{kind}`,
+    `logai_llm_tokens_total{kind,type}`, `logai_llm_retries_total{kind,reason}`.
+- **Language.** English or Vietnamese is chosen on AI Insights (stored in the
+  browser) and sent with each request. `vi` adds one system-prompt sentence so
+  free-text fields come back in Vietnamese. Records and cases store `language`;
+  old results are not re-translated.
+- **Save as document.** `POST /api/documentation` accepts `assign_group_ids`; the
+  new document becomes the manual documentation of those groups (skipped, with
+  a reason, while grouping is pending). **Move to group** uses
+  `PUT /api/templates/<id>/group`.
+- **Why the LLM is not running.** The runtime heartbeat carries `llm_status` /
+  `llm_reason` (`ok|disabled|error`), shown on the Alerts, AI Insights and LLM
+  profiles pages.
+
+### 7.7 LLM profiles
+
+The LLM endpoint, API key and model are managed in the web UI (**LLM
+profiles**), without editing env or restarting.
+
+- **Storage.** `data/llm_profiles.json` is written only by the web, atomically,
+  with mode `0600` because it holds API keys.
+  - The API never returns a key, only `api_key_hint` (e.g. `sk-…W7h`).
+  - Saving a profile with an empty key keeps the old key.
+- **Endpoint.** A base URL (`https://host` or `.../v1`) is normalized to
+  `.../v1/chat/completions`; any other path is kept.
+- **Active profile.** One profile is active system-wide
+  (`PUT /api/llm-profiles/active`).
+  - The engine re-reads it every poll and swaps the `IncidentClassifier`'s
+    `LLMConfig` in place.
+  - `null` means the `LOGAI_LLM_*` env config.
+  - No profile and no env endpoint means LLM analysis is disabled.
+- **Heartbeat.** The heartbeat reports `llm_enabled` and `llm_profile_id`, never
+  the key.
+- **No authentication.** Anyone who can reach the web UI can create or switch
+  profiles, and so redirect log evidence to another endpoint. The engine POSTs
+  to any host entered, internal addresses included (SSRF).
+  - Expose the UI only on a trusted network.
+  - Changing a profile's host requires re-entering the key, so a stored key is
+    never sent to a new host.
+
+## 8. Module ownership
+
+| Module | Responsibility | State it owns |
+|---|---|---|
+| `config.py` | Load and merge configuration | – |
+| `models.py` | Shared data contracts | – |
+| `collector/es_collector.py` | Realtime polling and historical streaming; ES field mapping; `_search` retry | Cursors via `CheckpointStore` |
+| `parsing/preprocessor.py`, `parsing/drain3_parser.py` | Message normalization and template mining | `drain3_state.bin` |
+| `embedding/embedder.py` | Remote BGE-M3 client, L2 normalization | – |
+| `clustering/hdbscan_cluster.py` | Offline clustering, centroids, nearest group | – |
+| `grouping/assignment_manager.py` | Apply manual grouping overrides | Via registries |
+| `docmatch/doc_matcher.py` | Corpus loading and cosine matching | `doc_embeddings.pkl` |
+| `docmatch/refresh_worker.py` | Background documentation refresh | `documentation_status.json` |
+| `features/feature_engine.py` | Per-`(service, group)` sliding windows | In-memory windows |
+| `features/template_activity.py` | Per-template recent counts for the LLM | `template_activity.json` |
+| `anomaly/isolation_forest_model.py` | Train/load/predict the global IF | `models/global_v3.pkl` |
+| `alert/alert_state_machine.py` | Hysteresis per window | `anomaly_state.json` |
+| `incident/*` | LLM worker, evidence builders, requests, history, incidents, profiles | LLM result files |
+| `metrics/prometheus_exporter.py` | `/metrics` | In-memory client |
+| `storage/base.py` | Atomic JSON (`atomic_write_json`), JSON/pickle/model stores | – |
+| `storage/registries.py` | Template/group metadata and vectors | Registry files |
+| `storage/documentation.py` | Corpus/override validation, revisions, persistence | Documentation JSON files |
+| `storage/grouping.py` | Grouping overrides, revisions, status helpers | `grouping_overrides.json` / `grouping_status.json` |
+| `storage/checkpoint.py` | Elasticsearch cursors | `checkpoint.json`, `training_checkpoint.json` |
+| `storage/dedup.py` | Bounded event idempotency | `dedup_index.json` |
+| `storage/index_selection.py` | Index selection and status | `es_index_*.json` |
+| `storage/retrain_schedule.py` | Retrain schedule, status, backup/restore | `retrain_*.json`, `retrain_backup/` |
+| `reliability/dlq.py` | Append failed events | `dlq.jsonl` |
+| `training/train_pipeline.py` | Orchestrate training | Via stores |
+| `realtime/realtime_pipeline.py` | Orchestrate streaming, control loop, retrain | Via stores |
+| `web/app.py` | HTTP API and static UI | Web-owned intent files |
+
+Ownership rule: orchestrators decide order and branching; specialized modules
+never call back into an orchestrator. `models.py` and `config.py` are shared
+contracts with no workflow logic.
+
+## 9. Output contracts
 
 ### 9.1 Prometheus metrics
 
-Endpoint mặc định: `http://<host>:9108/metrics`.
+Default endpoint: `http://<host>:9108/metrics`. Main series:
 
-| Metric | Type | Labels | Update semantics |
+| Metric | Type | Labels | Semantics |
 |---|---|---|---|
-| `app_log_events_total` | Counter | `service` | Tăng sau parse/assign thành công |
-| `app_log_errors_total` | Counter | `service`, `error_code` | Tăng với level ERROR/CRITICAL/FATAL; `error_code` hiện là `template_id` |
-| `app_log_templates_total` | Gauge | `service` | Số template của service; hiện scan toàn registry mỗi event |
-| `log_anomaly_score` | Gauge | `service`, `group_id`, `documented` | Score gần nhất của cửa sổ `(service, group)`; ghi tại biên flush micro-batch (§7.5) |
-| `log_alert_state` | Gauge | `service`, `group_id`, `state` | State hiện tại bằng 1, ba state còn lại bằng 0; `set_alert_state` return sớm khi state không đổi |
-| `log_alerts_total` | Counter | `service`, `group_id` | Tăng một lần cho mỗi chuyển tiếp INTO `ALERTING` |
-| `logai_events_received_total` | Counter | Không | Tăng `inc(len(batch))` một lần mỗi batch |
-| `logai_events_processed_total` | Counter | Không | Tăng sau khi event được mark dedup |
-| `logai_events_failed_total` | Counter | Không | Tăng khi event exception và được gửi DLQ |
-| `logai_retry_total` | Counter | Không | Đã khai báo nhưng retry helper chưa cập nhật metric này |
-| `logai_processing_latency_seconds` | Histogram | Không | Quan sát thời gian `_process_one`, kể cả failure/dedup return |
-| `logai_queue_depth` | Gauge | Không | Kích thước batch trong lúc xử lý, 0 sau batch |
+| `app_log_events_total` | Counter | `service` | After successful parse/assign |
+| `app_log_errors_total` | Counter | `service`, `error_code` | ERROR/CRITICAL/FATAL events; `error_code` is the `template_id` |
+| `app_log_templates_total` | Gauge | `service` | Templates per service (O(1) counter, updated on new templates) |
+| `log_anomaly_score` | Gauge | `service`, `group_id`, `documented` | Latest score of the window, set at the flush boundary |
+| `log_alert_state` | Gauge | `service`, `group_id`, `state` | 1 for the current state, 0 for the others |
+| `log_alerts_total` | Counter | `service`, `group_id` | +1 per transition INTO `ALERTING` |
+| `logai_events_received_total` | Counter | – | +len(batch) per batch |
+| `logai_events_processed_total` | Counter | – | After an event is marked in dedup |
+| `logai_events_failed_total` | Counter | – | Event exception sent to the DLQ |
+| `logai_retry_total` | Counter | – | Elasticsearch `_search` retries |
+| `logai_processing_latency_seconds` | Histogram | – | Duration of `_process_one` |
+| `logai_queue_depth` | Gauge | – | Batch size while processing, 0 after |
+| `logai_last_processed_event_timestamp_seconds` | Gauge | – | Event time of the last processed event (catch-up tracking) |
+| `logai_pipeline_errors_total` | Counter | `stage`, `reason_code` | Stage failures (grouping, flush, …) |
+| `logai_llm_*` | Histogram/Counter | `kind`, … | See §7.6 |
 
-Prometheus scrape mỗi 10 giây theo `prometheus.yml`. Metrics client state nằm
-trong memory và reset khi process restart; Prometheus giữ time series đã scrape.
+`prometheus.yml` is a sample scrape config (10 s interval). Client state is
+in-memory and resets on restart; Prometheus keeps the scraped series.
 
-### 9.2 Web UI và HTTP API
+### 9.2 Web UI and HTTP API
 
-Flask web process là reader của template/group/anomaly state và là writer duy
-nhất của editable documentation corpus/overrides và grouping intent. Engine là
-writer duy nhất của grouping status và applied registries. Bốn view dùng hash route:
-`#templates`, `#groups`, `#alerting`, `#documentation`. Sidebar và Reload luôn
-hiện trên desktop; request lỗi được retry mỗi 2 giây để browser tự reconnect sau
-web process restart.
+- **Who writes what.**
+  - The Flask web process reads template, group and anomaly state.
+  - It is the only writer of the documentation corpus and overrides, grouping
+    overrides, index selection, the retrain schedule, analysis requests,
+    incidents and LLM profiles.
+  - The engine is the only writer of grouping status, applied registries and
+    the LLM results.
+- **Views.** The 9 views are hash routes: Alerting, AI Insights, Incidents,
+  Templates, Groups, Documentation, Data sources, Retrain, LLM profiles.
+- **Concurrency.** Mutations use optimistic revisions and return 409 on a stale
+  snapshot.
+- **Grouping changes.** `PUT /api/templates/<id>/group` returns `202`; the
+  engine flushes buffered predictions and activates the revision at a batch
+  boundary.
+- **Health.** `GET /api/health` is based on the engine heartbeat and returns
+  503 while the engine is unavailable. `GET /api/stats` is the web liveness
+  probe.
+- **No authentication.** Restrict write routes with ingress or network policy.
 
-`GET /api/alerts` merge `anomaly_state.json` với group/template registries. Alert
-condition lấy trực tiếp từ `AnomalyState.alert_state`. Cột Level của Alerting UI
-không phải field của group và không tham gia state machine; API derive nó từ
-template level nặng nhất trong service/group cell để cung cấp display context.
-Alerting view chỉ poll mỗi 2 giây khi đang active.
-
-Documentation mutations dùng optimistic revision và trả 409 khi client ghi từ
-snapshot cũ hoặc grouping revision chưa apply. Assignment endpoint ghi override
-với fingerprint audit của group rồi trả `state: pending`; refresh worker áp dụng
-revision bất đồng bộ. Manual override hợp lệ tiếp tục gắn với group ID khi
-membership thay đổi. API không có auth, vì vậy deployment phải chặn write routes
-bằng ingress/network policy.
-
-`PUT /api/templates/<id>/group` ghi desired assignment và trả `202`; engine
-flush prediction cũ rồi activate revision tại poll/batch boundary. `GET
-/api/grouping/status` phân biệt pending, partial, applied, failed và
-engine_unavailable. `GET /api/health` dùng heartbeat thay vì chỉ kiểm tra port.
-
-`GET /api/es-indices` trả lựa chọn hiện tại kèm trạng thái engine
-(`pending`/`applied`/`no_index_selected`/`engine_unavailable`); `PUT
-/api/es-indices {patterns, revision}` lưu lựa chọn (`202`, `409` khi revision cũ,
-`400` khi tên không hợp lệ).
-
-Chi tiết endpoint, payload, response và hành vi UI nằm tại
+Every endpoint, payload, response and UI behavior is documented in
 [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
 ### 9.3 Persistent artifacts
 
-| Artifact | Format | Writer | Reader | Nội dung |
+| Artifact | Format | Writer | Reader | Content |
 |---|---|---|---|---|
-| `data/template_registry.json` | JSON object | Training + realtime | Training + realtime | `template_id -> TemplateState` (kèm in-memory $O(1)$ Counter theo service) |
-| `data/template_embeddings.pkl` | Pickle | Training + realtime | Training + realtime | `template_id -> numpy vector` |
-| `data/group_registry.json` | JSON object | Training + realtime | Training + realtime | `group_id -> GroupState` |
-| `data/group_centroids.pkl` | Pickle | Training | Training + realtime | `group_id -> normalized centroid` |
-| `data/models/global_v3.pkl` | Pickle | Training | Realtime | Global Isolation Forest với rate-floor features |
-| `data/doc_embeddings.pkl` | Pickle | Doc matcher | Hiện chưa được reuse khi reload | Corpus entries + embeddings |
-| `data/drain3_state.bin` | Drain3 persistence | Parser | Parser | Drain tree/template clusters |
-| `data/checkpoint.json` | JSON object | Collector + realtime | Collector | `search_after`, `last_timestamp` (cursor cũ), `indices: {index: {search_after, last_timestamp, floor_ts}}` |
-| `data/es_index_selection.json` | JSON object | Web API | Realtime + training + web | Index/pattern được chọn và `added_at` |
-| `data/es_index_status.json` | JSON object | Realtime | Web API | Index có sẵn, pattern -> index, tiến độ từng index, revision đã áp dụng |
-| `data/training_checkpoint.json` | JSON object | Training pipeline | Training collector | Historical `search_after` cursor |
-| `data/training_event_index.jsonl` | Append-only JSONL | Training pipeline | Training pipeline | Lightweight parsed event records for replay (kèm `level`, nguồn để dựng `TemplateState.level`) |
-| `data/anomaly_state.json` | JSON object | Alert state machine | Alert state machine + web API | `"[service, group_id]" -> AnomalyState` (tuple được flatten thành chuỗi JSON-list tại seam; key thường `group_id` cũ vẫn đọc được nhưng là ô mồ côi) |
-| `data/documentation_corpus.json` | Versioned JSON object | Web API (seed lần đầu từ YAML) | Matcher + web API | Editable documentation source of truth |
-| `data/documentation_overrides.json` | Versioned JSON object | Web API | Refresh worker + web API | Manual group assignment + group fingerprint |
-| `data/documentation_status.json` | JSON object | Refresh worker | Web API | Applied/attempted revisions, stale groups, refresh error |
-| `data/grouping_overrides.json` | Versioned JSON object | Web API | Training + realtime | Desired anchor/manual-group assignments |
-| `data/grouping_status.json` | JSON object | Training + realtime | Web API + readiness | Applied/attempted revision, per-template results, heartbeat and progress timestamps |
-| `data/dedup_index.json` | JSON object | Dedup index | Dedup index | `event_id -> processed wall-clock time` |
-| `data/dlq.jsonl` | Append-only JSONL | Realtime | Manual replay API | Failed event records |
-| `data/window_state.json` | Chưa dùng | Không | Không | Config placeholder |
+| `template_registry.json` | JSON | Training + realtime | Training + realtime + web | `template_id -> TemplateState` |
+| `template_embeddings.pkl` | Pickle | Training + realtime | Training + realtime | `template_id -> vector` |
+| `group_registry.json` | JSON | Training + realtime | All | `group_id -> GroupState` |
+| `group_centroids.pkl` | Pickle | Training + realtime | Training + realtime | `group_id -> normalized centroid` |
+| `group_lineage.json` | JSON | Training | Training + realtime (retrain summary) | Groups grown/created by the last retrain, `next_group_number` |
+| `models/global_v3.pkl` | Pickle | Training | Realtime | Global Isolation Forest |
+| `doc_embeddings.pkl` | Pickle | Doc matcher | Doc matcher | Cached corpus embeddings |
+| `drain3_state.bin` | Drain3 | Parser | Parser | Drain tree / clusters |
+| `checkpoint.json` | JSON | Realtime | Collector | Legacy cursor + `indices: {index: {search_after, last_timestamp, floor_ts}}` |
+| `training_checkpoint.json` | JSON | Training | Training | Historical cursor |
+| `training_event_index.jsonl` | JSONL | Training | Training | Parsed event records for replay |
+| `anomaly_state.json` | JSON | Alert state machine | Engine + web | `"[service, group_id]" -> AnomalyState` |
+| `dedup_index.json` | JSON | Realtime | Realtime | Recently processed `event_id`s |
+| `dlq.jsonl` | JSONL | Realtime | Manual | Failed events (§9.4) |
+| `es_index_selection.json` / `es_index_status.json` | JSON | Web / engine | Engine + training / web | §4.2 |
+| `documentation_corpus.json` / `documentation_overrides.json` | JSON | Web (seeded from YAML) | Engine + web | §4.3 |
+| `documentation_status.json` | JSON | Refresh worker | Web | Applied revisions, stale groups, errors |
+| `grouping_overrides.json` | JSON | Web | Training + realtime | Desired manual assignments |
+| `grouping_status.json` | JSON | Training + realtime | Web + healthcheck | Applied/attempted revision, per-template results, heartbeat |
+| `analysis_requests.json` | JSON | Web | Engine | §7.6 |
+| `incident_analysis.json` / `service_analysis.json` / `template_triage.json` | JSON | Engine | Web | Latest LLM result per target |
+| `analysis_history.jsonl` | JSONL | Engine | Web | Every finished analysis |
+| `incident_cases.json` | JSON | Web | Engine + web | Confirmed incidents |
+| `template_activity.json` | JSON | Realtime | Realtime | Recent per-template counts |
+| `llm_profiles.json` | JSON (0600) | Web | Engine + web | LLM profiles and API keys |
+| `retrain_schedule.json` / `retrain_status.json` | JSON | Web / engine | Engine / web | §6.4 |
+| `retrain_backup/` | Files | Engine | Engine | Pre-retrain artifacts (§6.4) |
 
-> Lưu ý: vì `anomaly_state.json` giờ lưu theo key flatten của tuple
-> `(service, group_id)`, các key `group_id` đơn thuần (trước refactor) sẽ không map
-> vào cửa sổ mới. Khi deploy, **xóa `data/anomaly_state.json`** để tránh các ô cũ
-> mồ côi (hàm parse giữ nguyên key chuỗi cũ nên file không crash khi đọc, nhưng
-> state cũ sẽ không bao giờ được làm mát).
-
-Pickle files chỉ được load từ nguồn tin cậy. Pickle không phải format an toàn
-cho artifact do bên không tin cậy cung cấp.
+Pickle files must only be loaded from trusted sources.
 
 ### 9.4 DLQ record
 
@@ -885,221 +890,192 @@ cho artifact do bên không tin cậy cung cấp.
     "message": "...",
     "metadata": {},
     "event_id": "es-document-id",
-    "es_index": "app-logs-*",
+    "es_index": "app-logs-2026.09.07",
     "es_doc_id": "es-document-id"
   }
 }
 ```
 
-`DeadLetterQueue.replay()` chỉ yield records và không xóa. `clear()` xóa toàn
-bộ file; hiện không có CLI replay/clear chính thức.
+There is no replay or clear command; inspect or replay the JSONL by hand.
 
 ## 10. Reliability semantics
 
 ### 10.1 Retry
 
-Chỉ Elasticsearch `_search()` được bọc retry ở trạng thái hiện tại.
+Only Elasticsearch `_search` retries (`ElasticsearchCollector._search`):
 
-- Tổng cộng tối đa 1 lần gọi đầu + 5 retry.
-- Backoff mặc định: 1, 2, 4, 8, 16 giây, cap 60 giây.
-- Mỗi delay có random jitter từ 0% đến 10%.
-- Sau khi hết retry, exception được raise ra ngoài.
-- Parse, embedding, registry write, feature, model và metrics update không có
-  retry riêng; lỗi của các bước này đi thẳng vào per-event exception handler.
-- Elasticsearch exception sau khi hết retry xảy ra ngoài `_process_one`, nên
-  không được ghi vào event DLQ và có thể làm dừng realtime loop. Docker Compose
-  sẽ restart process vì policy `unless-stopped`.
+- Non-retryable client errors (400/401/403/404) fail immediately.
+- Other errors retry up to 5 times with backoff 1, 2, 4, 8, 16 s (cap 60 s) plus
+  0–10% jitter; each retry increments `logai_retry_total`. After the last
+  attempt the exception is raised.
+- Remote embedding and LLM calls have their own bounded retries
+  (`embedding.max_retries`, `llm.max_retries`, `llm.job_deadline_seconds`).
+- Parse, registry, feature, model and metrics steps do not retry; failures go
+  to the per-event handler (DLQ).
+- An ES failure after the last retry happens outside `_process_one`, so it is
+  not a DLQ record; the poll loop backs off and tries again.
 
 ### 10.2 Dedup
 
-Realtime kiểm tra `DedupIndex.seen(event_id)` trước parse. Event thành công được
-`mark()` sau toàn bộ processing.
+Realtime checks `DedupIndex.seen(event_id)` before parsing and calls `mark()`
+after processing. The index is a bounded LRU (`OrderedDict`) of
+`reliability.dedup_max_size` entries (200,000, ~20 MB): O(1) lookup, insert and
+eviction. A compact JSON snapshot is written at the flush boundary when it
+changed, for crash recovery.
 
-`DedupIndex` sử dụng Bounded LRU Cache (`OrderedDict`) với dung lượng cố định
-`reliability.dedup_max_size` (mặc định 200.000 entries).
+### 10.3 Checkpoint and crash recovery
 
-- Lookup là $O(1)$, insert và eviction tự động loại bỏ phần tử cũ nhất ở đầu ở $O(1)$ amortized (`popitem(last=False)`).
-- RAM tiêu thụ cố định ở mức ~20 MB (thay vì tăng không giới hạn theo log volume).
-- Hàm `gc()` không còn duyệt $O(D)$, loại bỏ hoàn toàn hiện tượng pipeline stall.
-- Snapshot được ghi compact JSON không indent xuống đĩa khi batch có thay đổi (`_dirty`) để phục hồi khi crash.
-- Tương thích ngược với file JSON cũ định dạng dict.
-
-
-### 10.3 Checkpoint và crash recovery
-
-Realtime checkpoint gồm sort value cuối cùng và timestamp cuối cùng. Collector
-chỉ trả cursor; `RealtimePipeline` commit cả hai giá trị atomically tại **biên
-flush micro-batch** (§7.5), sau khi buffer đã được chấm và state đã bền vững.
-
-Realtime xử lý batch theo at-least-once semantics. Collector không advance
-checkpoint ngay sau khi fetch batch:
+Realtime is at-least-once. The collector only returns cursors; the pipeline
+commits them at the **flush boundary**, after the buffer is scored and state is
+durable:
 
 ```text
 fetch [F, G, H, I, J]
-process F, G, H  (buffer feature vectors, chưa commit cursor)
-process crash
-restart và fetch lại [F, G, H, I, J]
-dedup skip F, G, H; xử lý I, J
+process F, G, H  (vectors buffered, cursor not committed)
+crash
+restart, fetch [F, G, H, I, J] again
+dedup skips F, G, H; process I, J
 flush -> commit checkpoint after J
 ```
 
-Vì suy luận đã batch hóa và tích lũy **qua nhiều poll**, cursor được tách khỏi
-buffer: `_pending_cursor`/`_pending_last_ts` lấy từ poll của stream, còn buffer có
-thể chứa cả fv-snapshot từ idle-tick (vốn không advance cursor). `_flush_batch()`
-giữ **đúng thứ tự** durability và chỉ commit khi có cursor thật:
+`_flush_batch()` keeps this order and commits only with a real stream cursor:
 
-1. `_flush_predictions()` — `predict_batch`, apply transition tuần tự trong RAM,
-   rồi atomic bulk persist final alert state của mỗi group đúng một lần.
-2. `template_registry.flush()` → `group_registry.flush()` (no-op nếu `_dirty` sạch).
+1. `_flush_predictions()`: `predict_batch`, transitions in RAM, one atomic bulk
+   persist of final alert states.
+2. `template_registry.flush()` → `group_registry.flush()` (no-op if clean).
 3. `dedup.gc()`.
-4. `checkpoint.commit(cursor, last_ts)` — **chỉ khi `_pending_cursor is not None`**.
-   Flush chỉ-idle (stream rỗng) vẫn cool-down nhưng không commit.
+4. `checkpoint.commit_indices(...)`: only when a stream cursor is pending. An
+   idle-only flush still cools windows down but commits nothing.
 
-Mọi crash TRƯỚC bước 4 → cursor không advance; dedup mark là in-memory tới `gc`
-nên batch được đọc lại và loại trùng idempotent, không mất/nhân đôi alert.
+A crash before step 4 leaves the cursor in place; dedup marks are in memory
+until `gc`, so the batch is re-read and deduplicated without losing or
+duplicating alerts.
 
-Với nhiều index (§4.1.1), `_pending_cursors` giữ cursor của từng index đã xử lý;
-bước 4 commit tất cả một lần (`checkpoint.commit_indices`), cùng thứ tự durability.
+Historical training: `stream_historical_batches()` never writes the checkpoint.
+Training saves Drain3 state, then appends and `fsync`s the event index, then
+commits the cursor, per batch. On restart the cursor gives the next page and
+the event index holds everything parsed so far. Both files are deleted only
+after all training artifacts are written.
 
-Historical training có semantics riêng: `stream_historical_batches()` không tự
-ghi checkpoint. Training append và `fsync` event index trước, sau đó mới commit
-cursor theo từng batch. Khi process restart, cursor xác định page kế tiếp còn
-event index giữ toàn bộ dữ liệu đã parse cho các phase grouping và model. Hai file
-training này chỉ bị xóa sau khi toàn bộ training artifacts được ghi thành công.
+### 10.4 File atomicity and process model
 
-### 10.4 File atomicity và process model
-
-`JSONStore`, `PickleStore` và `ModelStore` ghi temp file rồi `os.replace`, giúp
-tránh file nửa chừng khi process crash. Lock là `threading.RLock`, chỉ bảo vệ
-threads trong cùng process.
-
-Không có file lock/distributed lock. Hai OS processes cùng ghi một artifact có
-thể overwrite state của nhau. Chỉ một realtime writer được phép dùng cùng
+All JSON state is written through a temp file and `os.replace`
+(`atomic_write_json` uses a unique temp name and `fsync`), so a crash never
+leaves a half-written file. Locks are `threading.RLock` and only protect threads
+inside one process; there is no file or distributed lock. Two processes writing
+the same artifact can overwrite each other: only one realtime writer may use a
 `data/` directory.
 
-Grouping activation uses `grouping_status.json` as a recovery marker. A pending
+Grouping activation uses `grouping_status.json` as a recovery marker: a pending
 attempt is written before registry mutation and `applied_revision` only after
 template metadata/embeddings and group metadata/centroids are durable. A crash
 between file replacements is reconciled idempotently before the next event.
 
-DLQ là append JSONL dưới thread lock nhưng không dùng temp+replace hoặc `fsync`;
-record cuối có thể không bền vững nếu host mất điện đúng lúc ghi.
+The DLQ appends JSONL under a thread lock without temp+replace or `fsync`; the
+last record can be lost on power failure.
 
-### 10.5 State durability theo component
+### 10.5 Durability by component
 
-| State | Durability hiện tại |
+| State | Durability |
 |---|---|
-| Checkpoint | Commit tại biên flush micro-batch (§7.5), chỉ khi có cursor stream |
-| Alert state | Flush một lần tại biên predict batch; key là `(service, group_id)` flatten; intermediate states giữ trong RAM cho metrics |
-| Dedup | Flush tại biên flush qua `gc()` |
-| Template/group metadata trong realtime | Update dùng `flush=False`; `flush()` tại biên flush micro-batch, no-op khi `_dirty` sạch |
-| Template embeddings | Mark dirty on update; save the complete cache once at a batch/training boundary |
-| Grouping intent/status | Web and engine have separate files; status heartbeat also carries last poll/event/checkpoint progress |
-| Feature windows | Chỉ in-memory, key `(service, group_id)`; reset khi restart (idle-tick bù bằng cách union với alert state đã persist) |
-| Prometheus client counters/gauges | Chỉ in-memory; reset khi restart |
+| Checkpoint | Committed at the flush boundary, only with a stream cursor |
+| Alert state | Persisted once per flush; intermediate states only in RAM for metrics |
+| Dedup | Snapshot at the flush boundary via `gc()` |
+| Template/group metadata | Updated with `flush=False`; flushed at the flush boundary |
+| Template embeddings | Marked dirty; saved once at a batch/training boundary |
+| Grouping intent/status | Separate web and engine files; status heartbeat carries progress |
+| Template activity | Saved every 5 minutes and on stop |
+| Feature windows | In memory only; reset on restart (idle tick still cools persisted non-NORMAL windows) |
+| Prometheus client state | In memory only |
 
-Feature history reset làm group quay về cold-start/neutral behavior sau restart,
-dù `window_state_file` đã có trong config.
+## 11. Design choices
 
-## 11. Các lựa chọn thiết kế
+- **Elasticsearch polling instead of push/queue.** `search_after` keeps the
+  collector simple with no Kafka. In exchange, throughput depends on polling
+  and batch size, cursor commits need care, and the mapping must support a
+  stable sort.
+- **Drain3 for template mining.** It is an online parser that fits both
+  training and realtime, and its persisted tree keeps template IDs stable
+  across restarts. Losing or replacing `drain3_state.bin` can change IDs and
+  desynchronize the registries.
+- **Remote BGE-M3.** Training and realtime call a separately deployed
+  `BAAI/bge-m3` service over HTTP; OpenAI-compatible and TEI response formats
+  are supported. Vectors (1024-d) are L2-normalized, so a dot product equals
+  cosine similarity. The model weights and accelerators belong to the inference
+  service, not the LogAI image.
+- **Offline HDBSCAN, realtime nearest centroid.** Clustering only in training
+  avoids constant topology changes and clustering cost at runtime. Templates
+  that are too different stay pending until the next training.
+- **One global Isolation Forest.** It saves memory and avoids a cold-start model
+  per group. The 8 dimensionless features make services with different volumes
+  comparable. The trade-off is that a global distribution can hide a pattern
+  specific to one group, so thresholds must be tuned on real data.
+- **File-based storage.** JSON is inspectable, pickle fits NumPy and sklearn,
+  and atomic replace is enough for one writer. It cannot scale horizontally and
+  has no multi-file transactions or efficient queries.
+- **Prometheus pull model.** The engine only exposes current state and
+  counters; Prometheus stores the history.
 
-### 11.1 Elasticsearch polling thay vì push/queue
+## 12. Known limits
 
-`search_after` cho phép collector đơn giản, không cần Kafka và phù hợp MVP.
-Đổi lại, throughput phụ thuộc polling/batch size, cursor commit phải được xử lý
-cẩn thận và index mapping phải hỗ trợ stable sort.
-
-### 11.2 Drain3 cho template mining
-
-Drain3 là online parser, phù hợp cả training và realtime. Persisted tree giúp
-template IDs ổn định khi restart. Nếu mất hoặc thay `drain3_state.bin`, template
-IDs có thể thay đổi và làm lệch registries cũ.
-
-### 11.3 Remote BGE-M3 semantic representation
-
-Training and realtime call a separately deployed `BAAI/bge-m3` inference
-service over HTTP. LogAI consumes the 1024-dimensional dense output and applies
-L2 normalization, so dot product remains equivalent to cosine similarity. The
-model weights and accelerator dependencies are owned by the inference service,
-not the LogAI image. OpenAI-compatible and TEI response formats are supported.
-
-### 11.4 Offline HDBSCAN, realtime nearest centroid
-
-HDBSCAN chỉ chạy trong training để tránh thay đổi topology liên tục và chi phí
-clustering ở realtime. Template mới chỉ được gắn vào group hiện có khi đạt
-similarity threshold; template khác biệt được giữ pending đến lần training sau.
-
-### 11.5 Một Global Isolation Forest
-
-Một model chung giảm memory và loại cold-start model theo group. Sáu feature
-dimensionless giúp so sánh hành vi giữa service có volume khác nhau. Tradeoff:
-phân phối toàn cục có thể che khuất pattern đặc thù của một group, nên threshold
-và contamination phải tune bằng dữ liệu thật.
-
-### 11.6 File-based storage
-
-JSON dễ kiểm tra, pickle phù hợp NumPy/sklearn và atomic replace đủ cho một
-writer. Lựa chọn này giảm dependency vận hành nhưng không hỗ trợ horizontal
-scaling, transaction nhiều file, query hiệu quả hoặc state lớn.
-
-### 11.7 Prometheus pull model
-
-Engine chỉ expose current state/counters; Prometheus chịu trách nhiệm scrape và
-lưu time series. Không có API lịch sử riêng trong engine.
-
-## 12. Giới hạn và known issues
-
-Các giới hạn dưới đây là behavior đã quan sát từ code, không phải mục tiêu
-thiết kế tương lai:
-
-| Mức độ | Giới hạn | Ảnh hưởng |
+| Area | Limit | Impact |
 |---|---|---|
-| Critical | Checkpoint commit trước xử lý batch | Có thể mất event khi crash |
-| Resolved | Dedup JSON không bounded, GC/flush O(D) | Đã giải quyết (Bounded LRU Cache - Issue 2) |
-| Resolved | Historical fetch/parse giữ full `RawLog` và `ParsedEvent` lists | Stream theo batch, replay qua `training_event_index.jsonl`; feature-vector sampling vẫn là Issue 7 |
-| Critical | Feature generation scan timestamps và giữ toàn bộ vectors | CPU/RAM tăng mạnh khi training lớn |
-| High | Template metric scan toàn registry mỗi event | Realtime CPU/object allocation tăng theo số template |
-| High | Feature windows không persist | Restart mất baseline ngắn hạn |
-| Resolved | Realtime registry metadata không flush cuối batch | Đã giải quyết (flush tại biên flush micro-batch với cờ `_dirty` - Issue 10) |
-| Resolved | `rolling_window_points` config chưa được dùng | Đã giải quyết (kết nối trực tiếp vào _GroupWindow - Issue 7) |
-| Medium | `logai_retry_total` không được nối với retry helper | Metric luôn không phản ánh retry thật |
-| Medium | Documentation cache chỉ ghi, chưa đọc reuse | Reload embed lại corpus |
-| Medium | Re-run training trên registry cũ có thể cộng lại event counts | Overlapping lookback làm metadata count tăng lặp |
-| Resolved | Group IDs không ổn định qua retraining | Đối chiếu ID theo overlap + lineage (§6.2) |
-| Operational | Single writer, không có inter-process lock | Không chạy nhiều instance trên cùng volume |
-| Operational | Docker ES tắt security; Grafana dùng password mặc định | Chỉ phù hợp local/demo |
+| Training | All feature vectors are kept in RAM before fitting (no reservoir sampling) | Memory grows with the training window |
+| Training | `training.max_docs` silently truncates the time range; only a warning is logged | Long lookbacks may train on the first part only |
+| Realtime | Feature windows are not persisted | Short-term baselines restart cold after a restart |
+| Realtime | A single process per `data/` directory, no inter-process lock | No horizontal scaling; never run training and realtime concurrently on one directory |
+| Security | Web API has no authentication; LLM profile endpoints are not allow-listed (SSRF) | Expose the UI only on a trusted network |
+| Security | Grafana in compose defaults to the password `admin` | Set `GF_SECURITY_ADMIN_PASSWORD` outside demos |
+| Input | Numeric timestamps are read as epoch seconds | Epoch milliseconds are misread |
+| Input | Dedup uses `_id` only | Same `_id` across indices counts once |
+| Alerting | `min_events_1m` is per service window | Needs tuning by the number of services per group |
 
-Nguồn theo dõi remediation là `KNOWN_ISSUES.md`; lịch sử giải quyết được ghi ở
-`ISSUES_FIXED.md`.
+## 13. Runtime and deployment invariants
 
-## 13. Runtime và deployment invariants
+1. Run training before the first realtime start, to create registries,
+   centroids and the model.
+2. Training and realtime must share the same `data/` volume and Drain3 state.
+3. Only one realtime process may write to a state directory, and training and
+   realtime must not run concurrently on it (the scheduled retrain handles this
+   in-process).
+4. Elasticsearch documents need a sortable `@timestamp` and a stable unique ID.
+5. The documentation corpus and templates must use the same embedding model
+   and dimension. Changing the model means retraining all artifacts together.
+6. Pickle artifacts are created and loaded only in a trusted environment with
+   compatible dependency versions.
 
-Để hệ thống hoạt động đúng theo kiến trúc hiện tại:
+## 14. Reading the code
 
-1. Chạy training trước realtime lần đầu để tạo registries, centroids và global
-   model.
-2. Training và realtime phải dùng cùng `data/` volume và cùng Drain3 state.
-3. Chỉ một realtime process được ghi vào một state directory.
-   Training và realtime cũng không được chạy đồng thời trên directory đó.
-4. Elasticsearch documents phải có sortable `@timestamp` và stable unique ID.
-5. Documentation corpus và model embedding phải có cùng embedding dimension.
-6. Không thay model embedding mà giữ centroids/doc embeddings cũ; phải retrain
-   artifacts cùng nhau.
-7. Pickle artifacts chỉ được tạo và load trong trusted environment, với phiên
-   bản dependency tương thích.
+Read in dependency order:
 
-## 14. Quy tắc thay đổi kiến trúc
+1. `logai/models.py`: shared vocabulary and the tuple-key boundaries.
+2. `logai/config.py`: defaults and artifact locations.
+3. `logai/collector/es_collector.py` and `logai/parsing/`: normalizing the
+   external input.
+4. `logai/training/train_pipeline.py`: how a model snapshot is published.
+5. `logai/realtime/realtime_pipeline.py`: runtime ordering and durability.
+6. `logai/storage/` (`registries`, `documentation`, `grouping`): file ownership
+   and revision contracts.
+7. `logai/docmatch/refresh_worker.py`: applying documentation asynchronously.
+8. `logai/features/feature_engine.py`, `anomaly/isolation_forest_model.py`,
+   `alert/alert_state_machine.py`: inference and alerting.
+9. `logai/incident/`: on-demand LLM analysis.
+10. `logai/web/app.py` and `docs/WEB_UI.md`: HTTP/UI behavior.
 
-Một thay đổi phải cập nhật tài liệu này khi tác động một trong các phần sau:
+The tests under `tests/` are executable examples of these contracts. Good
+starting points are `test_realtime_crash_load_and_perf.py`,
+`test_realtime_grouping_refresh.py`, `test_group_documentation_refresh.py`,
+`test_web_documentation_api.py` and `test_web_grouping_api.py`.
 
-- External input fields, defaults hoặc timestamp semantics.
-- Data contract trong `models.py`.
-- Thứ tự/nhánh của training hoặc realtime pipeline.
-- Artifact filename, format, ownership hoặc durability.
-- Metric name, type, label hoặc update semantics.
-- Retry, checkpoint, dedup, DLQ hoặc crash recovery guarantee.
-- Model/feature dimension, group identity hoặc documentation matching.
-- Process topology, concurrency hoặc deployment assumptions.
+## 15. When to update this document
 
-Các optimization không đổi contract vẫn phải được ghi vào `ISSUES_FIXED.md` và
-đánh dấu trạng thái tương ứng trong `KNOWN_ISSUES.md`.
+Update it with any change to:
+
+- external input fields, defaults or timestamp semantics;
+- data contracts in `models.py`;
+- the order or branches of the training or realtime pipeline;
+- artifact names, formats, ownership or durability;
+- metric names, types, labels or semantics;
+- retry, checkpoint, dedup, DLQ or crash-recovery guarantees;
+- feature dimensions, group identity or documentation matching;
+- process topology, concurrency or deployment assumptions.

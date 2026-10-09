@@ -19,7 +19,7 @@ The deployment runs **both the Realtime Engine and the Template Explorer Web UI 
 │  │ - scripts/run_realtime│         │ - scripts/run_web.py  │  │
 │  │ - Port 9108 (metrics) │         │ - Port 5555 (UI)      │  │
 │  └──────────┬────────────┘         └───────────▲───────────┘  │
-│             │ (Read-Write)                     │ (Read-Only)  │
+│             │ (Read-Write)                     │ (Intents)    │
 │             ▼                                  │              │
 │       ┌────────────────────────────────────────┴──────┐       │
 │       │ Volume: logai-data-pvc (/app/data)            │       │
@@ -33,9 +33,9 @@ The deployment runs **both the Realtime Engine and the Template Explorer Web UI 
 ### Why this guarantees data consistency:
 - Both containers run in the **same Pod**, sharing the exact same `logai-data-pvc` mounted at `/app/data`.
 - When the engine discovers and flushes new templates to `template_registry.json`, the web UI immediately serves them from that exact same file.
-- The web container writes only documentation files and
-  `grouping_overrides.json`; engine registries and `grouping_status.json` remain
-  engine-owned.
+- The web container writes only intent files (documentation, grouping
+  overrides, index selection, retrain schedule, analysis requests, incidents,
+  LLM profiles); registries, status and LLM results remain engine-owned.
 - Readiness executes `scripts/healthcheck.py`, which requires a fresh engine
   heartbeat instead of treating an open TCP port as pipeline progress.
 - Port 5555 exposes unauthenticated mutation endpoints. Restrict it with an
@@ -56,30 +56,8 @@ cp k8s/.env.example k8s/.env
 nano k8s/.env
 ```
 
-**Inside `k8s/.env`:**
-```ini
-# Container image (change to your registry path if using a private registry)
-LOGAI_IMAGE=logai-engine:latest
-
-# Elasticsearch URL (in-cluster or external)
-LOGAI_ES_HOSTS=http://elasticsearch.default.svc.cluster.local:9200
-LOGAI_ES_USER=elastic
-LOGAI_ES_PASSWORD=your-password
-
-# Prometheus metrics port
-LOGAI_METRICS_PORT=9108
-
-# Web UI port
-LOGAI_WEB_PORT=5555
-
-# Storage paths & sizes
-LOGAI_STORAGE_BASE_DIR=/app/data
-LOGAI_DOCUMENTATION_CORPUS_PATH=/app/data/documentation_corpus.json
-LOGAI_DATA_STORAGE_SIZE=10Gi
-
-# Optional bearer token for the BGE-M3 API
-LOGAI_EMBEDDING_API_KEY=
-```
+Every key (image, Elasticsearch, ports, storage size, embedding API key, LLM)
+is listed with comments in `k8s/.env.example`.
 
 ---
 
