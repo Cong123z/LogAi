@@ -50,7 +50,7 @@ function renderLlmProfiles(data) {
   $llmTbody.innerHTML = llm.profiles.map(p => {
     const isActive = p.id === llm.activeId;
     const status = isActive
-      ? `<span class="badge badge-green">Active</span>${engine.llm_profile_id === p.id ? ' <span class="ins-meta">in use</span>' : ''}`
+      ? `<span class="badge badge-green">Active</span>${engine.llm_profile_id === p.id ? ' <span class="badge badge-info">In use</span>' : ''}`
       : `<button type="button" class="btn" data-llm-use="${escapeHtml(p.id)}" aria-label="Use profile ${escapeHtml(p.name)}">Use</button>`;
     return `<tr>
       <td>${escapeHtml(p.name)}</td>

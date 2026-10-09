@@ -276,10 +276,16 @@
             <button class="btn btn-primary" id="src-save-btn" disabled>Save selection</button>
           </div>
         </div>
-        <p class="ins-meta">The engine reads every selected index from the moment it is added (no backfill). A pattern such as <code>app-logs-*</code> also picks up indices created later.</p>
+        <details class="how-it-works">
+          <summary>How data sources work</summary>
+          <ul>
+            <li>The engine reads every selected index from the moment it is added. Older logs are not backfilled.</li>
+            <li>A pattern such as <code>app-logs-*</code> also picks up indices created later.</li>
+          </ul>
+        </details>
         <p class="ins-toast ins-toast-error" id="src-action-status" aria-live="polite"></p>
         <form class="btn-row" id="src-add-form">
-          <label for="src-pattern" class="ins-meta">Index or pattern</label>
+          <label for="src-pattern" class="filter-label">Index or pattern</label>
           <input id="src-pattern" placeholder="app-logs-*" maxlength="255" autocomplete="off" spellcheck="false">
           <button class="btn" type="submit">Add</button>
         </form>
@@ -307,7 +313,20 @@
             <button class="btn" id="rt-run-btn">Retrain now</button>
           </div>
         </div>
-        <p class="ins-meta">At the scheduled time the engine pauses log processing, retrains on the chosen window of logs, and restarts itself. Existing groups never change: new templates are only added to them or form new groups. Logs that arrive meanwhile are read after the restart, so alerts are delayed but nothing is lost. If a retrain fails or the engine stops during it, the version from before the retrain is restored. A run missed while the engine was down is skipped and shown in the history.</p>
+        <details class="how-it-works">
+          <summary>How retraining works</summary>
+          <ol class="rt-steps">
+            <li><strong>Pause</strong><span>Log processing stops at the scheduled time</span></li>
+            <li><strong>Train</strong><span>On the last <em>Lookback</em>, newest logs cut past <em>Max documents</em></span></li>
+            <li><strong>Restart</strong><span>The engine reloads with the new model</span></li>
+            <li><strong>Catch up</strong><span>Logs that arrived meanwhile are read; alerts are only delayed</span></li>
+          </ol>
+          <ul class="rt-guarantees">
+            <li>Existing groups never change</li>
+            <li>Failed runs roll back</li>
+            <li>Missed runs are skipped and logged</li>
+          </ul>
+        </details>
         <p class="ins-toast ins-toast-error" id="rt-action-status" aria-live="polite"></p>
         <form id="rt-form" class="rt-form" autocomplete="off">
           <h3>Schedule</h3>
@@ -320,8 +339,8 @@
             <span class="rt-label" id="rt-days-label">Days</span>
             <div class="rt-row">
               <div class="toggle-group" id="rt-days" role="group" aria-labelledby="rt-days-label"></div>
-              <button type="button" class="btn" id="rt-every-day">Every day</button>
-              <button type="button" class="btn" id="rt-weekdays">Mon–Fri</button>
+              <button type="button" class="btn" id="rt-every-day" aria-pressed="false">Every day</button>
+              <button type="button" class="btn" id="rt-weekdays" aria-pressed="false">Mon–Fri</button>
             </div>
           </div>
           <h3>Training data</h3>
@@ -331,8 +350,8 @@
             </div>
             <div class="form-field"><label for="rt-max-docs">Max documents</label><input type="number" id="rt-max-docs" min="1000" max="5000000" step="1000" required></div>
           </div>
-          <p class="ins-meta">Each retrain reads the logs of the last <em>Lookback</em>. If the window holds more than <em>Max documents</em>, the newest logs are left out. <a href="#" id="rt-defaults">Use defaults</a></p>
           <div class="btn-row">
+            <button type="button" class="btn" id="rt-defaults">Use default training data</button>
             <button type="button" class="btn" id="rt-discard-btn" disabled>Discard changes</button>
             <button type="submit" class="btn btn-primary" id="rt-save-btn" disabled>Save schedule</button>
           </div>
@@ -381,9 +400,9 @@
       <form id="llm-form" autocomplete="off">
         <input type="hidden" id="llm-id">
         <div class="form-field"><label for="llm-name">Name</label><input id="llm-name" maxlength="100" required></div>
-        <div class="form-field"><label for="llm-endpoint">Endpoint</label><input id="llm-endpoint" type="url" maxlength="500" required placeholder="https://api.example.com" aria-describedby="llm-endpoint-help"><div class="sync-status" id="llm-endpoint-help">OpenAI-compatible. A base URL such as https://host gets /v1/chat/completions added.</div></div>
+        <div class="form-field"><label for="llm-endpoint">Endpoint</label><input id="llm-endpoint" type="url" maxlength="500" required placeholder="https://api.example.com" aria-describedby="llm-endpoint-help"><div class="field-hint" id="llm-endpoint-help"><span>OpenAI-compatible. A base URL such as <code>https://host</code> gets <code>/v1/chat/completions</code> added.</span></div></div>
         <div class="form-field"><label for="llm-model">Model</label><input id="llm-model" maxlength="200" required placeholder="gpt-5.6-luna"></div>
-        <div class="form-field"><label for="llm-key">API key</label><input id="llm-key" type="password" maxlength="500" autocomplete="new-password" aria-describedby="llm-key-help"><div class="sync-status" id="llm-key-help">Stored on the server and never shown again.</div></div>
+        <div class="form-field"><label for="llm-key">API key</label><input id="llm-key" type="password" maxlength="500" autocomplete="new-password" aria-describedby="llm-key-help"><div class="field-hint field-hint-lock" id="llm-key-help"><span>Stored on the server and never shown again.</span></div></div>
         <div class="form-field" id="llm-activate-field"><label class="switch"><input type="checkbox" role="switch" id="llm-activate" checked><span>Use this profile now</span></label></div>
         <div class="form-error" id="llm-error"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="llm-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>

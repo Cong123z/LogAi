@@ -1,5 +1,5 @@
 // ── Incident history page ──
-const inc = {cases: [], service: 'all', selected: null, signature: null, toastTimer: null};
+const inc = {cases: [], service: 'all', selected: null, signature: null, toastTimer: null, patternOpen: false};
 const $incList = document.getElementById('inc-list');
 const $incDetail = document.getElementById('inc-detail');
 const $incService = document.getElementById('inc-service');
@@ -49,6 +49,10 @@ $incList.addEventListener('click', event => {
   const again = $incList.querySelector(`[data-inc-id="${CSS.escape(inc.selected)}"]`);
   if (again) again.focus();
 });
+// Polls re-render the detail; remember whether the error pattern is open.
+$incDetail.addEventListener('toggle', event => {
+  if (event.target.classList.contains('pattern-collapse')) inc.patternOpen = event.target.open;
+}, true);
 $incDetail.addEventListener('click', async event => {
   if (event.target.closest('[data-inc-action="edit"]')) {
     const c = inc.cases.find(x => x.id === inc.selected);

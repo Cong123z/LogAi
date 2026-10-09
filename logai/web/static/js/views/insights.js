@@ -253,7 +253,7 @@ function incidentDetailHtml(c) {
     <div class="ins-section"><h3>Root cause</h3><p class="ins-why" style="white-space:pre-line">${escapeHtml(c.root_cause || '')}</p></div>
     ${c.resolution ? `<div class="ins-section"><h3>Resolution</h3><div class="ai-text" style="white-space:pre-line">${escapeHtml(c.resolution)}</div></div>` : ''}
     ${c.documentation_id ? `<p>Runbook <span class="badge badge-blue">${escapeHtml(c.documentation_id)}</span></p>` : ''}
-    <div class="ins-section"><h3>Error pattern (${(c.template_texts || []).length} templates)</h3>${incidentPatternHtml(c)}</div>
+    <details class="ins-section pattern-collapse"${inc.patternOpen ? ' open' : ''}><summary><span class="pattern-collapse-title">Error pattern</span><span class="badge badge-info">${(c.template_texts || []).length} templates</span><span class="pattern-collapse-action" aria-hidden="true"></span></summary>${incidentPatternHtml(c)}</details>
     <div class="ins-actions"><button type="button" class="btn btn-primary" data-inc-action="edit">Edit</button><button type="button" class="btn btn-danger" data-ins-action="delete-case">Delete incident</button></div>`;
 }
 

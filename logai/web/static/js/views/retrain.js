@@ -23,6 +23,14 @@ function rtSetDays(days) {
     button.classList.toggle('active', on);
     button.setAttribute('aria-pressed', String(on));
   });
+  rtSyncPresets();
+}
+
+// Light up "Every day" / "Mon–Fri" when the picked days are exactly that preset.
+function rtSyncPresets() {
+  const days = [...document.querySelectorAll('[data-rt-day].active')].map(b => b.dataset.rtDay).join();
+  document.getElementById('rt-every-day').setAttribute('aria-pressed', String(days === '0,1,2,3,4,5,6'));
+  document.getElementById('rt-weekdays').setAttribute('aria-pressed', String(days === '0,1,2,3,4'));
 }
 
 function rtSetTrainingData(lookbackHours, maxDocs) {
@@ -130,6 +138,7 @@ document.getElementById('rt-days').addEventListener('click', event => {
   const on = !button.classList.contains('active');
   button.classList.toggle('active', on);
   button.setAttribute('aria-pressed', String(on));
+  rtSyncPresets();
   rtMarkDirty();
 });
 document.getElementById('rt-every-day').addEventListener('click', () => { rtSetDays([0, 1, 2, 3, 4, 5, 6]); rtMarkDirty(); });

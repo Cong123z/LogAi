@@ -78,7 +78,7 @@ function renderSources(data, force = false) {
     const viaPattern = !exact && patterns.find(p => p.includes('*') && srcMatches(p, item.index));
     const health = {green: 'badge-green', yellow: 'badge-yellow', red: 'badge-red'}[item.health] || 'badge-gray';
     return `<tr>
-      <td><input type="checkbox" data-src-toggle="${escapeHtml(item.index)}" ${exact || viaPattern ? 'checked' : ''} ${viaPattern ? 'disabled' : ''} aria-label="Read ${escapeHtml(item.index)}"></td>
+      <td><label class="switch"${viaPattern ? ` title="Read through the pattern ${escapeHtml(viaPattern)}"` : ''}><input type="checkbox" role="switch" data-src-toggle="${escapeHtml(item.index)}" ${exact || viaPattern ? 'checked' : ''} ${viaPattern ? 'disabled' : ''} aria-label="Read ${escapeHtml(item.index)}"></label></td>
       <td><span class="tmpl-id">${escapeHtml(item.index)}</span>${viaPattern ? ` <span class="ins-meta">via ${escapeHtml(viaPattern)}</span>` : ''}</td>
       <td>${item.docs_count == null ? '—' : Number(item.docs_count).toLocaleString()}</td>
       <td><span class="badge ${health}">${escapeHtml(item.health || 'unknown')}</span></td>
