@@ -115,6 +115,39 @@ function formatCount(n) {
   return String(n);
 }
 
+// Events per minute over the last 60 s (live); hovering shows the 15-minute
+// average and the normal rate. — while the engine is stopped.
+function formatRate(item) {
+  if (item.rate_per_min === null || item.rate_per_min === undefined) return '<span class="sync-status" title="No recent rates from the engine">—</span>';
+  const title = `Last minute ${item.rate_1m || 0}/min · 15-minute average ${item.rate_per_min}/min`
+    + (item.baseline_per_min === null || item.baseline_per_min === undefined ? '' : ` · normal ${item.baseline_per_min}/min`);
+  return `<span title="${title}">${item.rate_1m || 0}/min</span>`;
+}
+
+// Live rates: while Templates or Groups is open, the server pushes the
+// engine's snapshot about every second and the Rate cells update in place.
+const SILENT_RATE = {rate_1m: 0, rate_per_min: 0, baseline_per_min: null, ratio: null};
+let rateStream = null;
+function setRateStream(open) {
+  if (!open) {
+    if (rateStream) rateStream.close();
+    rateStream = null;
+    return;
+  }
+  if (rateStream) return;
+  rateStream = new EventSource('/api/rates/stream');
+  rateStream.onmessage = event => {
+    const {templates, groups} = JSON.parse(event.data);
+    const pick = (table, id) => table ? (table[id] || SILENT_RATE) : {};
+    document.querySelectorAll('[data-rate-template]').forEach(cell => {
+      cell.innerHTML = formatRate(pick(templates, cell.dataset.rateTemplate));
+    });
+    document.querySelectorAll('[data-rate-group]').forEach(cell => {
+      cell.innerHTML = formatRate(pick(groups, cell.dataset.rateGroup));
+    });
+  };
+}
+
 // ── API ──────────────────────────────────────────────────────────
 async function fetchTemplates() {
   const params = new URLSearchParams();

@@ -31,7 +31,7 @@ from logai.docmatch.doc_matcher import DocumentationMatcher
 from logai.docmatch.refresh_worker import DocumentationRefreshWorker
 from logai.embedding.embedder import TemplateEmbedder
 from logai.features.feature_engine import FeatureEngine
-from logai.features.template_activity import TemplateActivity
+from logai.features.template_activity import TemplateActivity, rate_fields
 from logai.grouping import PENDING_GROUP_ID
 from logai.grouping.assignment_manager import (
     GroupAssignmentError,
@@ -57,7 +57,7 @@ from logai.models import (
 )
 from logai.parsing.drain3_parser import Drain3Parser
 from logai.reliability.dlq import DeadLetterQueue
-from logai.storage.base import JSONStore, ModelStore
+from logai.storage.base import JSONStore, ModelStore, atomic_write_json
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import DedupIndex
 from logai.storage.documentation import DocumentationCorpusStore
@@ -127,6 +127,11 @@ class RealtimePipeline:
         )
         self.template_activity = TemplateActivity.load(self._template_activity_path)
         self._template_activity_saved_at = time.monotonic()
+        # Snapshot of every template's rate for the web's Templates and Groups.
+        self._template_rates_path = (
+            f"{config.storage.base_dir}/{config.storage.template_rates_file}"
+        )
+        self._template_rates_saved_at = 0.0
         # Latest raw ERROR/FATAL lines per template: the core of LLM evidence.
         # Memory only; refills within minutes of a restart.
         self.error_samples = ErrorSamples()
@@ -881,6 +886,8 @@ class RealtimePipeline:
 
     CONTROL_INTERVAL_SECONDS = 2.0
     TEMPLATE_ACTIVITY_SAVE_SECONDS = 300.0
+    # Every control tick: the web streams this file to the Templates/Groups pages.
+    TEMPLATE_RATES_SECONDS = 1.0
 
     def _control_tick(self) -> None:
         self._check_retrain()
@@ -888,6 +895,7 @@ class RealtimePipeline:
         self._process_analysis_requests()
         self._heartbeat_grouping()
         self._save_template_activity()
+        self._publish_template_rates()
         self._publish_index_status()
 
     # --- retrain (web "Retrain" page) -------------------------------------------
@@ -1084,6 +1092,28 @@ class RealtimePipeline:
     def _reexec() -> None:
         logging.shutdown()
         os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    def _publish_template_rates(self) -> None:
+        """Write {at, templates: {id: rate fields}} for the web; `at` is wall
+        time so the web can tell a stopped engine's numbers are stale."""
+        if getattr(self, "template_activity", None) is None:
+            return
+        if time.monotonic() - self._template_rates_saved_at < self.TEMPLATE_RATES_SECONDS:
+            return
+        self._template_rates_saved_at = time.monotonic()
+        now = self._now_event_time() if self._event_clock else time.time()
+        counts = self.template_activity.counts(now)
+        last_minute = self.template_activity.rate_1m(now)
+        try:
+            atomic_write_json(self._template_rates_path, {
+                "at": time.time(),
+                "templates": {
+                    tid: rate_fields(entry, last_minute.get(tid, 0.0))
+                    for tid, entry in counts.items()
+                },
+            })
+        except OSError as exc:
+            logger.warning("Unable to save template rates: %s", exc)
 
     def _save_template_activity(self, force: bool = False) -> None:
         """Persist per-template baselines every few minutes (and on shutdown);

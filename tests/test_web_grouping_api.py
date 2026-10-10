@@ -59,6 +59,7 @@ def test_group_listing_includes_every_member_template():
             "event_count": 2,
             "first_seen": 0,
             "last_seen": 0,
+            "rate_1m": None, "rate_per_min": None, "baseline_per_min": None, "ratio": None,
         }]
         assert [template["template_id"] for template in by_id["GB"]["templates"]] == ["T2"]
     finally:

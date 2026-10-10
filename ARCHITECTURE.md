@@ -907,6 +907,7 @@ Every endpoint, payload, response and UI behavior is documented in
 | `analysis_history.jsonl` | JSONL | Engine | Web | Every done/failed analysis (Incidents › Analysis history) |
 | `incident_cases.json` | JSON | Web | Engine + web | Confirmed incidents |
 | `template_activity.json` | JSON | Realtime | Realtime | Recent per-template counts |
+| `template_rates.json` | JSON | Realtime | Web | Every second: per-template `rate_1m`, `rate_per_min`, `baseline_per_min`, `ratio`; streamed to the Templates/Groups Rate columns by `GET /api/rates/stream` |
 | `llm_profiles.json` | JSON (0600) | Web | Engine + web | LLM profiles and API keys |
 | `retrain_schedule.json` / `retrain_status.json` | JSON | Web / engine | Engine / web | §6.4 |
 | `retrain_backup/` | Files | Engine | Engine | Pre-retrain artifacts (§6.4) |

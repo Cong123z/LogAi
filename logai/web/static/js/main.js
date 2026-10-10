@@ -44,6 +44,7 @@ function setView(view, updateHash = true) {
     state.alertRefreshTimer = null;
   }
   loadData();
+  setRateStream(view === 'templates' || view === 'groups');
   if (view === 'alerting' || view === 'pipeline' || view === 'sources' || view === 'retrain') state.alertRefreshTimer = setInterval(loadData, 2000);
   if (view === 'llm' || view === 'insights' || view === 'incidents') state.alertRefreshTimer = setInterval(loadData, 3000);
 }

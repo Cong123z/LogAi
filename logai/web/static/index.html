@@ -136,6 +136,7 @@
               <th data-sort="service">Service <span class="sort-arrow"></span></th>
               <th data-sort="level">Level <span class="sort-arrow"></span></th>
               <th data-sort="event_count">Events <span class="sort-arrow"></span></th>
+              <th data-sort="rate_1m" title="Events per minute over the last minute (live)">Rate <span class="sort-arrow"></span></th>
               <th data-sort="group_id">Group ID <span class="sort-arrow"></span></th>
               <th data-sort="first_seen">First Seen <span class="sort-arrow"></span></th>
               <th data-sort="last_seen" class="sorted">Last Seen <span class="sort-arrow">▼</span></th>
@@ -172,7 +173,7 @@
         <div class="filter-bar"><span class="filter-label">Show</span><label class="chip-toggle"><input type="checkbox" id="undocumented-groups-only"><span>Undocumented only</span></label><label class="chip-toggle"><input type="checkbox" id="single-groups-only"><span>Single-template only</span></label></div>
         <div class="table-wrap">
           <table class="group-table">
-            <thead><tr><th data-group-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-group-sort="service">Service <span class="sort-arrow"></span></th><th data-group-sort="representative_template">Representative Template <span class="sort-arrow"></span></th><th data-group-sort="error_code" class="sorted">Error code <span class="sort-arrow">▲</span></th><th data-group-sort="documentation_source">Source <span class="sort-arrow"></span></th><th data-group-sort="event_count">Events <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
+            <thead><tr><th data-group-sort="group_id">Group ID <span class="sort-arrow"></span></th><th data-group-sort="service">Service <span class="sort-arrow"></span></th><th data-group-sort="rate_1m" title="Events per minute of all its templates over the last minute (live)">Rate <span class="sort-arrow"></span></th><th data-group-sort="representative_template">Representative Template <span class="sort-arrow"></span></th><th data-group-sort="error_code" class="sorted">Error code <span class="sort-arrow">▲</span></th><th data-group-sort="documentation_source">Source <span class="sort-arrow"></span></th><th data-group-sort="event_count">Events <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
             <tbody id="groups-tbody"><tr><td colspan="7" class="loading">Loading groups...</td></tr></tbody>
           </table>
         </div>

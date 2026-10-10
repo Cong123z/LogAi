@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from logai.alert.alert_state_machine import group_id_key
 from logai.incident.profiles import LLMProfileStore, ProfileError, ProfileStoreUnreadable
@@ -25,6 +25,7 @@ from logai.incident.requests import (
     request_key,
 )
 from logai.config import AppConfig
+from logai.features.template_activity import RATE_KEYS, group_rate, rate_fields
 from logai.grouping import PENDING_GROUP_ID
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.storage.retrain_schedule import (
@@ -59,6 +60,13 @@ logger = logging.getLogger("logai.web")
 
 # A request the engine has not picked up within this time is shown as failed.
 STALE_REQUEST_SECONDS = 600
+# Rates older than this come from a stopped engine and are not shown.
+RATES_STALE_SECONDS = 30
+NO_RATE = dict.fromkeys(RATE_KEYS)
+# The rate stream checks the engine's snapshot this often and pings when idle
+# so proxies keep the connection open.
+RATE_STREAM_POLL_SECONDS = 1.0
+RATE_STREAM_PING_SECONDS = 15.0
 # Upper bound for "Triage all unknown" so one click cannot flood the LLM queue.
 TRIAGE_ALL_LIMIT = 50
 
@@ -124,6 +132,34 @@ def create_app(
             return {}
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
+    def _template_rates() -> Optional[Dict[str, Any]]:
+        """template_id -> rate fields from the engine's snapshot, or None when
+        it is missing, unreadable or stale."""
+        try:
+            snapshot = _load_json("template_rates.json")
+        except (OSError, ValueError):
+            return None
+        if time.time() - float(snapshot.get("at") or 0) > RATES_STALE_SECONDS:
+            return None
+        return snapshot.get("templates") or {}
+
+    def _rate_of(rates: Optional[Dict[str, Any]], template_id: str) -> Dict[str, Any]:
+        return dict(NO_RATE) if rates is None else rate_fields(rates.get(template_id))
+
+    def _rates_payload() -> Dict[str, Any]:
+        """Every template's and group's rate fields; both None when stale."""
+        rates = _template_rates()
+        if rates is None:
+            return {"templates": None, "groups": None}
+        groups = _load_json("group_registry.json")
+        return {
+            "templates": {tid: rate_fields(entry) for tid, entry in rates.items()},
+            "groups": {
+                gid: group_rate([_rate_of(rates, tid) for tid in group.get("template_ids", [])])
+                for gid, group in groups.items()
+            },
+        }
 
     def _is_known(group_id: Optional[str]) -> bool:
         return group_id is not None and group_id != PENDING_GROUP_ID
@@ -216,6 +252,35 @@ def create_app(
 
     # ── API Routes ────────────────────────────────────────────────────
 
+    @app.route("/api/rates/stream")
+    def stream_rates():
+        """Server-Sent Events: the rates payload each time the engine rewrites
+        its snapshot (about every second) or it turns stale."""
+        # ponytail: one server thread per open tab (threaded dev server); move
+        # to an async WSGI server if many tabs stay open.
+        rates_file = base / "template_rates.json"
+
+        def events():
+            sent, quiet = object(), 0.0  # nothing sent yet
+            while True:
+                try:
+                    stamp = rates_file.stat().st_mtime
+                except OSError:
+                    stamp = None
+                if stamp is not None and time.time() - stamp > RATES_STALE_SECONDS:
+                    stamp = None
+                if stamp != sent:
+                    sent, quiet = stamp, 0.0
+                    yield f"data: {json.dumps(_rates_payload())}\n\n"
+                elif quiet >= RATE_STREAM_PING_SECONDS:
+                    quiet = 0.0
+                    yield ": ping\n\n"
+                time.sleep(RATE_STREAM_POLL_SECONDS)
+                quiet += RATE_STREAM_POLL_SECONDS
+
+        return Response(events(), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
     @app.route("/api/templates")
     def list_templates():
         """List templates with optional filters.
@@ -233,6 +298,7 @@ def create_app(
         templates = _load_json("template_registry.json")
         groups = _load_json("group_registry.json")
         grouping_overrides, grouping_sync = _grouping_context()
+        rates = _template_rates()
 
         # Build response list with enrichment from group registry
         result: List[Dict[str, Any]] = []
@@ -247,6 +313,7 @@ def create_app(
                 "service": tmpl.get("service", "unknown"),
                 "level": tmpl.get("level", "INFO"),
                 "event_count": tmpl.get("event_count", 0),
+                **_rate_of(rates, tid),
                 "first_seen": tmpl.get("first_seen", 0),
                 "last_seen": tmpl.get("last_seen", 0),
                 "group_id": gid,
@@ -534,6 +601,7 @@ def create_app(
             entry["id"] for entry in documentation.load_corpus()["entries"]
         }
         templates = _load_json("template_registry.json")
+        rates = _template_rates()
         for gid, group in groups.items():
             item = {"group_id": gid, **group}
             item["templates"] = []
@@ -547,9 +615,11 @@ def create_app(
                     "service": template.get("service", "unknown"),
                     "level": template.get("level", DEFAULT_LEVEL),
                     "event_count": template.get("event_count", 0),
+                    **_rate_of(rates, template_id),
                     "first_seen": template.get("first_seen", 0),
                     "last_seen": template.get("last_seen", 0),
                 })
+            item.update(dict(NO_RATE) if rates is None else group_rate(item["templates"]))
             override = overrides.get(gid)
             texts = [
                 templates.get(template_id, {}).get("template_text", "")

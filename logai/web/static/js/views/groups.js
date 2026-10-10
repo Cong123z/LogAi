@@ -12,7 +12,7 @@ function renderGroups(items) {
   if (state.undocumentedGroupsOnly) items = items.filter(group => !group.documented);
   if (state.singleGroupsOnly) items = items.filter(group => group.singleton);
   if (!items.length) {
-    $groupsTbody.innerHTML = '<tr><td colspan="7" class="empty-state">No groups found.</td></tr>';
+    $groupsTbody.innerHTML = '<tr><td colspan="8" class="empty-state">No groups found.</td></tr>';
     return;
   }
   const documentsById = new Map(state.documents.map(doc => [doc.id, doc]));
@@ -44,12 +44,14 @@ function renderGroups(items) {
         <span>${escapeHtml(template.service || 'unknown')}</span>
         <span><span class="badge ${levelBadgeClass(template.level)}">${escapeHtml(template.level || 'INFO')}</span></span>
         <span class="group-member-events">${formatCount(template.event_count || 0)}</span>
+        <span class="group-member-events" data-rate-template="${escapeHtml(template.template_id || '')}">${formatRate(template)}</span>
       </div>
     `).join('') : '<div class="group-member"><span class="sync-status">No templates recorded.</span></div>';
     return `
       <tr data-group-id="${escapeHtml(g.group_id)}">
         <td><div class="group-cell"><span class="group-id">${escapeHtml(g.group_id || '—')}</span>${g.singleton ? ' <span class="badge badge-unknown" title="Only one template: HDBSCAN found no similar templates for it">single</span>' : ''}<button type="button" class="group-expand${expanded ? ' expanded' : ''}" aria-expanded="${expanded}" aria-controls="${memberRowId}" title="${expanded ? 'Hide' : 'Show'} group templates"><span class="group-expand-icon" aria-hidden="true">&#9656;</span><span>${templateLabel}</span></button></div></td>
         <td>${escapeHtml(g.service || 'unknown')}</td>
+        <td class="rate-cell" data-rate-group="${escapeHtml(g.group_id)}">${formatRate(g)}</td>
         <td><div class="tmpl-text" title="${escapeHtml(g.representative_template || '')}">${highlightWildcards(escapeHtml(g.representative_template || '—'))}</div></td>
         <td>${g.documentation_id ? `<span class="tmpl-id">${escapeHtml(errorCode)}</span>` : '<span class="badge badge-unknown">Undocumented</span>'}</td>
         <td><span class="badge ${g.documentation_source === 'manual' ? 'badge-info' : (g.documentation_source === 'stale_override' ? 'badge-warn' : (g.documented ? 'badge-known' : 'badge-unknown'))}"${g.membership_changed_since_assignment ? ' title="Membership changed after this manual assignment"' : ''}>${escapeHtml(g.documentation_source || (g.documented ? 'automatic' : 'none'))}</span></td>
@@ -57,7 +59,7 @@ function renderGroups(items) {
         <td><div class="btn-row"><button class="btn assign-doc"${documentationLocked ? ' disabled title="Waiting for template grouping"' : ''}>${g.documented ? 'Change' : 'Assign'}</button>${(g.documented || g.documentation_id || g.manual_documentation_id) ? `<button class="btn clear-doc"${documentationLocked ? ' disabled title="Waiting for template grouping"' : ''}>Clear</button>` : ''}</div></td>
       </tr>
       <tr class="group-members-row" id="${memberRowId}" data-members-for="${escapeHtml(g.group_id)}"${expanded ? '' : ' hidden'}>
-        <td colspan="7"><div class="group-members-panel"><div class="group-member-list"><div class="group-member group-member-header"><span>Template ID</span><span>Template</span><span>Service</span><span>Level</span><span class="group-member-events">Events</span></div>${memberRows}</div></div></td>
+        <td colspan="8"><div class="group-members-panel"><div class="group-member-list"><div class="group-member group-member-header"><span>Template ID</span><span>Template</span><span>Service</span><span>Level</span><span class="group-member-events">Events</span><span class="group-member-events">Rate</span></div>${memberRows}</div></div></td>
       </tr>`;
   }).join('');
   $groupsTbody.querySelectorAll('.group-expand').forEach(button => button.addEventListener('click', () => {

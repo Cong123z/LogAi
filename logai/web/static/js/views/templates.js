@@ -85,7 +85,7 @@ function renderStats(stats) {
 function renderTable(items) {
   if (!items.length) {
     $tbody.innerHTML = `
-      <tr><td colspan="9" class="empty-state">
+      <tr><td colspan="10" class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
           <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
         </svg>
@@ -102,6 +102,7 @@ function renderTable(items) {
       <td>${escapeHtml(t.service)}</td>
       <td><span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span></td>
       <td>${formatCount(t.event_count)}</td>
+      <td class="rate-cell" data-rate-template="${escapeHtml(t.template_id)}">${formatRate(t)}</td>
       <td><span class="group-id" title="${escapeHtml(t.group_id || '—')}">${t.group_id && t.group_id !== 'UNASSIGNED_PENDING' ? escapeHtml(t.group_id) : '—'}</span></td>
       <td title="${formatFullTs(t.first_seen)}">${formatTs(t.first_seen)}</td>
       <td title="${formatFullTs(t.last_seen)}">${formatTs(t.last_seen)}</td>

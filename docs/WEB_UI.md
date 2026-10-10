@@ -19,8 +19,8 @@ bookmarked directly:
 | Alerting | `/#alerting` | `anomaly_state.json`, enriched from group/template registries |
 | AI Insights | `/#insights` | LLM result files, `analysis_requests.json` |
 | Incidents | `/#incidents` | `incident_cases.json`; the **Analysis history** tab reads `analysis_history.jsonl` |
-| Templates | `/#templates` | `template_registry.json`, `group_registry.json` |
-| Groups | `/#groups` | Group registry plus documentation corpus/overrides |
+| Templates | `/#templates` | `template_registry.json`, `group_registry.json`, `template_rates.json` |
+| Groups | `/#groups` | Group registry plus documentation corpus/overrides, `template_rates.json` |
 | Documentation | `/#documentation` | Editable corpus and synchronization status |
 | Data sources | `/#sources` | `es_index_selection.json`, `es_index_status.json` |
 | Retrain | `/#retrain` | `retrain_schedule.json`, `retrain_status.json` |
@@ -49,6 +49,11 @@ a side drawer so the table stays visible.
 Templates support search, service and log-level filters, known/unknown status,
 sortable columns, pagination with 25/50/100/200 rows per page, optional
 auto-refresh, and a detail drawer.
+The **Rate** column is live: events per minute over the last 60 seconds,
+updated about every second while the page is open. Hovering shows the 15-minute average and the normal rate. It shows `—` when the
+engine's snapshot is missing or older than 30 seconds (engine stopped).
+Updates arrive over Server-Sent Events from `GET /api/rates/stream`, opened only
+while Templates or Groups is the active view.
 Template `level` is the most severe log level observed for that template and is
 monotonically promoted by the pipeline.
 
@@ -61,8 +66,10 @@ engine status. A `202` response never produces a success notification by itself.
 ## Groups
 
 The Groups view shows Total Groups, Documented, and Undocumented counts. Its
-table can be sorted by group ID, service, representative template, error code,
-documentation source, or event count. The Error code column displays the error
+table can be sorted by group ID, service, rate, representative template, error
+code, documentation source, or event count. A group's **Rate** is the sum of
+its templates' rates against their summed normal rate; the expanded member
+list shows each template's rate. The Error code column displays the error
 code from the active documentation match, not the internal documentation ID.
 Each group row also has a template-count toggle. Expanding it shows every member
 template with its ID, full template text, service, level, and event count inline;
@@ -233,6 +240,7 @@ groups and the new groups, from `group_lineage.json`. Two browsers saving from t
 | `GET /api/retrain` | None | `schedule`, `saved`, `revision`, engine `status` (state, history), `run_pending`, `next_run_at`, `engine_state` (`running` / `retraining` / `engine_unavailable`), `defaults` |
 | `PUT /api/retrain` | `schedule` (`enabled`, `time` HH:MM, `weekdays` 0=Mon…6, `timezone`, `lookback_hours`, `max_docs`), `revision` | Updated view; `400` invalid, `409` stale revision |
 | `POST /api/retrain/run` | Optional `lookback_hours`, `max_docs` (default: the schedule's) | `202`; `400` invalid; `409` while a retrain runs or waits to start |
+| `GET /api/rates/stream` | None | Server-Sent Events: `{templates, groups}` rate fields (`rate_1m`, `rate_per_min`, `baseline_per_min`, `ratio`) each time the engine rewrites `template_rates.json`, both `null` when stale; `: ping` every 15 s when idle |
 | `GET /api/insights/history` | Optional `kind` (`window`/`service`/`template`), `service`, `id` | Every stored analysis (done and failed), newest first, capped at 300: `items`, `total`, `all_total`, `services`, `limit` |
 | `GET /api/insights/history/<n>` | Entry number in path | One history row plus the full stored `record`; `404` if missing |
 
@@ -284,6 +292,7 @@ volume as the realtime engine.
 | `es_index_status.json` | Realtime engine | Available indices, pattern resolution, per-index progress, applied revision |
 | `retrain_schedule.json` | Web UI/API | Retrain schedule and "retrain now" requests |
 | `retrain_status.json` | Realtime engine | Retrain state, heartbeat, next run, last 20 runs |
+| `template_rates.json` | Realtime engine | Every second: each template's last-minute rate, 15-minute rate, normal rate and ratio, for the live Rate columns |
 | `group_lineage.json` | Training | Templates added to existing groups and new groups at the last retrain |
 | `retrain_backup/` | Realtime engine | Artifacts from just before the last retrain, restored if it fails or is interrupted |
 

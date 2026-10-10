@@ -133,6 +133,27 @@ class TemplateActivity:
                         out[minute - first] += count
         return out
 
+    def rate_1m(self, now: float) -> Dict[str, float]:
+        """template_id -> events per minute over the last 60 s, summed over
+        services: the current minute plus the unexpired share of the previous
+        one (sliding-window estimate), so it moves smoothly second by second."""
+        current = int(now // 60)
+        previous_weight = 1.0 - (now % 60) / 60.0
+        out: Dict[str, float] = {}
+        with self._lock:
+            for (_svc, template_id), buckets in self._minutes.items():
+                total = 0.0
+                for minute, count in reversed(buckets):
+                    if minute == current:
+                        total += count
+                    elif minute == current - 1:
+                        total += count * previous_weight
+                    elif minute < current - 1:
+                        break
+                if total:
+                    out[template_id] = out.get(template_id, 0.0) + total
+        return {template_id: round(rate, 2) for template_id, rate in out.items()}
+
     # -- persistence -----------------------------------------------------------
 
     def save(self, path: str | Path) -> None:
@@ -163,6 +184,33 @@ class TemplateActivity:
         except (OSError, ValueError, TypeError, AttributeError):
             return cls()
         return activity
+
+
+RATE_KEYS = ("rate_1m", "rate_per_min", "baseline_per_min", "ratio")
+
+
+def rate_fields(entry: Optional[Dict[str, Any]], rate_1m: float = 0.0) -> Dict[str, Any]:
+    """What the web shows of a template's activity: the last minute's rate,
+    the 15-minute rate, the normal rate and how many times normal (15-minute
+    based). A template silent for 24 h has rate 0."""
+    entry = entry or empty_counts()
+    return {"rate_1m": entry.get("rate_1m", rate_1m),
+            **{k: entry[k] for k in ("rate_per_min", "baseline_per_min", "ratio")}}
+
+
+def group_rate(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Sum of member rates against the summed normal rate. A member silent for
+    24 h has no baseline and counts as 0; no member with one means unknown."""
+    rate = round(sum(e["rate_per_min"] or 0.0 for e in entries), 2)
+    rate_1m = round(sum(e.get("rate_1m") or 0.0 for e in entries), 2)
+    baselines = [e["baseline_per_min"] for e in entries if e["baseline_per_min"] is not None]
+    if not baselines:
+        return {"rate_1m": rate_1m, "rate_per_min": rate, "baseline_per_min": None, "ratio": None}
+    baseline = sum(baselines)
+    return {
+        "rate_1m": rate_1m, "rate_per_min": rate, "baseline_per_min": round(baseline, 3),
+        "ratio": round(rate / max(baseline, RATE_FLOOR_PER_MIN), 1),
+    }
 
 
 def recent(activity: Dict[str, Dict[str, Any]], template_id: str) -> Dict[str, Any]:
