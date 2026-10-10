@@ -113,14 +113,15 @@ retrain schedule when training runs in-process (§6.4).
 |---|---|---:|---|
 | `@timestamp` | ISO8601 string or number | Should exist | Missing/unparseable → processing time |
 | `service` (or `service.name`, then `service_code2`) | string | No | `"unknown"` |
-| `level` (or `log.level`, then the 3rd token of the message) | string | No | `"INFO"` |
+| `log.level` (then `level`, then a level found in the first 5 tokens of the message, after any date/time/pid/`[thread]` prefix) | string | No | `"INFO"` |
 | `message` | string | No | `""` |
-| other fields | JSON-compatible | No | Kept in `RawLog.metadata` (noise keys such as `ecs`, `agent`, `host`, `log` are dropped; the host name, from `host.name`/`host.hostname` or the `service_code` IP, is kept as `metadata.host_name`) |
+| other fields | JSON-compatible | No | Kept in `RawLog.metadata` (noise keys such as `ecs`, `agent`, `host`, `log` are dropped; the host name, from `host.name`/`host.hostname`, a flat `host` string or the `service_code` IP, is kept as `metadata.host_name`) |
 
 Rules:
 
 - ISO8601 with a `Z` suffix is parsed as `+00:00`.
-- A number is read as **epoch seconds**; epoch milliseconds are not normalized.
+- A number above `1e11` is read as **epoch milliseconds** (divided by 1000);
+  a smaller number is read as epoch seconds.
 - `event_id` comes from the Elasticsearch `_id`, not from the payload, and
   `es_index` is the hit's real `_index`.
 - Dedup uses `_id` only: two documents in different indices with the same
@@ -355,20 +356,37 @@ flowchart TD
 
 | Step | Module | Input | Output / state |
 |---:|---|---|---|
-| 1 | `ElasticsearchCollector.stream_historical_batches` | `start_ts`, `end_ts`, `max_docs`, `batch_size`, cursor | Iterator of `(List[RawLog], cursor)` |
+| 1 | `ElasticsearchCollector.newest_start`, then `stream_historical_batches` | `start_ts`, `end_ts`, `max_docs`, `batch_size`, cursor | Iterator of `(List[RawLog], cursor)` |
 | 2 | `Drain3Parser` | Each batch, in timestamp order | Drain3 state + durable training event index |
 | 3 | `TrainingPipeline._rebuild_template_registry` | Event index | Template metadata (incl. max-severity `level`) |
 | 4 | `TemplateEmbedder` | New or changed template texts | L2-normalized vectors |
 | 5 | `TrainingPipeline._cluster_templates` | Ungrouped templates + embeddings | `template_id -> group_id` (§6.2) |
 | 6 | `TrainingPipeline` (Phase 5) | Mapping + grouping overrides | Group registry + centroids |
 | 7 | `DocumentationMatcher.match_all`, then `DocumentationRefreshWorker.refresh_once` | Centroids, corpus, manual overrides | Documentation fields in the group registry |
-| 8 | `TrainingPipeline._group_events` | Event index + mapping | Timestamps per `(service, group_id)` |
-| 9 | `FeatureEngine` per window | Chronological timestamps | `FeatureVector` list |
-| 10 | `GlobalAnomalyModel.train` | All feature vectors | `models/global_v3.pkl` |
+| 8 | `bucket_window_timestamps` | Event index + mapping | Sorted timestamps per `(service, group_id)`, 8 B/event |
+| 9 | `sample_window_features` (one `FeatureEngine` per window) | Every event | A uniform sample of `training.feature_sample_size` (100k) `FeatureVector`s |
+| 10 | `GlobalAnomalyModel.train` | Sampled feature vectors | `models/global_v3.pkl` |
 
-Events with an `event_id` already in the event index (a resumed run, or a
-duplicate across batch boundaries) are skipped before parsing. The Drain3
-state is saved once per batch, then the event index, then the cursor (§10.3).
+Events whose `event_id` is among the last 200,000 seen (a resumed run
+replaying its last batch, or a duplicate across batch boundaries) are skipped
+before parsing. The Drain3 state is saved once per batch, then the event
+index, then the cursor (§10.3).
+
+**Range and memory.** The stream reads ascending and stops at `max_docs`. On a
+fresh run, `newest_start` binary-searches the start (to the second, with exact
+`_count`-style searches, ~22 for 30 days) so the newest `max_docs` documents
+are read, not the oldest. It sizes for 99% of `max_docs`: on a live index, docs
+indexed late into the range and re-read page boundaries also count toward the cap. Time buckets are not used: one bursty hour can hold
+more than the whole budget. If that query fails, the lookback start is
+kept. Memory does not grow with the window beyond ~8 B/event: steps 2 and 3
+stream the event index, step 8 keeps only `(window, timestamp)` per event, and
+step 9 feeds every event through the feature engine (baselines need the full
+stream) but keeps a uniform sample of exactly `feature_sample_size` vectors
+(selection sampling). The sample is uniform over events, not
+spread across windows: over-weighting quiet windows teaches the model that
+their spiky vectors are normal, and it stops flagging real bursts. Below ~20k
+vectors the threshold and burst detection vary from one retrain to the next
+(`tests/test_training_scale.py`). The event index on disk is ~250 B/event.
 
 Clustering still groups templates **across services**; only the rate clocks
 (features/alerts) are split per service.
@@ -845,7 +863,17 @@ Default endpoint: `http://<host>:9108/metrics`. Main series:
 | `logai_queue_depth` | Gauge | – | Batch size while processing, 0 after |
 | `logai_last_processed_event_timestamp_seconds` | Gauge | – | Event time of the last processed event (catch-up tracking) |
 | `logai_pipeline_errors_total` | Counter | `stage`, `reason_code` | Stage failures (grouping, flush, …) |
-| `logai_llm_*` | Histogram/Counter | `kind`, … | See §7.6 |
+| `logai_es_poll_errors_total` | Counter | – | Failed Elasticsearch polls (per failing index) |
+| `logai_es_malformed_hits_total` | Counter | – | ES hits skipped for a missing/invalid `_source` or `_id` |
+| `logai_dlq_records_total` | Counter | `reason_code` | Events written to the DLQ |
+| `logai_engine_heartbeat_timestamp_seconds` | Gauge | – | Wall time of the latest poll-loop heartbeat |
+| `logai_last_successful_poll_timestamp_seconds` | Gauge | – | Wall time of the latest successful ES poll |
+| `logai_last_checkpoint_commit_timestamp_seconds` | Gauge | – | Wall time of the latest checkpoint commit |
+| `logai_grouping_apply_total` | Counter | `result`, `reason_code` | Grouping revision application attempts |
+| `logai_grouping_apply_duration_seconds` | Histogram | – | Time spent applying a grouping revision |
+| `logai_grouping_revision_info` | Gauge | `revision`, `state` | Current grouping revision and sync state |
+| `logai_llm_requests_total` | Counter | `result` | LLM analyses by result |
+| `logai_llm_*` | Histogram/Counter | `kind`, … | Duration, tokens and retries; see §7.6 |
 
 `prometheus.yml` is a sample scrape config (10 s interval). Client state is
 in-memory and resets on restart; Prometheus keeps the scraped series.
@@ -991,7 +1019,9 @@ duplicating alerts.
 Historical training: `stream_historical_batches()` never writes the checkpoint.
 Training saves Drain3 state, then appends and `fsync`s the event index, then
 commits the cursor, per batch. On restart the cursor gives the next page and
-the event index holds everything parsed so far. Both files are deleted only
+the event index holds everything parsed so far; the last 200,000 event ids of
+the index seed the dedup, so a batch whose cursor was not committed is skipped
+when it is read again. Both files are deleted only
 after all training artifacts are written.
 
 ### 10.4 File atomicity and process model
@@ -1057,13 +1087,14 @@ last record can be lost on power failure.
 
 | Area | Limit | Impact |
 |---|---|---|
-| Training | All feature vectors are kept in RAM before fitting (no reservoir sampling) | Memory grows with the training window |
-| Training | `training.max_docs` silently truncates the time range; only a warning is logged | Long lookbacks may train on the first part only |
+| Training | Phases 6–7 keep 8 B/event of timestamps; an out-of-order window is sorted as a Python list | Past ~100M events, an external sort is needed |
+| Training | Training dedup remembers the last 200,000 event ids | A duplicate `_id` further apart is counted twice |
+| Training | `training.max_docs` still caps the documents read (newest kept); the web allows up to 20M | The event index uses ~230 B/event on the shared data volume; training refuses to start when `max_docs` x 300 B exceeds the free space |
+| Anomaly | The Isolation Forest's own `random_state` moves its threshold by up to ~0.02; on marginal traffic that changes whether a burst is detected | Alert behaviour can shift between retrains independently of sampling; tune `score_high` on real data |
 | Realtime | Feature windows are not persisted | Short-term baselines restart cold after a restart |
 | Realtime | A single process per `data/` directory, no inter-process lock | No horizontal scaling; never run training and realtime concurrently on one directory |
 | Security | Web API has no authentication; LLM profile endpoints are not allow-listed (SSRF) | Expose the UI only on a trusted network |
 | Security | Grafana in compose defaults to the password `admin` | Set `GF_SECURITY_ADMIN_PASSWORD` outside demos |
-| Input | Numeric timestamps are read as epoch seconds | Epoch milliseconds are misread |
 | Input | Dedup uses `_id` only | Same `_id` across indices counts once |
 | Alerting | `min_events_1m` is per service window | Needs tuning by the number of services per group |
 

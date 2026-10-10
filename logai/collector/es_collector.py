@@ -407,6 +407,48 @@ class ElasticsearchCollector:
             else:
                 time.sleep(self.config.poll_interval_seconds)
 
+    def newest_start(self, start_ts: float, end_ts: float, max_docs: int) -> float:
+        """Earliest start, to the second, from which [start, end_ts] holds at
+        most `max_docs` documents.
+
+        The historical stream reads ascending and stops at `max_docs`, so
+        without this a long lookback keeps its oldest logs and drops the newest
+        ones. A binary search on exact counts (~22 queries for 30 days) rather
+        than time buckets: one bursty hour can hold more than the whole budget.
+        On any error the range start is kept.
+        """
+        from datetime import datetime, timezone
+
+        def count_since(since: float) -> int:
+            body: Dict[str, Any] = {
+                "size": 0,
+                "track_total_hits": True,
+                "query": {"range": {"@timestamp": {
+                    "gte": datetime.fromtimestamp(since, tz=timezone.utc).isoformat(),
+                    "lte": datetime.fromtimestamp(end_ts, tz=timezone.utc).isoformat(),
+                }}},
+            }
+            return int(self._search(body)["hits"]["total"]["value"])
+
+        try:
+            if count_since(start_ts) <= max_docs:
+                return start_ts
+            too_early, fits = float(start_ts), float(end_ts)
+            while fits - too_early > 1.0:
+                middle = float(int((too_early + fits) / 2))
+                if middle <= too_early:
+                    break
+                if count_since(middle) > max_docs:
+                    too_early = middle
+                else:
+                    fits = middle
+            return fits
+        except Exception as exc:  # noqa: BLE001 - an optimisation, never fatal
+            logger.warning(
+                "Could not size the training range (%s); reading from the lookback start", exc
+            )
+        return start_ts
+
     def stream_historical_batches(
         self,
         start_ts: float,

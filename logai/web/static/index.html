@@ -394,7 +394,7 @@
             <div class="form-field"><label for="rt-lookback">Lookback</label>
               <div class="rt-row"><input type="number" id="rt-lookback" min="0.1" step="any" required><select id="rt-lookback-unit" class="filter-select" aria-label="Lookback unit"><option value="hours">hours</option><option value="days">days</option></select></div>
             </div>
-            <div class="form-field"><label for="rt-max-docs">Max documents</label><input type="number" id="rt-max-docs" min="1000" max="5000000" step="1000" required></div>
+            <div class="form-field"><label for="rt-max-docs">Max documents</label><input type="number" id="rt-max-docs" min="1000" max="20000000" step="1000" required></div>
           </div>
           <div class="btn-row">
             <button type="button" class="btn" id="rt-defaults">Use default training data</button>
@@ -419,7 +419,7 @@
       <form id="rt-run-form">
         <p class="ins-meta">The engine pauses log processing while it trains (alerts are delayed until it catches up), then restarts itself. These values apply to this run only.</p>
         <div class="form-field"><label for="rt-run-lookback">Lookback (hours)</label><input type="number" id="rt-run-lookback" min="0.1" max="720" step="any" required></div>
-        <div class="form-field"><label for="rt-run-max-docs">Max documents</label><input type="number" id="rt-run-max-docs" min="1000" max="5000000" step="1000" required></div>
+        <div class="form-field"><label for="rt-run-max-docs">Max documents</label><input type="number" id="rt-run-max-docs" min="1000" max="20000000" step="1000" required></div>
         <div class="form-error" id="rt-run-error"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="rt-run-modal">Cancel</button><button type="submit" class="btn btn-primary">Start retrain</button></div>
       </form>

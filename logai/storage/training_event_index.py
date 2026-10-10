@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections import deque
 from pathlib import Path
-from typing import Dict, Iterable, Iterator
+from typing import Dict, Iterable, Iterator, List
 
 from logai.models import ParsedEvent
 
@@ -48,12 +49,17 @@ class TrainingEventIndex:
                 if isinstance(record, dict):
                     yield record
 
-    def event_ids(self) -> set[str]:
-        return {
-            record["event_id"]
-            for record in self.records()
-            if isinstance(record.get("event_id"), str) and record["event_id"]
-        }
+    def recent_event_ids(self, limit: int) -> List[str]:
+        """The last `limit` event ids, oldest first: what a resumed run can
+        replay. Streams the file, so memory is bounded by `limit`."""
+        return list(deque(
+            (
+                record["event_id"]
+                for record in self.records()
+                if isinstance(record.get("event_id"), str) and record["event_id"]
+            ),
+            maxlen=limit,
+        ))
 
     def clear(self) -> None:
         if self.path.exists():

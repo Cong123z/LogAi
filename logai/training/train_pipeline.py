@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
+import shutil
 import time
-from collections import defaultdict
+from array import array
+from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from itertools import islice
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
@@ -52,6 +56,40 @@ from logai.storage.training_event_index import TrainingEventIndex
 
 logger = logging.getLogger("logai.training")
 _GROUP_NUMBER_RE = re.compile(r"^G(\d+)$")
+# Recent event ids kept for training dedup (~25 MB). Duplicates in one
+# historical stream are close together: a resume replays the last batch, and
+# the collector re-reads docs that share the cursor's timestamp.
+TRAINING_DEDUP_WINDOW = 200_000
+# Disk reserved per document for the training event index (~230 B measured).
+EVENT_INDEX_BYTES_PER_DOC = 300
+
+WindowKey = Tuple[str, str]
+
+
+class _RecentIds:
+    """Bounded LRU of event ids, so dedup memory does not grow with the window.
+
+    ponytail: a duplicate further apart than `limit` ids is counted twice; only
+    the same doc in two indices at very different times can do that.
+    """
+
+    def __init__(self, ids: Iterable[str] = (), limit: int = TRAINING_DEDUP_WINDOW):
+        self._limit = limit
+        self._ids: "OrderedDict[str, None]" = OrderedDict()
+        for event_id in ids:
+            self.add(event_id)
+
+    def __contains__(self, event_id: object) -> bool:
+        return event_id in self._ids
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+    def add(self, event_id: str) -> None:
+        self._ids[event_id] = None
+        self._ids.move_to_end(event_id)
+        if len(self._ids) > self._limit:
+            self._ids.popitem(last=False)
 
 
 class TrainingPipeline:
@@ -176,8 +214,7 @@ class TrainingPipeline:
             sum(1 for result in results if result.get("state") == "unresolved"),
             len(template_states) - len(template_to_group),
         )
-        grouped_by_group = self._group_events(template_to_group)
-        self._train_anomaly_models(grouped_by_group)
+        self._train_anomaly_model(template_to_group)
 
         # Publish the complete effective membership only after feature/model
         # generation succeeds. A failed training run therefore never reports
@@ -269,10 +306,12 @@ class TrainingPipeline:
         ],
         checkpoint_store: Optional[CheckpointStore] = None,
     ) -> None:
-        durable_event_ids: Set[str] = self.event_index.event_ids()
+        durable_event_ids = _RecentIds(
+            self.event_index.recent_event_ids(TRAINING_DEDUP_WINDOW)
+        )
         logger.info(
             "Phase 1 start: Drain3 state %s (%s) restored with %d clusters / %d messages; "
-            "event index has %d events from a previous interrupted run",
+            "%d recent event ids loaded from a previous interrupted run",
             self.parser.persistence_path,
             _format_size(_file_size(self.parser.persistence_path)),
             self.parser.cluster_count(),
@@ -401,19 +440,9 @@ class TrainingPipeline:
             if s.group_id and s.group_id != PENDING_GROUP_ID
         }
         states: Dict[str, TemplateState] = {}
-        seen_event_ids: Set[str] = set()
-        for record in self.event_index.records():
-            event_id = record.get("event_id")
-            template_id = record.get("template_id")
-            timestamp = record.get("timestamp")
-            if (
-                not isinstance(event_id, str)
-                or event_id in seen_event_ids
-                or not isinstance(template_id, str)
-                or not isinstance(timestamp, (int, float))
-            ):
-                continue
-            seen_event_ids.add(event_id)
+        for record in self._valid_records():
+            template_id = record["template_id"]
+            timestamp = record["timestamp"]
             # Normalise once per record; the same value feeds both the initial
             # construction below and the promotion at the end of the iteration.
             event_level = str(record.get("level") or DEFAULT_LEVEL).strip().upper()
@@ -487,6 +516,23 @@ class TrainingPipeline:
             pruned,
             self.config.training.template_ttl_days,
         )
+
+    def _valid_records(self) -> Iterator[Dict[str, Any]]:
+        """Event-index records with a usable id, template and timestamp, each
+        event once. Phase 2 and the feature pass both read this, so template
+        counts and feature windows cover the same events."""
+        seen = _RecentIds()
+        for record in self.event_index.records():
+            event_id = record.get("event_id")
+            if (
+                not isinstance(event_id, str)
+                or event_id in seen
+                or not isinstance(record.get("template_id"), str)
+                or not isinstance(record.get("timestamp"), (int, float))
+            ):
+                continue
+            seen.add(event_id)
+            yield record
 
     def _override_template_ids(self) -> Set[str]:
         """Templates a grouping override names (as source or anchor): never pruned."""
@@ -644,61 +690,43 @@ class TrainingPipeline:
             len(matches),
         )
 
-    def _group_events(
-        self, template_to_group: Dict[str, str]
-    ) -> Dict[Tuple[str, str], List[float]]:
-        """Bucket event timestamps by (service, group_id) window key.
-
-        The per-event `service` is already carried in each event-index record, so
-        splitting the training windows per service costs no extra data. This
-        mirrors the realtime pipeline's window key exactly - train/serve parity
-        requires both to bucket by (service, group), not by group alone.
-        """
-        logger.info("Phase 6: Grouping and sorting event timestamps by (service, group)...")
+    def _train_anomaly_model(self, template_to_group: Dict[str, str]) -> None:
+        """Phases 6-7: feature vectors per (service, group) window, then the
+        global Isolation Forest, in memory that does not grow with the events
+        beyond 8 bytes each (see `bucket_window_timestamps`)."""
+        logger.info("Phase 6: Bucketing event timestamps by (service, group)...")
         t_phase6 = time.time()
-        result: Dict[Tuple[str, str], List[float]] = defaultdict(list)
-        records = sorted(self.event_index.records(), key=lambda r: float(r["timestamp"]))
-        for record in records:
-            gid = template_to_group.get(str(record.get("template_id")))
-            if gid:
-                result[(str(record.get("service") or "unknown"), gid)].append(
-                    float(record["timestamp"])
-                )
+        windows = bucket_window_timestamps(self._valid_records(), template_to_group)
         logger.info(
-            "Phase 6 complete in %.2fs: Grouped %d events into %d (service, group) windows",
+            "Phase 6 complete in %.2fs: %d events in %d (service, group) windows",
             time.time() - t_phase6,
-            len(records),
-            len(result),
+            sum(len(ts) for ts in windows.values()),
+            len(windows),
         )
-        return result
 
-    def _train_anomaly_models(
-        self, grouped: Dict[Tuple[str, str], List[float]]
-    ) -> None:
         logger.info("Phase 7: Extracting feature vectors and training global anomaly model...")
         t_phase7 = time.time()
-        all_feature_vectors: List[FeatureVector] = []
-        # Every window shares the training start as its bucket origin, matching
-        # a realtime engine that has been listening since then: buckets before a
-        # window's first event count as silent.
-        origin = min((ts[0] for ts in grouped.values() if ts), default=None)
-        for window_key, timestamps in grouped.items():
-            engine = FeatureEngine(self.config.features, origin=origin)
-            for timestamp in timestamps:
-                fv = engine.update(window_key, timestamp)
-                all_feature_vectors.append(fv)
-
+        sample_size = max(
+            int(self.config.training.feature_sample_size),
+            int(self.config.anomaly.min_training_samples),
+        )
+        kept, scored = sample_window_features(
+            windows, self.config.features, sample_size, self.config.anomaly.random_state
+        )
         logger.info(
-            "Phase 7: Collected %d total feature vectors across %d (service, group) windows for global model training",
-            len(all_feature_vectors),
-            len(grouped),
+            "Phase 7: scored %d events across %d (service, group) windows; kept %d "
+            "feature vectors for the global model (sample_size=%d)",
+            scored,
+            len(windows),
+            len(kept),
+            sample_size,
         )
         t_fit = time.time()
-        trained = self.anomaly_model.train(all_feature_vectors)
+        trained = self.anomaly_model.train(kept)
         if not trained:
             logger.warning(
                 "Total feature vectors (%d) < min_training_samples (%d) - global IF model was not fitted.",
-                len(all_feature_vectors),
+                len(kept),
                 self.config.anomaly.min_training_samples,
             )
         else:
@@ -716,6 +744,78 @@ def next_group_number(ids: Iterable[str], floor: int = 1) -> int:
     Manual (`G_MANUAL_*`) and legacy (`G_SINGLE_*`) ids are ignored."""
     numbers = [int(m.group(1)) for gid in ids if (m := _GROUP_NUMBER_RE.match(str(gid)))]
     return max([floor - 1, *numbers]) + 1
+
+
+def bucket_window_timestamps(
+    records: Iterable[Dict[str, Any]], template_to_group: Dict[str, str]
+) -> Dict[WindowKey, array]:
+    """Event timestamps per (service, group) window, each sorted ascending.
+
+    Only (window, timestamp) is kept per event, as an 8-byte float in a compact
+    array, instead of the whole record. Windows are independent, so sorting
+    within each window is all the feature pass needs. The key mirrors the
+    realtime window exactly (train/serve parity). Templates without a group are
+    skipped.
+    """
+    windows: Dict[WindowKey, array] = {}
+    for record in records:
+        gid = template_to_group.get(str(record.get("template_id")))
+        if not gid:
+            continue
+        key = (str(record.get("service") or "unknown"), gid)
+        bucket = windows.get(key)
+        if bucket is None:
+            bucket = windows[key] = array("d")
+        bucket.append(float(record["timestamp"]))
+    for key, bucket in windows.items():
+        # The index is already in Elasticsearch @timestamp order; only a
+        # timestamp the collector could not parse (read as "now") breaks it.
+        # ponytail: sorting an out-of-order window builds a list of that
+        # window's floats (~32 B/event); use an external sort past ~100M events.
+        if any(a > b for a, b in zip(bucket, islice(bucket, 1, None))):
+            windows[key] = array("d", sorted(bucket))
+    return windows
+
+
+def sample_window_features(
+    windows: Dict[WindowKey, array],
+    config: Any,
+    sample_size: int,
+    seed: int,
+) -> Tuple[List[FeatureVector], int]:
+    """Feed every event through the feature engine (baselines need the full
+    stream) and keep a uniform random sample of exactly
+    min(`sample_size`, events) vectors (selection sampling, Knuth's
+    Algorithm S: an exact count, so a small budget never falls under
+    `min_training_samples` by chance). Returns the kept vectors and the number
+    of events scored.
+
+    Uniform over events on purpose: the model must learn the volume-weighted
+    mix realtime scores. Over-weighting quiet windows (stratifying) teaches it
+    that their spiky vectors are normal and it stops flagging real bursts; see
+    tests/test_training_scale.py. Below ~20k vectors the threshold and the
+    detection of a burst vary from seed to seed, hence the 100k default.
+    """
+    total = sum(len(ts) for ts in windows.values())
+    wanted = min(sample_size, total)
+    # Every window shares the training start as its bucket origin, matching a
+    # realtime engine that has been listening since then: buckets before a
+    # window's first event count as silent.
+    origin = min((ts[0] for ts in windows.values() if ts), default=None)
+    rng = random.Random(seed)
+    kept: List[FeatureVector] = []
+    scored = 0
+    for key, timestamps in windows.items():
+        # One engine per window: a finished window's deques are freed instead
+        # of piling up for every window at once.
+        engine = FeatureEngine(config, origin=origin)
+        for timestamp in timestamps:
+            fv = engine.update(key, timestamp)
+            # Keep with probability (still wanted) / (still to come).
+            if rng.random() * (total - scored) < wanted - len(kept):
+                kept.append(fv)
+            scored += 1
+    return kept, scored
 
 
 def _format_ts(ts: float) -> str:
@@ -764,6 +864,12 @@ def run_training_from_elasticsearch(
     start_ts = end_ts - lookback
 
     initial_search_after = training_checkpoint.get_search_after()
+    if initial_search_after is None and total_docs > 0:
+        # Keep the newest max_docs, not the oldest; a resume follows its cursor.
+        # 1% headroom: on a live index, docs indexed late into the range and
+        # re-read page boundaries also count toward max_docs, and would make
+        # the stream stop just before the newest logs.
+        start_ts = collector.newest_start(start_ts, end_ts, total_docs - total_docs // 100)
     pipeline = TrainingPipeline(config)
 
     # On resume, events already in the durable index count towards max_docs;
@@ -772,6 +878,17 @@ def run_training_from_elasticsearch(
         sum(1 for _ in pipeline.event_index.records()) if initial_search_after else 0
     )
     remaining_docs = max(total_docs - already_indexed, 0)
+    # The event index takes ~230 B/event (measured on real logs) on the volume
+    # the engine also writes to: refuse up front instead of filling it minutes
+    # into the run.
+    need = remaining_docs * EVENT_INDEX_BYTES_PER_DOC
+    free = shutil.disk_usage(pipeline.event_index.path.parent).free
+    if need > free:
+        raise RuntimeError(
+            f"Not enough disk for max_docs={total_docs}: the training event index "
+            f"needs about {need / 1e9:.1f} GB, {free / 1e9:.1f} GB free in "
+            f"{pipeline.event_index.path.parent}. Lower max_docs or free space."
+        )
 
     logger.info(
         "Training job config: index=%s range=[%s .. %s] lookback=%.1fh max_docs=%d "

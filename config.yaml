@@ -23,4 +23,8 @@ alert:
   min_events_1m: 150
 
 training:
-  max_docs: 500000
+  # Training memory no longer grows with this (feature vectors are sampled);
+  # the event index on disk does, ~250 B/event (5M ≈ 1.2 GB).
+  max_docs: 5000000
+  # Fewer, larger pages: Drain3 state is saved once per batch. ES caps at 10000.
+  batch_size: 5000

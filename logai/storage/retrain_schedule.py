@@ -24,7 +24,7 @@ from logai.storage.index_selection import _atomic_write, read_json
 SCHEMA_VERSION = 1
 MAX_LOOKBACK_HOURS = 720
 MIN_MAX_DOCS = 1_000
-MAX_MAX_DOCS = 5_000_000
+MAX_MAX_DOCS = 20_000_000
 HISTORY_LIMIT = 20
 _TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
 

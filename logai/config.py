@@ -171,8 +171,15 @@ class AlertConfig:
 @dataclass
 class TrainingConfig:
     batch_size: int = 2000
+    # Cap on documents read. When the lookback holds more, training keeps the
+    # newest ones. Memory no longer grows with it (~8 B/event for features);
+    # disk does (~250 B/event in the training event index).
     max_docs: int = 200_000
     lookback_seconds: float = 7 * 24 * 3600
+    # Feature vectors the global Isolation Forest is fitted on, a uniform
+    # sample. Every event still updates the rate baselines. Below ~20k the
+    # alert threshold varies from one retrain to the next.
+    feature_sample_size: int = 100_000
     # Templates unseen this long are pruned at retrain (unless an override uses them).
     template_ttl_days: float = 30
 

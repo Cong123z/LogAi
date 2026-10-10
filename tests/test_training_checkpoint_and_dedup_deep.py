@@ -201,6 +201,62 @@ class TestTrainingCheckpointAndDedupDeep(unittest.TestCase):
         self.assertFalse(training_cp.path.exists())
         self.assertFalse(event_index_path.exists())
 
+    def test_crash_between_index_append_and_cursor_commit_counts_once(self):
+        """The replayed batch is already in the event index: the bounded resume
+        dedup (seeded from the index tail) must skip it before Drain3."""
+        training_cp = CheckpointStore(
+            self.cfg.storage, checkpoint_file=self.cfg.storage.training_checkpoint_file
+        )
+        batch_1 = [RawLog(event_id=f"b1_{i}", timestamp=1000.0 + i, service="auth",
+                          level="INFO", message="m") for i in range(10)]
+        batch_2 = [RawLog(event_id=f"b2_{i}", timestamp=1010.0 + i, service="payment",
+                          level="INFO", message="m") for i in range(10)]
+        batch_3 = [RawLog(event_id=f"b3_{i}", timestamp=1020.0 + i, service="auth",
+                          level="INFO", message="m") for i in range(10)]
+        commit = training_cp.set_search_after
+        calls = []
+
+        def commit_then_fail(cursor, flush=False):
+            calls.append(cursor)
+            if len(calls) == 2:  # batch 2 is in the index; its cursor is not
+                raise OSError("disk full")
+            commit(cursor, flush=flush)
+
+        with patch.object(training_cp, "set_search_after", side_effect=commit_then_fail):
+            with self.assertRaises(OSError):
+                self.pipeline.run(
+                    [(batch_1, [1009000, "b1_9"]), (batch_2, [1019000, "b2_9"])],
+                    checkpoint_store=training_cp,
+                )
+        self.assertEqual(training_cp.get_search_after(), [1009000, "b1_9"])
+        self.assertEqual(len(list(self.pipeline.event_index.records())), 20)
+
+        self.pipeline.parser.parse.reset_mock()
+        self.pipeline.run(
+            [(batch_2, [1019000, "b2_9"]), (batch_3, [1029000, "b3_9"])],
+            checkpoint_store=training_cp,
+        )
+        self.assertEqual(self.pipeline.parser.parse.call_count, 10)  # batch 3 only
+        total = sum(t.event_count for t in self.pipeline.template_registry.all_templates())
+        self.assertEqual(total, 30)
+
+    def test_refuses_to_start_without_disk_for_the_event_index(self):
+        collector = MagicMock()
+        collector.stream_historical_batches.return_value = []
+        collector.newest_start.side_effect = lambda start, end, docs: start
+        self.cfg.training.max_docs = 1_000_000  # ~300 MB of event index
+        full = MagicMock(free=10_000_000)        # 10 MB free
+        with patch("logai.training.train_pipeline.ElasticsearchCollector", return_value=collector), \
+                patch("logai.training.train_pipeline.TrainingPipeline", return_value=self.pipeline), \
+                patch("logai.training.train_pipeline.shutil.disk_usage", return_value=full):
+            with self.assertRaisesRegex(RuntimeError, "Not enough disk for max_docs=1000000"):
+                run_training_from_elasticsearch(self.cfg, lookback_seconds=3600)
+            collector.stream_historical_batches.assert_not_called()
+
+            full.free = 10_000_000_000  # 10 GB free: runs
+            run_training_from_elasticsearch(self.cfg, lookback_seconds=3600)
+            collector.stream_historical_batches.assert_called_once()
+
     def test_crash_in_phase2_preserves_artifacts_for_retry(self):
         """If failure occurs during Phase 2 (clustering), event index and checkpoint
         must remain on disk so that re-running does not re-fetch from ES."""

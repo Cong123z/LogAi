@@ -201,8 +201,8 @@ saving from the same snapshot get `409`; the page keeps the unsaved changes.
 Set when the engine retrains: **Retrain automatically**, a time, the days
 (chips, or **Every day** / **Mon–Fri**) and a timezone (the browser's zone until
 the first save). **Training data** sets each run's **Lookback** (hours or days,
-at most 720 h) and **Max documents** (1,000–5,000,000); if the window holds more
-logs than that, the newest are left out. **Use defaults** restores
+at most 720 h) and **Max documents** (1,000–20,000,000); if the window holds more
+logs than that, the oldest are left out (training keeps the newest). **Use defaults** restores
 `training.lookback_seconds` / `training.max_docs`.
 
 At the scheduled time the engine pauses polling, flushes, stops its background
