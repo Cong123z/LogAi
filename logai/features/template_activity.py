@@ -117,6 +117,22 @@ class TemplateActivity:
             if entry["count_30m"] or any(hourly.get(template_id, {}).values())
         }
 
+    def series(
+        self, now: float, service: str, template_ids: List[str],
+        minutes: int = HORIZON_MINUTES,
+    ) -> List[int]:
+        """Events per minute of these templates of `service` over the last
+        `minutes` minutes, oldest first; the last entry is the current minute."""
+        current = int(now // 60)
+        first = current - minutes + 1
+        out = [0] * minutes
+        with self._lock:
+            for template_id in set(template_ids):
+                for minute, count in self._minutes.get((service, template_id), ()):
+                    if first <= minute <= current:
+                        out[minute - first] += count
+        return out
+
     # -- persistence -----------------------------------------------------------
 
     def save(self, path: str | Path) -> None:

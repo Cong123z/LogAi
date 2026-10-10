@@ -10,6 +10,7 @@ import numpy as np
 
 from logai.features.template_activity import recent
 from logai.incident.classifier import TEXT_LIMIT
+from logai.incident.error_samples import ERRORS_PROMPT
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
 MAX_CANDIDATE_GROUPS = 5
@@ -24,16 +25,19 @@ TEMPLATE_SYSTEM_PROMPT = (
     "operation or failure. If none fits, answer \"new\". Reply with JSON only: "
     '{"verdict": "suspicious" | "benign" | "unsure", "confidence": 0.0-1.0, '
     '"reasoning": "...", "suggested_group_id": "<candidate group_id>" | "new" | null}'
+    + ERRORS_PROMPT
 )
 
 
 def build_template_evidence(
     template_id: str, templates: TemplateRegistry, groups: GroupRegistry,
     activity: Optional[Dict[str, Dict[str, int]]] = None,
+    errors: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, str]]:
     """Evidence for one template plus candidate group_id -> representative
     template (the only groups the LLM may suggest). `activity` holds recent
-    per-template counts over all services; all-time counts are never sent."""
+    per-template counts over all services; all-time counts are never sent.
+    `errors` holds the template's own recent raw ERROR/FATAL lines."""
     activity = activity or {}
     state = templates.get(template_id)
     if state is None:
@@ -61,6 +65,7 @@ def build_template_evidence(
             "similarity": round(similarity, 4),
         })
     evidence = {
+        **({"errors": errors} if errors else {}),
         "template": {
             "id": state.template_id, "text": state.template_text, "service": state.service,
             "level": state.level, **recent(activity, state.template_id),

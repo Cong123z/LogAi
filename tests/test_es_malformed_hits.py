@@ -307,8 +307,15 @@ class TestProductionGossipHit(unittest.TestCase):
         self.assertAlmostEqual(raw.timestamp, 1790751632.036, places=3)
         self.assertEqual(raw.message, GOSSIP_MESSAGE)
         self.assertEqual(
-            raw.metadata, {"groupModule": "GOSSIP", "moduleCode": "VTN_CNTT_VAS_066_301"}
+            raw.metadata,
+            {"groupModule": "GOSSIP", "moduleCode": "VTN_CNTT_VAS_066_301",
+             "host_name": "VAS-APP121"},
         )
+
+    def test_host_falls_back_to_service_code_ip(self):
+        source = {k: v for k, v in GOSSIP_SOURCE.items() if k != "host"}
+        raw = _hit_to_rawlog({"_id": "x", "_source": source}, "idx")
+        self.assertEqual(raw.metadata["host_name"], "10.240.175.121")
 
 
 class TestOddFieldsAreIgnored(unittest.TestCase):

@@ -27,10 +27,11 @@ from logai.docmatch.doc_matcher import DocumentationMatcher
 from logai.features.template_activity import is_active, recent
 from logai.grouping import PENDING_GROUP_ID
 from logai.incident.cases import load_cases, recall_summary, similar_cases
+from logai.incident.error_samples import ERRORS_PROMPT
 from logai.incident.requests import DEFAULT_LANGUAGE
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
 from logai.parsing.preprocessor import PLACEHOLDER
-from logai.incident.history import append_history
+from logai.incident.history import LOGGED_STATUSES, append_history, backfill_history
 from logai.storage.base import JSONStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 
@@ -58,6 +59,7 @@ SYSTEM_PROMPT = (
     '{"documentation_id": "<candidate id>" | null, "confidence": 0.0-1.0, '
     '"reasoning": "...", "suggestion": {"title": "...", "text": "...", '
     '"error_code": "..."} | null, "similar_case_id": "<past incident id>" | null}'
+    + ERRORS_PROMPT
 )
 
 
@@ -232,6 +234,24 @@ class IncidentClassifier:
                         "Interrupted by engine restart before analysis finished",
                     ), flush=False)
             self.template_store.flush()
+        if self.history_path:
+            self.backfill_history()
+
+    def backfill_history(self) -> None:
+        """Copy finished results missing from the history file into it (see
+        history.backfill_history). Never raises: history is advisory."""
+        try:
+            added = backfill_history(self.history_path, {
+                kind: store.all()
+                for kind, store in (("window", self.store), ("service", self.service_store),
+                                    ("template", self.template_store))
+                if store is not None
+            })
+        except Exception:  # noqa: BLE001
+            logger.exception("Unable to backfill the analysis history")
+            return
+        if added:
+            logger.info("Added %d earlier analyses to the analysis history", added)
 
     @property
     def enabled(self) -> bool:
@@ -358,7 +378,7 @@ class IncidentClassifier:
         try:
             if store is not None:
                 store.set(store_key, record)
-            if self.history_path and record.get("status") == "done":
+            if self.history_path and record.get("status") in LOGGED_STATUSES:
                 append_history(self.history_path, kind, store_key, record)
         except Exception:  # noqa: BLE001
             logger.exception("Unable to persist analysis for %s", active_key)
@@ -516,6 +536,7 @@ class IncidentClassifier:
         self._note_outcome(record)
         record["model"] = cfg.model
         record["language"] = language
+        record["service"] = (evidence.get("template") or {}).get("service")
         self._finish_call("template", template_id, record, meta, result)
         self._persist("template", ("template", template_id), self.template_store, template_id, record)
         self._on_result(result)
@@ -585,7 +606,10 @@ class IncidentClassifier:
             }
 
         hits = self.matcher.top_k(self.groups.get_centroid(group_id), self.config.max_candidates)
+        context = context or {}
         evidence = {
+            # Raw error lines first: the LLM reads them before anything else.
+            **({"errors": context["errors"]} if context.get("errors") else {}),
             "service": service,
             "group_id": group_id,
             "alert": alert,
@@ -621,6 +645,8 @@ class IncidentClassifier:
                 }
                 for entry, similarity in hits
             ],
+            **({"correlated_alerts": context["correlated_alerts"]}
+               if context.get("correlated_alerts") else {}),
         }
         return evidence, {entry.doc_id: entry.title for entry, _ in hits}
 

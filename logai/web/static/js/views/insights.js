@@ -4,8 +4,6 @@ const ins = {
   filter: {windows: 'attention', services: 'all', templates: 'all'},
   selected: {windows: null, services: null, templates: null},
   deleteTarget: null, toastTimer: null,
-  // Earlier analyses of the selected item: fetched when the section is opened.
-  history: {key: null, at: null, entries: null, open: false},
 };
 const INS_FILTERS = {
   windows: [['attention', 'Needs attention'], ['analyzed', 'Analyzed'], ['all', 'All windows']],
@@ -122,13 +120,17 @@ function insMeta(a) {
   return `<p class="ins-meta">Analyzed ${escapeHtml(formatFullTs(a.analyzed_at))}${a.model ? ' · ' + escapeHtml(a.model) : ''}${a.language ? ' · ' + escapeHtml(a.language.toUpperCase()) : ''}${cost}</p>`;
 }
 
+// Opens Incidents › Analysis history filtered to this item (see incidents.js).
+const INS_HISTORY_LINK = '<a class="btn" href="#incidents" data-open-history>History</a>';
 const INS_CASE_BUTTON = '<button type="button" class="btn" data-ins-action="case">Save as service incident</button>';
 
-function insSuggestionHtml(suggestion, groupIds, index) {
+// readOnly (the Incidents history view): the same answer, without buttons.
+function insSuggestionHtml(suggestion, groupIds, index, readOnly = false) {
+  if (!suggestion) return '';
   const target = groupIds.length ? ` and assign to ${groupIds.join(', ')}` : '';
   return `<div class="detail-value"><strong>${escapeHtml(suggestion.title)}</strong>${suggestion.error_code ? ` <span class="tmpl-id">${escapeHtml(suggestion.error_code)}</span>` : ''}</div>
     <div class="ai-text">${escapeHtml(suggestion.text)}</div>
-    <div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="save" data-ins-suggestion="${index}">Save as document${escapeHtml(target)}</button></div>`;
+    ${readOnly ? '' : `<div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="save" data-ins-suggestion="${index}">Save as document${escapeHtml(target)}</button></div>`}`;
 }
 
 function insActions(item, extra = '') {
@@ -142,9 +144,10 @@ function insActions(item, extra = '') {
   return `<div class="ins-actions">${extra}${analyze}${del}</div>`;
 }
 
-function insAnalysisBody(item) {
+function insAnalysisBody(item, readOnly = false) {
   const a = item.analysis;
-  ins.suggestions = [];
+  const suggestions = [];
+  if (!readOnly) ins.suggestions = suggestions;
   if (!a) return `<p class="ins-empty">Not analyzed yet. The AI ${item.kind === 'template' ? 'judges whether this pattern looks suspicious and which group it belongs to' : item.kind === 'service' ? 'reviews every group of this service and lists the important issues' : 'matches this incident to a document or suggests a fix'}.</p>`;
   if (a.status === 'requested' || a.status === 'pending') return '<p class="ins-empty" aria-busy="true">Analyzing… this usually takes 5–15 seconds.</p>';
   if (a.status === 'failed') return `<p class="st-failed">Analysis failed: ${escapeHtml(a.error || 'unknown error')}</p>${insMeta(a)}`;
@@ -154,16 +157,16 @@ function insAnalysisBody(item) {
         <p class="ins-meta">Confidence ${Math.round((a.confidence || 0) * 100)}%</p>
         <p class="ins-why">${escapeHtml(a.reasoning || '')}</p>${insMeta(a)}`;
     }
-    ins.suggestions = [{suggestion: a.suggestion, groups: [item.raw.group_id]}];
+    suggestions.push({suggestion: a.suggestion, groups: [item.raw.group_id]});
     return `<p><span class="badge badge-yellow">No matching document</span></p>
       <p class="ins-why">${escapeHtml(a.reasoning || '')}</p>
-      <h3 style="margin-top:12px">Suggested fix</h3>${insSuggestionHtml(a.suggestion, [item.raw.group_id], 0)}${insMeta(a)}`;
+      <h3 style="margin-top:12px">Suggested fix</h3>${insSuggestionHtml(a.suggestion, [item.raw.group_id], 0, readOnly)}${insMeta(a)}`;
   }
   if (item.kind === 'service') {
     const health = ['healthy', 'degraded', 'critical'].includes(a.health) ? a.health : 'unknown';
     const color = {healthy: 'green', degraded: 'yellow', critical: 'red', unknown: 'gray'}[health];
     const issues = a.issues || [];
-    ins.suggestions = issues.map(issue => ({suggestion: issue.suggestion, groups: issue.group_ids || []}));
+    issues.forEach(issue => suggestions.push({suggestion: issue.suggestion, groups: issue.group_ids || []}));
     return `<p><span class="badge badge-${color}">${health[0].toUpperCase() + health.slice(1)}</span></p>
       <p style="line-height:1.5">${escapeHtml(a.summary || '')}</p>${insMeta(a)}
       ${issues.length ? `<div class="ins-section"><h3>Issues (${issues.length})</h3><ol class="ins-issues">${issues.map((issue, index) => `
@@ -172,7 +175,7 @@ function insAnalysisBody(item) {
           ${issue.reasoning ? `<p class="ins-why">${escapeHtml(issue.reasoning)}</p>` : ''}
           ${issue.documentation_id
             ? `<span class="badge badge-blue">${escapeHtml(issue.documentation_id)}</span> ${escapeHtml(issue.document_title || '')}`
-            : insSuggestionHtml(issue.suggestion, issue.group_ids || [], index)}
+            : insSuggestionHtml(issue.suggestion, issue.group_ids || [], index, readOnly)}
 
         </li>`).join('')}</ol></div>` : '<p class="ins-empty">No issues found.</p>'}`;
   }
@@ -180,43 +183,41 @@ function insAnalysisBody(item) {
   const color = {suspicious: 'red', benign: 'green', unsure: 'gray'}[verdict];
   let group = '<p class="ins-empty">No group suggested.</p>';
   if (a.suggested_group_id === 'new') {
-    group = `<p>Belongs in a <strong>new group</strong>; no existing group fits.</p><div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="move" data-ins-group="">Create new group</button></div>`;
+    group = `<p>Belongs in a <strong>new group</strong>; no existing group fits.</p>${readOnly ? '' : '<div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="move" data-ins-group="">Create new group</button></div>'}`;
   } else if (a.suggested_group_id) {
     group = `<p>Belongs with <strong>${escapeHtml(a.suggested_group_id)}</strong></p><div class="ins-code">${escapeHtml(a.suggested_group_rep || '')}</div>
-      <div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="move" data-ins-group="${escapeHtml(a.suggested_group_id)}">Move to ${escapeHtml(a.suggested_group_id)}</button></div>`;
+      ${readOnly ? '' : `<div class="ins-actions"><button type="button" class="btn btn-primary" data-ins-action="move" data-ins-group="${escapeHtml(a.suggested_group_id)}">Move to ${escapeHtml(a.suggested_group_id)}</button></div>`}`;
   }
   return `<p><span class="badge badge-${color}">${verdict[0].toUpperCase() + verdict.slice(1)}</span> <span class="ins-meta">Confidence ${Math.round((a.confidence || 0) * 100)}%</span></p>
     <p class="ins-why">${escapeHtml(a.reasoning || '')}</p>${insMeta(a)}
     <div class="ins-section"><h3>Suggested group</h3>${group}</div>`;
 }
 
-// "This happened before": incidents the engine recalled for this analysis,
-// shown with their CURRENT text so edits made from experience appear here.
+// "This happened before": a link to each incident the engine recalled, plus
+// how its pattern compares now. The incident itself is read in Incidents.
 function insRecallHtml(a) {
   const recalled = (a && a.recalled) || [];
   if (!recalled.length) return '';
   const incidents = (ins.data && ins.data.incidents) || {};
   const fmt = (x, digits = 1) => x === null || x === undefined ? '—' : Number(x).toFixed(digits);
   const side = v => v ? `${fmt(v.rate_per_min)}/min${v.ratio === null || v.ratio === undefined ? '' : ` · ${fmt(v.ratio)}×`}` : '<span class="ins-meta">not abnormal now</span>';
-  return `<div class="inc-recall" role="region" aria-label="Past incidents"><h3>↺ This happened before</h3>${recalled.map(r => {
+  return `<div class="inc-recall" role="region" aria-label="Past incidents">${recalled.map(r => {
     const c = incidents[r.id];
     const pct = Math.round((r.overlap || 0) * 100);
     const used = a.similar_case_id === r.id ? ' · <span class="st-matched">used by the AI ✓</span>' : '';
-    if (!c) return `<div class="inc-recall-item"><span class="ins-meta">${escapeHtml(r.id)} · ${pct}% match · this incident was deleted</span></div>`;
+    const link = c
+      ? `<a href="#incidents" data-open-incident="${escapeHtml(r.id)}">${escapeHtml(r.id)}${c.title ? ` · ${escapeHtml(c.title)}` : ''}</a>`
+      : `${escapeHtml(r.id)} <span class="ins-meta">(deleted)</span>`;
     const comparison = r.comparison || [];
     const onlyNow = r.only_now || [];
     return `<div class="inc-recall-item">
-      <div><strong>${escapeHtml(r.id)}</strong> ${escapeHtml(c.title || '')}</div>
-      <div class="ins-meta">${pct}% of its error pattern is back${c.occurred_at ? ` · last time ${escapeHtml(formatFullTs(c.occurred_at))}` : ''}${used}</div>
-      <p><strong>Root cause:</strong> ${escapeHtml(c.root_cause || '')}</p>
-      ${c.resolution ? `<p><strong>Resolution:</strong> ${escapeHtml(c.resolution)}</p>` : ''}
-      ${c.documentation_id ? `<div>Runbook <span class="badge badge-blue">${escapeHtml(c.documentation_id)}</span></div>` : ''}
+      <div><strong>↺ This happened before:</strong> ${link}</div>
+      <div class="ins-meta">${pct}% of its error pattern is back${c && c.occurred_at ? ` · last time ${escapeHtml(formatFullTs(c.occurred_at))}` : ''}${used}</div>
       ${comparison.length ? `<details><summary>Then vs now (${comparison.length} templates)</summary><div class="table-wrap"><table>
         <thead><tr><th scope="col">Template</th><th scope="col">Then</th><th scope="col">Now</th></tr></thead>
         <tbody>${comparison.map(row => `<tr><td class="mono">${highlightWildcards(escapeHtml(row.text))}</td><td>${side(row.then)}</td><td>${side(row.now)}</td></tr>`).join('')}</tbody>
       </table></div></details>` : ''}
       ${onlyNow.length ? `<details><summary>New this time (${onlyNow.length})</summary>${onlyNow.map(t => `<div class="ins-code">${highlightWildcards(escapeHtml(t))}</div>`).join('')}</details>` : ''}
-      <div class="ins-actions"><a class="btn" href="#incidents" data-open-incident="${escapeHtml(r.id)}">Open in Incidents</a></div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -276,46 +277,8 @@ function insDetailHtml(item) {
     ? '<a class="btn" href="#documentation">Open documentation</a>' : '';
   const saveCase = item.kind === 'service' && done ? INS_CASE_BUTTON : '';
   const recall = item.kind === 'template' ? '' : insRecallHtml(item.analysis);
-  return `${head}${recall}<div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody(item)}</div>${insActions(item, openDoc + saveCase)}${insHistoryHtml(item)}`;
+  return `${head}${recall}<div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody(item)}</div>${insActions(item, openDoc + saveCase + INS_HISTORY_LINK)}`;
 }
-
-function insHistoryEntryHtml(kind, a) {
-  const headline = kind === 'template' ? `${a.verdict || 'unsure'} · confidence ${Math.round((a.confidence || 0) * 100)}%`
-    : kind === 'service' ? `${a.health || 'unknown'}${(a.issues || []).length ? ` · ${a.issues.length} issue(s)` : ''}`
-    : a.documentation_id ? `Matched ${a.documentation_id} ${a.document_title || ''}` : 'No matching document';
-  const issues = kind === 'service' && (a.issues || []).length
-    ? `<ul>${a.issues.map(issue => `<li>${escapeHtml(issue.title || '')}</li>`).join('')}</ul>` : '';
-  return `<li><strong>${escapeHtml(headline)}</strong>
-    <p class="ins-why">${escapeHtml((kind === 'service' ? a.summary : a.reasoning) || '')}</p>${issues}${insMeta(a)}</li>`;
-}
-
-function insHistoryHtml(item) {
-  const h = ins.history;
-  const current = item.analysis && item.analysis.analyzed_at;
-  const cached = h.key === `${item.kind}:${item.id}` && h.at === current ? h.entries : null;
-  // The newest finished entry is the analysis already shown above.
-  const past = (cached || []).filter(entry => entry.record && entry.record.analyzed_at !== current);
-  const body = !cached ? '<p class="ins-empty" aria-busy="true">Loading…</p>'
-    : past.length ? `<ol class="ins-issues">${past.map(entry => insHistoryEntryHtml(item.kind, entry.record)).join('')}</ol>`
-    : '<p class="ins-empty">No earlier analyses.</p>';
-  return `<details class="ins-section" data-ins-history${cached && h.open ? ' open' : ''}><summary>Previous analyses</summary>${body}</details>`;
-}
-
-$insDetail.addEventListener('toggle', async event => {
-  const $details = event.target;
-  const item = insSelectedItem();
-  if (!$details.matches || !$details.matches('[data-ins-history]') || !item) return;
-  const h = ins.history;
-  h.open = $details.open;
-  const key = `${item.kind}:${item.id}`, at = item.analysis && item.analysis.analyzed_at;
-  if (!h.open || (h.key === key && h.at === at && h.entries)) return;
-  try {
-    const resp = await fetch(`/api/insights/history?kind=${encodeURIComponent(item.kind)}&id=${encodeURIComponent(item.id)}`);
-    if (!resp.ok) throw new Error('Unable to load previous analyses');
-    Object.assign(h, {key, at, entries: (await resp.json()).entries || []});
-    $details.outerHTML = insHistoryHtml(item);
-  } catch (err) { insToast(err.message, true); }
-}, true);  // toggle does not bubble
 
 function insSelectedItem() {
   return insItems(ins.tab).find(item => item.id === ins.selected[ins.tab]);

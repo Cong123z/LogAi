@@ -377,10 +377,10 @@ def test_one_bad_service_does_not_block_others(tmp_path):
     add_request(tmp_path / "analysis_requests.json", "service", "billing", 11.0, now=11.0)
     real = build_service_evidence
 
-    def flaky(service, *args):
+    def flaky(service, *args, **kwargs):
         if service == "recharge":
             raise RuntimeError("boom")
-        return real(service, *args)
+        return real(service, *args, **kwargs)
 
     with patch("logai.realtime.realtime_pipeline.build_service_evidence", side_effect=flaky):
         p._process_analysis_requests()

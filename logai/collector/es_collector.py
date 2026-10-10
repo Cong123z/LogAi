@@ -123,6 +123,24 @@ _NOISE_KEYS = (
 )
 
 
+def _extract_host(src: Dict[str, Any]) -> Optional[str]:
+    """The machine that wrote the log: ECS `host.name`/`host.hostname`, a flat
+    `host` string, else this deployment's `service_code` (a host IP, either a
+    string or `{"host_ip": ...}`). Kept as metadata["host_name"] because the
+    `host` envelope itself is dropped as noise."""
+    host = src.get("host")
+    if isinstance(host, dict):
+        for key in ("name", "hostname"):
+            if isinstance(host.get(key), str) and host[key]:
+                return host[key]
+    elif isinstance(host, str) and host:
+        return host
+    code = src.get("service_code")
+    if isinstance(code, dict):
+        code = code.get("host_ip")
+    return code if isinstance(code, str) and code else None
+
+
 def _coerce_message(value: Any) -> str:
     """`message` as a string: missing/null -> "", any other type -> str()."""
     if isinstance(value, str):
@@ -152,12 +170,16 @@ def _hit_to_rawlog(hit: Dict[str, Any], index: str) -> RawLog:
     ts_raw = src.get("@timestamp")
     ts = _parse_timestamp(ts_raw)
     message = _coerce_message(src.get("message"))
+    metadata = {k: v for k, v in src.items() if k not in _NOISE_KEYS}
+    host = _extract_host(src)
+    if host:
+        metadata["host_name"] = host
     return RawLog(
         timestamp=ts,
         service=_extract_service(src),
         level=_extract_level({**src, "message": message}),
         message=message,
-        metadata={k: v for k, v in src.items() if k not in _NOISE_KEYS},
+        metadata=metadata,
         event_id=hit_id,
         es_index=str(hit.get("_index") or index),
         es_doc_id=hit_id,

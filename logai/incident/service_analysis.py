@@ -11,6 +11,7 @@ from logai.docmatch.doc_matcher import DocumentationMatcher
 from logai.features.template_activity import is_active, recent
 from logai.grouping import PENDING_GROUP_ID
 from logai.incident.cases import MAX_TEMPLATE_TEXTS, similar_cases
+from logai.incident.error_samples import ERRORS_PROMPT
 from logai.incident.classifier import (
     MAX_PARAMETER_VALUE,
     MAX_UNKNOWN_TEMPLATES,
@@ -55,6 +56,7 @@ SERVICE_SYSTEM_PROMPT = (
     '"documentation_id": "<candidate id>" | null, "reasoning": "...", '
     '"suggestion": {"title": "...", "text": "...", "error_code": "..."} | null}], '
     '"similar_case_id": "<past incident id>" | null}'
+    + ERRORS_PROMPT
 )
 
 
@@ -132,11 +134,14 @@ def build_service_evidence(
     cases: Iterable[Dict[str, Any]] = (),
     activity: Optional[Dict[str, Dict[str, Any]]] = None,
     signature: Iterable[Dict[str, Any]] = (),
+    errors: Optional[Dict[str, Any]] = None,
+    correlated_alerts: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, str], Set[str]]:
     """Evidence for every group of `service`, plus candidate id -> title and
     the group ids sent (the only ones an issue may reference). `activity` holds
     this service's recent per-template counts; `signature` (the "templates"
-    of service_signature) selects the past incidents."""
+    of service_signature) selects the past incidents. `errors` (see
+    error_samples.ErrorSamples.block) goes first, `correlated_alerts` last."""
     activity = activity or {}
 
     def count(state, window: str = "count_30m") -> int:
@@ -204,6 +209,7 @@ def build_service_evidence(
     )[:MAX_UNKNOWN_TEMPLATES]
     ranked = sorted(best.values(), key=lambda item: -item[0])[:MAX_CANDIDATES]
     evidence = {
+        **({"errors": errors} if errors else {}),
         "service": service,
         "groups": evidence_groups,
         "unknown_templates": [describe(s) for s in unknown],
@@ -216,6 +222,7 @@ def build_service_evidence(
             for similarity, entry in ranked
         ],
         "past_incidents": similar_cases(cases, service, signature, k=MAX_PAST_INCIDENTS),
+        **({"correlated_alerts": correlated_alerts} if correlated_alerts else {}),
     }
     return (
         evidence,

@@ -16,7 +16,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from logai.alert.alert_state_machine import group_id_key
 from logai.incident.profiles import LLMProfileStore, ProfileError, ProfileStoreUnreadable
 from logai.incident.cases import add_case, delete_case, load_cases, update_case
-from logai.incident.history import load_history
+from logai.incident.history import history_entry, history_row, read_history
 from logai.incident.requests import (
     DEFAULT_LANGUAGE,
     LANGUAGES,
@@ -872,12 +872,46 @@ def create_app(
         add_request(analysis_requests_file, kind, target_id, now, language=language)
         return jsonify({"state": "requested", "requested_at": now}), 202
 
+    HISTORY_LIMIT = 300
+
     @app.route("/api/insights/history", methods=["GET"])
     def insight_history():
-        kind, target_id = request.args.get("kind"), request.args.get("id")
-        if kind not in _record_files or not target_id:
-            return jsonify({"error": "invalid_request", "message": "kind and id are required"}), 400
-        return jsonify({"entries": load_history(analysis_history_file, kind, target_id)})
+        """Every analysis ever made, newest first, as compact rows. Optional
+        filters: kind, service, and id (one target; needs kind)."""
+        kind = request.args.get("kind") or None
+        service = request.args.get("service") or None
+        target_id = request.args.get("id") or None
+        if kind is not None and kind not in _record_files:
+            return jsonify({"error": "invalid_request", "message": "unknown kind"}), 400
+        templates = _load_json("template_registry.json")
+        rows = []
+        for number, entry in read_history(analysis_history_file):
+            row = history_row(number, entry)
+            if row["service"] is None and row["kind"] == "template":
+                row["service"] = (templates.get(row["id"]) or {}).get("service")
+            rows.append(row)
+        services = sorted({row["service"] for row in rows if row["service"]})
+        matching = [
+            row for row in rows
+            if (kind is None or row["kind"] == kind)
+            and (service is None or row["service"] == service)
+            and (target_id is None or row["id"] == target_id)
+        ]
+        matching.sort(key=lambda row: (-float(row["at"] or 0), -row["n"]))
+        return jsonify({
+            "items": matching[:HISTORY_LIMIT], "total": len(matching),
+            "all_total": len(rows), "services": services, "limit": HISTORY_LIMIT,
+        })
+
+    @app.route("/api/insights/history/<int:number>", methods=["GET"])
+    def insight_history_entry(number: int):
+        entry = history_entry(analysis_history_file, number)
+        if entry is None:
+            return jsonify({"error": "not_found", "message": str(number)}), 404
+        row = history_row(number, entry)
+        if row["service"] is None and row["kind"] == "template":
+            row["service"] = (_load_json("template_registry.json").get(row["id"]) or {}).get("service")
+        return jsonify({**row, "record": entry["record"]})
 
     @app.route("/api/insights/delete", methods=["POST"])
     def delete_insight():

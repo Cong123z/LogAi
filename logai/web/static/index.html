@@ -241,11 +241,25 @@
 
       <section class="view" id="view-incidents" aria-label="Incident history">
         <div class="ins-toolbar">
-          <p class="sync-status" style="margin:0;flex:1">Incidents of whole services, written from experience. When a service shows an incident's error pattern again, the analysis shows it as "This happened before" with its root cause and resolution, and the AI is given it too. Save one from a service analysis in AI Insights, or write one here.</p>
+          <div class="toggle-group" role="tablist" aria-label="Incident page">
+            <button class="toggle-btn active" role="tab" aria-selected="true" data-inc-tab="incidents">Incidents<span class="ins-count" id="inc-count-incidents"></span></button>
+            <button class="toggle-btn" role="tab" aria-selected="false" data-inc-tab="history">Analysis history<span class="ins-count" id="inc-count-history"></span></button>
+          </div>
+          <span id="inc-history-filters" hidden>
+            <label for="inc-kind">Type</label>
+            <select id="inc-kind" class="filter-select">
+              <option value="">All analyses</option>
+              <option value="window">Alerts</option>
+              <option value="service">Services</option>
+              <option value="template">Unknown templates</option>
+            </select>
+          </span>
           <label for="inc-service">Service</label>
           <select id="inc-service" class="filter-select"></select>
+          <span class="inc-target" id="inc-target" hidden><span id="inc-target-label"></span><button type="button" class="btn" id="inc-target-clear" aria-label="Show every item">Show all</button></span>
           <button type="button" class="btn btn-primary" id="inc-new">New incident</button>
         </div>
+        <p class="sync-status" id="inc-help" style="margin:0 0 12px"></p>
         <p class="ins-toast" id="inc-toast" role="status" aria-live="polite"></p>
         <div class="ins-layout">
           <ul class="ins-list" id="inc-list" aria-label="Incidents"></ul>

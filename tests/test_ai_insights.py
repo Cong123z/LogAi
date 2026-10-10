@@ -323,7 +323,89 @@ def test_history_keeps_every_finished_analysis(tmp_path):
         stream.write('{"torn line\n')  # a crash mid-append must not break reads
 
     client = create_app(data_dir=str(tmp_path)).test_client()
-    entries = client.get("/api/insights/history?kind=template&id=T9").get_json()["entries"]
-    assert [e["record"]["verdict"] for e in entries] == ["benign", "suspicious"]
-    assert client.get("/api/insights/history?kind=template&id=T8").get_json() == {"entries": []}
-    assert client.get("/api/insights/history?kind=bogus&id=T9").status_code == 400
+    body = client.get("/api/insights/history").get_json()
+    # Failed analyses are kept too; newest first; one row per analysis.
+    assert [row["headline"].split(" ")[0] for row in body["items"]] == ["Failed", "Benign", "Suspicious"]
+    assert body["total"] == body["all_total"] == 3
+    assert {row["kind"] for row in body["items"]} == {"template"}
+    newest = body["items"][0]
+    detail = client.get(f"/api/insights/history/{newest['n']}").get_json()
+    assert detail["record"]["status"] == "failed" and detail["n"] == newest["n"]
+    assert client.get("/api/insights/history/999").status_code == 404
+    assert client.get("/api/insights/history?kind=template&id=T8").get_json()["items"] == []
+    assert client.get("/api/insights/history?kind=window").get_json()["items"] == []
+    assert client.get("/api/insights/history?kind=bogus").status_code == 400
+
+
+def test_error_lines_and_correlated_alerts_reach_window_and_service_evidence(tmp_path):
+    from logai.alert.alert_state_machine import group_id_key
+    from logai.models import GroupedEvent, RawLog
+
+    p = _engine(tmp_path)
+    p._assign_group = lambda parsed: GroupedEvent(parsed=parsed, group_id="G_AUTH")
+    for i, level in enumerate(("ERROR", "INFO")):
+        p._process_one(RawLog(
+            timestamp=1000.0 + i, service="auth", level=level, event_id=f"e{i}",
+            message=f"Login failed java.net.ConnectException: refused password=s3cret try={i}",
+            metadata={"host_name": "auth-01"},
+        ))
+    template_id = next(iter(p.error_samples._recent))[1]
+    p.template_registry.upsert(TemplateState(template_id=template_id, template_text="login failed",
+                                             service="auth", group_id="G_AUTH", first_seen=1000.0))
+    p.group_registry.upsert(GroupState(group_id="G_AUTH", service="auth", template_ids=[template_id]))
+    p.group_registry.upsert(GroupState(group_id="G_API", service="api", representative_template="api down"))
+    p.alert_sm._store.set(group_id_key(("api", "G_API")), {
+        "group_id": ["api", "G_API"], "timestamp": 1000.0, "anomaly_score": 0.9,
+        "alert_state": "ALERTING"})
+    p.alert_sm._non_normal.add(("api", "G_API"))
+    p._event_clock, p._event_clock_wall = 1010.0, time.monotonic()
+
+    _req(tmp_path, "window", json.dumps(list(tic.WK)), 10.0)
+    _req(tmp_path, "service", "auth", 11.0)
+    p._control_tick()
+
+    context = p.incident_classifier.submit.call_args.kwargs["context"]
+    errors = context["errors"]
+    assert errors["summary"]["error_templates"] == 1
+    signature = errors["signatures"][0]
+    assert signature["exception"] == "java.net.ConnectException"
+    assert signature["samples"] == [signature["samples"][0]] and "s3cret" not in signature["samples"][0]
+    assert errors["top_values"]["host"] == [["auth-01", 1]]
+    assert sum(errors["timeline_per_min"]) == 2  # the template's events, all levels
+    assert context["correlated_alerts"][0]["group_id"] == "G_API"
+
+    evidence = p.incident_classifier.submit_service.call_args.args[2]
+    assert list(evidence)[0] == "errors"
+    assert evidence["correlated_alerts"][0]["service"] == "api"
+
+
+def test_results_older_than_the_history_file_are_backfilled_once(tmp_path):
+    """Analyses made before analysis_history.jsonl existed must not vanish
+    from the history when they are re-analyzed and overwritten."""
+    from logai.incident.history import read_history
+
+    window_key = json.dumps(["recharge", "G0000"])
+    JSONStore(tmp_path / "incident_analysis.json").bulk_set({
+        window_key: {"status": "done", "analyzed_at": 5.0, "documentation_id": "DOC-1"},
+        json.dumps(["recharge", "G0001"]): {"status": "failed", "analyzed_at": 6.0},
+        json.dumps(["recharge", "G0002"]): {"status": "pending", "requested_at": 6.5},
+    })
+    JSONStore(tmp_path / "service_analysis.json").bulk_set(
+        {"recharge": {"status": "done", "analyzed_at": 7.0, "summary": "ok"}})
+    history = tmp_path / "analysis_history.jsonl"
+
+    def build():
+        clf, _, _ = _clf(tmp_path, [], preseed_templates={
+            "T9": {"status": "done", "analyzed_at": 8.0, "verdict": "benign"}})
+        return clf
+
+    for _ in range(2):  # a second engine start must not duplicate them
+        clf = build()
+        clf.history_path = str(history)
+        clf.backfill_history()
+    logged = [(e["kind"], e["id"], e["record"]["status"], e["at"]) for _, e in read_history(history)]
+    assert len(logged) == 5  # nothing duplicated by the second start
+    assert {(kind, at) for kind, _, _, at in logged if at < 100} == {
+        ("window", 5.0), ("window", 6.0), ("service", 7.0), ("template", 8.0)}
+    # The pending one was marked failed at start-up (interrupted), so it is kept too.
+    assert ("window", json.dumps(["recharge", "G0002"]), "failed") in {e[:3] for e in logged}

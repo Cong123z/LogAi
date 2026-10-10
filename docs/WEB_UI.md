@@ -17,8 +17,8 @@ bookmarked directly:
 | View | URL | Data source |
 |---|---|---|
 | Alerting | `/#alerting` | `anomaly_state.json`, enriched from group/template registries |
-| AI Insights | `/#insights` | LLM result files, `analysis_requests.json`, `analysis_history.jsonl` |
-| Incidents | `/#incidents` | `incident_cases.json` |
+| AI Insights | `/#insights` | LLM result files, `analysis_requests.json` |
+| Incidents | `/#incidents` | `incident_cases.json`; the **Analysis history** tab reads `analysis_history.jsonl` |
 | Templates | `/#templates` | `template_registry.json`, `group_registry.json` |
 | Groups | `/#groups` | Group registry plus documentation corpus/overrides |
 | Documentation | `/#documentation` | Editable corpus and synchronization status |
@@ -233,6 +233,8 @@ groups and the new groups, from `group_lineage.json`. Two browsers saving from t
 | `GET /api/retrain` | None | `schedule`, `saved`, `revision`, engine `status` (state, history), `run_pending`, `next_run_at`, `engine_state` (`running` / `retraining` / `engine_unavailable`), `defaults` |
 | `PUT /api/retrain` | `schedule` (`enabled`, `time` HH:MM, `weekdays` 0=Mon…6, `timezone`, `lookback_hours`, `max_docs`), `revision` | Updated view; `400` invalid, `409` stale revision |
 | `POST /api/retrain/run` | Optional `lookback_hours`, `max_docs` (default: the schedule's) | `202`; `400` invalid; `409` while a retrain runs or waits to start |
+| `GET /api/insights/history` | Optional `kind` (`window`/`service`/`template`), `service`, `id` | Every stored analysis (done and failed), newest first, capped at 300: `items`, `total`, `all_total`, `services`, `limit` |
+| `GET /api/insights/history/<n>` | Entry number in path | One history row plus the full stored `record`; `404` if missing |
 
 Mutation errors use JSON with an `error` and `message`. Important status codes
 are `400` for invalid input, `404` for an unknown document/group, `409` for a

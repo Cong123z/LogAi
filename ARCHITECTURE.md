@@ -6,7 +6,9 @@ truth, and this document must be corrected.
 
 Related docs: [`README.md`](README.md) (run/deploy),
 [`docs/WEB_UI.md`](docs/WEB_UI.md) (Web UI behavior and the full HTTP API),
-[`k8s/README.md`](k8s/README.md) (Kubernetes).
+[`k8s/README.md`](k8s/README.md) (Kubernetes),
+[`docs/LLM_Module.md`](docs/LLM_Module.md) (raw error evidence for
+the LLM: design and improvement roadmap).
 
 ## 1. Purpose and scope
 
@@ -113,7 +115,7 @@ retrain schedule when training runs in-process (§6.4).
 | `service` (or `service.name`, then `service_code2`) | string | No | `"unknown"` |
 | `level` (or `log.level`, then the 3rd token of the message) | string | No | `"INFO"` |
 | `message` | string | No | `""` |
-| other fields | JSON-compatible | No | Kept in `RawLog.metadata` (noise keys such as `ecs`, `agent`, `host`, `log` are dropped) |
+| other fields | JSON-compatible | No | Kept in `RawLog.metadata` (noise keys such as `ecs`, `agent`, `host`, `log` are dropped; the host name, from `host.name`/`host.hostname` or the `service_code` IP, is kept as `metadata.host_name`) |
 
 Rules:
 
@@ -625,9 +627,12 @@ user from the **AI Insights** page. Three kinds:
     in the web.
 - **Delete.** Only the engine writes result files, so deletes also go through a
   request. A job still running for a deleted record does not write it back.
-- **History.** Every finished analysis is also appended to
-  `analysis_history.jsonl`, which is append-only and never rewritten. The web
-  reads it to show earlier answers for the same target.
+- **History.** Every finished analysis (`done` or `failed`) is also appended
+  to `analysis_history.jsonl`, which is append-only and never rewritten. On
+  start the engine backfills result records older than the file. The web lists
+  it on the Incidents page's **Analysis history** tab, newest first, with a
+  read-only detail; the History button in AI Insights opens that tab filtered
+  to the item.
 
 **What the LLM is sent**
 
@@ -654,6 +659,31 @@ user from the **AI Insights** page. Three kinds:
     events in the last 30 minutes, ERROR/WARN first.
 - **`service` evidence** also includes `unknown_templates`. Groups are ordered
   by alert state, recent activity, level, then `count_30m`.
+- **Raw error lines (`errors`, first key of every kind of evidence).**
+  Templates hide ids, hosts and exception details, so `ErrorSamples`
+  (`incident/error_samples.py`) keeps, in memory, the last 50 raw
+  ERROR/FATAL/CRITICAL lines per `(service, template)` plus each template's
+  first-seen line. Lines are cut to 400 characters, and credentials
+  (`password=`, `token:`, `Bearer …`) are masked; ids and error codes are
+  kept. **These lines are sent to the LLM endpoint.** For the last 30
+  minutes the block holds:
+  - `signatures`: lines grouped by exception, `Caused by` chain, first stack
+    frame and error codes (best-effort regex; without an exception the
+    template is the signature). Each has counts, rate, baseline, `ratio` and
+    `chronic` (ratio < 1.5: the usual noise), plus the first-seen and latest
+    sample. At most 5, elevated before chronic.
+  - `top_values`: the most common host (`metadata.host_name`, from
+    `host.name` or the `service_code` IP) and metadata values (e.g.
+    `moduleCode`); keys whose values are all different are left out.
+  - `timeline_per_min`: events per minute of the error templates, 30 minutes,
+    oldest first.
+  - `summary`: error templates, signatures, events in 15/30 minutes, error
+    templates new in the last hour.
+  The window block covers the group's templates, the service block every
+  template of the service, the triage block the template itself.
+- **`correlated_alerts`** (window and service): up to 10 other non-NORMAL
+  windows (other services for a service analysis), most severe first, with
+  their representative template, to point at a shared or upstream cause.
 - **Hallucination guard.** Only document IDs, group IDs and `similar_case_id`
   values from the candidate lists that were sent are accepted.
 
@@ -690,9 +720,9 @@ user from the **AI Insights** page. Three kinds:
   - Each window/service record stores `recalled`: the engine's own matches,
     present even when the LLM fails. It holds IDs and comparisons, not copies
     of incident content.
-  - AI Insights shows "↺ This happened before" with the incident's **current**
-    root cause, resolution and runbook (so edits show on old analyses), the
-    then-vs-now table and "New this time".
+  - AI Insights shows "↺ This happened before" with a link to the incident
+    (opened in Incidents, where its root cause and resolution are read), the
+    match percentage, the then-vs-now table and "New this time".
   - The Alerts and Services lists show a "↺ CASE-…" badge.
 - **Hand-written incidents.** One editor serves three modes: saving from a
   service analysis, editing (`PUT /api/incident-cases/<id>`) and writing by hand
@@ -771,6 +801,7 @@ profiles**), without editing env or restarting.
 | `docmatch/refresh_worker.py` | Background documentation refresh | `documentation_status.json` |
 | `features/feature_engine.py` | Per-`(service, group)` sliding windows | In-memory windows |
 | `features/template_activity.py` | Per-template recent counts for the LLM | `template_activity.json` |
+| `incident/error_samples.py` | Raw ERROR/FATAL lines and exception signatures for the LLM | In memory only |
 | `anomaly/isolation_forest_model.py` | Train/load/predict the global IF | `models/global_v3.pkl` |
 | `alert/alert_state_machine.py` | Hysteresis per window | `anomaly_state.json` |
 | `incident/*` | LLM worker, evidence builders, requests, history, incidents, profiles | LLM result files |
@@ -873,7 +904,7 @@ Every endpoint, payload, response and UI behavior is documented in
 | `grouping_status.json` | JSON | Training + realtime | Web + healthcheck | Applied/attempted revision, per-template results, heartbeat |
 | `analysis_requests.json` | JSON | Web | Engine | §7.6 |
 | `incident_analysis.json` / `service_analysis.json` / `template_triage.json` | JSON | Engine | Web | Latest LLM result per target |
-| `analysis_history.jsonl` | JSONL | Engine | Web | Every finished analysis |
+| `analysis_history.jsonl` | JSONL | Engine | Web | Every done/failed analysis (Incidents › Analysis history) |
 | `incident_cases.json` | JSON | Web | Engine + web | Confirmed incidents |
 | `template_activity.json` | JSON | Realtime | Realtime | Recent per-template counts |
 | `llm_profiles.json` | JSON (0600) | Web | Engine + web | LLM profiles and API keys |

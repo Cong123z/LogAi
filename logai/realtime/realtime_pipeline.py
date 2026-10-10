@@ -38,6 +38,7 @@ from logai.grouping.assignment_manager import (
     GroupAssignmentManager,
 )
 from logai.incident.classifier import IncidentClassifier
+from logai.incident.error_samples import ErrorSamples
 from logai.incident.profiles import LLMProfileStore
 from logai.incident.cases import load_cases
 from logai.incident.requests import DEFAULT_LANGUAGE, load_requests, parse_key
@@ -126,6 +127,9 @@ class RealtimePipeline:
         )
         self.template_activity = TemplateActivity.load(self._template_activity_path)
         self._template_activity_saved_at = time.monotonic()
+        # Latest raw ERROR/FATAL lines per template: the core of LLM evidence.
+        # Memory only; refills within minutes of a restart.
+        self.error_samples = ErrorSamples()
         self.model_store = ModelStore(config.storage.model_dir)
         self.anomaly_model = GlobalAnomalyModel(config.anomaly, self.model_store)
         self.documentation_worker = DocumentationRefreshWorker(
@@ -532,6 +536,9 @@ class RealtimePipeline:
 
             parsed = self.parser.parse(raw)
             self.template_activity.record(raw.service, parsed.template_id, raw.timestamp)
+            error_samples = getattr(self, "error_samples", None)
+            if error_samples is not None:
+                error_samples.record(raw, parsed.template_id)
             grouped = self._assign_group(parsed)
             self.metrics.record_raw_event(parsed)
 
@@ -1255,9 +1262,15 @@ class RealtimePipeline:
                 identity[0], self.template_registry,
                 self.alert_sm.states_for_service(identity[0]), activity, now,
             )
+            group = self.group_registry.get(identity[1])
             return classifier.submit(
                 identity, alert, params, requested_at=requested_at, language=language,
-                context={"activity": activity, "signature": signature["templates"]},
+                context={
+                    "activity": activity, "signature": signature["templates"],
+                    "errors": self._errors_block(
+                        identity[0], group.template_ids if group else [], activity, now),
+                    "correlated_alerts": self._correlated_alerts(exclude_window=identity),
+                },
             )
         if kind == "service":
             alert_states = self.alert_sm.states_for_service(target_id)
@@ -1274,18 +1287,67 @@ class RealtimePipeline:
                 alert_states, params, self.doc_matcher,
                 load_cases(classifier.cases_path) if classifier.cases_path else (),
                 activity, signature["templates"],
+                errors=self._errors_block(target_id, None, activity, now),
+                correlated_alerts=self._correlated_alerts(exclude_service=target_id),
             )
             return classifier.submit_service(
                 target_id, requested_at, evidence, candidates, sent_groups, language,
                 {**signature, "occurred_at": now},
             )
+        activity = self.template_activity.counts(now)
+        template = self.template_registry.get(target_id)
         evidence, candidates = build_template_evidence(
-            target_id, self.template_registry, self.group_registry,
-            self.template_activity.counts(now),
+            target_id, self.template_registry, self.group_registry, activity,
+            errors=(
+                self._errors_block(template.service, [target_id], activity, now)
+                if template else None
+            ),
         )
         return classifier.submit_template(
             target_id, requested_at, evidence, candidates, language
         )
+
+    def _errors_block(self, service: str, template_ids, activity: dict, now: float):
+        """The `errors` evidence block (raw ERROR/FATAL lines, signatures,
+        hosts, timeline) for these templates of `service`; None when quiet."""
+        error_samples = getattr(self, "error_samples", None)
+        if error_samples is None:
+            return None
+
+        def first_seen(template_id: str) -> Optional[float]:
+            state = self.template_registry.get(template_id)
+            return state.first_seen if state else None
+
+        return error_samples.block(
+            service, template_ids, activity, now,
+            first_seen=first_seen, activity=self.template_activity,
+        )
+
+    MAX_CORRELATED_ALERTS = 10
+
+    def _correlated_alerts(
+        self, exclude_service: Optional[str] = None,
+        exclude_window: Optional[Tuple[str, str]] = None,
+    ) -> list:
+        """Other (service, group) windows that are not NORMAL right now, most
+        severe first: a shared or upstream cause shows up as several of them."""
+        rank = {"ALERTING": 3, "COOLING": 2, "WARMING": 1}
+        items = []
+        for window in self.alert_sm.groups_not_normal():
+            if not (isinstance(window, tuple) and len(window) == 2):
+                continue
+            if window == exclude_window or window[0] == exclude_service:
+                continue
+            state = self.alert_sm._load(window)
+            group = self.group_registry.get(window[1])
+            items.append({
+                "service": window[0], "group_id": window[1],
+                "state": state.alert_state, "score": round(state.anomaly_score, 3),
+                "at": state.timestamp,
+                "representative_template": group.representative_template if group else "",
+            })
+        items.sort(key=lambda item: (-rank.get(item["state"], 0), -item["score"]))
+        return items[:self.MAX_CORRELATED_ALERTS]
 
     def _write_failed(self, kind: str, target_id: str, requested_at: float, error: str) -> None:
         classifier = self.incident_classifier

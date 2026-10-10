@@ -641,6 +641,9 @@ tbody tr:last-child td { border-bottom: none; }
 .ins-item-title { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ins-item-sub { font-family: var(--font-mono); font-size:12px; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ins-item-status { font-size:12px; font-weight:600; }
+.ins-item-sub.hist-sub { font-family:inherit; }
+.ins-toolbar > span:not([hidden]) { display:inline-flex; align-items:center; gap:12px; }
+.inc-target { padding:4px 4px 4px 12px; border:1px solid var(--accent); border-radius:999px; font-size:13px; }
 .ins-detail { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:18px 20px; min-height:240px; }
 .ins-detail h2 { font-size:16px; margin:0; }
 .ins-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }
@@ -653,9 +656,7 @@ tbody tr:last-child td { border-bottom: none; }
 .ins-code { font-family: var(--font-mono); font-size:13px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius-sm); padding:8px 10px; margin:10px 0 14px; word-break:break-word; }
 .ins-section { border-top:1px solid var(--border); padding-top:14px; margin-top:14px; }
 .inc-recall { background:var(--blue-bg); border:1px solid var(--border); border-radius:var(--radius); padding:12px 14px; margin-top:14px; }
-.inc-recall h3 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--blue); }
 .inc-recall-item + .inc-recall-item { border-top:1px solid var(--border); margin-top:12px; padding-top:12px; }
-.inc-recall p { margin:6px 0; line-height:1.5; white-space:pre-line; }
 .inc-recall details { margin-top:8px; }
 .inc-recall summary { cursor:pointer; color:var(--text-dim); font-size:13px; }
 .inc-pattern { list-style:none; margin:6px 0; padding:0; max-height:220px; overflow:auto; }
