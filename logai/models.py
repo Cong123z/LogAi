@@ -1,6 +1,6 @@
 """Core data contracts shared across training & realtime pipelines.
 
-These mirror the "Data Contract" and "State cần lưu" sections of the
+These mirror the "Data Contract" and "State to persist" sections of the
 implementation plan.
 """
 from __future__ import annotations
