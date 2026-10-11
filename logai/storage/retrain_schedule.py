@@ -223,6 +223,12 @@ def _copy(src: Path, dst: Path) -> None:
         shutil.copy2(src, dst)
 
 
+def discard_backup(config: Any) -> None:
+    """Invalidate the previous retrain's backup, so a run that fails (or is
+    killed) before its own snapshot never restores that older state."""
+    (Path(config.storage.base_dir) / BACKUP_DIR / _MANIFEST).unlink(missing_ok=True)
+
+
 def snapshot_artifacts(config: Any) -> Path:
     """Copy the current artifacts aside. The manifest is written last, so a
     backup without one is incomplete and never restored."""

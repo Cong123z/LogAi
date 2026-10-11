@@ -9,6 +9,7 @@ templates just wait for the next training run.
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 import json
 import logging
 import os
@@ -77,6 +78,7 @@ from logai.storage.index_selection import (
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 from logai.storage.retrain_schedule import (
     RetrainScheduleStore,
+    discard_backup,
     next_run_at,
     read_json,
     restore_artifacts,
@@ -381,6 +383,14 @@ class RealtimePipeline:
             batch = [raw for _, b, _ in polled for raw in b]
             for index, index_batch, cursor in polled:
                 if not index_batch:
+                    if cursor is not None:
+                        # Every hit was malformed: step past them, or this
+                        # page is fetched again forever.
+                        last = (
+                            (self.checkpoint.get_index_cursor(index) or {}).get("last_timestamp")
+                            if index is not None else self.checkpoint.get_last_timestamp()
+                        )
+                        self._pending_cursors[index] = (cursor, last)
                     continue
                 self.metrics.logai_queue_depth.set(len(index_batch))
                 self.metrics.logai_events_received_total.inc(len(index_batch))
@@ -420,7 +430,7 @@ class RealtimePipeline:
                     n >= self.config.anomaly.predict_batch_size
                     or waited >= self.config.anomaly.predict_max_wait_seconds
                 ))
-                or (bool(batch) and bool(self._pending_cursors))
+                or bool(self._pending_cursors)
             )
             if should_flush:
                 self._flush_batch()
@@ -798,13 +808,20 @@ class RealtimePipeline:
         except Exception as exc:  # noqa: BLE001 - keep reading what is known
             logger.warning("Unable to resolve Elasticsearch indices: %s", exc)
             self._resolve_error = str(exc)[:300]
+            resolved = None
+        known = set(self.checkpoint.index_names())
+        if resolved is None:
+            # Keep reading what is known: last resolution, else the indices
+            # with a cursor that match the pattern (e.g. right after a
+            # restart). Polling them then reports the outage.
             resolved = {
-                pattern: self._resolved.get(pattern, [] if "*" in pattern else [pattern])
+                pattern: self._resolved.get(pattern) or sorted(
+                    index for index in known if fnmatch.fnmatchcase(index, pattern)
+                ) or ([] if "*" in pattern else [pattern])
                 for pattern in patterns
             }
         active = sorted({index for indices in resolved.values() for index in indices})
 
-        known = set(self.checkpoint.index_names())
         legacy_floor = self.checkpoint.legacy_floor()
         floors: dict[str, float] = {}
         for entry in entries:
@@ -818,7 +835,9 @@ class RealtimePipeline:
                 if legacy_floor is not None:
                     floor_ts = min(floor_ts, legacy_floor)
                 floors[index] = min(floors.get(index, floor_ts), floor_ts)
-        dropped = known - set(active)
+        # A cursor is only forgotten on a successful resolve: an unreachable
+        # Elasticsearch must never look like a removed index.
+        dropped = set() if self._resolve_error else known - set(active)
 
         if active != self._active_indices or floors or dropped:
             # Buffered work and cursors belong to the previous selection.
@@ -944,6 +963,9 @@ class RealtimePipeline:
         if trigger["trigger"] == "manual":
             status["handled_request_at"] = trigger["requested_at"]
         status_lock = threading.Lock()
+        # Before "running" is durable: a failure or kill until the snapshot
+        # below must find no backup, not the previous retrain's.
+        discard_backup(self.config)
         self.retrain_store.write_status(status)
         logger.info("Retrain (%s) starting: lookback=%.1fh max_docs=%d",
                     run["trigger"], run["lookback_hours"], run["max_docs"])

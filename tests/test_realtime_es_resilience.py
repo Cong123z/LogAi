@@ -66,7 +66,7 @@ class RunForeverResilienceTest(unittest.TestCase):
         # They stay empty here because poll_batch never yields a batch, so the
         # flush branch is never taken and this test stays focused on backoff.
         p._pending_predictions = []
-        p._pending_cursor = None
+        p._pending_cursors = {}
         p._pending_last_ts = None
         p._buffer_started_at = None
         # start_metrics_server just needs to be a no-op here.

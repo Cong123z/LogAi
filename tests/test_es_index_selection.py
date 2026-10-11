@@ -208,6 +208,42 @@ class TestEngineSelection(unittest.TestCase):
         self.assertEqual(cp.get_index_cursor("logs-2")["last_timestamp"], 1001.0)
         self.assertIsNone(cp.get_search_after())  # legacy cursor untouched
 
+    def test_restart_while_es_is_down_keeps_every_cursor(self):
+        self.store.replace(["logs-*"], None, now=500.0)
+        self.pipeline._refresh_index_selection()
+        self.pipeline.checkpoint.commit_indices({"logs-1": ([1000, 1], 1000.0)})
+
+        with patch("logai.realtime.realtime_pipeline.MetricsExporter"):
+            restarted = RealtimePipeline(self.cfg)
+        restarted.collector.resolve = MagicMock(side_effect=ConnectionError("es down"))
+        restarted._refresh_index_selection()
+        cp = restarted.checkpoint
+        self.assertEqual(cp.get_index_cursor("logs-1")["search_after"], [1000, 1])
+        # The known indices are still polled, so the outage is reported.
+        self.assertEqual(restarted._active_indices, ["logs-1", "logs-2"])
+
+        restarted.collector.resolve = self.pipeline.collector.resolve
+        restarted._last_resolve_at = float("-inf")
+        restarted._refresh_index_selection()
+        self.assertEqual(cp.get_index_cursor("logs-1")["search_after"], [1000, 1])
+
+    def test_page_of_only_malformed_hits_is_stepped_over(self):
+        self.store.replace(["orders"], None, now=500.0)
+        collector = self.pipeline.collector
+        collector._search = MagicMock(return_value={"hits": {"hits": [{"_id": "x", "sort": [5, 1]}]}})
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) == 2:
+                raise _Stop()
+
+        with patch("logai.realtime.realtime_pipeline.time.sleep", sleep):
+            with self.assertRaises(_Stop):
+                self.pipeline._poll_loop()
+        self.assertEqual(self.pipeline.checkpoint.get_index_cursor("orders")["search_after"], [5, 1])
+        self.assertEqual(collector._search.call_args.args[0]["search_after"], [5, 1])
+
     def test_status_file_for_the_web(self):
         self.store.replace(["orders"], None, now=500.0)
         self.pipeline._refresh_index_selection()

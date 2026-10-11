@@ -236,6 +236,26 @@ class TestRollbackAndRecovery(TempConfig):
         self.assertEqual((run["result"], run["rolled_back"]), ("failed", True))
         p._reexec.assert_called_once()
 
+    def test_failure_before_snapshot_never_restores_an_older_backup(self):
+        from logai.storage.retrain_schedule import snapshot_artifacts
+        self._write_before()
+        snapshot_artifacts(self.cfg)  # left by an earlier retrain
+        self._train_and_break()       # newer state since then
+        newer = self._files()[0].read_text(encoding="utf-8")
+        p = self._pipeline()
+        p._pending_predictions = [("window", MagicMock())]
+        p._flush_batch = MagicMock(side_effect=OSError("disk full"))
+        with patch("logai.training.train_pipeline.run_training_from_elasticsearch") as train:
+            p._run_retrain({"trigger": "schedule", "lookback_hours": 1.0, "max_docs": 1000})
+        train.assert_not_called()
+        self.assertEqual(self._files()[0].read_text(encoding="utf-8"), newer)
+        run = self.store.load_status()["history"][-1]
+        self.assertEqual((run["result"], run["rolled_back"]), ("failed", False))
+        # Killed in that window: the restart finds no backup to restore either.
+        self.store.write_status({**self.store.load_status(), "state": "running"})
+        self._pipeline()
+        self.assertEqual(self._files()[0].read_text(encoding="utf-8"), newer)
+
     def test_engine_killed_during_retrain_is_restored_and_recorded_once(self):
         from logai.storage.retrain_schedule import snapshot_artifacts
         self._write_before()
