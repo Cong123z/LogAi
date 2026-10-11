@@ -6,8 +6,9 @@ realtime pipeline counts events per (service, template) in two series:
   - hourly buckets over the last BASELINE_HOURS -> baseline_per_min, the
     template's normal rate (median of closed hours, silent hours as zero),
     and ratio = current rate / normal rate ("how many times normal").
-Hours before the engine first observed traffic (`origin_hour`) are unknown, not
-zero, so a fresh engine reports no baseline until MIN_BASELINE_HOURS closed.
+Only hours in which the engine recorded some event (of any service) count:
+hours before it started or while it or the ingestion was down are unknown, not
+zero, so it reports no baseline until MIN_BASELINE_HOURS such hours closed.
 State is saved to a small JSON file so a restart keeps the baseline.
 Written by the poll thread, read and saved by the control thread.
 """
@@ -61,15 +62,12 @@ class TemplateActivity:
     def __init__(self) -> None:
         self._minutes: Dict[Key, Deque[List[int]]] = {}
         self._hours: Dict[Key, Deque[List[int]]] = {}
-        self._origin_hour: Optional[int] = None
         self._lock = threading.Lock()
 
     def record(self, service: str, template_id: str, timestamp: float) -> None:
         key = (service, template_id)
         minute, hour = int(timestamp // 60), int(timestamp // 3600)
         with self._lock:
-            if self._origin_hour is None:
-                self._origin_hour = hour
             _bump(self._minutes.setdefault(key, deque()), minute, HORIZON_MINUTES)
             _bump(self._hours.setdefault(key, deque()), hour, BASELINE_HOURS + 1)
 
@@ -79,12 +77,14 @@ class TemplateActivity:
         template seen in the last BASELINE_HOURS, so a template that went
         silent shows count 0 against its normal rate."""
         current_minute, current_hour = int(now // 60), int(now // 3600)
+        first_hour = current_hour - BASELINE_HOURS
         with self._lock:
-            first_hour = max(
-                current_hour - BASELINE_HOURS,
-                self._origin_hour if self._origin_hour is not None else current_hour,
-            )
-            closed_hours = max(0, current_hour - first_hour)
+            # Hours the engine was listening; a gap (engine stopped overnight)
+            # must not read as a silent service, or every ratio explodes.
+            observed = sorted({
+                hour for buckets in self._hours.values() for hour, _ in buckets
+                if first_hour <= hour < current_hour
+            })
             totals: Dict[str, Dict[str, Any]] = {}
             hourly: Dict[str, Dict[int, int]] = {}
             for (svc, template_id), buckets in self._hours.items():
@@ -105,11 +105,9 @@ class TemplateActivity:
                             entry[f"count_{window}m"] += count
         for template_id, entry in totals.items():
             entry["rate_per_min"] = round(entry["count_15m"] / 15.0, 2)
-            if closed_hours >= MIN_BASELINE_HOURS:
+            if len(observed) >= MIN_BASELINE_HOURS:
                 per_hour = hourly.get(template_id, {})
-                baseline = _median([
-                    per_hour.get(hour, 0) / 60.0 for hour in range(first_hour, current_hour)
-                ])
+                baseline = _median([per_hour.get(hour, 0) / 60.0 for hour in observed])
                 entry["baseline_per_min"] = round(baseline, 3)
                 entry["ratio"] = round(entry["rate_per_min"] / max(baseline, RATE_FLOOR_PER_MIN), 1)
         return {
@@ -160,7 +158,6 @@ class TemplateActivity:
         with self._lock:
             payload = {
                 "schema_version": SCHEMA_VERSION,
-                "origin_hour": self._origin_hour,
                 "minutes": {json.dumps(list(k)): list(v) for k, v in self._minutes.items() if v},
                 "hours": {json.dumps(list(k)): list(v) for k, v in self._hours.items() if v},
             }
@@ -173,8 +170,6 @@ class TemplateActivity:
         try:
             with open(path, "r", encoding="utf-8") as stream:
                 raw = json.load(stream)
-            origin = raw.get("origin_hour")
-            activity._origin_hour = origin if isinstance(origin, int) else None
             for name, target in (("minutes", activity._minutes), ("hours", activity._hours)):
                 for key, buckets in (raw.get(name) or {}).items():
                     service, template_id = json.loads(key)

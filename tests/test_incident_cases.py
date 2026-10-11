@@ -109,3 +109,15 @@ def test_update_case_rewrites_text_and_pattern_but_keeps_identity(tmp_path):
         update_case(path, case["id"], {"title": "x", "root_cause": "y", "pattern": []})
     with pytest.raises(KeyError):
         update_case(path, "CASE-0404", {"title": "x", "root_cause": "y", "pattern": [{"text": "a"}]})
+
+
+def test_llm_copy_keeps_only_templates_abnormal_again():
+    from logai.incident.cases import compact_for_llm
+
+    rows = [{"text": f"t{i}", "then": {}, "now": None} for i in range(20)]
+    rows += [{"text": f"hot{i}", "then": {}, "now": {"ratio": float(i)}} for i in range(10)]
+    full = [{"id": "C1", "root_cause": "rc", "comparison": rows, "only_now": list("abcdefg")}]
+    sent = compact_for_llm(full)[0]
+    assert [row["text"] for row in sent["comparison"]] == [f"hot{i}" for i in range(9, 1, -1)]
+    assert sent["templates_not_shown"] == 22 and sent["only_now"] == list("abcde")
+    assert sent["root_cause"] == "rc" and len(full[0]["comparison"]) == 30  # input untouched

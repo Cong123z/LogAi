@@ -134,7 +134,7 @@ import time
 
 import test_incident_classifier as tic
 from logai.config import LLMConfig
-from logai.incident.classifier import IncidentClassifier
+from logai.incident.classifier import BRIEF_PROMPT, IncidentClassifier
 from logai.storage.base import JSONStore
 
 TRIAGE_REPLY = {"verdict": "suspicious", "confidence": 0.8, "reasoning": "refused payments",
@@ -167,7 +167,7 @@ def test_process_template_done(tmp_path):
     assert rec["status"] == "done" and rec["verdict"] == "suspicious"
     assert rec["suggested_group_id"] == "G0" and rec["requested_at"] == 5.0 and rec["model"] == "m"
     assert clf.template_store.get("T9")["verdict"] == "suspicious"
-    assert session.calls[0]["json"]["messages"][0]["content"] == TEMPLATE_SYSTEM_PROMPT
+    assert session.calls[0]["json"]["messages"][0]["content"] == TEMPLATE_SYSTEM_PROMPT + BRIEF_PROMPT
     assert results == ["template_done"]
 
 

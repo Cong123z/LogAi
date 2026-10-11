@@ -667,8 +667,10 @@ user from the **AI Insights** page. Three kinds:
   `(service, template)` in two series:
   - 1-minute buckets over 30 minutes → `count_15m`, `count_30m`, `rate_per_min`;
   - 1-hour buckets over 24 hours → `baseline_per_min` = median of the closed
-    hours (silent hours count as 0; hours before the engine started are
-    unknown; at least 3 hours are needed).
+    hours in which the engine recorded any event, of any service. A
+    template's silent hours count as 0. Hours before the engine started, or
+    while the engine or ingestion was down, are unknown and skipped. At
+    least 3 such hours are needed.
 
   `ratio` = current rate / max(baseline, 0.1/min). The counts are saved to
   `template_activity.json` every 5 minutes and on stop. Templates silent now but
@@ -765,8 +767,11 @@ user from the **AI Insights** page. Three kinds:
 
 - **Worker reliability and speed.** There is one worker with a priority queue:
   window/service analyses run before template triage.
-  - A reply cut off at `max_tokens` (`finish_reason: length`) is retried once
-    with double the budget (at most 8000).
+  - A reply cut off at `max_tokens` is retried once with double the budget
+    (at most 8000). A reply whose `completion_tokens` reach `max_tokens` counts
+    as cut off even when a proxy reports `finish_reason: stop`, because
+    reasoning models can spend the whole budget thinking. `llm.max_tokens`
+    defaults to 4000; it is only a cap.
   - A non-JSON reply is retried once with a reminder.
   - Budgets are ×1.5 for Vietnamese.
   - A read timeout is retried only once, and `llm.job_deadline_seconds` (150)

@@ -60,6 +60,16 @@ def test_ratio_against_own_normal_rate_and_silent_hours_count_as_zero():
     assert gone["count_30m"] == 0 and gone["baseline_per_min"] == 3.0 and gone["ratio"] == 0.0
 
 
+def test_hours_the_engine_was_down_are_unknown_not_silent():
+    activity = TemplateActivity()
+    _feed(activity, "api", "T1", 0.0, 5 * H, 2)            # 5 h of traffic
+    _feed(activity, "web", "W1", 5 * H, 6 * H, 1)          # another service still logs
+    _feed(activity, "api", "T1", 20 * H, 23 * H + 900, 2)  # engine back after 14 h down
+    entry = activity.counts(23 * H + 899, "api")["T1"]
+    # 8 known hours with traffic + 1 known silent hour -> median 2.0, not 0
+    assert entry["baseline_per_min"] == 2.0 and entry["ratio"] == 1.0
+
+
 def test_save_and_load_keep_the_baseline(tmp_path):
     path = tmp_path / "template_activity.json"
     activity = TemplateActivity()

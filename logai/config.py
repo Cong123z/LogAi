@@ -97,10 +97,15 @@ class LLMConfig:
     max_retries: int = 2
     retry_backoff_seconds: float = 1.0
     max_candidates: int = 5
-    max_tokens: int = 800
+    # A cap, not a cost: reasoning models think inside it (gemini-3.8-flash
+    # uses ~4k thinking tokens even on a short prompt).
+    max_tokens: int = 4000
     # One job (all retries included) gives up after this long, so a stuck
     # endpoint cannot hold the single LLM worker for minutes.
     job_deadline_seconds: float = 150.0
+    # Merged into every request body for server-specific options, e.g.
+    # {"chat_template_kwargs": {"enable_thinking": false}} on vLLM.
+    extra_body: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -58,7 +58,7 @@ Scope per analysis kind:
 ```
 
 - **Counts, rate and ratio** come from `TemplateActivity.counts()`. When a template's events are spread over several signatures, they are split by sample share.
-- **Chronic** means `ratio < 1.5` with a known baseline, which needs at least 3 closed hours. Signatures are sorted elevated before chronic, then by `count_30m`; at most 5 are kept.
+- **Chronic** means `ratio < 1.5` with a known baseline, which needs at least 3 closed hours with engine traffic. Signatures are sorted elevated before chronic, then by `count_30m`; at most 5 are kept.
 - **top_values** holds the top 3 values per key, host first, at most 6 keys. Keys whose values are all distinct (IDs) are skipped.
 - **timeline_per_min** comes from `TemplateActivity.series()`. It counts every event of the error templates, at every level, oldest first.
 

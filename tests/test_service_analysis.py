@@ -188,7 +188,7 @@ def test_service_prompt_mentions_shape():
 import time
 
 from logai.config import LLMConfig
-from logai.incident.classifier import IncidentClassifier
+from logai.incident.classifier import BRIEF_PROMPT, IncidentClassifier
 
 SVC_EVIDENCE = {"service": "recharge", "groups": [], "candidates": []}
 SVC_REPLY = {"health": "degraded", "summary": "s", "issues": [
@@ -204,7 +204,7 @@ def _svc_classifier(tmp_path, responses, preseed=None):
     session = tic.FakeSession(responses)
     results = []
     clf = IncidentClassifier(
-        LLMConfig(endpoint="http://llm", model="m", retry_backoff_seconds=0),
+        LLMConfig(endpoint="http://llm", model="m", retry_backoff_seconds=0, max_tokens=800),
         tic._matcher(tmp_path, tic.CLASSIFIER_DOCS), groups, templates,
         JSONStore(tmp_path / "incident_analysis.json"),
         session=session, on_result=results.append, service_store=service_store,
@@ -220,7 +220,7 @@ def test_process_service_done(tmp_path):
     assert store.get("recharge")["status"] == "done"
     body = session.calls[0]["json"]
     assert body["max_tokens"] == 2000
-    assert body["messages"][0]["content"] == SERVICE_SYSTEM_PROMPT
+    assert body["messages"][0]["content"] == SERVICE_SYSTEM_PROMPT + BRIEF_PROMPT
     assert json.loads(body["messages"][1]["content"]) == SVC_EVIDENCE
     assert results == ["service_done"]
 

@@ -134,8 +134,9 @@ def _classifier(tmp_path, responses, **config):
     store = JSONStore(tmp_path / "incident_analysis.json")
     results = []
     clf = IncidentClassifier(
+        # Budget tests below are written for an 800-token budget.
         LLMConfig(endpoint="http://llm/v1/chat/completions", model="m",
-                  retry_backoff_seconds=0, **config),
+                  retry_backoff_seconds=0, **{"max_tokens": 800, **config}),
         _matcher(tmp_path, CLASSIFIER_DOCS), groups, templates, store,
         session=session, on_result=results.append,
     )
@@ -268,7 +269,7 @@ def test_llm_env_overrides():
                                  "LOGAI_LLM_API_KEY": "s"}):
         llm = load_config().llm
     assert (llm.endpoint, llm.model, llm.api_key) == ("http://x", "qwen", "s")
-    assert llm.max_candidates == 5 and llm.max_tokens == 800
+    assert llm.max_candidates == 5 and llm.max_tokens == 4000
 
 
 # --- Task 3: realtime pipeline wiring ---------------------------------------
@@ -484,7 +485,7 @@ def test_unrelated_case_not_offered(tmp_path):
 
 
 def test_language_instruction_and_record(tmp_path):
-    from logai.incident.classifier import SYSTEM_PROMPT
+    from logai.incident.classifier import BRIEF_PROMPT, SYSTEM_PROMPT
 
     clf, session, store, _ = _classifier(tmp_path, [
         _reply({"documentation_id": "DOC-001", "reasoning": "x"}),
@@ -493,7 +494,7 @@ def test_language_instruction_and_record(tmp_path):
     assert clf.process(KEY, ALERT, [], language="vi")["language"] == "vi"
     assert "in Vietnamese" in session.calls[0]["json"]["messages"][0]["content"]
     clf.process(KEY, ALERT, [])
-    assert session.calls[1]["json"]["messages"][0]["content"] == SYSTEM_PROMPT
+    assert session.calls[1]["json"]["messages"][0]["content"] == SYSTEM_PROMPT + BRIEF_PROMPT
     assert store.get(STORE_KEY)["language"] == "en"
 
 
@@ -554,6 +555,21 @@ def test_cut_off_reply_is_asked_again_with_twice_the_budget(tmp_path):
     assert [c["json"]["max_tokens"] for c in session.calls] == [800, 1600]
     assert rec["usage"] == {"prompt_tokens": 2000, "completion_tokens": 920}
     assert isinstance(rec["duration_s"], float)
+
+
+def test_extra_body_reasoning_tokens_and_evidence_sizes_are_recorded(tmp_path):
+    clf, session, _, _ = _classifier(
+        tmp_path,
+        [_raw(json.dumps(VALID), usage={"prompt_tokens": 900, "completion_tokens": 400,
+                                        "completion_tokens_details": {"reasoning_tokens": 300}})],
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    rec = clf.process(KEY, ALERT, [])
+    body = session.calls[0]["json"]
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "at most 3 sentences" in body["messages"][0]["content"]
+    assert rec["usage"]["reasoning_tokens"] == 300
+    assert rec["evidence_chars"]["candidates"] > 0 and "alert" in rec["evidence_chars"]
 
 
 def test_cut_off_twice_fails_with_a_clear_error(tmp_path):
@@ -645,3 +661,14 @@ def test_metrics_record_llm_call():
     fake.logai_llm_tokens_total.labels.assert_any_call(kind="service", type="prompt")
     fake.logai_llm_tokens_total.labels.assert_any_call(kind="service", type="completion")
     fake.logai_llm_retries_total.labels.assert_called_with(kind="service", reason="length")
+
+
+def test_spent_budget_counts_as_cut_off_even_when_the_proxy_says_stop(tmp_path):
+    notice = "No visible answer was produced: reasoning consumed the entire budget."
+    clf, session, _, _ = _classifier(tmp_path, [
+        _raw(notice, "stop", {"prompt_tokens": 900, "completion_tokens": 2397}),
+        _raw(json.dumps(VALID), usage={"prompt_tokens": 900, "completion_tokens": 1400}),
+    ])
+    rec = clf.process(KEY, ALERT, [])
+    assert rec["status"] == "done" and rec["attempts"] == 2
+    assert [c["json"]["max_tokens"] for c in session.calls] == [800, 1600]

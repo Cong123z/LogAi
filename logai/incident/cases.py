@@ -182,6 +182,30 @@ def recall_summary(past_incidents: Iterable[Dict[str, Any]]) -> List[Dict[str, A
     return [{key: item.get(key) for key in keys} for item in past_incidents or []]
 
 
+# The LLM's copy of a recalled case: big cases list dozens of templates, most
+# of them not abnormal now.
+MAX_LLM_COMPARISON = 8
+MAX_LLM_ONLY_NOW = 5
+
+
+def compact_for_llm(past_incidents: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Recalled cases as sent to the LLM: only the comparison rows of templates
+    abnormal again now (highest ratio first, at most 8), the rest counted in
+    templates_not_shown. Records and the page keep the full comparison."""
+    compact = []
+    for item in past_incidents or []:
+        rows = item.get("comparison") or []
+        back = sorted(
+            (row for row in rows if row.get("now") is not None),
+            key=lambda row: -(row["now"].get("ratio") or 0),
+        )[:MAX_LLM_COMPARISON]
+        compact.append({
+            **item, "comparison": back, "templates_not_shown": len(rows) - len(back),
+            "only_now": (item.get("only_now") or [])[:MAX_LLM_ONLY_NOW],
+        })
+    return compact
+
+
 def _numbers(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     entry = entry or {}
     return {key: entry.get(key) for key in ("rate_per_min", "ratio", "count_15m")}

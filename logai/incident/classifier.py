@@ -26,7 +26,7 @@ from logai.config import LLMConfig
 from logai.docmatch.doc_matcher import DocumentationMatcher
 from logai.features.template_activity import is_active, recent
 from logai.grouping import PENDING_GROUP_ID
-from logai.incident.cases import load_cases, recall_summary, similar_cases
+from logai.incident.cases import compact_for_llm, load_cases, recall_summary, similar_cases
 from logai.incident.error_samples import ERRORS_PROMPT
 from logai.incident.requests import DEFAULT_LANGUAGE
 from logai.models import DEFAULT_LEVEL, LEVEL_RANK
@@ -49,7 +49,8 @@ SYSTEM_PROMPT = (
     "are recent templates of the same service that belong to no group yet. "
     "past_incidents are human-confirmed earlier incidents of this service whose "
     "error pattern overlaps its current one; each has a then-vs-now comparison "
-    "per template (now null: not abnormal now) and only_now templates that are "
+    "of its templates that are abnormal again now (templates_not_shown counts "
+    "the rest) and only_now templates that are "
     "new this time; judge severity mainly by ratio, since absolute rates depend "
     "on overall traffic. Past incidents are written and curated by people from "
     "experience: when one fits, prefer its root cause and resolution over a new "
@@ -85,6 +86,11 @@ MAX_TOKENS_CAP = 8000
 # Vietnamese text costs about twice the tokens of English.
 LANGUAGE_TOKEN_FACTOR = {"vi": 1.5}
 JSON_REMINDER = " Your previous reply was not valid JSON; reply with one JSON object only."
+# Answer tokens are decode time: keep the free text short.
+BRIEF_PROMPT = (
+    " Keep each reasoning field to at most 3 sentences: name the evidence "
+    "(exception, error code, template or group id) and the conclusion."
+)
 # Urgent analyses run before template triage, which can be queued 50 at a time.
 PRIORITY_URGENT, PRIORITY_TRIAGE = 0, 1
 
@@ -142,10 +148,42 @@ def _add_usage(meta: Dict[str, Any], usage: Any) -> None:
     if not isinstance(usage, dict):
         return
     total = meta["usage"] or {"prompt_tokens": 0, "completion_tokens": 0}
-    for key in total:
+    for key in ("prompt_tokens", "completion_tokens"):
         if isinstance(usage.get(key), int):
             total[key] += usage[key]
+    # Thinking tokens (inside completion_tokens), when the server reports them.
+    reasoning = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    if isinstance(reasoning, int):
+        total["reasoning_tokens"] = total.get("reasoning_tokens", 0) + reasoning
     meta["usage"] = total
+
+
+def _chars(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _evidence_chars(evidence: Dict[str, Any]) -> Dict[str, int]:
+    """Size of each evidence section, which shows what the prompt is spent
+    on; a big list of objects is also split by field (e.g. groups.parameters)."""
+    sizes = {}
+    for key, value in evidence.items():
+        sizes[key] = _chars(value)
+        if sizes[key] >= 5000 and isinstance(value, list):
+            fields: Dict[str, int] = defaultdict(int)
+            for item in value:
+                for field, inner in (item.items() if isinstance(item, dict) else ()):
+                    fields[field] += _chars(inner)
+            sizes.update({f"{key}.{f}": n for f, n in fields.items() if n >= 1000})
+    return sizes
+
+
+def _log_bad_reply(reason: str, finish: str, content: str) -> None:
+    """The start and end of a reply that could not be used, to tell an empty
+    answer (thinking used the budget) from prose or a truncated object."""
+    logger.warning(
+        "LLM reply unusable (%s, finish_reason=%s, %d chars): %r ... %r",
+        reason, finish, len(content), content[:200], content[-100:],
+    )
 
 
 def _budget(max_tokens: int, language: str) -> int:
@@ -442,7 +480,7 @@ class IncidentClassifier:
             record = self._validate(
                 window_key,
                 self._ask(
-                    evidence, SYSTEM_PROMPT + language_instruction(language),
+                    evidence, SYSTEM_PROMPT + BRIEF_PROMPT + language_instruction(language),
                     _budget(cfg.max_tokens, language), cfg, meta,
                 ),
                 candidates, past,
@@ -478,7 +516,7 @@ class IncidentClassifier:
         meta = _new_meta()
         try:
             reply = self._ask(
-                evidence, SERVICE_SYSTEM_PROMPT + language_instruction(language),
+                evidence, SERVICE_SYSTEM_PROMPT + BRIEF_PROMPT + language_instruction(language),
                 _budget(max(cfg.max_tokens, SERVICE_MIN_TOKENS), language), cfg, meta,
             )
             record = {
@@ -519,7 +557,7 @@ class IncidentClassifier:
         meta = _new_meta()
         try:
             reply = self._ask(
-                evidence, TEMPLATE_SYSTEM_PROMPT + language_instruction(language),
+                evidence, TEMPLATE_SYSTEM_PROMPT + BRIEF_PROMPT + language_instruction(language),
                 _budget(cfg.max_tokens, language), cfg, meta,
             )
             record = {
@@ -657,12 +695,18 @@ class IncidentClassifier:
         record["duration_s"] = round(meta["duration_s"], 2)
         record["attempts"] = meta["attempts"]
         record["usage"] = meta["usage"]
+        if meta.get("evidence_chars"):
+            record["evidence_chars"] = meta["evidence_chars"]
         usage = meta["usage"] or {}
+        if record.get("status") == "failed" and meta.get("reply"):
+            _log_bad_reply("invalid", "stop", meta["reply"])
         logger.info(
-            "LLM %s %s: %s in %.1fs, %s attempt(s), tokens %s -> %s%s", kind, key, result,
+            "LLM %s %s: %s in %.1fs, %s attempt(s), tokens %s -> %s%s%s%s", kind, key, result,
             meta["duration_s"], meta["attempts"], usage.get("prompt_tokens", "?"),
             usage.get("completion_tokens", "?"),
+            f" ({usage['reasoning_tokens']} reasoning)" if "reasoning_tokens" in usage else "",
             f", retries {meta['retries']}" if meta["retries"] else "",
+            f", evidence chars {meta['evidence_chars']}" if meta.get("evidence_chars") else "",
         )
         try:
             self._on_call(kind, meta)
@@ -677,14 +721,20 @@ class IncidentClassifier:
         asked again with twice the budget; a reply that is not JSON is asked
         again once with a reminder. Both stay inside cfg.job_deadline_seconds."""
         deadline = time.monotonic() + cfg.job_deadline_seconds
+        if evidence.get("past_incidents"):
+            evidence = {**evidence, "past_incidents": compact_for_llm(evidence["past_incidents"])}
+        meta["evidence_chars"] = _evidence_chars(evidence)
         content, finish = self._call(evidence, system_prompt, max_tokens, cfg, meta, deadline)
         if finish != "length":
             try:
-                return self._parse(content)
+                reply = self._parse(content)
+                meta["reply"] = content  # logged if the reply fails validation
+                return reply
             except ValueError:
                 reason = "json"
         else:
             reason = "length"
+        _log_bad_reply(reason, finish, content)
         if time.monotonic() + cfg.timeout_seconds > deadline:
             raise RuntimeError(f"LLM did not answer within {cfg.job_deadline_seconds:.0f} s")
         meta["retries"].append(reason)
@@ -694,8 +744,15 @@ class IncidentClassifier:
             system_prompt += JSON_REMINDER
         content, finish = self._call(evidence, system_prompt, max_tokens, cfg, meta, deadline)
         if finish == "length":
+            _log_bad_reply("length", finish, content)
             raise ValueError(f"LLM reply was cut off at {max_tokens} tokens")
-        return self._parse(content)
+        try:
+            reply = self._parse(content)
+        except ValueError:
+            _log_bad_reply("json", finish, content)
+            raise
+        meta["reply"] = content
+        return reply
 
     def _call(
         self, evidence: Dict[str, Any], system_prompt: str = SYSTEM_PROMPT,
@@ -722,6 +779,7 @@ class IncidentClassifier:
             ],
             "temperature": 0,
             "max_tokens": max_tokens or cfg.max_tokens,
+            **(cfg.extra_body or {}),
         }
         meta["attempts"] += 1
         timeouts = 0
@@ -748,7 +806,12 @@ class IncidentClassifier:
                     _add_usage(meta, payload.get("usage"))
                     choice = payload["choices"][0]
                     finish = str(choice.get("finish_reason") or "stop")
-                    return str(choice["message"]["content"]), finish
+                    # Some proxies answer "stop" with a notice when thinking
+                    # used the whole budget: a spent budget is a cut-off reply.
+                    used = (payload.get("usage") or {}).get("completion_tokens")
+                    if isinstance(used, int) and used >= body["max_tokens"]:
+                        finish = "length"
+                    return str(choice["message"]["content"] or ""), finish
                 error, reason = RuntimeError(f"LLM returned HTTP {response.status_code}"), "http"
             meta["duration_s"] += time.monotonic() - started
             if attempt + 1 >= attempts or (reason == "timeout" and timeouts > 1):
