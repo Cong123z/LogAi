@@ -589,10 +589,27 @@ stateDiagram-v2
     COOLING --> ALERTING: a high score
 ```
 
-Defaults are 2 / 3 / 3 consecutive scores; the shipped `config.yaml` uses
-10 / 30 / 10 with `score_high=0.65`, `score_low=0.52`, `min_events_1m=150`. A
+Defaults are 2 / 3 / 3 consecutive scores. The shipped `config.yaml` uses
+5 / 10 / 10 with `score_high=0.58`, `score_low=0.50`, `min_events_1m=5`. A
 score between `score_low` and `score_high` resets the relevant countdown but
 does not necessarily change state.
+
+These values were calibrated on 2026-10-11 by an offline replay of 3.5 h of
+normal node97 traffic (323k events, 109 groups) through the engine's own
+parser, features, model and state machine:
+- **Normal traffic.** The score was 0.29 at p50, 0.445 at p99, 0.555 at
+  p99.9 and 0.612 at most. These values raised no alert, and neither did the
+  previous 10 / 30 / 10, 0.65, 150.
+- **Injected incidents.** A 10-minute error burst at 50× its normal rate
+  (G0010, 3 → 150/min) is caught at its first minute; the old values missed
+  it. The old `min_events_1m=150` also kept every low-volume (error) group
+  from ever escalating.
+- **Limits.** A 10× error burst (peak 0.52) and a +200/min timeout burst
+  (~5×, peak 0.52) score below normal noise, so no threshold can catch them
+  without false alerts. Better detection needs model work, not thresholds.
+- **Restart.** Starting mid-traffic with empty feature windows (an engine
+  restart) raised 3 false alerts on the busiest groups in the first ~30
+  minutes; see §12.
 
 ### 7.5 Micro-batch inference
 
@@ -676,6 +693,12 @@ user from the **AI Insights** page. Three kinds:
   `template_activity.json` every 5 minutes and on stop. Templates silent now but
   active in the last 24 h are still listed with count 0, as a sign that logs
   "disappeared".
+- **`past_incidents` as sent.** `cases.compact_for_llm` is applied in
+  `IncidentClassifier._ask`, the one place every kind passes through. It
+  keeps only the comparison rows of templates abnormal again now (highest
+  ratio first, at most 8), counts the rest in `templates_not_shown`, and keeps
+  at most 5 `only_now`. A 30-template case went from 10.9k to 5.3k characters.
+  `recalled` on the record and the page still keep the full comparison.
 - **`window` evidence:**
   - `alert.rate` from `FeatureEngine.describe()`: 10s/1m/5m rates, the median
     and spread of the 1m baseline, and the ratio to the median, with a summary
@@ -776,7 +799,20 @@ user from the **AI Insights** page. Three kinds:
   - Budgets are ×1.5 for Vietnamese.
   - A read timeout is retried only once, and `llm.job_deadline_seconds` (150)
     bounds each job including retries.
-  - Records store `duration_s`, `attempts` and `usage`.
+  - Records store `duration_s`, `attempts`, `usage` (with
+    `reasoning_tokens` when the server reports
+    `completion_tokens_details.reasoning_tokens`) and `evidence_chars`: the
+    characters of each evidence section, also split by field for a list of
+    5,000 characters or more (e.g. `groups.parameters`). The same figures
+    end the `LLM <kind> <id>: …` log line.
+  - An unusable reply (not JSON, cut off, or failing validation) logs its
+    first 200 and last 100 characters with `finish_reason`.
+  - `llm.extra_body` (a dict) is merged into every request body, for
+    server-specific options such as
+    `{"chat_template_kwargs": {"enable_thinking": false}}` on vLLM. It also
+    applies to web profiles.
+  - Every system prompt ends with `BRIEF_PROMPT`: each reasoning field is at
+    most 3 sentences naming the evidence. Answer tokens cost decode time.
   - Metrics: `logai_llm_request_duration_seconds{kind}`,
     `logai_llm_tokens_total{kind,type}`, `logai_llm_retries_total{kind,reason}`.
 - **Language.** English or Vietnamese is chosen on AI Insights (stored in the
@@ -1104,7 +1140,9 @@ last record can be lost on power failure.
 | Training | Training dedup remembers the last 200,000 event ids | A duplicate `_id` further apart is counted twice |
 | Training | `training.max_docs` still caps the documents read (newest kept); the web allows up to 20M | The event index uses ~230 B/event on the shared data volume; training refuses to start when `max_docs` x 300 B exceeds the free space |
 | Anomaly | The Isolation Forest's own `random_state` moves its threshold by up to ~0.02; on marginal traffic that changes whether a burst is detected | Alert behaviour can shift between retrains independently of sampling; tune `score_high` on real data |
-| Realtime | Feature windows are not persisted | Short-term baselines restart cold after a restart |
+| Realtime | Feature windows are not persisted | Short-term baselines restart cold after a restart; with the looser 2026-10-11 alert values, a restart during busy traffic can raise false alerts on the busiest groups for ~30 min |
+| Anomaly | The 8 features compare a group with its own last 30 minutes, and a group is scored only when it logs | A sustained 5–10× burst scores below normal noise, a uniform volume change (e.g. a 10× replay) is not an anomaly by design, and a group that stops logging is never scored |
+| Replay | The replayer stamps events with wall-clock emit time | At N× speed every rate is N× higher than reality and the 24 h `TemplateActivity` baseline is mixed across speeds; compare analyses at 1× |
 | Realtime | A single process per `data/` directory, no inter-process lock | No horizontal scaling; never run training and realtime concurrently on one directory |
 | Security | Web API has no authentication; LLM profile endpoints are not allow-listed (SSRF) | Expose the UI only on a trusted network |
 | Security | Grafana in compose defaults to the password `admin` | Set `GF_SECURITY_ADMIN_PASSWORD` outside demos |

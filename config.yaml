@@ -15,12 +15,14 @@ anomaly:
   predict_batch_size: 2000
 
 alert:
-  warm_consecutive: 10
-  alert_consecutive: 30
+  # Loosened 2026-10-11: 150 events/min kept every error group from alerting,
+  # and 0.65 sat far in the tail (normal traffic scores ~0.45-0.55).
+  warm_consecutive: 5
+  alert_consecutive: 10
   cool_consecutive: 10
-  score_high: 0.65
-  score_low: 0.52
-  min_events_1m: 150
+  score_high: 0.58
+  score_low: 0.5
+  min_events_1m: 5
 
 training:
   # Training memory no longer grows with this (feature vectors are sampled);

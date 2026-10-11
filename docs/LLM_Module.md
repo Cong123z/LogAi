@@ -76,14 +76,14 @@ Scope per analysis kind:
 ## 3. Known weaknesses (as of 2026-10-09)
 
 1. **No real-data check yet.** It is unknown how many real recharge error lines produce a signature, and whether stack traces arrive as one ES document or as one document per line. If they arrive one per line, the `Caused by` and `at` lines have no level, fall back to INFO, and are dropped.
-2. **What the LLM saw is not stored.** Analysis records keep the answer but not the evidence, so a bad answer cannot be traced back to bad evidence. This blocks all tuning.
+2. **What the LLM saw is only partly stored.** Since 2026-10-11 each record keeps `evidence_chars` (the size of every section), and unusable replies are logged, but the evidence content itself is still not stored.
 3. **Personal data is not masked.** Recharge logs carry `msisdn` and phone numbers, which are sent to the LLM endpoint as they are.
 4. **Signature patterns are narrow.** They target Java and Python. Missing: Oracle `ORA-xxxxx`, `SQLSTATE`, Go `panic:`, "returned 503" or "HTTP 503" style status codes, and Vietnamese error text.
 5. **Samples have little variety.** 50 lines per template cover only seconds on a busy template, and only the first-seen and latest lines are shown. A rarer second variant of the same template can be missed.
 6. **First-seen is per process.** After a restart the "first-seen" sample is the first one seen *since the restart*. All samples are in memory only and are lost on restart.
 7. **Memory is unbounded per key.** Keys are never pruned (marked with `# ponytail:` in the code).
 8. **Tunables are constants.** They are not in `config.py`, so they cannot be changed without a release.
-9. **The token cost has not been measured.** The expected cost is about 1–2k extra prompt tokens.
+9. **Token cost (measured 2026-10-11).** The `errors` block is 0.7–1.1k characters, about 2–3% of a service prompt. The cost of a prompt lies elsewhere (see §5).
 
 ## 4. Roadmap to "perform best" (in order)
 
@@ -97,7 +97,72 @@ Scope per analysis kind:
 | 6 | **Quality loop.** Replay known incidents (node97 replay, `incident_cases.json`), then compare the AI's cited exception and document with the confirmed root cause, along with prompt tokens. | Proves "better", not only "more" | A repeatable script that prints accuracy and tokens per run |
 | 7 | **Housekeeping.** Move tunables to `LLMConfig` (or a new `error_evidence:` section), prune idle keys after 24 h, and optionally persist first-seen samples with `template_activity.json`. | Operability | Config documented, memory bounded |
 
+Status on 2026-10-11: #2 is partly done (section sizes, not contents). The
+others are open. §5 adds the context work that the measurements put first.
+
 Each step must keep the existing guarantees:
 - nothing in this module raises into the poll loop;
 - evidence keys are optional, so old records and tests still load;
 - the LLM's hallucination guards are unchanged.
+
+## 5. Measurements and changes (2026-10-11)
+
+These were measured on the local docker stack (node97 replay, LLM through the
+web profiles: the zen proxy with gemini-3.8-flash / gpt-5.6-luna, and
+OpenRouter with deepseek-v4-pro).
+
+### What a prompt is spent on (`evidence_chars`)
+
+| Section | Window | Service |
+|---|---|---|
+| `past_incidents`, before | 10,865 (75%) | 10,873 (30%) |
+| `past_incidents`, after `compact_for_llm` | 5,307 | 5,305 |
+| `groups` | n/a | ~21,000: templates 9.4k, parameters 5.3k, representative template 1.7k |
+| `candidates` | 1,396 | 3,550 |
+| `errors` | 0–735 | 773–1,102 |
+
+### Time
+- **Time is driven by the provider and the output, not by prompt size.**
+  gpt-5.6-luna service calls take 11–16 s, with outliers of 86–120 s
+  caused by proxy queueing, not tokens. deepseek-v4-pro calls take 6–73 s.
+- **`timeout_seconds` does not cap a call.** `requests` applies it to each
+  wait for data, so one call took 120 s with a 60 s setting.
+
+### gemini-3.8-flash failure and fix
+- **Symptom.** gemini thinks for about 4k tokens even on a tiny prompt.
+  With a budget of 800–3,000 tokens it produced no answer. The zen proxy then
+  returned a notice with `finish_reason=stop`, so the engine retried without
+  more budget.
+- **What did not help.** The proxy ignores `reasoning_effort`.
+- **Fix.** `llm.max_tokens` now defaults to 4000. A reply with
+  `completion_tokens >= max_tokens` counts as cut off and is retried with
+  double the budget (at most 8000).
+
+### Wrong 24 h baseline (fixed)
+- **Symptom.** `TemplateActivity` took the median over all 24 hours, so 12
+  hours while the engine was stopped counted as silent. Every template read
+  150–775× its normal rate, and the LLM reported a "traffic surge" that did
+  not exist.
+- **Fix.** Only hours with any engine traffic count. Ratios dropped to about
+  1.1–1.3×. The service analysis went from "degraded" to "healthy". The
+  window analysis moved from a false volume spike (DOC-016) to the raw error
+  signature T00078 matched to DOC-007 (`ERR_TRANSFER_SELF`).
+
+### Replay speed
+- **Rates scale with replay speed.** The replayer stamps logs with the time it
+  sends them, so at N× speed every rate is N× higher.
+- **Verdicts flip at 3×.** All templates ran at about 2.2× their baseline,
+  and repeated service analyses switched between healthy and degraded.
+  Compare analyses at 1×.
+
+### Next context to add
+These are evidence, not rules; the user declined a rule-based health rubric.
+1. Service volume and error share, now against the baseline.
+2. Each template's normal range (p10–p90) and how many hours its baseline
+   covers.
+3. The same hour yesterday.
+4. Baseline quality: observed hours and gaps.
+5. Per-minute timelines for the service and its top changed templates.
+6. What changed since the last analysis.
+7. Proposals carried over: runbooks by error code, dropped templates, alert
+   onset times, and a per-service note (purpose and dependencies).
