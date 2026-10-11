@@ -1,8 +1,8 @@
 """Elasticsearch collector (plan section 4.1).
 
-Uses `search_after` pagination sorted by (@timestamp, _id) so it can resume
-exactly where it left off via a persisted checkpoint, with retry+backoff on
-transient errors. Also exposes a bounded historical range query used by the
+Pages sorted by (@timestamp, _doc) from a persisted cursor; each page re-reads
+the cursor's millisecond so no doc sharing it is skipped (see `_page`), and the
+caller's dedup drops the re-read ones. Retry+backoff on transient errors. Also exposes a bounded historical range query used by the
 training pipeline (plan section 3.1).
 """
 from __future__ import annotations
@@ -239,6 +239,21 @@ def _range_from(start_ts: float) -> Dict[str, Any]:
     return {"range": {"@timestamp": {"gte": gte_iso}}}
 
 
+# The @timestamp sort value is always epoch milliseconds (also for a
+# date_nanos field), so a cursor's first value can start a range query.
+_SORT = [{"@timestamp": {"order": "asc", "numeric_type": "date"}}, {"_doc": "asc"}]
+# Page size used to read one crowded millisecond whole: ES's default
+# index.max_result_window, the largest page a plain search may return.
+_WHOLE_MILLISECOND = 10_000
+
+
+def _legacy_cursor(cursor: Optional[List[Any]]) -> Optional[List[Any]]:
+    """Old checkpoints stored the string _id as tiebreak, which _doc rejects."""
+    if cursor and len(cursor) >= 2 and isinstance(cursor[1], str):
+        return [cursor[0], 0]
+    return cursor
+
+
 class ElasticsearchCollector:
     _malformed_counter: Optional[Any] = None
     _on_retry_hook: Optional[Callable[[int, BaseException], None]] = None
@@ -297,19 +312,9 @@ class ElasticsearchCollector:
         """
         if index is not None:
             return self._poll_index(index)
-        search_after = self.checkpoint.get_search_after()
-        if search_after and len(search_after) >= 2 and isinstance(search_after[1], str):
-            # Migration safety: old checkpoint used string _id, which fails with _doc sort.
-            search_after = [search_after[0], 0]
-
-        body: Dict[str, Any] = {
-            "size": self.config.batch_size,
-            "sort": [{"@timestamp": "asc"}, {"_doc": "asc"}],
-        }
-        if search_after:
-            body["query"] = {"match_all": {}}
-            body["search_after"] = search_after
-        else:
+        search_after = _legacy_cursor(self.checkpoint.get_search_after())
+        filters: List[Dict[str, Any]] = []
+        if not search_after:
             # No cursor yet: this is the very first poll ever (or right after
             # a checkpoint reset). Floor the query at the moment the realtime
             # pipeline first started instead of match_all, so it never rewinds
@@ -320,31 +325,69 @@ class ElasticsearchCollector:
             if start_ts is None:
                 start_ts = time.time()
                 self.checkpoint.set_start_ts(start_ts)
-            body["query"] = _range_from(start_ts)
-
-        return self._fetch(body, None, self.config.index)
+            filters.append(_range_from(start_ts))
+        return self._fetch(
+            self._page(filters, search_after, self.config.batch_size, None),
+            self.config.index,
+        )
 
     def _poll_index(self, index: str) -> Tuple[List[RawLog], Optional[List[Any]]]:
         cursor = self.checkpoint.get_index_cursor(index) or {}
-        body: Dict[str, Any] = {
-            "size": self.config.batch_size,
-            "sort": [{"@timestamp": "asc"}, {"_doc": "asc"}],
-        }
-        if cursor.get("search_after"):
-            body["query"] = {"match_all": {}}
-            body["search_after"] = cursor["search_after"]
-        else:
+        search_after = _legacy_cursor(cursor.get("search_after"))
+        filters: List[Dict[str, Any]] = []
+        if not search_after:
             floor_ts = cursor.get("floor_ts")
             if floor_ts is None:
                 floor_ts = time.time()
                 self.checkpoint.set_index_floors({index: floor_ts})
-            body["query"] = _range_from(floor_ts)
-        return self._fetch(body, index, index)
+            filters.append(_range_from(floor_ts))
+        return self._fetch(self._page(filters, search_after, self.config.batch_size, index), index)
+
+    def _page(
+        self,
+        filters: List[Dict[str, Any]],
+        cursor: Optional[List[Any]],
+        size: int,
+        index: Optional[str],
+    ) -> Dict[str, Any]:
+        """One page after `cursor`, which re-reads the cursor's millisecond.
+
+        Paging with search_after on (@timestamp, _doc) loses docs: the
+        docs sharing the cursor's millisecond can sort on either side of it
+        in the next request (_doc is per shard and changes on merges). Re-reading
+        that millisecond returns them all, and the caller's dedup drops the
+        ones already seen. When that millisecond alone fills a page, re-reading
+        it would never move forward, so it is read whole with a larger page.
+        """
+        clauses = list(filters)
+        if cursor:
+            clauses.append({"range": {"@timestamp": {"gte": cursor[0], "format": "epoch_millis"}}})
+        body: Dict[str, Any] = {
+            "size": size,
+            "sort": _SORT,
+            "query": {"bool": {"filter": clauses}} if clauses else {"match_all": {}},
+        }
+        def stuck(response: Dict[str, Any], page: int) -> bool:
+            hits = response.get("hits", {}).get("hits", [])
+            return bool(cursor) and len(hits) >= page and (
+                (hits[-1].get("sort") or [None])[0] == cursor[0]
+            )
+
+        response = self._search(body, index)
+        if stuck(response, size) and size < _WHOLE_MILLISECOND:
+            # The millisecond fills the page: read all of it in one request.
+            body = {**body, "size": _WHOLE_MILLISECOND}
+            response = self._search(body, index)
+        if stuck(response, body["size"]):
+            # ponytail: one millisecond holding more than 10k docs falls back
+            # to search_after, where _doc can still skip a doc; use PIT +
+            # _shard_doc if a source ever logs that much in one millisecond.
+            response = self._search({**body, "search_after": cursor}, index)
+        return response
 
     def _fetch(
-        self, body: Dict[str, Any], index: Optional[str], label: str
+        self, response: Dict[str, Any], label: str
     ) -> Tuple[List[RawLog], Optional[List[Any]]]:
-        response = self._search(body, index)
         hits = response.get("hits", {}).get("hits", [])
         if not hits:
             return [], None
@@ -475,19 +518,13 @@ class ElasticsearchCollector:
         total_fetched = 0
 
         while total_fetched < max_docs:
-            if search_after and len(search_after) >= 2 and isinstance(search_after[1], str):
-                search_after = [search_after[0], 0]
-
+            search_after = _legacy_cursor(search_after)
             current_limit = min(chunk_size, max_docs - total_fetched)
-            body: Dict[str, Any] = {
-                "size": current_limit,
-                "sort": [{"@timestamp": "asc"}, {"_doc": "asc"}],
-                "query": {"range": {"@timestamp": range_filter}},
-            }
-            if search_after:
-                body["search_after"] = search_after
-
-            response = self._search(body)
+            # Each page re-reads the cursor's millisecond (see _page); the
+            # training dedup drops the re-read docs.
+            response = self._page(
+                [{"range": {"@timestamp": range_filter}}], search_after, current_limit, None
+            )
             hits = response.get("hits", {}).get("hits", [])
             if not hits:
                 break

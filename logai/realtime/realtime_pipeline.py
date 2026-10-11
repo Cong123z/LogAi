@@ -383,13 +383,13 @@ class RealtimePipeline:
             batch = [raw for _, b, _ in polled for raw in b]
             for index, index_batch, cursor in polled:
                 if not index_batch:
-                    if cursor is not None:
-                        # Every hit was malformed: step past them, or this
-                        # page is fetched again forever.
-                        last = (
-                            (self.checkpoint.get_index_cursor(index) or {}).get("last_timestamp")
-                            if index is not None else self.checkpoint.get_last_timestamp()
-                        )
+                    committed, last = self._committed_cursor(index)
+                    # Compare the millisecond only: a re-read boundary doc can
+                    # come back with another _doc (merges), and the next page
+                    # re-reads that whole millisecond anyway.
+                    if cursor is not None and (not committed or cursor[0] != committed[0]):
+                        # Every hit was malformed or already processed: step
+                        # past them, or this page is fetched again forever.
                         self._pending_cursors[index] = (cursor, last)
                     continue
                 self.metrics.logai_queue_depth.set(len(index_batch))
@@ -408,6 +408,10 @@ class RealtimePipeline:
                     self._event_clock_wall = time.monotonic()
                 finally:
                     self.metrics.logai_queue_depth.set(0)
+
+            # A page of only already-processed docs still moved the cursor
+            # (e.g. replay after a crash): read on instead of sleeping.
+            moved = bool(self._pending_cursors)
 
             # ── Phase 3: Idle tick (throttled) ────────────────────────────
             # Appends snapshot vectors for silent groups into the SAME buffer.
@@ -440,7 +444,7 @@ class RealtimePipeline:
                     self.metrics.logai_queue_depth.set(0)
 
             # ── Phase 5: Sleep when the stream was empty this cycle ───────
-            if not batch:
+            if not batch and not moved:
                 poll_interval = self.config.elasticsearch.poll_interval_seconds
                 if self._pending_predictions and self._buffer_started_at is not None:
                     # Buffer still filling: wake in time to honour the 1s timer.
@@ -761,10 +765,22 @@ class RealtimePipeline:
                 if index is not None:
                     self._note_index_poll(index, [], str(exc)[:300])
                 continue
+            # Each page re-reads the cursor's millisecond (see
+            # ElasticsearchCollector._page): the docs already processed are
+            # not new, so a quiet stream still counts as empty and sleeps.
+            batch = [raw for raw in batch if not self.dedup.seen(raw.event_id)]
             polled.append((index, batch, cursor))
             if index is not None:
                 self._note_index_poll(index, batch, None)
         return polled, failures
+
+    def _committed_cursor(self, index: Optional[str]) -> Tuple[Any, Optional[float]]:
+        """(search_after, last_timestamp) last committed for this index (None:
+        the legacy single cursor)."""
+        if index is None:
+            return self.checkpoint.get_search_after(), self.checkpoint.get_last_timestamp()
+        cursor = self.checkpoint.get_index_cursor(index) or {}
+        return cursor.get("search_after"), cursor.get("last_timestamp")
 
     def _note_index_poll(self, index: str, batch: list, error: Optional[str]) -> None:
         with self._index_lock:

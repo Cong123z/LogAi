@@ -360,7 +360,9 @@ class TestRealtimeCrashLoadAndPerformance(unittest.TestCase):
         # Second run: replay exact same 5,000 logs
         self.pipeline.collector.poll_batch = MagicMock(side_effect=[(batch, cursor), _StopLoop])
         t0 = time.perf_counter()
-        with self.assertRaises(_StopLoop):
+        # Nothing new and the cursor did not move: the loop then sleeps its
+        # poll interval, which is not dedup cost.
+        with self.assertRaises(_StopLoop), patch("logai.realtime.realtime_pipeline.time.sleep"):
             self.pipeline.run_forever()
         elapsed = time.perf_counter() - t0
         replay_throughput = len(batch) / elapsed

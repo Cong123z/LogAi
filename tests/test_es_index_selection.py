@@ -88,14 +88,54 @@ def test_poll_index_uses_its_floor_then_its_own_cursor(tmp_path):
     batch, cursor = collector.poll_batch("idx-a")
     body, index = collector._search.call_args.args
     assert index == "idx-a" and "search_after" not in body
-    assert body["query"]["range"]["@timestamp"]["gte"].startswith("2026-09-21")
+    assert body["query"]["bool"]["filter"][0]["range"]["@timestamp"]["gte"].startswith("2026-09-21")
     assert cursor == [5, 1] and batch[0].es_index == "idx-a"
 
     collector.poll_batch("idx-b")
     body, index = collector._search.call_args.args
-    assert index == "idx-b" and body["search_after"] == [9, 9]
+    # From its own cursor, re-reading the cursor's millisecond.
+    assert index == "idx-b" and "search_after" not in body
+    assert body["query"]["bool"]["filter"] == [
+        {"range": {"@timestamp": {"gte": 9, "format": "epoch_millis"}}}]
     # Fetching never commits.
     assert collector.checkpoint.get_index_cursor("idx-a")["search_after"] is None
+
+
+def test_millisecond_filling_a_page_is_read_whole(tmp_path):
+    same_ms = [_hit(f"d{i}", "idx-a", [9, i]) for i in range(5)]
+    collector = _collector(tmp_path, [])
+    collector._search.side_effect = [{"hits": {"hits": same_ms[:3]}}, {"hits": {"hits": same_ms}}]
+    collector.config.batch_size = 3
+    collector.checkpoint.commit_indices({"idx-a": ([9, 0], 0.009)})
+    batch, _ = collector.poll_batch("idx-a")
+    first, second = [call.args[0] for call in collector._search.call_args_list]
+    assert first["size"] == 3 and second["size"] == 10_000
+    assert "search_after" not in second and len(batch) == 5
+
+
+def test_millisecond_beyond_the_largest_page_falls_back_to_search_after(tmp_path):
+    full = {"hits": {"hits": [_hit(f"d{i}", "idx-a", [9, i]) for i in range(3)]}}
+    collector = _collector(tmp_path, [])
+    collector._search.side_effect = [full, full, full]
+    with patch("logai.collector.es_collector._WHOLE_MILLISECOND", 3):
+        collector.config.batch_size = 3
+        collector.checkpoint.commit_indices({"idx-a": ([9, 0], 0.009)})
+        collector.poll_batch("idx-a")
+    bodies = [call.args[0] for call in collector._search.call_args_list]
+    assert len(bodies) == 2 and bodies[-1]["search_after"] == [9, 0]
+
+
+def test_historical_pages_reread_the_cursor_millisecond(tmp_path):
+    collector = _collector(tmp_path, [])
+    collector._search.side_effect = [
+        {"hits": {"hits": [_hit("a", "i", [5, 1]), _hit("b", "i", [7, 2])]}},
+        {"hits": {"hits": [_hit("b", "i", [7, 2])]}},
+    ]
+    pages = list(collector.stream_historical_batches(start_ts=0.0, max_docs=10, batch_size=2))
+    assert [cursor for _, cursor in pages] == [[7, 2], [7, 2]]
+    second = collector._search.call_args_list[1].args[0]
+    assert "search_after" not in second
+    assert {"range": {"@timestamp": {"gte": 7, "format": "epoch_millis"}}} in second["query"]["bool"]["filter"]
 
 
 def test_unknown_index_gets_a_now_floor_once(tmp_path):
@@ -242,7 +282,24 @@ class TestEngineSelection(unittest.TestCase):
             with self.assertRaises(_Stop):
                 self.pipeline._poll_loop()
         self.assertEqual(self.pipeline.checkpoint.get_index_cursor("orders")["search_after"], [5, 1])
-        self.assertEqual(collector._search.call_args.args[0]["search_after"], [5, 1])
+        self.assertEqual(collector._search.call_args.args[0]["query"]["bool"]["filter"],
+                         [{"range": {"@timestamp": {"gte": 5, "format": "epoch_millis"}}}])
+
+    def test_reread_boundary_doc_counts_as_nothing_new(self):
+        self.store.replace(["orders"], None, now=500.0)
+        self.pipeline._refresh_index_selection()
+        seen = RawLog(timestamp=1000.0, service="a", level="INFO", message="x", event_id="e1")
+        self.pipeline.dedup.mark("e1")
+        self.pipeline.checkpoint.commit_indices({"orders": ([1000000, 4], 1000.0)})
+        # Same doc, other _doc after a merge: still nothing new.
+        self.pipeline.collector.poll_batch = MagicMock(return_value=([seen], [1000000, 9]))
+        self.pipeline._process_one = MagicMock()
+        self.pipeline.checkpoint.commit_indices = MagicMock()
+        with patch("logai.realtime.realtime_pipeline.time.sleep", side_effect=_Stop):
+            with self.assertRaises(_Stop):  # slept: nothing new
+                self.pipeline._poll_loop()
+        self.pipeline._process_one.assert_not_called()
+        self.pipeline.checkpoint.commit_indices.assert_not_called()
 
     def test_status_file_for_the_web(self):
         self.store.replace(["orders"], None, now=500.0)

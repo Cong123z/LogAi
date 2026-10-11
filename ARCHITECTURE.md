@@ -126,8 +126,16 @@ Rules:
   `es_index` is the hit's real `_index`.
 - Dedup uses `_id` only: two documents in different indices with the same
   `_id` are treated as the same event.
-- Realtime queries sort by `@timestamp` asc, then `_doc` asc; the index mapping
-  must support that sort.
+- Realtime and training queries sort by `@timestamp` asc, then `_doc` asc; the
+  index mapping must support that sort. The cursor is the last hit's sort
+  values, but the next page starts at the cursor's **millisecond**
+  (`@timestamp >= cursor`), not after the cursor: `_doc` is per shard and
+  changes on segment merges, so docs sharing that millisecond can sort on
+  either side of it in the next request. Dedup drops the re-read docs, so a
+  page of only seen docs counts as empty. A millisecond that alone fills a page
+  is read whole in one request of 10,000 (ES's default `max_result_window`).
+  Only a single millisecond holding more than 10,000 docs falls back to
+  `search_after`, the one case where a doc can still be skipped.
 
 ### 4.2 Index selection (Data sources page)
 
@@ -1057,7 +1065,7 @@ last record can be lost on power failure.
 
 ## 11. Design choices
 
-- **Elasticsearch polling instead of push/queue.** `search_after` keeps the
+- **Elasticsearch polling instead of push/queue.** Cursor paging keeps the
   collector simple with no Kafka. In exchange, throughput depends on polling
   and batch size, cursor commits need care, and the mapping must support a
   stable sort.
