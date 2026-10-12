@@ -128,3 +128,96 @@ document.getElementById('src-save-btn').addEventListener('click', async event =>
     else button.disabled = false;
   }
 });
+
+// ── Data sources: Elasticsearch endpoint and credentials ──
+const conn = {data: null, dirty: false};
+const $connForm = document.getElementById('src-conn-form');
+const $connStatus = document.getElementById('src-conn-status');
+const $connError = document.getElementById('src-conn-error');
+const $connHosts = document.getElementById('src-conn-hosts');
+const $connUser = document.getElementById('src-conn-user');
+const $connPassword = document.getElementById('src-conn-password');
+const $connVerify = document.getElementById('src-conn-verify');
+
+function fetchConnection() { return getJson('/api/es-connection', 'Unable to load the Elasticsearch connection'); }
+
+const connHosts = value => value.split(',').map(h => h.trim()).filter(Boolean);
+// Same cluster test as the engine: scheme, host and port, order ignored.
+function connCluster(hosts) {
+  return (hosts || []).map(h => {
+    try {
+      const url = new URL(h);
+      return `${url.protocol}//${url.hostname.toLowerCase()}:${url.port || (url.protocol === 'https:' ? 443 : 9200)}`;
+    } catch (err) { return h; }
+  }).sort().join(',');
+}
+
+function connStatusText(data) {
+  const engine = data.engine || {};
+  const hosts = (engine.hosts || []).join(', ') || 'Elasticsearch';
+  const from = data.source === 'env' ? 'Using the server configuration. ' : '';
+  if (data.state === 'engine_unavailable') return `${from}The engine is not running; the connection is used when it starts.`;
+  if (data.state === 'pending') return 'Saved. Waiting for the engine to connect…';
+  if (data.state === 'error') return `${from}Cannot connect to ${hosts}${data.error ? `: ${data.error}` : '.'}`;
+  return `${from}Connected to ${hosts}${engine.username ? ` as ${engine.username}` : ''}.`;
+}
+
+function renderConnection(data) {
+  conn.data = data;
+  $connStatus.className = 'sync-status' + (data.state === 'error' || data.state === 'engine_unavailable' ? ' llm-status-error' : '');
+  $connStatus.textContent = connStatusText(data);
+  document.getElementById('src-conn-default-btn').disabled = data.source === 'env';
+  if (conn.dirty) return;  // never overwrite what the user is typing
+  const shown = data.saved || data.engine || {};
+  $connHosts.value = (shown.hosts || []).join(', ');
+  $connUser.value = shown.username || '';
+  $connVerify.checked = shown.verify_certs !== false;
+  $connPassword.value = '';
+  $connPassword.placeholder = data.saved && data.saved.password_set ? 'Unchanged (leave empty to keep)' : '';
+}
+
+function connSetDirty(dirty) {
+  conn.dirty = dirty;
+  document.getElementById('src-conn-save-btn').disabled = !dirty;
+  document.getElementById('src-conn-discard-btn').disabled = !dirty;
+}
+
+const connMovesCluster = hosts => connCluster(hosts) !== connCluster((conn.data.engine || {}).hosts);
+const CONN_MOVE_WARNING = 'This endpoint is another cluster: its indices are read from now on, earlier logs are not backfilled.';
+
+async function connMutate(method, body, url = '/api/es-connection') {
+  $connError.textContent = '';
+  try {
+    const data = await apiMutation(url, method, body);
+    $connPassword.value = '';
+    connSetDirty(false);
+    renderConnection(data);
+  } catch (err) {
+    $connError.textContent = err.status === 409
+      ? 'The connection was changed elsewhere; review it and save again.'
+      : err.message;
+    if (err.status === 409) renderConnection(await fetchConnection());
+  }
+}
+
+$connForm.addEventListener('input', () => { connSetDirty(true); $connError.textContent = ''; });
+document.getElementById('src-conn-discard-btn').addEventListener('click', () => {
+  connSetDirty(false);
+  $connError.textContent = '';
+  renderConnection(conn.data);
+});
+$connForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const hosts = connHosts($connHosts.value);
+  if (connMovesCluster(hosts) && !await confirmDialog(CONN_MOVE_WARNING, {title: 'Switch cluster?', confirmLabel: 'Save connection', danger: false})) return;
+  await connMutate('PUT', {
+    hosts, username: $connUser.value, password: $connPassword.value,
+    verify_certs: $connVerify.checked, revision: conn.data.saved ? conn.data.saved.revision : null,
+  });
+});
+document.getElementById('src-conn-default-btn').addEventListener('click', async () => {
+  const saved = conn.data && conn.data.saved;
+  if (!saved) return;
+  if (!await confirmDialog('Use the endpoint and credentials from the server configuration again? If it is another cluster, its indices are read from now on.', {title: 'Use server default?', confirmLabel: 'Use server default', danger: false})) return;
+  await connMutate('DELETE', undefined, `/api/es-connection?revision=${encodeURIComponent(saved.revision)}`);
+});

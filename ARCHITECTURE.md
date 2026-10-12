@@ -70,8 +70,9 @@ volume `logai-data` holds all artifacts across container restarts.
 
 The web process and the engine never call each other: they communicate only
 through files in `data/`. The web writes *intent* files (documentation,
-grouping overrides, index selection, retrain schedule, analysis requests, LLM
-profiles); the engine writes *status/result* files.
+grouping overrides, Elasticsearch connection and index selection, retrain
+schedule, analysis requests, LLM profiles); the engine writes *status/result*
+files.
 
 ## 3. Configuration
 
@@ -86,6 +87,8 @@ order, later layers overriding earlier ones:
    `LOGAI_EMBEDDING_*`, `LOGAI_LLM_*`). The full list with comments is in
    [`.env.example`](.env.example); the web process additionally reads
    `LOGAI_WEB_HOST`, `LOGAI_WEB_PORT`, `LOGAI_WEB_DATA_DIR`.
+4. The Elasticsearch endpoint and credentials saved on the web, which replace
+   `LOGAI_ES_HOSTS/USER/PASSWORD/VERIFY_CERTS` at runtime (§4.2.1).
 
 `LOGAI_STORAGE_BASE_DIR` moves the storage base, the model directory, the
 Drain3 state and the three documentation runtime files together.
@@ -160,8 +163,25 @@ The user picks indices or patterns (`app-logs-*`) on the **Data sources** page.
   exists.
 - The engine writes `data/es_index_status.json`: available indices
   (`_cat/indices`, refreshed every 30 s), pattern → indices, per-index progress
-  and the applied `selection_revision`. The web has no ES credentials and only
-  reads this file.
+  and the applied `selection_revision`. The web never connects to
+  Elasticsearch (it may store the credentials, §4.2.1, but never uses them) and
+  only reads this file.
+
+### 4.2.1 Connection (Data sources page)
+
+- The web writes `data/es_connection.json` (`hosts`, `username`, `password`,
+  `verify_certs`; mode `0600`). The engine checks its mtime on every poll and
+  reconnects without a restart. Training reads it too. While the file is
+  missing, `LOGAI_ES_*` is used.
+- The password is never returned by the API. An empty password keeps the saved
+  one, except when the hosts move to another server.
+- `checkpoint.json` records which cluster its cursors belong to
+  (`cluster.fingerprint`: the sorted scheme/host/port of the hosts). When the
+  hosts point at another cluster, whether the change is made live or while
+  the engine was down, every cursor is dropped. Each index is then read from
+  `cluster.since`, the switch time. A credential-only change keeps the cursors.
+- `es_index_status.json` carries `connection`: source, revision, hosts (with
+  no userinfo), username, `verify_certs`, `connected`.
 
 ### 4.3 Documentation corpus
 
@@ -886,6 +906,7 @@ profiles**), without editing env or restarting.
 | `storage/checkpoint.py` | Elasticsearch cursors | `checkpoint.json`, `training_checkpoint.json` |
 | `storage/dedup.py` | Bounded event idempotency | `dedup_index.json` |
 | `storage/index_selection.py` | Index selection and status | `es_index_*.json` |
+| `storage/es_connection.py` | Elasticsearch endpoint and credentials from the web | `es_connection.json` |
 | `storage/retrain_schedule.py` | Retrain schedule, status, backup/restore | `retrain_*.json`, `retrain_backup/` |
 | `reliability/dlq.py` | Append failed events | `dlq.jsonl` |
 | `training/train_pipeline.py` | Orchestrate training | Via stores |
@@ -938,7 +959,7 @@ in-memory and resets on restart; Prometheus keeps the scraped series.
 - **Who writes what.**
   - The Flask web process reads template, group and anomaly state.
   - It is the only writer of the documentation corpus and overrides, grouping
-    overrides, index selection, the retrain schedule, analysis requests,
+    overrides, index selection, the Elasticsearch connection, the retrain schedule, analysis requests,
     incidents and LLM profiles.
   - The engine is the only writer of grouping status, applied registries and
     the LLM results.
@@ -981,6 +1002,7 @@ Every endpoint, payload, response and UI behavior is documented in
 | `dedup_index.json` | JSON | Realtime | Realtime | Recently processed `event_id`s |
 | `dlq.jsonl` | JSONL | Realtime | Manual | Failed events (§9.4) |
 | `es_index_selection.json` / `es_index_status.json` | JSON | Web / engine | Engine + training / web | §4.2 |
+| `es_connection.json` | JSON (0600) | Web | Engine + training + web | ES endpoint and credentials (§4.2.1) |
 | `documentation_corpus.json` / `documentation_overrides.json` | JSON | Web (seeded from YAML) | Engine + web | §4.3 |
 | `documentation_status.json` | JSON | Refresh worker | Web | Applied revisions, stale groups, errors |
 | `grouping_overrides.json` | JSON | Web | Training + realtime | Desired manual assignments |
@@ -1154,7 +1176,7 @@ last record can be lost on power failure.
 | Alerting | `warm/alert/cool_consecutive` count events, and `score_high` is one value for every group | Busy groups reach a streak in under a second, so short spikes alert. Groups whose normal score is high alert more than quiet ones. Planned: time-based holds and per-group calibration |
 | Replay | The replayer stamps events with wall-clock emit time | At N× speed every rate is N× higher than reality and the 24 h `TemplateActivity` baseline is mixed across speeds; compare analyses at 1× |
 | Realtime | A single process per `data/` directory, no inter-process lock | No horizontal scaling; never run training and realtime concurrently on one directory |
-| Security | Web API has no authentication; LLM profile endpoints are not allow-listed (SSRF) | Expose the UI only on a trusted network |
+| Security | Web API has no authentication; LLM profile and Elasticsearch connection endpoints are not allow-listed (SSRF) | Expose the UI only on a trusted network |
 | Security | Grafana in compose defaults to the password `admin` | Set `GF_SECURITY_ADMIN_PASSWORD` outside demos |
 | Input | Dedup uses `_id` only | Same `_id` across indices counts once |
 | Alerting | `min_events_1m` is per service window | Needs tuning by the number of services per group |

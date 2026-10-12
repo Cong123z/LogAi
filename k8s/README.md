@@ -59,6 +59,10 @@ nano k8s/.env
 Every key (image, Elasticsearch, ports, storage size, embedding API key, LLM)
 is listed with comments in `k8s/.env.example`.
 
+`LOGAI_ES_*` are only defaults. The Elasticsearch endpoint, username, password
+and TLS check can also be set on the web **Data sources** page; that overrides
+the Secret without a redeploy, and **Use server default** goes back to it.
+
 ---
 
 ### Step 2: Link the BGE-M3 service

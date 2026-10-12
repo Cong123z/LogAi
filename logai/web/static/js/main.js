@@ -170,7 +170,9 @@ async function loadData() {
     } else if (state.activeView === 'pipeline') {
       renderPipeline(await fetchPipeline());
     } else if (state.activeView === 'sources') {
-      renderSources(await fetchSources());
+      const [sources, connection] = await Promise.all([fetchSources(), fetchConnection()]);
+      renderSources(sources);
+      renderConnection(connection);
     } else if (state.activeView === 'retrain') {
       renderRetrain(await fetchRetrain());
     } else {

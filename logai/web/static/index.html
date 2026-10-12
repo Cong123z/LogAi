@@ -294,14 +294,27 @@
             <button class="btn btn-primary" id="src-save-btn" disabled>Save selection</button>
           </div>
         </div>
-        <details class="how-it-works">
-          <summary>How data sources work</summary>
-          <ul>
-            <li>The engine reads every selected index from the moment it is added. Older logs are not backfilled.</li>
-            <li>A pattern such as <code>app-logs-*</code> also picks up indices created later.</li>
-          </ul>
-        </details>
         <p class="ins-toast ins-toast-error" id="src-action-status" aria-live="polite"></p>
+        <form id="src-conn-form" class="rt-form" autocomplete="off">
+          <h3>Connection</h3>
+          <p class="sync-status" id="src-conn-status" aria-live="polite">Loading connection...</p>
+          <div class="form-field"><label for="src-conn-hosts">Elasticsearch endpoint</label>
+            <input id="src-conn-hosts" placeholder="https://elasticsearch:9200" maxlength="2000" spellcheck="false" required aria-describedby="src-conn-hosts-hint">
+            <span class="ins-meta" id="src-conn-hosts-hint">Separate several nodes of one cluster with commas.</span>
+          </div>
+          <div class="rt-row">
+            <div class="form-field"><label for="src-conn-user">Username</label><input id="src-conn-user" maxlength="200" autocomplete="username" spellcheck="false"></div>
+            <div class="form-field"><label for="src-conn-password">Password</label><input id="src-conn-password" type="password" maxlength="500" autocomplete="new-password"></div>
+          </div>
+          <div class="form-field"><label><input type="checkbox" id="src-conn-verify"> Verify TLS certificate</label></div>
+          <p class="ins-toast ins-toast-error" id="src-conn-error" aria-live="polite"></p>
+          <div class="btn-row">
+            <button type="button" class="btn" id="src-conn-default-btn">Use server default</button>
+            <button type="button" class="btn" id="src-conn-discard-btn" disabled>Discard changes</button>
+            <button type="submit" class="btn btn-primary" id="src-conn-save-btn" disabled>Save connection</button>
+          </div>
+        </form>
+        <h3>Indices</h3>
         <form class="btn-row" id="src-add-form">
           <label for="src-pattern" class="filter-label">Index or pattern</label>
           <input id="src-pattern" placeholder="app-logs-*" maxlength="255" autocomplete="off" spellcheck="false">
@@ -328,14 +341,6 @@
         <div class="section-heading">
           <div class="sync-status" id="pl-status" aria-live="polite">Loading pipeline stats...</div>
         </div>
-        <details class="how-it-works">
-          <summary>How these numbers work</summary>
-          <ul>
-            <li>Counts are totals since the engine last started; a restart resets them.</li>
-            <li>The engine reports every ~5 s. Throughput is the change between two reports.</li>
-            <li>The chart covers only the time this page has been open.</li>
-          </ul>
-        </details>
         <h3>Throughput</h3>
         <div class="stats-row" id="pl-throughput"></div>
         <figure class="stat-card pl-chart">
@@ -360,20 +365,6 @@
             <button class="btn" id="rt-run-btn">Retrain now</button>
           </div>
         </div>
-        <details class="how-it-works">
-          <summary>How retraining works</summary>
-          <ol class="rt-steps">
-            <li><strong>Pause</strong><span>Log processing stops at the scheduled time</span></li>
-            <li><strong>Train</strong><span>On the last <em>Lookback</em>, newest logs cut past <em>Max documents</em></span></li>
-            <li><strong>Restart</strong><span>The engine reloads with the new model</span></li>
-            <li><strong>Catch up</strong><span>Logs that arrived meanwhile are read; alerts are only delayed</span></li>
-          </ol>
-          <ul class="rt-guarantees">
-            <li>Existing groups never change</li>
-            <li>Failed runs roll back</li>
-            <li>Missed runs are skipped and logged</li>
-          </ul>
-        </details>
         <p class="ins-toast ins-toast-error" id="rt-action-status" aria-live="polite"></p>
         <form id="rt-form" class="rt-form" autocomplete="off">
           <h3>Schedule</h3>

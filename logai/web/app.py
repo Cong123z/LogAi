@@ -41,6 +41,11 @@ from logai.storage.documentation import (
     RevisionConflict,
     group_fingerprint,
 )
+from logai.storage.es_connection import (
+    ConnectionConflict,
+    ConnectionError_ as ESConnectionError,
+    ESConnectionStore,
+)
 from logai.storage.index_selection import (
     IndexSelectionConflict,
     IndexSelectionError,
@@ -86,6 +91,7 @@ def create_app(
     template_triage_path: str | None = None,
     index_selection_path: str | None = None,
     index_status_path: str | None = None,
+    es_connection_path: str | None = None,
     retrain_schedule_path: str | None = None,
     retrain_status_path: str | None = None,
     retrain_defaults: Dict[str, Any] | None = None,
@@ -115,6 +121,7 @@ def create_app(
         index_selection_path or base / "es_index_selection.json"
     )
     index_status_file = Path(index_status_path or base / "es_index_status.json")
+    es_connection = ESConnectionStore(es_connection_path or base / "es_connection.json")
     analysis_requests_file = Path(analysis_requests_path or base / "analysis_requests.json")
     retrain_defaults = retrain_defaults or RetrainScheduleStore.from_config(AppConfig()).defaults
     retrain = RetrainScheduleStore(
@@ -1471,6 +1478,66 @@ def create_app(
         except IndexSelectionError as exc:
             return jsonify({"error": "invalid_request", "message": str(exc)}), 400
         return jsonify({"state": "pending", **saved}), 202
+
+    # ── Data sources: the Elasticsearch endpoint and credentials ──
+
+    def _connection_view() -> Dict[str, Any]:
+        """What was saved here (never the password) and what the engine uses."""
+        saved = es_connection.public_view()
+        status = read_json(index_status_file)
+        engine = status.get("connection") if isinstance(status.get("connection"), dict) else {}
+        applied = (
+            engine.get("source") == ("web" if saved else "env")
+            and engine.get("revision") == (saved["revision"] if saved else None)
+        )
+        if not _llm_engine_state()["alive"]:
+            state = "engine_unavailable"
+        elif not applied:
+            state = "pending"
+        elif engine.get("connected"):
+            state = "connected"
+        else:
+            state = "error"
+        return {
+            "state": state, "source": "web" if saved else "env", "saved": saved,
+            "engine": {k: engine.get(k) for k in ("hosts", "username", "verify_certs")},
+            "error": status.get("error") if state == "error" else None,
+        }
+
+    @app.route("/api/es-connection", methods=["GET"])
+    def get_es_connection():
+        return jsonify(_connection_view())
+
+    @app.route("/api/es-connection", methods=["PUT"])
+    def set_es_connection():
+        payload = _json_body()
+        if payload is None or "hosts" not in payload:
+            return jsonify({"error": "invalid_request", "message": "hosts is required"}), 400
+        try:
+            es_connection.save(
+                hosts=payload["hosts"], username=payload.get("username"),
+                password=payload.get("password"), verify_certs=payload.get("verify_certs"),
+                expected_revision=payload.get("revision"),
+            )
+        except ConnectionConflict as exc:
+            return jsonify({
+                "error": "revision_conflict", "message": str(exc),
+                "current_revision": exc.current_revision,
+            }), 409
+        except ESConnectionError as exc:
+            return jsonify({"error": "invalid_request", "message": str(exc)}), 400
+        return jsonify(_connection_view()), 202
+
+    @app.route("/api/es-connection", methods=["DELETE"])
+    def clear_es_connection():
+        try:
+            es_connection.clear(request.args.get("revision") or None)
+        except ConnectionConflict as exc:
+            return jsonify({
+                "error": "revision_conflict", "message": str(exc),
+                "current_revision": exc.current_revision,
+            }), 409
+        return jsonify(_connection_view()), 202
 
     def _retrain_view() -> Dict[str, Any]:
         loaded = retrain.load()

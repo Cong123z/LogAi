@@ -23,7 +23,8 @@ Architecture details: [`ARCHITECTURE.md`](ARCHITECTURE.md). Web UI/API:
   not regroup; a new template that is too different stays Unknown until the
   next training.
 - **Web UI** (`scripts/run_web.py`, port 5555): browse templates, groups and
-  alerts; edit documentation; move templates between groups by hand; AI
+  alerts; edit documentation; move templates between groups by hand; set the
+  Elasticsearch endpoint, credentials and indices (**Data sources**); AI
   Insights (calls the LLM only when you click).
 
 ## Requirements
@@ -107,6 +108,9 @@ Tests: `pip install pytest && pytest tests/`
 
 - `config.yaml`: thresholds, windows, paths. `LOGAI_*` environment variables
   (see `.env.example`) override this file.
+- The Elasticsearch endpoint and credentials saved on the **Data sources** page
+  override `LOGAI_ES_HOSTS` / `LOGAI_ES_USER` / `LOGAI_ES_PASSWORD` /
+  `LOGAI_ES_VERIFY_CERTS`, without a restart.
 - `docs/documentation_corpus.yaml`: sample documentation, only used to seed the
   first start; edit it in the Web UI afterwards.
 - The default thresholds need tuning on real logs.

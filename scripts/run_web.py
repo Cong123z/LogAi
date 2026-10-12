@@ -64,6 +64,7 @@ def main():
                 ("template_triage", "template_triage"),
                 ("index_selection", "es_index_selection"),
                 ("index_status", "es_index_status"),
+                ("es_connection", "es_connection"),
                 ("retrain_schedule", "retrain_schedule"),
                 ("retrain_status", "retrain_status"),
             ]

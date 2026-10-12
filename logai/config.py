@@ -23,6 +23,8 @@ class ElasticsearchConfig:
     index: str = "app-logs-*"
     username: str | None = None
     password: str | None = None
+    # False skips TLS certificate checks (self-signed Elasticsearch 8 setups).
+    verify_certs: bool = True
     poll_interval_seconds: float = 1.0
     batch_size: int = 500
     request_timeout_seconds: float = 30.0
@@ -217,6 +219,7 @@ class StorageConfig:
     template_rates_file: str = "template_rates.json"
     es_index_selection_file: str = "es_index_selection.json"
     es_index_status_file: str = "es_index_status.json"
+    es_connection_file: str = "es_connection.json"
     group_lineage_file: str = "group_lineage.json"
     retrain_schedule_file: str = "retrain_schedule.json"
     retrain_status_file: str = "retrain_status.json"
@@ -293,6 +296,10 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         cfg.elasticsearch.username = os.environ["LOGAI_ES_USER"]
     if os.environ.get("LOGAI_ES_PASSWORD"):
         cfg.elasticsearch.password = os.environ["LOGAI_ES_PASSWORD"]
+    if os.environ.get("LOGAI_ES_VERIFY_CERTS"):
+        cfg.elasticsearch.verify_certs = os.environ["LOGAI_ES_VERIFY_CERTS"].strip().lower() not in {
+            "0", "false", "no", "off"
+        }
     if os.environ.get("LOGAI_METRICS_PORT"):
         cfg.metrics.http_port = int(os.environ["LOGAI_METRICS_PORT"])
     if os.environ.get("LOGAI_METRICS_HOST"):

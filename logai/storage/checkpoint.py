@@ -89,6 +89,24 @@ class CheckpointStore:
             return None
         return self.get_last_timestamp() or self.get_start_ts()
 
+    # --- which cluster the cursors belong to -------------------------------
+    # "cluster": {"fingerprint", "since"}. Cursors of another cluster are
+    # meaningless, so a new cluster drops them and is read from `since`.
+
+    def cluster(self) -> Optional[Dict[str, Any]]:
+        value = self._store.get("cluster")
+        return dict(value) if isinstance(value, dict) else None
+
+    def set_cluster(self, fingerprint: str, since: Optional[float], reset: bool) -> None:
+        """Record the cluster; with `reset`, drop every cursor in the same write
+        so each index (and the legacy cursor) starts again at `since`."""
+        updates: Dict[str, Any] = {"cluster": {"fingerprint": fingerprint, "since": since}}
+        if reset:
+            updates.update(search_after=None, last_timestamp=None, start_ts=since)
+            if self.has_index_cursors():
+                updates["indices"] = {}
+        self._store.bulk_set(updates)
+
     def clear(self) -> None:
         if self.path.exists():
             try:

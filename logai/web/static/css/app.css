@@ -794,23 +794,9 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 :is(#llm-engine-status, #src-status, #rt-status).llm-status-disabled { border-left-color: var(--yellow); background: var(--yellow-bg); }
 :is(#llm-engine-status, #src-status, #rt-status).llm-status-disabled::before { background: var(--yellow); box-shadow: 0 0 0 3px var(--yellow-bg); }
 
-.how-it-works { margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-card); font-size: 13px; }
-.how-it-works summary {
-  display: flex; align-items: center; gap: 8px; padding: 10px 14px; min-height: 40px;
-  cursor: pointer; color: var(--text-dim); font-weight: 600; list-style: none;
-}
-.how-it-works summary::-webkit-details-marker { display: none; }
-.how-it-works summary::before {
-  content: "i"; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
-  background: var(--blue-bg); color: var(--blue); font: 700 11px/1 var(--font-mono);
-}
-.how-it-works summary::after { content: "▸"; margin-left: auto; transition: transform .15s; }
-.how-it-works[open] summary::after { transform: rotate(90deg); }
-.how-it-works summary:hover { color: var(--text); }
-.how-it-works ul:not([class]) { margin: 0; padding: 0 14px 12px 40px; color: var(--text-dim); line-height: 1.6; }
-.how-it-works ul:not([class]) li + li { margin-top: 4px; }
 #rt-defaults { margin-right: auto; }
-:is(#llm-action-status, #src-action-status, #rt-action-status):empty { display: none; }
+:is(#llm-action-status, #src-action-status, #rt-action-status, #src-conn-error):empty { display: none; }
+#src-conn-status { margin: 0 0 14px; }
 :is(#view-llm, #view-sources, #view-retrain) > .section-heading { flex-wrap: wrap; }
 #src-add-form { flex-wrap: wrap; }
 #src-pattern { flex: 1 1 200px; min-width: 0; }
@@ -851,18 +837,5 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 /* Retrain: preset day buttons fill like the day toggles when they match. */
 .btn[aria-pressed="true"] { background: var(--accent-solid); border-color: var(--accent-solid); color: var(--on-accent); }
 
-/* "How retraining works": a numbered step strip plus check chips. */
-.rt-steps { counter-reset: rt-step; list-style: none; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 0; padding: 4px 14px 14px; }
-.rt-steps li { counter-increment: rt-step; position: relative; display: flex; flex-direction: column; gap: 4px; padding-top: 34px; }
-.rt-steps li::before {
-  content: counter(rt-step); position: absolute; top: 0; left: 0; display: grid; place-items: center;
-  width: 26px; height: 26px; border-radius: 50%; background: var(--accent-solid); color: var(--on-accent); font-weight: 700; font-size: 12px;
-}
-.rt-steps li:not(:last-child)::after { content: ""; position: absolute; top: 13px; left: 34px; right: -4px; height: 2px; background: var(--border); }
-.rt-steps strong { color: var(--text); font-size: 13px; }
-.rt-steps span { color: var(--text-dim); font-size: 12.5px; line-height: 1.45; }
-.rt-guarantees { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0 14px 14px; }
-.rt-guarantees li { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; background: var(--green-bg); color: var(--green); font-size: 12.5px; font-weight: 600; }
-.rt-guarantees li::before { content: "✓"; }
 .switch:has(input:disabled) { cursor: not-allowed; }
 .switch input:disabled { opacity: .5; cursor: not-allowed; }

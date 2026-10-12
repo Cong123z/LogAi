@@ -61,6 +61,7 @@ from logai.reliability.dlq import DeadLetterQueue
 from logai.storage.base import JSONStore, ModelStore, atomic_write_json
 from logai.storage.checkpoint import CheckpointStore
 from logai.storage.dedup import DedupIndex
+from logai.storage import es_connection
 from logai.storage.documentation import DocumentationCorpusStore
 from logai.storage.grouping import (
     GroupingOverrideStore,
@@ -101,6 +102,16 @@ class RealtimePipeline:
         self._record_missed_retrains()
 
         self.checkpoint = CheckpointStore(config.storage)
+        # Endpoint/credentials saved on the web "Data sources" page override
+        # the env config (see _refresh_es_connection).
+        self._env_es_config = config.elasticsearch
+        self.es_connection = es_connection.ESConnectionStore(
+            f"{config.storage.base_dir}/{config.storage.es_connection_file}"
+        )
+        self._connection_mtime = self.es_connection.mtime_ns()
+        self._connection = self.es_connection.load()
+        config.elasticsearch = es_connection.apply(self._env_es_config, self._connection)
+        self._check_cluster()
         self.collector = ElasticsearchCollector(config.elasticsearch, self.checkpoint)
         self.parser = Drain3Parser(config.drain3)
         self.embedder = TemplateEmbedder(config.embedding)
@@ -168,6 +179,7 @@ class RealtimePipeline:
             lambda attempt, exc: self.metrics.logai_retry_total.inc()
         )
         self.collector._malformed_counter = self.metrics.logai_es_malformed_hits_total
+        self.collector._abort_retry = self._connection_changed
 
         # LLM incident analysis: one job per alert episode (entering ALERTING),
         # run on a background thread. The endpoint comes from the active web
@@ -338,6 +350,8 @@ class RealtimePipeline:
             if trigger is not None:
                 self._run_retrain(trigger)
             self._refresh_grouping_if_needed()
+            if self._refresh_es_connection():
+                consecutive_poll_failures = 0  # new settings: no backoff from the old ones
             self._refresh_index_selection()
             # ── Phase 1: Poll ES (one batch per selected index) ───────────
             polled, failures = self._poll_indices()
@@ -358,7 +372,7 @@ class RealtimePipeline:
                 self.metrics.logai_pipeline_errors_total.labels(
                     stage="elasticsearch", reason_code="poll_failed"
                 ).inc()
-                time.sleep(backoff)
+                self._backoff_sleep(backoff)
                 continue
             if failures:
                 # Some indices failed: count it, keep reading the others.
@@ -795,6 +809,75 @@ class RealtimePipeline:
                     progress["last_event_ts"] or 0.0, batch[-1].timestamp
                 )
 
+    def _check_cluster(self) -> bool:
+        """Drop every cursor when the hosts point at another cluster than the
+        cursors were read from; its indices are then read from now. True on
+        a reset. A checkpoint without a recorded cluster is adopted as is."""
+        fingerprint = es_connection.hosts_fingerprint(self.config.elasticsearch.hosts)
+        stored = self.checkpoint.cluster()
+        if stored is not None and stored.get("fingerprint") == fingerprint:
+            return False
+        reset = stored is not None
+        self.checkpoint.set_cluster(fingerprint, time.time() if reset else None, reset)
+        if reset:
+            logger.warning(
+                "Elasticsearch endpoint moved to another cluster (%s): every "
+                "index is read from now", fingerprint,
+            )
+        return reset
+
+    def _connection_changed(self) -> bool:
+        store = getattr(self, "es_connection", None)
+        return store is not None and store.mtime_ns() != self._connection_mtime
+
+    def _backoff_sleep(self, seconds: float) -> None:
+        """Sleep after a failed poll, but wake as soon as new connection
+        settings are saved, so fixing them on the web applies at once."""
+        if getattr(self, "es_connection", None) is None:
+            time.sleep(seconds)
+            return
+        deadline = time.monotonic() + seconds
+        while not self._connection_changed():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
+
+    def _refresh_es_connection(self) -> bool:
+        """Apply the endpoint/credentials saved on the web (or, once removed,
+        the env config) without a restart. True when applied."""
+        store = getattr(self, "es_connection", None)
+        if store is None:
+            return False
+        mtime = store.mtime_ns()
+        if mtime == self._connection_mtime:
+            return False
+        self._connection_mtime = mtime
+        conn = store.load()
+        new_config = es_connection.apply(self._env_es_config, conn)
+        # Buffered work and cursors belong to the previous connection.
+        if self._pending_predictions or self._pending_cursors:
+            self._flush_batch()
+        self._connection = conn
+        self.config.elasticsearch = new_config
+        self.collector.reconnect(new_config)
+        if self._check_cluster():
+            with self._index_lock:
+                self._index_progress.clear()
+            self._resolved = {}
+        logger.info(
+            "Elasticsearch connection from %s: %s",
+            "the web" if conn else "env config",
+            ", ".join(es_connection.display_host(h) for h in new_config.hosts),
+        )
+        # Re-resolve the selection and re-list indices on the next pass.
+        self._selection_mtime = -1
+        self._last_index_list_at = float("-inf")
+        self._available_indices = None
+        self._available_error = None
+        self._resolve_error = None
+        return True
+
     def _refresh_index_selection(self) -> bool:
         """Apply the web's index selection: on a change (or every
         index_refresh_seconds) resolve patterns to concrete indices, start new
@@ -839,6 +922,8 @@ class RealtimePipeline:
         active = sorted({index for indices in resolved.values() for index in indices})
 
         legacy_floor = self.checkpoint.legacy_floor()
+        # Indices of a newly connected cluster are read from the switch on.
+        cluster_since = (self.checkpoint.cluster() or {}).get("since")
         floors: dict[str, float] = {}
         for entry in entries:
             for index in resolved.get(entry["pattern"], []):
@@ -850,6 +935,8 @@ class RealtimePipeline:
                 floor_ts = entry["added_at"]
                 if legacy_floor is not None:
                     floor_ts = min(floor_ts, legacy_floor)
+                if cluster_since is not None:
+                    floor_ts = max(floor_ts, cluster_since)
                 floors[index] = min(floors.get(index, floor_ts), floor_ts)
         # A cursor is only forgotten on a successful resolve: an unreachable
         # Elasticsearch must never look like a removed index.
@@ -904,6 +991,7 @@ class RealtimePipeline:
             "indices": progress,
             "available": self._available_indices,
             "error": self._resolve_error or self._available_error,
+            "connection": self._connection_status(),
         }
         if payload == self._last_index_status:
             return
@@ -912,6 +1000,18 @@ class RealtimePipeline:
             self._last_index_status = payload
         except OSError as exc:
             logger.warning("Unable to write index status: %s", exc)
+
+    def _connection_status(self) -> dict:
+        es = self.config.elasticsearch
+        conn = getattr(self, "_connection", None)
+        return {
+            "source": "web" if conn else "env",
+            "revision": conn["revision"] if conn else None,
+            "hosts": [es_connection.display_host(h) for h in es.hosts],
+            "username": es.username or "",
+            "verify_certs": es.verify_certs,
+            "connected": self._available_indices is not None and self._available_error is None,
+        }
 
     # --- LLM profile ---------------------------------------------------------
 

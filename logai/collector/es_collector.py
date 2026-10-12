@@ -47,6 +47,8 @@ def _build_client(config: ElasticsearchConfig) -> Elasticsearch:
     }
     if config.username and config.password:
         kwargs["basic_auth"] = (config.username, config.password)
+    if not config.verify_certs:
+        kwargs.update(verify_certs=False, ssl_show_warn=False)
     return Elasticsearch(**kwargs)
 
 
@@ -257,6 +259,8 @@ def _legacy_cursor(cursor: Optional[List[Any]]) -> Optional[List[Any]]:
 class ElasticsearchCollector:
     _malformed_counter: Optional[Any] = None
     _on_retry_hook: Optional[Callable[[int, BaseException], None]] = None
+    # True when retrying is pointless: new connection settings were saved.
+    _abort_retry: Optional[Callable[[], bool]] = None
 
     def __init__(self, config: ElasticsearchConfig, checkpoint: CheckpointStore):
         self.config = config
@@ -265,6 +269,11 @@ class ElasticsearchCollector:
         # Injected by the pipeline for Prometheus metrics (see RealtimePipeline).
         self._malformed_counter = None
         self._on_retry_hook = None
+
+    def reconnect(self, config: ElasticsearchConfig) -> None:
+        """Use new connection settings (from the web's Data sources page)."""
+        self.config = config
+        self.client = _build_client(config)
 
     def _search(self, body: Dict[str, Any], index: Optional[str] = None) -> Dict[str, Any]:
         """Search with exponential backoff, classifying ES errors.
@@ -285,7 +294,7 @@ class ElasticsearchCollector:
                 raise  # fail-fast: no point retrying a 400/401/403/404
             except Exception as exc:  # noqa: BLE001
                 attempt += 1
-                if attempt > 5:
+                if attempt > 5 or (self._abort_retry is not None and self._abort_retry()):
                     logger.error(
                         "_search failed after %d attempts: %s", attempt - 1, exc
                     )

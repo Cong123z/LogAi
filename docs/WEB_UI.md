@@ -22,7 +22,7 @@ bookmarked directly:
 | Templates | `/#templates` | `template_registry.json`, `group_registry.json`, `template_rates.json` |
 | Groups | `/#groups` | Group registry plus documentation corpus/overrides, `template_rates.json` |
 | Documentation | `/#documentation` | Editable corpus and synchronization status |
-| Data sources | `/#sources` | `es_index_selection.json`, `es_index_status.json` |
+| Data sources | `/#sources` | `es_connection.json`, `es_index_selection.json`, `es_index_status.json` |
 | Retrain | `/#retrain` | `retrain_schedule.json`, `retrain_status.json` |
 | LLM profiles | `/#llm` | `llm_profiles.json` |
 
@@ -134,6 +134,8 @@ events between two heartbeats. The throughput sparkline keeps the last 60
 heartbeats in the browser tab only, so it starts empty and has no history.
 While the engine is down the page shows its last reported numbers.
 
+The page itself has no "How … works" panel (removed 2026-10-13); this section is the reference.
+
 ## Documentation
 
 `docs/documentation_corpus.yaml` is seed data only. On first startup it is
@@ -180,9 +182,30 @@ of these synchronization states:
 
 ## Data sources
 
-Choose which Elasticsearch indices the engine reads. Tick indices from the
-**Available indices** list (published by the engine, which owns the ES
-credentials) or type a pattern such as `app-logs-*`, then **Save selection**.
+**Connection.** Set the Elasticsearch endpoint (several nodes of one cluster
+separated by commas), username, password and **Verify TLS certificate** (off for
+a self-signed certificate), then **Save connection**. The engine reconnects
+within about a second, with no restart, and the status line shows `Connected to
+…` or the Elasticsearch error (e.g. `401`). The web never connects to
+Elasticsearch itself, so there is no test button: save, then read the status.
+
+- Until the first save, and after **Use server default**, the engine uses
+  `LOGAI_ES_HOSTS` / `LOGAI_ES_USER` / `LOGAI_ES_PASSWORD` /
+  `LOGAI_ES_VERIFY_CERTS`.
+- The password is stored in `data/es_connection.json` (mode `0600`) and is never
+  sent back to the browser. Leave it empty to keep the saved one. A new endpoint
+  host requires typing the password again, so a saved password is never sent to
+  another server.
+- Changing only the username, password or TLS check keeps every read position.
+  An endpoint on another cluster (scheme, host or port differs) asks for
+  confirmation: its indices are read from that moment, with no backfill.
+  Switching back to the first cluster also starts from that moment.
+- Training (scheduled or the one-off job) uses the same connection.
+- Anyone who can open the page can point the engine at another Elasticsearch.
+  Expose the UI only on a trusted network.
+
+**Indices.** Choose which Elasticsearch indices the engine reads. Tick indices from the
+**Available indices** list (published by the engine) or type a pattern such as `app-logs-*`, then **Save selection**.
 The engine applies it within about a second, with no restart:
 
 - every selected index is read from the moment it is added, with no backfill;
@@ -195,6 +218,8 @@ time and the number of events read. The status line shows `Waiting for the
 engine…` until the engine has applied the saved revision. Until the first save,
 the engine reads `elasticsearch.index` (`LOGAI_ES_INDEX`) as before. Two browsers
 saving from the same snapshot get `409`; the page keeps the unsaved changes.
+
+The page itself has no "How … works" panel (removed 2026-10-13); this section is the reference.
 
 ## Retrain
 
@@ -218,6 +243,8 @@ your local time), a running retrain with its elapsed time, or the last error;
 **History** lists the last 20 runs with the templates added to existing
 groups and the new groups, from `group_lineage.json`. Two browsers saving from the same snapshot get `409`.
 
+The page itself has no "How … works" panel (removed 2026-10-13); this section is the reference.
+
 ## HTTP API
 
 | Method and path | Input | Output |
@@ -236,6 +263,9 @@ groups and the new groups, from `group_lineage.json`. Two browsers saving from t
 | `PUT /api/groups/<id>/documentation` | `documentation_id`, `override_revision` | Pending assignment and new override revision |
 | `DELETE /api/groups/<id>/documentation` | `override_revision`, `force` | Confirmation-required 409 or pending clear suppression and new override revision |
 | `GET /api/es-indices` | None | Selection (`entries`, `revision`, `source`), engine `state`, `resolved`, per-index progress, `available` indices |
+| `GET /api/es-connection` | None | `saved` (`hosts`, `username`, `verify_certs`, `password_set`, `revision`; `null` before the first save), `source` (`web`/`env`), what the `engine` uses, `state` (`connected`/`pending`/`error`/`engine_unavailable`), `error` |
+| `PUT /api/es-connection` | `hosts`, `username`, `password` (empty keeps the saved one), `verify_certs`, `revision` | Connection view (`202`); `409` on a stale revision, `400` on an invalid endpoint or a new host without a password |
+| `DELETE /api/es-connection?revision=` | Current `revision` | Back to the env configuration (`202`); `409` on a stale revision |
 | `PUT /api/es-indices` | `patterns`, `revision` (`null` before the first save) | Saved selection (`202`); `409` on a stale revision, `400` on an invalid name |
 | `GET /api/retrain` | None | `schedule`, `saved`, `revision`, engine `status` (state, history), `run_pending`, `next_run_at`, `engine_state` (`running` / `retraining` / `engine_unavailable`), `defaults` |
 | `PUT /api/retrain` | `schedule` (`enabled`, `time` HH:MM, `weekdays` 0=Mon…6, `timezone`, `lookback_hours`, `max_docs`), `revision` | Updated view; `400` invalid, `409` stale revision |
@@ -289,8 +319,9 @@ volume as the realtime engine.
 | `grouping_status.json` | Training/realtime engine | Per-template results, failure codes, heartbeat, and progress |
 | `group_registry.json` | Training/realtime engine | Group metadata and currently applied documentation match |
 | `anomaly_state.json` | Realtime alert state machine | Latest state for each `(service, group_id)` alert cell |
+| `es_connection.json` | Web UI/API | Elasticsearch endpoint, username, password and TLS check (mode `0600`; the password is never returned) |
 | `es_index_selection.json` | Web UI/API | Selected Elasticsearch indices/patterns and when each was added |
-| `es_index_status.json` | Realtime engine | Available indices, pattern resolution, per-index progress, applied revision |
+| `es_index_status.json` | Realtime engine | Available indices, pattern resolution, per-index progress, applied revision, `connection` in use |
 | `retrain_schedule.json` | Web UI/API | Retrain schedule and "retrain now" requests |
 | `retrain_status.json` | Realtime engine | Retrain state, heartbeat, next run, last 20 runs |
 | `template_rates.json` | Realtime engine | Every second: each template's last-minute rate, 15-minute rate, normal rate and ratio, for the live Rate columns |

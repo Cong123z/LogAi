@@ -50,6 +50,7 @@ from logai.storage.grouping import (
     failed_status,
     first_nonretryable,
 )
+from logai.storage import es_connection
 from logai.storage.index_selection import IndexSelectionStore
 from logai.storage.registries import GroupRegistry, TemplateRegistry
 from logai.storage.training_event_index import TrainingEventIndex
@@ -853,6 +854,13 @@ def run_training_from_elasticsearch(
     ).load()
     if selection and selection["entries"]:
         config.elasticsearch.index = ",".join(e["pattern"] for e in selection["entries"])
+    # ... and the endpoint/credentials saved on the web, when there are any.
+    config.elasticsearch = es_connection.apply(
+        config.elasticsearch,
+        es_connection.ESConnectionStore(
+            f"{config.storage.base_dir}/{config.storage.es_connection_file}"
+        ).load(),
+    )
 
     checkpoint_file = getattr(
         config.storage, "training_checkpoint_file", "training_checkpoint.json"
