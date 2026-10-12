@@ -166,3 +166,31 @@ These are evidence, not rules; the user declined a rule-based health rubric.
 6. What changed since the last analysis.
 7. Proposals carried over: runbooks by error code, dropped templates, alert
    onset times, and a per-service note (purpose and dependencies).
+
+## 6. Burst-injection tests (2026-10-12)
+
+The replayer injected bursts into single groups at 1×. Full results and the
+optimization plan are in `agents.md` ("Evaluation: burst-injection alert
+tests").
+
+- **The right group and document when it answers.** The window analysis named G0010 /
+  DOC-001 (confidence 0.90–0.95, 6–13 s) every time it returned JSON.
+- **Rates are diluted early in a burst.** `rate_per_min = count_15m / 15`
+  understates a burst younger than 15 min by 3–5× (44/min reported, about 155 real).
+  The ratio is diluted the same way.
+- **Timeline misread.** The last entry is the current, partial minute, and
+  the LLM read it as a decline. Once it also read the oldest-first list backwards.
+  When it read the timeline correctly, it gave the true per-minute rate.
+- **Hot INFO groups can be cut.** Service evidence keeps the top 20 groups
+  by (alert state, active, level, count). An INFO group at 120/min can be ranked
+  behind any active ERROR group. Success-text INFO bursts were also not
+  reported as issues, which is reasonable.
+- **Failures.** deepseek-v4-pro twice returned `<think>` plus prose with no
+  JSON (no `response_format` is sent). The `zendigikey.shop` proxy timed out
+  (60 s read, ~120 s with the retry) on 2 of 10 calls in the morning and 6 of 7 in the
+  afternoon, for deepseek and gpt-5.6-luna alike.
+
+**To fix later:** `rate_1m` / `rate_5m` next to `rate_per_min`; mark the partial
+last minute and state the timeline order; rank service groups by change vs
+baseline; JSON mode where supported; a reliable endpoint or a longer timeout
+with one retry.

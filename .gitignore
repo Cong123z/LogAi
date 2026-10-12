@@ -36,3 +36,4 @@ KNOWN_ISSUES.md
 docs/superpowers/
 k8s/logai.yaml
 k8s/training.yaml
+.ua/
