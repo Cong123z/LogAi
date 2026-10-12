@@ -18,7 +18,7 @@ bookmarked directly:
 |---|---|---|
 | Alerting | `/#alerting` | `anomaly_state.json`, enriched from group/template registries |
 | AI Insights | `/#insights` | LLM result files, `analysis_requests.json` |
-| Incidents | `/#incidents` | `incident_cases.json`; the **Analysis history** tab reads `analysis_history.jsonl` |
+| Incidents | `/#incidents` | `incident_cases.json`; the **Analysis history** tab reads `analysis_history.jsonl` and hides the entries listed in `analysis_history_deleted.json` |
 | Templates | `/#templates` | `template_registry.json`, `group_registry.json`, `template_rates.json` |
 | Groups | `/#groups` | Group registry plus documentation corpus/overrides, `template_rates.json` |
 | Documentation | `/#documentation` | Editable corpus and synchronization status |
@@ -241,8 +241,9 @@ groups and the new groups, from `group_lineage.json`. Two browsers saving from t
 | `PUT /api/retrain` | `schedule` (`enabled`, `time` HH:MM, `weekdays` 0=Mon…6, `timezone`, `lookback_hours`, `max_docs`), `revision` | Updated view; `400` invalid, `409` stale revision |
 | `POST /api/retrain/run` | Optional `lookback_hours`, `max_docs` (default: the schedule's) | `202`; `400` invalid; `409` while a retrain runs or waits to start |
 | `GET /api/rates/stream` | None | Server-Sent Events: `{templates, groups}` rate fields (`rate_1m`, `rate_per_min`, `baseline_per_min`, `ratio`) each time the engine rewrites `template_rates.json`, both `null` when stale; `: ping` every 15 s when idle |
-| `GET /api/insights/history` | Optional `kind` (`window`/`service`/`template`), `service`, `id` | Every stored analysis (done and failed), newest first, capped at 300: `items`, `total`, `all_total`, `services`, `limit` |
-| `GET /api/insights/history/<n>` | Entry number in path | One history row plus the full stored `record`; `404` if missing |
+| `GET /api/insights/history` | Optional `kind` (`window`/`service`/`template`), `service`, `id` | Every stored analysis (done and failed), newest first, capped at 300: `items`, `total`, `all_total`, `services`, `limit`, `failed_total` (failed rows matching the filters) |
+| `GET /api/insights/history/<n>` | Entry number in path | One history row plus the full stored `record`; `404` if missing or deleted |
+| `POST /api/insights/history/delete` | `{"n": <entry>}`, or `{"failed": true}` plus optional `kind`, `service`, `id` filters | `{"deleted": count}`; the web UI confirms first. `400` invalid body or kind; `404` unknown or already deleted `n` |
 
 Mutation errors use JSON with an `error` and `message`. Important status codes
 are `400` for invalid input, `404` for an unknown document/group, `409` for a

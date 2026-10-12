@@ -676,6 +676,12 @@ user from the **AI Insights** page. Three kinds:
   it on the Incidents page's **Analysis history** tab, newest first, with a
   read-only detail; the History button in AI Insights opens that tab filtered
   to the item.
+- **Deleting history.** On that tab a user can delete one entry, or every
+  failed entry under the current filters, after a confirmation dialog. The
+  `.jsonl` is still never rewritten (the engine appends to it concurrently and
+  line numbers are entry ids): the web lists the deleted line numbers in
+  `analysis_history_deleted.json` and skips them when reading. The lines stay,
+  so the engine's backfill on start does not bring them back.
 
 **What the LLM is sent**
 
@@ -982,6 +988,7 @@ Every endpoint, payload, response and UI behavior is documented in
 | `analysis_requests.json` | JSON | Web | Engine | §7.6 |
 | `incident_analysis.json` / `service_analysis.json` / `template_triage.json` | JSON | Engine | Web | Latest LLM result per target |
 | `analysis_history.jsonl` | JSONL | Engine | Web | Every done/failed analysis (Incidents › Analysis history) |
+| `analysis_history_deleted.json` | JSON | Web | Web | Line numbers of history entries the user deleted |
 | `incident_cases.json` | JSON | Web | Engine + web | Confirmed incidents |
 | `template_activity.json` | JSON | Realtime | Realtime | Recent per-template counts |
 | `template_rates.json` | JSON | Realtime | Web | Every second: per-template `rate_1m`, `rate_per_min`, `baseline_per_min`, `ratio`; streamed to the Templates/Groups Rate columns by `GET /api/rates/stream` |

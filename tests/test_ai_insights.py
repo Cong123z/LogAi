@@ -337,6 +337,48 @@ def test_history_keeps_every_finished_analysis(tmp_path):
     assert client.get("/api/insights/history?kind=bogus").status_code == 400
 
 
+def test_history_entries_can_be_deleted(tmp_path):
+    from logai.incident.history import append_history, backfill_history
+    from logai.web.app import create_app
+
+    path = tmp_path / "analysis_history.jsonl"
+    rows = [  # line: (kind, id, status)
+        ("service", "api", "failed"), ("service", "api", "done"),
+        ("service", "web", "failed"), ("template", "T1", "failed"), ("service", "api", "done"),
+    ]
+    for at, (kind, target_id, status) in enumerate(rows):
+        append_history(path, kind, target_id, {"status": status, "analyzed_at": float(at)}, at=float(at))
+    client = create_app(data_dir=str(tmp_path)).test_client()
+    history = lambda query="": client.get(f"/api/insights/history{query}").get_json()
+    delete = lambda body: client.post("/api/insights/history/delete", json=body)
+
+    assert history()["failed_total"] == 3
+    assert delete({"n": 4}).get_json() == {"deleted": 1}
+    assert delete({"n": 4}).status_code == 404  # already deleted
+    assert delete({"n": 99}).status_code == 404
+    assert client.get("/api/insights/history/4").status_code == 404
+    # Other entries keep their numbers.
+    assert client.get("/api/insights/history/3").get_json()["id"] == "T1"
+    assert sorted(row["n"] for row in history()["items"]) == [0, 1, 2, 3]
+
+    # Bulk: only failed rows matching the filters go.
+    assert delete({"failed": True, "kind": "service", "service": "api"}).get_json() == {"deleted": 1}
+    body = history()
+    assert sorted(row["n"] for row in body["items"]) == [1, 2, 3] and body["all_total"] == 3
+    assert history("?kind=service&service=api")["failed_total"] == 0
+    assert delete({"failed": True}).get_json() == {"deleted": 2}
+    assert [row["n"] for row in history()["items"]] == [1]
+
+    for bad in ({}, {"n": "1"}, {"n": True}, {"failed": "yes"}):
+        assert delete(bad).status_code == 400
+    assert delete({"failed": True, "kind": "bogus"}).status_code == 400
+
+    # The engine's backfill on start sees the kept lines, so nothing comes back.
+    latest = {"api": {"status": "done", "analyzed_at": 4.0}, "web": {"status": "failed", "analyzed_at": 2.0}}
+    assert backfill_history(path, {"service": latest}) == 0
+    assert history()["all_total"] == 1
+
+
 def test_error_lines_and_correlated_alerts_reach_window_and_service_evidence(tmp_path):
     from logai.alert.alert_state_machine import group_id_key
     from logai.models import GroupedEvent, RawLog

@@ -4,18 +4,27 @@ The per-kind stores hold only the latest record per target; this file keeps
 every finished (done or failed) analysis so a user can look back at earlier
 answers on the Incidents page. Append only: a re-analysis, delete or vanished
 group never rewrites it, so an entry's line number is a stable id.
+
+A user deleting an entry on the Incidents page does not rewrite it either: the
+web lists the deleted line numbers in a separate tombstone file it alone
+writes. The line stays, so the engine's concurrent appends are never lost and
+backfill_history does not re-add the entry on the next start.
 """
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+from logai.storage.base import atomic_write_json
 
 # Statuses worth keeping: a result, or the reason there is none.
 LOGGED_STATUSES = ("done", "failed")
 SNIPPET_CHARS = 160
 KIND_LABELS = {"window": "Alert", "service": "Service", "template": "Template"}
+_deleted_lock = threading.Lock()
 
 
 def append_history(
@@ -31,15 +40,38 @@ def append_history(
         stream.write(line + "\n")
 
 
-def read_history(path: str | Path) -> List[Tuple[int, Dict[str, Any]]]:
+def read_deleted(path: str | Path) -> Set[int]:
+    """Line numbers the user deleted (empty when the file is missing or bad)."""
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            numbers = json.load(stream).get("deleted", [])
+        return {int(n) for n in numbers}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+
+
+def mark_deleted(path: str | Path, numbers: Iterable[int]) -> None:
+    # ponytail: deleted lines stay in the .jsonl; compact it at engine start
+    # if the file size ever matters.
+    with _deleted_lock:
+        deleted = read_deleted(path) | {int(n) for n in numbers}
+        atomic_write_json(path, {"deleted": sorted(deleted)})
+
+
+def read_history(
+    path: str | Path, deleted: Optional[Set[int]] = None,
+) -> List[Tuple[int, Dict[str, Any]]]:
     """(line number, entry) in file order. Unreadable lines (e.g. a torn last
-    write) are skipped but still counted, so line numbers stay stable."""
+    write) and `deleted` line numbers are skipped but still counted, so line
+    numbers stay stable."""
     # ponytail: full scan per read; fine to tens of thousands of lines,
     # trim old entries at engine start if it grows past that.
     entries = []
     try:
         with open(path, "r", encoding="utf-8") as stream:
             for number, line in enumerate(stream):
+                if deleted and number in deleted:
+                    continue
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
@@ -51,8 +83,10 @@ def read_history(path: str | Path) -> List[Tuple[int, Dict[str, Any]]]:
     return entries
 
 
-def history_entry(path: str | Path, number: int) -> Optional[Dict[str, Any]]:
-    return next((entry for n, entry in read_history(path) if n == number), None)
+def history_entry(
+    path: str | Path, number: int, deleted: Optional[Set[int]] = None,
+) -> Optional[Dict[str, Any]]:
+    return next((entry for n, entry in read_history(path, deleted) if n == number), None)
 
 
 def backfill_history(path: str | Path, records_by_kind: Dict[str, Dict[str, Any]]) -> int:

@@ -10,21 +10,23 @@ const $incDetail = document.getElementById('inc-detail');
 const $incService = document.getElementById('inc-service');
 const INC_HELP_TEXT = {
   incidents: 'Incidents of whole services, written from experience. When a service shows an incident\'s error pattern again, the analysis shows it as "This happened before" with its root cause and resolution, and the AI is given it too. Save one from a service analysis in AI Insights, or write one here.',
-  history: 'Every AI analysis made from AI Insights (alerts, services, unknown templates), newest first, failed ones included. Nothing here is ever removed: re-analyzing or deleting an analysis in AI Insights keeps the earlier answers.',
+  history: 'Every AI analysis made from AI Insights (alerts, services, unknown templates), newest first, failed ones included. Re-analyzing or deleting an analysis in AI Insights keeps the earlier answers here; delete the ones you no longer need from this page.',
 };
 const HISTORY_BADGE = {window: 'badge-blue', service: 'badge-green', template: 'badge-yellow'};
 const HISTORY_TAB = {window: 'windows', service: 'services', template: 'templates'};
 
-async function fetchIncidents() {
+// The history list filters, as sent to the API (list and bulk delete alike).
+function historyFilters() {
   const h = inc.history;
-  const params = new URLSearchParams();
-  if (h.target) {
-    params.set('kind', h.target.kind);
-    params.set('id', h.target.id);
-  } else {
-    if (h.kind) params.set('kind', h.kind);
-    if (h.service) params.set('service', h.service);
-  }
+  if (h.target) return {kind: h.target.kind, id: h.target.id};
+  const filters = {};
+  if (h.kind) filters.kind = h.kind;
+  if (h.service) filters.service = h.service;
+  return filters;
+}
+
+async function fetchIncidents() {
+  const params = new URLSearchParams(historyFilters());
   const [cases, history] = await Promise.all([
     getJson('/api/incident-cases', 'Unable to load incidents'),
     getJson(`/api/insights/history?${params}`, 'Unable to load the analysis history'),
@@ -64,6 +66,10 @@ function renderIncidents(data) {
   document.getElementById('inc-count-history').textContent = h.data ? h.data.all_total : '';
   document.getElementById('inc-history-filters').hidden = inc.tab !== 'history' || Boolean(h.target);
   document.getElementById('inc-new').hidden = inc.tab !== 'incidents';
+  const failed = h.data ? h.data.failed_total || 0 : 0;
+  const $deleteFailed = document.getElementById('inc-history-delete-failed');
+  $deleteFailed.hidden = inc.tab !== 'history' || !failed;
+  $deleteFailed.textContent = `Delete failed (${failed})`;
   document.getElementById('inc-target').hidden = inc.tab !== 'history' || !h.target;
   document.getElementById('inc-target-label').textContent = h.target ? `Only ${h.target.label}` : '';
   document.getElementById('inc-help').textContent = INC_HELP_TEXT[inc.tab];
@@ -150,7 +156,7 @@ function historyDetailHtml(d) {
       <span class="ins-meta">${escapeHtml(formatFullTs(d.at))}${d.service && d.kind !== 'service' ? ` · ${escapeHtml(d.service)}` : ''}</span></div>
     ${recall}
     <div class="ins-section"><h3>AI analysis</h3>${insAnalysisBody({kind: d.kind, analysis: a, raw: {group_id: groupId}}, true)}</div>
-    <div class="ins-actions">${sameItem}<a class="btn" href="#insights" data-hist-action="insights">Open in AI Insights</a></div>`;
+    <div class="ins-actions">${sameItem}<a class="btn" href="#insights" data-hist-action="insights">Open in AI Insights</a><button type="button" class="btn btn-danger" data-hist-action="delete">Delete</button></div>`;
 }
 
 function setIncidentTab(tab) {
@@ -193,6 +199,25 @@ document.getElementById('inc-target-clear').addEventListener('click', () => {
   incReload().catch(err => incToast(err.message, true));
 });
 
+document.getElementById('inc-history-delete-failed').addEventListener('click', async () => {
+  const h = inc.history;
+  const count = h.data ? h.data.failed_total || 0 : 0;
+  if (!count) return;
+  const scope = h.target ? ` of ${h.target.label}`
+    : [h.kind && `of type "${document.getElementById('inc-kind').selectedOptions[0].text}"`, h.service && `in ${h.service}`].filter(Boolean).join(' ');
+  const ok = await confirmDialog(`Delete ${count} failed ${count === 1 ? 'analysis' : 'analyses'}${scope ? ` ${scope}` : ''} from the history? This cannot be undone.`,
+    {title: 'Delete failed analyses?', confirmLabel: `Delete ${count}`});
+  if (!ok) return;
+  try {
+    const result = await apiMutation('/api/insights/history/delete', 'POST', {failed: true, ...historyFilters()});
+    h.selected = null;
+    await incReload();
+    incToast(`${result.deleted} failed ${result.deleted === 1 ? 'analysis' : 'analyses'} deleted`);
+  } catch (err) {
+    incToast(err.message, true);
+  }
+});
+
 $incList.addEventListener('click', event => {
   const historyButton = event.target.closest('[data-hist-n]');
   if (historyButton) {
@@ -210,10 +235,24 @@ $incList.addEventListener('click', event => {
   if (again) again.focus();
 });
 
-$incDetail.addEventListener('click', event => {
+$incDetail.addEventListener('click', async event => {
   const action = event.target.closest('[data-hist-action]');
   const d = inc.history.detail;
   if (!action || !d || d.error) return;
+  if (action.dataset.histAction === 'delete') {
+    const ok = await confirmDialog(`Delete this analysis of ${d.target} (${formatFullTs(d.at)}) from the history? This cannot be undone.`,
+      {title: 'Delete analysis?', confirmLabel: 'Delete'});
+    if (!ok) return;
+    try {
+      await apiMutation('/api/insights/history/delete', 'POST', {n: d.n});
+      Object.assign(inc.history, {selected: null, detailN: null, detail: null});
+      await incReload();
+      incToast('Analysis deleted');
+    } catch (err) {
+      incToast(err.message, true);
+    }
+    return;
+  }
   if (action.dataset.histAction === 'same') {
     inc.history.target = {kind: d.kind, id: d.id, label: d.target};
     inc.history.selected = d.n;
