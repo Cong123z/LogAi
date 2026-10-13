@@ -1,0 +1,26 @@
+# Argo CD Application for LogAI on the Oracle Cloud cluster.
+# Apply once by hand:  kubectl apply -n argocd -f k8s/argocd/logai-application.yaml
+#
+# Sync starts MANUAL: review the diff and sync from the UI or CLI first.
+# Once a manual sync is healthy, uncomment `automated` below and re-apply
+# (or run: argocd app set logai --sync-policy automated --self-heal --auto-prune).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: logai
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Cong123z/LogAi.git
+    targetRevision: master
+    path: k8s/overlays/oracle
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: logai
+  syncPolicy:
+    # automated:
+    #   prune: true      # delete resources removed from Git (the PVC is protected)
+    #   selfHeal: true   # undo manual kubectl edits
+    syncOptions:
+      - CreateNamespace=true
