@@ -136,7 +136,21 @@ OpenRouter with deepseek-v4-pro).
 - **What did not help.** The proxy ignores `reasoning_effort`.
 - **Fix.** `llm.max_tokens` now defaults to 4000. A reply with
   `completion_tokens >= max_tokens` counts as cut off and is retried with
-  double the budget (at most 8000).
+  double the budget (at most 8000). Raised again on 2026-10-13 (below).
+
+### Failure audit 2026-10-13 and budget raise
+- **Data.** 34 of 88 analyses in `analysis_history.jsonl` failed (39%):
+  12 read timeouts (60 s, retried once, ~120 s each), 9 proxy HTTP 502/503,
+  4 "did not answer within 150 s", 8 cut off / no JSON, 3 other.
+- **Cause.** All three profiles point at the same zen proxy (the one named
+  "openrouter" too), which serves reasoning models. Service analyses take
+  50–115 s, longer than the 60 s timeout, and deepseek-v4-pro spends
+  4.5–7k completion tokens on a ~700-token visible reply. The "150 s"
+  errors were really a timeout followed by a reply cut off at 4000 tokens,
+  with no time left for the 2× retry.
+- **Fix.** `timeout_seconds` 180, `job_deadline_seconds` 420, `max_tokens`
+  8000, cap 16000. The deadline error now names the real cause, and records
+  keep `retries`. Proxy 502/503 errors need a profile on another provider.
 
 ### Wrong 24 h baseline (fixed)
 - **Symptom.** `TemplateActivity` took the median over all 24 hours, so 12

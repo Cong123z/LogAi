@@ -82,7 +82,7 @@ MAX_PARAMETER_VALUE = 200
 TITLE_LIMIT, TEXT_LIMIT, ERROR_CODE_LIMIT, ERROR_LIMIT = 200, 20_000, 100, 500
 QUEUE_SIZE = 100
 SERVICE_MIN_TOKENS = 2000
-MAX_TOKENS_CAP = 8000
+MAX_TOKENS_CAP = 16000
 # Vietnamese text costs about twice the tokens of English.
 LANGUAGE_TOKEN_FACTOR = {"vi": 1.5}
 JSON_REMINDER = " Your previous reply was not valid JSON; reply with one JSON object only."
@@ -694,6 +694,8 @@ class IncidentClassifier:
         """Store the call's cost on the record, log it and report it."""
         record["duration_s"] = round(meta["duration_s"], 2)
         record["attempts"] = meta["attempts"]
+        if meta["retries"]:
+            record["retries"] = list(meta["retries"])
         record["usage"] = meta["usage"]
         if meta.get("evidence_chars"):
             record["evidence_chars"] = meta["evidence_chars"]
@@ -736,7 +738,10 @@ class IncidentClassifier:
             reason = "length"
         _log_bad_reply(reason, finish, content)
         if time.monotonic() + cfg.timeout_seconds > deadline:
-            raise RuntimeError(f"LLM did not answer within {cfg.job_deadline_seconds:.0f} s")
+            problem = (f"was cut off at {max_tokens} tokens" if reason == "length"
+                       else "contains no JSON object")
+            raise RuntimeError(f"LLM reply {problem}; no time left to retry within "
+                               f"{cfg.job_deadline_seconds:.0f} s")
         meta["retries"].append(reason)
         if reason == "length":
             max_tokens = min(max_tokens * 2, MAX_TOKENS_CAP)

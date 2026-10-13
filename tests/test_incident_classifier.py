@@ -269,7 +269,8 @@ def test_llm_env_overrides():
                                  "LOGAI_LLM_API_KEY": "s"}):
         llm = load_config().llm
     assert (llm.endpoint, llm.model, llm.api_key) == ("http://x", "qwen", "s")
-    assert llm.max_candidates == 5 and llm.max_tokens == 4000
+    assert llm.max_candidates == 5 and llm.max_tokens == 8000
+    assert llm.timeout_seconds == 180 and llm.job_deadline_seconds == 420
 
 
 # --- Task 3: realtime pipeline wiring ---------------------------------------
@@ -624,6 +625,21 @@ def test_read_timeout_is_retried_only_once(tmp_path):
     clf._session = session = TimeoutSession()
     rec = clf.process(KEY, ALERT, [])
     assert session.calls == 2 and rec["status"] == "failed" and "timed out" in rec["error"]
+
+
+def test_cut_off_reply_with_no_time_left_names_the_real_cause(tmp_path):
+    clf, session, _, _ = _classifier(tmp_path, [_raw("{", "length"), _reply(VALID)],
+                                     timeout_seconds=60, job_deadline_seconds=1)
+    rec = clf.process(KEY, ALERT, [])
+    assert len(session.calls) == 1
+    assert rec["status"] == "failed"
+    assert "cut off at 800 tokens; no time left to retry within 1 s" in rec["error"]
+
+
+def test_retry_reasons_are_stored_on_the_record(tmp_path):
+    clf, _, _, _ = _classifier(tmp_path, [FakeResponse(503, {}), _reply(VALID)])
+    rec = clf.process(KEY, ALERT, [])
+    assert rec["status"] == "done" and rec["retries"] == ["http"]
 
 
 def test_job_deadline_stops_retries(tmp_path):

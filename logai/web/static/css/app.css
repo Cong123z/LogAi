@@ -797,6 +797,7 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 #rt-defaults { margin-right: auto; }
 :is(#llm-action-status, #src-action-status, #rt-action-status, #src-conn-error):empty { display: none; }
 #src-conn-status { margin: 0 0 14px; }
+#src-conn-verify-hint { display: block; margin-top: 6px; }
 :is(#view-llm, #view-sources, #view-retrain) > .section-heading { flex-wrap: wrap; }
 #src-add-form { flex-wrap: wrap; }
 #src-pattern { flex: 1 1 200px; min-width: 0; }

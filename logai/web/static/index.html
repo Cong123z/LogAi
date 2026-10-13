@@ -306,7 +306,10 @@
             <div class="form-field"><label for="src-conn-user">Username</label><input id="src-conn-user" maxlength="200" autocomplete="username" spellcheck="false"></div>
             <div class="form-field"><label for="src-conn-password">Password</label><input id="src-conn-password" type="password" maxlength="500" autocomplete="new-password"></div>
           </div>
-          <div class="form-field"><label><input type="checkbox" id="src-conn-verify"> Verify TLS certificate</label></div>
+          <div class="form-field">
+            <label class="switch"><input type="checkbox" role="switch" id="src-conn-verify" aria-describedby="src-conn-verify-hint"><span>Verify TLS certificate</span></label>
+            <span class="ins-meta" id="src-conn-verify-hint">Turn off only for a self-signed certificate on a trusted network.</span>
+          </div>
           <p class="ins-toast ins-toast-error" id="src-conn-error" aria-live="polite"></p>
           <div class="btn-row">
             <button type="button" class="btn" id="src-conn-default-btn">Use server default</button>

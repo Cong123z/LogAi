@@ -53,6 +53,15 @@ docker compose up -d logai-engine                 # realtime + web UI
 docker compose --profile ui up -d grafana         # optional
 ```
 
+**Without the training job:** start `logai-engine` on an empty volume, pick the
+index on **Data sources**, then click **Retrain now** on the **Retrain** page.
+Until that retrain finishes, every template is `Unknown/Pending`, nothing is
+scored and no alert can fire; the log does not warn that the model is missing.
+The engine then trains in-process and restarts with the artifacts (checked
+2026-10-13: 6 h / 300k docs took 52 s). The page's default is 168 h / 5M docs,
+which needs more time and, on Kubernetes, fits in the 4 Gi engine pod only for
+moderate `max_docs`.
+
 Check:
 
 ```bash

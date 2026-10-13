@@ -817,15 +817,17 @@ user from the **AI Insights** page. Three kinds:
 - **Worker reliability and speed.** There is one worker with a priority queue:
   window/service analyses run before template triage.
   - A reply cut off at `max_tokens` is retried once with double the budget
-    (at most 8000). A reply whose `completion_tokens` reach `max_tokens` counts
+    (at most 16000). A reply whose `completion_tokens` reach `max_tokens` counts
     as cut off even when a proxy reports `finish_reason: stop`, because
     reasoning models can spend the whole budget thinking. `llm.max_tokens`
-    defaults to 4000; it is only a cap.
+    defaults to 8000; it is only a cap.
   - A non-JSON reply is retried once with a reminder.
   - Budgets are ×1.5 for Vietnamese.
-  - A read timeout is retried only once, and `llm.job_deadline_seconds` (150)
-    bounds each job including retries.
-  - Records store `duration_s`, `attempts`, `usage` (with
+  - A read timeout (`llm.timeout_seconds`, 180) is retried only once, and
+    `llm.job_deadline_seconds` (420) bounds each job including retries. When
+    no time is left for the length/JSON retry, the error names that cause.
+  - Records store `duration_s`, `attempts`, `retries` (e.g.
+    `["timeout", "length"]`, only when any happened), `usage` (with
     `reasoning_tokens` when the server reports
     `completion_tokens_details.reasoning_tokens`) and `evidence_chars`: the
     characters of each evidence section, also split by field for a list of
@@ -1183,8 +1185,11 @@ last record can be lost on power failure.
 
 ## 13. Runtime and deployment invariants
 
-1. Run training before the first realtime start, to create registries,
-   centroids and the model.
+1. Realtime can start on an empty `data/` directory. Until the first training
+   (the one-off job, or **Retrain now** on the web, §6.4) every template is
+   pending, so nothing is scored or alerted, and nothing is logged about the
+   missing model (`predict_batch` returns `None`). The first start reads from
+   the current time; training reads the lookback window.
 2. Training and realtime must share the same `data/` volume and Drain3 state.
 3. Only one realtime process may write to a state directory, and training and
    realtime must not run concurrently on it (the scheduled retrain handles this

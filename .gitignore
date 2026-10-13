@@ -37,3 +37,6 @@ docs/superpowers/
 k8s/logai.yaml
 k8s/training.yaml
 .ua/
+
+# Incident-test runs (scripts/incident_test.py)
+reports/
