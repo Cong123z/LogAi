@@ -1,0 +1,92 @@
+# Realtime engine. Mirrors the Deployment that was applied by hand; the
+# selector (app: logai-engine) cannot change, so Argo CD updates it in place.
+# Exactly one replica with Recreate: only one engine writes /app/data.
+#
+# Differences from the hand-applied version, on purpose:
+#   - image comes from GHCR (set by `images:` in kustomization.yaml), built by CI
+#   - no hostPath mount of the source tree over /app: the code is the code in
+#     the image, i.e. exactly what was merged to master
+#   - envFrom also reads ConfigMap logai-config (from params.env)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logai-engine
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: logai-engine
+  template:
+    metadata:
+      labels:
+        app: logai-engine
+    spec:
+      enableServiceLinks: false
+      # The node that holds the hostPath volume behind logai-data-pv.
+      nodeSelector:
+        logai-data: "true"
+      containers:
+        - name: logai-engine
+          image: logai-engine # set by `images:` in kustomization.yaml
+          imagePullPolicy: IfNotPresent # tags are sha-<commit>, never reused
+          command: ["python", "scripts/run_realtime.py"]
+          # Later sources win: the Secret comes last.
+          envFrom:
+            - configMapRef:
+                name: logai-config
+            - configMapRef:
+                name: logai-embedding
+            - secretRef:
+                name: logai-env
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          ports:
+            - name: metrics
+              containerPort: 9108
+          volumeMounts:
+            - name: logai-data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: 150m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          startupProbe:
+            tcpSocket:
+              port: metrics
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            exec:
+              command: ["python", "scripts/healthcheck.py"]
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: metrics
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: logai-data
+          persistentVolumeClaim:
+            claimName: logai-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logai-metrics-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: logai-engine
+  ports:
+    - name: metrics
+      port: 9108
+      targetPort: metrics

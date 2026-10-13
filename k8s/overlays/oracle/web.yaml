@@ -1,0 +1,70 @@
+# Template Explorer web UI. Mirrors the Deployment that was applied by hand;
+# the selector (app: logai-web) cannot change. Same deliberate differences as
+# engine.yaml: GHCR image, no hostPath source mount, plus ConfigMap logai-config.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logai-web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: logai-web
+  template:
+    metadata:
+      labels:
+        app: logai-web
+        logai-workload-group: logai
+    spec:
+      enableServiceLinks: false
+      # Same node as the engine: both use the hostPath volume behind logai-data-pv.
+      nodeSelector:
+        logai-data: "true"
+      containers:
+        - name: logai-web
+          image: logai-engine # set by `images:` in kustomization.yaml
+          imagePullPolicy: IfNotPresent # tags are sha-<commit>, never reused
+          command: ["python", "scripts/run_web.py"]
+          # Later sources win: the Secret comes last.
+          envFrom:
+            - configMapRef:
+                name: logai-config
+            - configMapRef:
+                name: logai-embedding
+            - secretRef:
+                name: logai-env
+          env:
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+          ports:
+            - name: web
+              containerPort: 5555
+          volumeMounts:
+            - name: logai-data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+      volumes:
+        - name: logai-data
+          persistentVolumeClaim:
+            claimName: logai-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logai-web
+spec:
+  type: ClusterIP
+  selector:
+    app: logai-web
+  ports:
+    - name: http
+      port: 5555
+      targetPort: 5555
