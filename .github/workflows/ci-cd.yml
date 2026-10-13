@@ -52,7 +52,7 @@ jobs:
       # hardware. Shared CI runners are slower and noisy, so it is skipped here.
       - name: Run tests
         run: >
-          pytest tests -q
+          python -m pytest tests -q
           --deselect tests/test_realtime_crash_load_and_perf.py::TestRealtimeCrashLoadAndPerformance::test_high_load_throughput_and_stress
 
   validate:
