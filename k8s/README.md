@@ -170,7 +170,11 @@ Kubernetes will automatically generate a new Secret version and trigger a rollin
 
 ## GitOps with Argo CD (Oracle Cloud cluster)
 
-`k8s/overlays/oracle` is deployed by Argo CD, with Git as the source of truth:
+`k8s/overlays/oracle` is deployed by Argo CD, with Git as the source of truth.
+Unlike `base`, it runs the engine and the web UI as two Deployments
+(`logai-engine`, `logai-web`) sharing the ReadWriteMany PVC `logai-data-pvc`,
+which is how the Oracle cluster was first set up; names and selectors match
+those objects so Argo CD adopts them in place.
 
 1. A pull request into `master` runs the CI in `.github/workflows/ci-cd.yml`:
    tests, manifest checks, and an arm64 image build with a Trivy scan.

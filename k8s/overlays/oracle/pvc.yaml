@@ -1,0 +1,18 @@
+# Matches the PVC already bound on the cluster. accessModes, storageClassName
+# and volumeName cannot change after creation, so they must stay as they are.
+# Argo CD never deletes it: not when it leaves Git (Prune=false) and not when
+# the Application is deleted (Delete=false).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logai-data-pvc
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: logai-data-storage
+  volumeName: logai-data-pv
+  resources:
+    requests:
+      storage: 10Gi
