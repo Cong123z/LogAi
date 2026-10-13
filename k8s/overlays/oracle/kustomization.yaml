@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# GitOps overlay for the Oracle Cloud cluster. Argo CD renders this directory
+# (see k8s/argocd/logai-application.yaml). Everything here is safe to commit:
+#   params.env        non-secret settings -> ConfigMap `logai-config`
+#   Secret logai-env  credentials, created by hand in the cluster (never in Git)
+#   ConfigMap logai-embedding  created by hand from embedding-config.example.yaml
+namespace: logai
+
+resources:
+  - ../../base
+
+configMapGenerator:
+  - name: logai-config
+    envs:
+      - params.env
+
+# The CI workflow rewrites newTag to sha-<commit> after each image it publishes
+# on master. Argo CD sees that commit and rolls the Deployment.
+images:
+  - name: logai-engine
+    newName: ghcr.io/cong123z/logai
+    newTag: latest
+
+patches:
+  - path: patch-deployment-env.yaml
+  - path: patch-pvc-keep.yaml

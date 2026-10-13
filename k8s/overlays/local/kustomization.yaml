@@ -1,10 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+# Manual deployment driven by one file: copy .env.example to .env in this
+# directory, edit it, then run `kubectl apply -k k8s/overlays/local`.
 resources:
-  - pvc.yaml
-  - deployment.yaml
-  - service.yaml
+  - ../../base
 
 # 1. Generates the Kubernetes Secret `logai-env` injected into all containers.
 secretGenerator:

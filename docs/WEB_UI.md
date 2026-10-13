@@ -183,7 +183,7 @@ of these synchronization states:
 ## Data sources
 
 **Connection.** Set the Elasticsearch endpoint (several nodes of one cluster
-separated by commas), username, password and **Verify TLS certificate** (off for
+separated by commas), username, password and the **Verify TLS certificate** switch (off for
 a self-signed certificate), then **Save connection**. The engine reconnects
 within about a second, with no restart, and the status line shows `Connected to
 …` or the Elasticsearch error (e.g. `401`). The web never connects to

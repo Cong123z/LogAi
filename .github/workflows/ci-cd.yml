@@ -1,0 +1,200 @@
+name: CI/CD
+
+# PR into master  -> test, validate, build + scan the arm64 image (nothing is published)
+# Push to master  -> the same, then publish to GHCR and point the Oracle overlay at the new tag;
+#                    Argo CD in the cluster picks up that commit and deploys it.
+on:
+  push:
+    branches: [master]
+    # A docs-only change should not rebuild and restart the engine.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Cancel superseded PR runs, but never cut a master run off mid-deploy.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  # Lowercase GHCR path; must match newName in k8s/overlays/oracle/kustomization.yaml.
+  IMAGE_NAME: ghcr.io/cong123z/logai
+
+# Every third-party action is pinned to a full commit SHA (version in the comment).
+# Tags can be moved: in March 2026 most aquasecurity/trivy-action tags were
+# force-pushed to credential-stealing code. Bump SHAs deliberately, e.g. with Dependabot.
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11" # same as the Dockerfile base image
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+
+      # The throughput test asserts >= 4,900 logs/s, which depends on the
+      # hardware. Shared CI runners are slower and noisy, so it is skipped here.
+      - name: Run tests
+        run: >
+          pytest tests -q
+          --deselect tests/test_realtime_crash_load_and_perf.py::TestRealtimeCrashLoadAndPerformance::test_high_load_throughput_and_stress
+
+  validate:
+    name: Validate Compose and Kubernetes manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate docker-compose.yml
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Render Kustomize overlays
+        run: |
+          kubectl kustomize k8s/overlays/oracle > /dev/null
+          cp k8s/overlays/local/.env.example k8s/overlays/local/.env
+          kubectl kustomize k8s/overlays/local > /dev/null
+
+  image:
+    name: Build, scan and publish arm64 image
+    needs: [test, validate]
+    # The Oracle nodes are Ampere (arm64). A native arm64 runner builds the
+    # hdbscan extension far faster than QEMU emulation; it is free for public repos.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # sha-<full commit>: the immutable tag that gets deployed.
+          # latest: convenience only (the Deployment uses IfNotPresent, so it never rolls on it).
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build image (local)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          push: false
+          tags: logai-engine:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: docker run --rm logai-engine:ci python -c "import logai; print('import ok')"
+
+      # Fails the build only on CRITICAL vulnerabilities that already have a fix.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: logai-engine:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Rebuilds from the cache just filled, so this is quick.
+      - name: Push image to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  deploy:
+    name: Point the Oracle overlay at the new image
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Add "Required reviewers" to this environment (Settings > Environments)
+    # to pause here for a manual approval before each deploy.
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      OVERLAY: k8s/overlays/oracle/kustomization.yaml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0 # full history, to compare with the commit already deployed
+
+      - name: Set newTag to this commit
+        id: bump
+        run: |
+          current=$(sed -nE 's/^[[:space:]]*newTag:[[:space:]]*sha-([0-9a-f]{40}).*$/\1/p' "$OVERLAY")
+          if [ -n "$current" ] && [ "$current" != "$GITHUB_SHA" ] \
+             && git merge-base --is-ancestor "$GITHUB_SHA" "$current"; then
+            echo "A newer commit ($current) is already deployed; skipping."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sed -i -E "s/^([[:space:]]*newTag:).*/\1 sha-${GITHUB_SHA}/" "$OVERLAY"
+          grep -q "newTag: sha-${GITHUB_SHA}" "$OVERLAY"
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A push made with GITHUB_TOKEN does not start another workflow run, so this cannot loop.
+      - name: Commit and push
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "deploy(oracle): logai sha-${GITHUB_SHA::7} [skip ci]"
+          for attempt in 1 2 3; do
+            git pull --rebase origin master && git push origin HEAD:master && exit 0
+            sleep 5
+          done
+          exit 1

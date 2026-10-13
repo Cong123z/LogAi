@@ -1,0 +1,9 @@
+# The PVC holds the registries, checkpoints and trained model. Argo CD must
+# never delete it: not when it drops out of Git (Prune=false) and not when the
+# Application itself is deleted (Delete=false).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logai-data-pvc
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false

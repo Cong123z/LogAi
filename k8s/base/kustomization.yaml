@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Plain manifests shared by every environment. They read no local files, so
+# they render anywhere (including inside Argo CD). Environment-specific values
+# (image, config, secrets) are added by the overlays:
+#   overlays/local   one k8s/overlays/local/.env file, applied by hand
+#   overlays/oracle  GitOps: Argo CD on the Oracle Cloud cluster
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml

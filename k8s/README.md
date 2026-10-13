@@ -2,7 +2,18 @@
 
 This directory contains Kubernetes manifests for deploying the LogAI Engine stack.
 
-Just like Docker Compose uses `.env`, Kubernetes here uses **`k8s/.env`**! You only have to edit **one single file**.
+```
+k8s/
+├── base/                 shared Deployment, Services, PVC (no local files needed)
+├── overlays/
+│   ├── local/            manual deploy from one .env file (Quick Start below)
+│   └── oracle/           GitOps deploy with Argo CD (see "GitOps with Argo CD")
+├── argocd/               the Argo CD Application for overlays/oracle
+├── training-job.yaml     optional one-off training Job
+└── embedding-config.example.yaml
+```
+
+For a manual deploy, Kubernetes uses **`k8s/overlays/local/.env`**, just like Docker Compose uses `.env`. You only have to edit **one single file**.
 
 ---
 
@@ -50,14 +61,14 @@ The deployment runs **both the Realtime Engine and the Template Explorer Web UI 
 
 ```bash
 # 1. Copy the example file
-cp k8s/.env.example k8s/.env
+cp k8s/overlays/local/.env.example k8s/overlays/local/.env
 
 # 2. Edit with your settings
-nano k8s/.env
+nano k8s/overlays/local/.env
 ```
 
 Every key (image, Elasticsearch, ports, storage size, embedding API key, LLM)
-is listed with comments in `k8s/.env.example`.
+is listed with comments in `k8s/overlays/local/.env.example`.
 
 `LOGAI_ES_*` are only defaults. The Elasticsearch endpoint, username, password
 and TLS check can also be set on the web **Data sources** page; that overrides
@@ -117,10 +128,10 @@ Existing groups never change on a retrain: new templates are only added to them 
 Deploy everything using Kustomize (native to `kubectl`):
 
 ```bash
-kubectl apply -k k8s/
+kubectl apply -k k8s/overlays/local
 ```
 
-> **How it works:** `kubectl apply -k` automatically reads `k8s/.env`, creates a secure Kubernetes Secret `logai-env`, and injects it into the Pods!
+> **How it works:** `kubectl apply -k` automatically reads `k8s/overlays/local/.env`, creates a secure Kubernetes Secret `logai-env`, and injects it into the Pods!
 
 Verify the Pod is running:
 ```bash
@@ -149,8 +160,55 @@ kubectl port-forward svc/logai-metrics 9108:9108
 
 ## Updating Environment Variables
 
-Whenever you edit `k8s/.env`, simply re-run:
+Whenever you edit `k8s/overlays/local/.env`, simply re-run:
 ```bash
-kubectl apply -k k8s/
+kubectl apply -k k8s/overlays/local
 ```
 Kubernetes will automatically generate a new Secret version and trigger a rolling update of the Pods with zero manual restarts required!
+
+---
+
+## GitOps with Argo CD (Oracle Cloud cluster)
+
+`k8s/overlays/oracle` is deployed by Argo CD, with Git as the source of truth:
+
+1. A pull request into `master` runs the CI in `.github/workflows/ci-cd.yml`:
+   tests, manifest checks, and an arm64 image build with a Trivy scan.
+2. On merge, CI pushes `ghcr.io/cong123z/logai:sha-<commit>` and commits that
+   tag into `overlays/oracle/kustomization.yaml`.
+3. Argo CD sees the commit and syncs the namespace `logai`. The `Recreate`
+   strategy stops the old pod before the new one mounts the PVC, and the engine
+   resumes from its checkpoint.
+4. To roll back, `git revert` the deploy commit.
+
+What lives where:
+
+| Setting | Where | In Git? |
+| --- | --- | --- |
+| Image tag | `overlays/oracle/kustomization.yaml` (`images:`) | Yes, written by CI |
+| Non-secret config | `overlays/oracle/params.env` → ConfigMap `logai-config` | Yes |
+| Credentials (`LOGAI_ES_USER`, `LOGAI_ES_PASSWORD`, `LOGAI_EMBEDDING_API_KEY`, `LOGAI_LLM_API_KEY`) | Secret `logai-env` | **No**, created by hand |
+| Embedding endpoint | ConfigMap `logai-embedding` | No, created by hand |
+
+One-time setup, in order:
+
+```bash
+# 1. Credentials (only the keys you use; an empty Secret is fine)
+kubectl create secret generic logai-env -n logai \
+  --from-literal=LOGAI_ES_USER=... --from-literal=LOGAI_ES_PASSWORD=...
+
+# 2. Embedding ConfigMap, if not already in the namespace
+kubectl apply -n logai -f k8s/embedding-config.yaml
+
+# 3. After CI has published a first image on master:
+kubectl apply -n argocd -f k8s/argocd/logai-application.yaml
+```
+
+The Application starts with manual sync. Review the diff in Argo CD, sync once,
+then enable `automated` in `k8s/argocd/logai-application.yaml`. The PVC carries
+`Prune=false,Delete=false`, so Argo CD never deletes it.
+
+The GHCR package must be pullable by the cluster: make it public (repository
+Packages settings) or add an `imagePullSecret`. Prefer the web UI **Retrain**
+page over `training-job.yaml` on this cluster; the Job still references the local
+`logai-engine:latest` image.
