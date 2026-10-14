@@ -97,6 +97,23 @@ function rtStatusText(data) {
   return parts.join(' ');
 }
 
+// "+54 templates: 18 joined existing groups · 36 in 11 new groups". Templates
+// the live engine placed between runs never reach the retrain's lineage, so
+// "joined" is the growth since the previous run minus the new-group members.
+function rtChanges(run) {
+  const l = run.lineage;
+  if (!l) return '—';
+  const inNew = `${l.new_group_templates} in ${l.new_groups} new groups`;
+  if (run.templates == null || run.prevTemplates == null) {
+    return `${l.added_templates} joined existing groups · ${inNew}`;
+  }
+  const growth = run.templates - run.prevTemplates;
+  const joined = growth - l.new_group_templates;
+  // Pruned ungrouped templates can make the growth smaller than the parts.
+  if (joined < 0) return `${growth >= 0 ? '+' : ''}${growth} templates · ${inNew}`;
+  return `+${growth} templates: ${joined} joined existing groups · ${inNew}`;
+}
+
 function renderRetrain(data) {
   rt.data = data;
   if (!rt.dirty) rtFillForm(data);
@@ -106,14 +123,20 @@ function renderRetrain(data) {
   const runButton = document.getElementById('rt-run-btn');
   runButton.disabled = busy;
   runButton.title = busy ? 'A retrain is already running or waiting to start' : '';
-  const history = [...((data.status || {}).history || [])].reverse();
+  // Template total of the previous run that reported one, so a row can show
+  // what changed since then (the live engine adds templates between runs).
+  let prevTemplates = null;
+  const history = ((data.status || {}).history || []).map(run => {
+    const row = {...run, prevTemplates};
+    if (run.templates != null) prevTemplates = run.templates;
+    return row;
+  }).reverse();
   const badge = result => ({succeeded: 'badge-known', missed: 'badge-warn'})[result] || 'badge-red';
   const resultLabel = run => run.result === 'failed'
     ? `${run.interrupted ? 'interrupted' : 'failed'}${run.rolled_back ? ' · rolled back' : ''}`
     : run.result;
   document.getElementById('rt-history-tbody').innerHTML = history.length ? history.map(run => {
-    const l = run.lineage;
-    const ids = l ? `+${l.added_templates} templates into ${l.grown_groups} groups · ${l.new_groups} new groups` : '—';
+    const ids = rtChanges(run);
     return `<tr>
       <td>${escapeHtml(rtWhen(run.started_at, data.schedule.timezone))}</td>
       <td>${escapeHtml(run.trigger === 'manual' ? 'Manual' : 'Schedule')}</td>
