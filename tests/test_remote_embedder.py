@@ -135,6 +135,21 @@ class TestRemoteEmbedder(unittest.TestCase):
             TemplateEmbedder(config, session=session).embed_one("hello")
         self.assertEqual(len(session.calls), 1)
 
+    def test_http_error_carries_server_body_and_batch(self):
+        response = FakeResponse(413, None)
+        response.text = '{"error":"inputs must have less than 8192 tokens"}'
+        config = EmbeddingConfig(
+            endpoint="http://bge-m3:8080/embed", api_format="tei", dimension=2,
+            max_retries=0,
+        )
+
+        with self.assertRaises(EmbeddingServiceError) as ctx:
+            TemplateEmbedder(config, session=FakeSession([response])).embed(["a", "bbb"])
+        message = str(ctx.exception)
+        self.assertIn("HTTP 413", message)
+        self.assertIn("less than 8192 tokens", message)
+        self.assertIn("batch 1/1 failed (2 texts, longest 3 chars)", message)
+
     def test_invalid_dimension_is_rejected(self):
         session = FakeSession([FakeResponse(200, [[1.0, 2.0, 3.0]])])
         config = EmbeddingConfig(
