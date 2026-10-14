@@ -16,6 +16,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from collections import deque
 from typing import Any, Optional, Tuple
 
@@ -91,6 +92,44 @@ logger = logging.getLogger("logai.realtime")
 # Recent extracted template parameters kept per (service, group) window as
 # evidence for the LLM incident analysis.
 RECENT_PARAMS_PER_WINDOW = 200
+
+
+class _LogTail(logging.Handler):
+    """The last WARNING+ log lines of a retrain, from any module, so the
+    Retrain page shows what the container log says (ES retries, embedding
+    failures, ...) without each step reporting it."""
+
+    def __init__(self, size: int = 30):
+        super().__init__(logging.WARNING)
+        self._records: deque = deque(maxlen=size)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            exc = record.exc_info[1] if record.exc_info else None
+            if exc is not None:
+                message += f" | {type(exc).__name__}: {exc}"
+            self._records.append({
+                "ts": record.created, "level": record.levelname,
+                "logger": record.name, "message": message[:500],
+            })
+        except Exception:  # noqa: BLE001 - logging must never raise
+            self.handleError(record)
+
+    def lines(self) -> list:
+        with self.lock:  # emit() runs under the same lock, on any thread
+            return list(self._records)
+
+
+def _raised_where(exc: BaseException) -> Optional[str]:
+    """`collector/es_collector.py:301 _search`: the innermost frame in logai/."""
+    marker = f"{os.sep}logai{os.sep}"
+    frames = [f for f in traceback.extract_tb(exc.__traceback__) if marker in f.filename]
+    if not frames:
+        return None
+    frame = frames[-1]
+    return f"{frame.filename.rsplit(marker, 1)[1]}:{frame.lineno} {frame.name}"
+
 
 class RealtimePipeline:
     def __init__(self, config: AppConfig):
@@ -1065,7 +1104,10 @@ class RealtimePipeline:
         """Pause, train in this process, then re-exec so every registry, the
         model and Drain3 state reload from disk. Logs that arrive meanwhile are
         read from the per-index checkpoint after the restart."""
-        from logai.training.train_pipeline import run_training_from_elasticsearch
+        from logai.training.train_pipeline import (
+            TrainingProgress,
+            run_training_from_elasticsearch,
+        )
 
         status = self.retrain_store.load_status()
         started = time.time()
@@ -1087,15 +1129,35 @@ class RealtimePipeline:
                     run["trigger"], run["lookback_hours"], run["max_docs"])
 
         done = threading.Event()
+        log_tail = _LogTail()
+        written_at = 0.0
+
+        def on_progress(new_step: bool) -> None:
+            # Runs on this thread, the only one that touches `progress`.
+            # Per-batch updates are written at most every 2 s (the page polls
+            # every 2 s); a new step is written at once.
+            nonlocal written_at
+            with status_lock:
+                if not new_step and time.time() - written_at < 2:
+                    return
+                written_at = time.time()
+                status["progress"] = {"steps": progress.snapshot(), "log": log_tail.lines()}
+                self.retrain_store.write_status(status)
+
+        progress = TrainingProgress(on_progress)
 
         def heartbeat() -> None:  # keeps healthcheck.py ready while training
             while not done.wait(10):
                 with status_lock:
                     status["heartbeat_at"] = time.time()
+                    if "progress" in status:
+                        status["progress"]["log"] = log_tail.lines()
                     self.retrain_store.write_status(status)
 
         threading.Thread(target=heartbeat, name="retrain-heartbeat", daemon=True).start()
+        logging.getLogger().addHandler(log_tail)
         try:
+            progress.step("prepare")
             if self._pending_predictions or self._pending_cursors:
                 self._flush_batch()
             self._save_template_activity(force=True)
@@ -1110,15 +1172,41 @@ class RealtimePipeline:
                 self.config,
                 lookback_seconds=run["lookback_hours"] * 3600,
                 max_docs=run["max_docs"],
+                progress=progress,
             )
             run.update(result="succeeded", **self._retrain_summary(started))
         except Exception as exc:  # noqa: BLE001 - recorded, then the engine restarts
-            logger.exception("Retrain failed; restoring the artifacts from before it")
-            run.update(result="failed", error=str(exc)[:500], rolled_back=self._restore())
+            # Whatever step raised: record it, the error and where it came from.
+            failed = progress.current
+            logger.exception(
+                "Retrain failed at %s; restoring the artifacts from before it",
+                failed["label"] if failed else "start",
+            )
+            run.update(
+                result="failed", error=str(exc)[:1000], error_type=type(exc).__name__,
+                where=_raised_where(exc),
+                failed_step={"key": failed["key"], "label": failed["label"]} if failed else None,
+                detail=dict(failed["detail"]) if failed else {},
+            )
+            run["rolled_back"] = self._restore()
         finally:
             done.set()
+            logging.getLogger().removeHandler(log_tail)
+            progress.finish()
             run["duration_seconds"] = time.time() - started
+            run["steps"] = [
+                {
+                    "key": s["key"], "label": s["label"],
+                    "duration_seconds": s["finished_at"] - s["started_at"],
+                    "detail": s["detail"],
+                }
+                for s in progress.snapshot()
+            ]
+            log = log_tail.lines()
+            if log:  # warnings and errors only; empty on a clean run
+                run["log"] = log
             with status_lock:
+                status.pop("progress", None)
                 status.update(
                     state=run["result"], finished_at=time.time(),
                     error=run.get("error"), heartbeat_at=time.time(),

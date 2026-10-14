@@ -271,13 +271,14 @@ class TestTrainingLevel(unittest.TestCase):
     def test_rebuild_keeps_most_severe_and_handles_legacy_records(self):
         from logai.models import ParsedEvent, RawLog
         from logai.storage.training_event_index import TrainingEventIndex
-        from logai.training.train_pipeline import TrainingPipeline
+        from logai.training.train_pipeline import TrainingPipeline, TrainingProgress
 
         cfg = AppConfig()
         cfg.storage.base_dir = self.tmp
         cfg.storage.model_dir = f"{self.tmp}/models"
         cfg.drain3.persistence_path = f"{self.tmp}/drain3.bin"
         pipeline = TrainingPipeline.__new__(TrainingPipeline)  # skip heavy __init__
+        pipeline.progress = TrainingProgress()
         pipeline.config = cfg
         pipeline.template_registry = TemplateRegistry(cfg.storage)
         pipeline.grouping_store = GroupingOverrideStore.from_config(cfg)
@@ -309,13 +310,14 @@ class TestTrainingLevel(unittest.TestCase):
         """A training_event_index.jsonl written by the previous schema (mid-resume)
         has no `level` key; those templates default to INFO without crashing."""
         from logai.storage.training_event_index import TrainingEventIndex
-        from logai.training.train_pipeline import TrainingPipeline
+        from logai.training.train_pipeline import TrainingPipeline, TrainingProgress
 
         cfg = AppConfig()
         cfg.storage.base_dir = self.tmp
         cfg.storage.model_dir = f"{self.tmp}/models"
         cfg.drain3.persistence_path = f"{self.tmp}/drain3.bin"
         pipeline = TrainingPipeline.__new__(TrainingPipeline)
+        pipeline.progress = TrainingProgress()
         pipeline.config = cfg
         pipeline.template_registry = TemplateRegistry(cfg.storage)
         pipeline.grouping_store = GroupingOverrideStore.from_config(cfg)

@@ -17,7 +17,7 @@ from array import array
 from collections import OrderedDict, defaultdict
 from datetime import datetime, timezone
 from itertools import islice
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple, Union
 
 import numpy as np
 
@@ -93,9 +93,64 @@ class _RecentIds:
             self._ids.popitem(last=False)
 
 
+class TrainingProgress:
+    """The steps of one training run, for the web Retrain page.
+
+    `on_change(new_step)` is called after every change, with `new_step` true
+    when a step starts; the in-process retrain writes `snapshot()` into
+    `retrain_status.json`. Without a callback it only records.
+    """
+
+    LABELS = {
+        "prepare": "Pausing the engine and backing up artifacts",
+        "range": "Finding the training range",
+        "read": "Reading and parsing logs",
+        "templates": "Merging the template registry",
+        "embed": "Embedding new templates",
+        "cluster": "Grouping new templates",
+        "groups": "Building groups",
+        "model": "Training the anomaly model",
+        "publish": "Publishing registries",
+    }
+
+    def __init__(self, on_change: Optional[Callable[[bool], None]] = None):
+        self.steps: List[Dict[str, Any]] = []
+        self._on_change = on_change
+
+    def step(self, key: str, **detail: Any) -> None:
+        self.finish()
+        self.steps.append({
+            "key": key, "label": self.LABELS[key], "started_at": time.time(),
+            "finished_at": None, "detail": detail,
+        })
+        if self._on_change is not None:
+            self._on_change(True)
+
+    def detail(self, **detail: Any) -> None:
+        if not self.steps:
+            return
+        self.steps[-1]["detail"].update(detail)
+        if self._on_change is not None:
+            self._on_change(False)
+
+    def finish(self) -> None:
+        if self.steps and self.steps[-1]["finished_at"] is None:
+            self.steps[-1]["finished_at"] = time.time()
+
+    @property
+    def current(self) -> Optional[Dict[str, Any]]:
+        return self.steps[-1] if self.steps else None
+
+    def snapshot(self) -> List[Dict[str, Any]]:
+        return [{**s, "detail": dict(s["detail"])} for s in self.steps]
+
+
 class TrainingPipeline:
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, progress: Optional[TrainingProgress] = None):
         self.config = config
+        self.progress = progress or TrainingProgress()
+        # Documents the read step should fetch (the page's progress bar).
+        self.read_target: Optional[int] = None
         # Bulk parsing: persist Drain3 once per batch (see _stream_parse)
         # instead of re-serialising the whole tree on every template change.
         self.parser = Drain3Parser(config.drain3, autosave=False)
@@ -181,6 +236,7 @@ class TrainingPipeline:
             raise
         template_to_group = self._cluster_templates()
         logger.info("Phase 5: Applying grouping overrides and building groups + centroids...")
+        self.progress.step("groups")
         t_phase5 = time.time()
         template_states = {
             state.template_id: state for state in self.template_registry.all_templates()
@@ -204,6 +260,11 @@ class TrainingPipeline:
             {group.group_id: group for group in self.group_registry.all_groups()},
         )
         results = resolution.results.values()
+        self.progress.detail(
+            groups=len(groups),
+            singletons=sum(1 for group in groups.values() if len(group.template_ids) == 1),
+            ungrouped=len(template_states) - len(template_to_group),
+        )
         logger.info(
             "Phase 5 complete in %.2fs: Built %d groups with centroids (%d singleton) "
             "from %d templates; overrides applied=%d unresolved=%d; %d templates without a group",
@@ -221,6 +282,8 @@ class TrainingPipeline:
         # generation succeeds. A failed training run therefore never reports
         # the grouping revision as applied.
         logger.info("Phase 8: Publishing template registry, groups and centroids...")
+        # Also covers documentation matching and the final save (Phases 9-10).
+        self.progress.step("publish", templates=len(template_states), groups=len(groups))
         t_phase8 = time.time()
         self.template_registry.flush()
         self.group_registry.replace_all(groups, centroids)
@@ -325,6 +388,8 @@ class TrainingPipeline:
                 "Training pipeline Phase 1: streaming %d in-memory historical logs",
                 len(historical_logs),
             )
+            if self.read_target is None:
+                self.read_target = len(historical_logs)
             sorted_logs = sorted(historical_logs, key=lambda r: r.timestamp)
             batch_size = getattr(self.config.training, "batch_size", 2000)
             batch_stream: Iterable[Any] = (
@@ -337,6 +402,10 @@ class TrainingPipeline:
             logger.info("Training pipeline Phase 1: streaming batches from generator")
             batch_stream = historical_logs
 
+        self.progress.step(
+            "read", fetched=0, target=self.read_target, parsed=0, skipped_dup=0,
+            templates=self.parser.cluster_count(),
+        )
         total_batches = 0
         parsed_count = 0
         fetched_count = 0
@@ -391,6 +460,14 @@ class TrainingPipeline:
 
             elapsed = time.time() - t_phase1
             last_ts = max(raw.timestamp for raw in batch)
+            self.progress.detail(
+                fetched=fetched_count,
+                parsed=parsed_count,
+                skipped_dup=fetched_count - parsed_count,
+                templates=self.parser.cluster_count(),
+                last_event_ts=last_ts,
+                rate=round(fetched_count / elapsed) if elapsed > 0 else 0,
+            )
             logger.info(
                 "Phase 1 batch %d: fetched=%d parsed=%d skipped_dup=%d | total fetched=%d parsed=%d | "
                 "last_event=%s | clusters=%d drain3_messages=%d state=%s event_index=%s | "
@@ -433,6 +510,7 @@ class TrainingPipeline:
         dropped after ``training.template_ttl_days`` unseen.
         """
         logger.info("Phase 2: Merging template registry with event index...")
+        self.progress.step("templates")
         t_phase2 = time.time()
         existing = {s.template_id: s for s in self.template_registry.all_templates()}
         self._frozen = {
@@ -507,6 +585,10 @@ class TrainingPipeline:
             if old is not None and old.template_text != state.template_text:
                 self.template_registry.delete(template_id, flush=False)
         self.template_registry.replace_all(list(states.values()))
+        self.progress.detail(
+            templates=len(states), seen_in_window=seen_in_window,
+            kept=len(states) - seen_in_window, pruned=pruned,
+        )
         logger.info(
             "Phase 2 complete in %.2fs: %d templates (%d seen in window, %d kept from "
             "previous runs, %d pruned after %s days unseen)",
@@ -574,6 +656,7 @@ class TrainingPipeline:
             len(todo),
             len(templates) - len(todo),
         )
+        self.progress.step("embed", to_embed=len(todo), reused=len(templates) - len(todo))
         t_phase3 = time.time()
         if todo:
             embeddings = self.embedder.embed([t.template_text for t in todo])
@@ -600,9 +683,10 @@ class TrainingPipeline:
             "Phase 4: %d templates keep their group; placing %d without a group...",
             len(template_to_group), len(candidates),
         )
+        self.progress.step("cluster", kept_group=len(template_to_group), to_place=len(candidates))
         t_phase4 = time.time()
 
-        added: Dict[str, List[str]] = defaultdict(list)
+        added:Dict[str, List[str]] = defaultdict(list)
         centroids = self.group_registry.all_centroids()
         rest: List[str] = []
         for tid in candidates:
@@ -646,6 +730,11 @@ class TrainingPipeline:
             "added": {gid: sorted(tids) for gid, tids in sorted(added.items())},
             "new": new,
         }
+        self.progress.detail(
+            joined_existing=sum(len(t) for t in added.values()),
+            new_groups=len(new),
+            new_group_templates=len(rest),
+        )
         logger.info(
             "Phase 4 complete in %.2fs: %d templates added to %d existing groups; "
             "%d new groups from %d templates",
@@ -696,8 +785,10 @@ class TrainingPipeline:
         global Isolation Forest, in memory that does not grow with the events
         beyond 8 bytes each (see `bucket_window_timestamps`)."""
         logger.info("Phase 6: Bucketing event timestamps by (service, group)...")
+        self.progress.step("model")
         t_phase6 = time.time()
         windows = bucket_window_timestamps(self._valid_records(), template_to_group)
+        self.progress.detail(windows=len(windows))
         logger.info(
             "Phase 6 complete in %.2fs: %d events in %d (service, group) windows",
             time.time() - t_phase6,
@@ -722,8 +813,10 @@ class TrainingPipeline:
             len(kept),
             sample_size,
         )
+        self.progress.detail(scored=scored, kept=len(kept), sample_size=sample_size)
         t_fit = time.time()
         trained = self.anomaly_model.train(kept)
+        self.progress.detail(fitted=bool(trained))
         if not trained:
             logger.warning(
                 "Total feature vectors (%d) < min_training_samples (%d) - global IF model was not fitted.",
@@ -842,8 +935,9 @@ def run_training_from_elasticsearch(
     lookback_seconds: Optional[float] = None,
     max_docs: Optional[int] = None,
     batch_size: Optional[int] = None,
+    progress: Optional[TrainingProgress] = None,
 ) -> None:
-    lookback = config.training.lookback_seconds if lookback_seconds is None else lookback_seconds
+    lookback =config.training.lookback_seconds if lookback_seconds is None else lookback_seconds
     total_docs = config.training.max_docs if max_docs is None else max_docs
     chunk_size = config.training.batch_size if batch_size is None else batch_size
 
@@ -871,6 +965,10 @@ def run_training_from_elasticsearch(
     end_ts = time.time()
     start_ts = end_ts - lookback
 
+    pipeline = TrainingPipeline(config, progress)
+    pipeline.progress.step(
+        "range", index=config.elasticsearch.index, start_ts=start_ts, end_ts=end_ts,
+    )
     initial_search_after = training_checkpoint.get_search_after()
     if initial_search_after is None and total_docs > 0:
         # Keep the newest max_docs, not the oldest; a resume follows its cursor.
@@ -878,7 +976,6 @@ def run_training_from_elasticsearch(
         # re-read page boundaries also count toward max_docs, and would make
         # the stream stop just before the newest logs.
         start_ts = collector.newest_start(start_ts, end_ts, total_docs - total_docs // 100)
-    pipeline = TrainingPipeline(config)
 
     # On resume, events already in the durable index count towards max_docs;
     # otherwise every restart would fetch another full max_docs window.
@@ -886,6 +983,11 @@ def run_training_from_elasticsearch(
         sum(1 for _ in pipeline.event_index.records()) if initial_search_after else 0
     )
     remaining_docs = max(total_docs - already_indexed, 0)
+    pipeline.read_target = remaining_docs
+    pipeline.progress.detail(
+        start_ts=start_ts, resumed=initial_search_after is not None,
+        already_indexed=already_indexed,
+    )
     # The event index takes ~230 B/event (measured on real logs) on the volume
     # the engine also writes to: refuse up front instead of filling it minutes
     # into the run.

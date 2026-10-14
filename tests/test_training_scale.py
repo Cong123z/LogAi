@@ -171,7 +171,8 @@ class TestLogsFlow(unittest.TestCase):
         model = MagicMock()
         model.train.return_value = True
         fake = SimpleNamespace(
-            config=config, anomaly_model=model, _valid_records=self.valid_records
+            config=config, anomaly_model=model, _valid_records=self.valid_records,
+            progress=_tp().TrainingProgress(),
         )
         with self.assertLogs("logai.training", "INFO") as logs:
             _tp().TrainingPipeline._train_anomaly_model(fake, {"T1": "G1"})

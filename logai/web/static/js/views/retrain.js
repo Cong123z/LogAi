@@ -84,14 +84,17 @@ const rtDuration = seconds => {
 function rtStatusText(data) {
   const st = data.status || {};
   if (data.engine_state === 'retraining') {
-    return `Retraining (${st.trigger || 'manual'}) for ${rtDuration(Date.now() / 1000 - st.started_at)}… The engine restarts when it finishes.`;
+    const steps = (st.progress || {}).steps || [];
+    const step = steps.length ? ` · now: ${steps[steps.length - 1].label}` : '';
+    return `Retraining (${st.trigger || 'manual'}) for ${rtDuration(Date.now() / 1000 - st.started_at)}${step}… The engine restarts when it finishes.`;
   }
   const parts = [];
   if (data.engine_state === 'engine_unavailable') parts.push('The engine is not running (no recent heartbeat).');
   if (data.run_pending) parts.push('Retrain requested; waiting for the engine to start it…');
   const last = (st.history || [])[st.history ? st.history.length - 1 : 0];
   if (last && last.result === 'missed') parts.push(`The retrain scheduled for ${rtWhen(last.started_at, data.schedule.timezone)} was missed: the engine was not running.`);
-  else if (st.state === 'failed') parts.push(`Last retrain failed: ${st.error || 'unknown error'}${last && last.rolled_back && !/restored/.test(st.error || '') ? ' (previous version restored)' : ''}.`);
+  else if (st.state === 'failed' && last && last.failed_step) parts.push(`Last retrain failed at ${last.failed_step.label}${last.rolled_back ? ' (previous version restored)' : ''}.`);
+  else if (st.state === 'failed') parts.push(`Last retrain failed:${st.error || 'unknown error'}${last && last.rolled_back && !/restored/.test(st.error || '') ? ' (previous version restored)' : ''}.`);
   else if (st.state === 'succeeded') parts.push(`Last retrain succeeded ${rtWhen(st.finished_at, data.schedule.timezone)}.`);
   parts.push(data.schedule.enabled ? `Next retrain: ${rtWhen(data.next_run_at, data.schedule.timezone)}.` : 'Automatic retrain is off.');
   return parts.join(' ');
@@ -112,6 +115,104 @@ function rtChanges(run) {
   // Pruned ungrouped templates can make the growth smaller than the parts.
   if (joined < 0) return `${growth >= 0 ? '+' : ''}${growth} templates · ${inNew}`;
   return `+${growth} templates: ${joined} joined existing groups · ${inNew}`;
+}
+
+// One line per training step, from the counts the engine reports for it.
+const rtN = n => formatCount(n || 0);
+const rtTime = ts => new Date(ts * 1000).toLocaleString(undefined, {dateStyle: 'short', timeStyle: 'medium'});
+const RT_STEP_TEXT = {
+  range: d => [d.index, d.start_ts && `from ${rtTime(d.start_ts)}`,
+    d.resumed && `resuming, ${rtN(d.already_indexed)} logs already read`].filter(Boolean).join(' · '),
+  read: d => [`${rtN(d.fetched)}${d.target ? ` of ${rtN(d.target)}` : ''} logs`,
+    `${rtN(d.templates)} templates`, d.skipped_dup && `${rtN(d.skipped_dup)} duplicates skipped`,
+    d.rate && `${rtN(d.rate)} logs/s`, d.last_event_ts && `logs up to ${rtTime(d.last_event_ts)}`].filter(Boolean).join(' · '),
+  templates: d => d.templates == null ? '' : `${rtN(d.templates)} templates: ${rtN(d.seen_in_window)} seen in the window, ${rtN(d.kept)} kept from earlier, ${rtN(d.pruned)} pruned`,
+  embed: d => `${rtN(d.to_embed)} new or changed templates to embed · ${rtN(d.reused)} reused`,
+  cluster: d => d.new_groups == null ? `${rtN(d.to_place)} templates without a group to place`
+    : `${rtN(d.joined_existing)} joined existing groups · ${rtN(d.new_group_templates)} formed ${rtN(d.new_groups)} new groups`,
+  groups: d => d.groups == null ? '' : `${rtN(d.groups)} groups (${rtN(d.singletons)} single-template) · ${rtN(d.ungrouped)} templates without a group`,
+  model: d => [d.windows != null && `${rtN(d.windows)} (service, group) windows`,
+    d.kept != null && `trained on ${rtN(d.kept)} of ${rtN(d.scored)} feature vectors`,
+    d.fitted === false && 'not fitted: too few vectors, the previous model is kept'].filter(Boolean).join(' · '),
+  publish: d => d.groups == null ? '' : `${rtN(d.templates)} templates · ${rtN(d.groups)} groups, then documentation matching`,
+};
+
+// Live steps (started_at/finished_at) and history steps (duration_seconds).
+function rtStepsHtml(steps, {running = false, failedKey = null} = {}) {
+  const now = Date.now() / 1000;
+  return `<ol class="rt-steps">${steps.map((s, i) => {
+    const last = i === steps.length - 1;
+    const state = last && running ? 'current' : last && failedKey === s.key ? 'failed' : 'done';
+    const seconds = s.duration_seconds ?? ((s.finished_at || now) - s.started_at);
+    const d = s.detail || {};
+    const text = (RT_STEP_TEXT[s.key] || (() => ''))(d);
+    let bar = '';
+    if (state === 'current' && s.key === 'read' && d.target) {
+      const left = d.rate ? Math.max(0, d.target - d.fetched) / d.rate : null;
+      bar = `<div class="rt-step-bar"><progress max="${d.target}" value="${Math.min(d.fetched || 0, d.target)}"></progress>
+        <span class="ins-meta">${Math.floor(100 * (d.fetched || 0) / d.target)}%${left != null ? ` · about ${rtDuration(left)} left` : ''}</span></div>`;
+    }
+    return `<li class="rt-step rt-step-${state}">
+      <span class="rt-step-label">${escapeHtml(s.label)}</span>
+      <span class="rt-step-time">${escapeHtml(rtDuration(seconds))}</span>
+      ${text ? `<div class="ins-meta">${escapeHtml(text)}</div>` : ''}${bar}
+    </li>`;
+  }).join('')}</ol>`;
+}
+
+// Warnings and errors the engine logged during the run (any module).
+function rtLogHtml(log, open) {
+  if (!log || !log.length) return '';
+  return `<details class="rt-log" data-rt-log${open ? ' open' : ''}>
+    <summary>Warnings and errors from the engine log (${log.length})</summary>
+    <ul>${log.map(line => `<li class="rt-log-${line.level === 'WARNING' ? 'warn' : 'error'}">
+      <span class="rt-log-meta">${escapeHtml(new Date(line.ts * 1000).toLocaleTimeString())} ${escapeHtml(line.level)} ${escapeHtml(line.logger)}</span>
+      ${escapeHtml(line.message)}</li>`).join('')}</ul>
+  </details>`;
+}
+
+function rtRunDetailHtml(run) {
+  const failed = run.result === 'failed';
+  let head;
+  if (failed) {
+    const where = run.failed_step ? `Failed at <strong>${escapeHtml(run.failed_step.label)}</strong>`
+      : run.interrupted ? 'Interrupted: the engine stopped while retraining' : 'Failed before training started';
+    head = `${where} after ${escapeHtml(rtDuration(run.duration_seconds))}`
+      + (run.error_type ? ` · ${escapeHtml(run.error_type)}` : '')
+      + (run.where ? ` · <code>${escapeHtml(run.where)}</code>` : '')
+      + (run.rolled_back ? ' · previous version restored' : '');
+  } else {
+    head = `Retrain ${escapeHtml(run.result)} in ${escapeHtml(rtDuration(run.duration_seconds))}`;
+  }
+  return `<div class="rt-run-head${failed ? ' rt-run-failed' : ''}">
+      <span>${head}</span>
+      <button type="button" class="btn" data-rt-close>Close</button>
+    </div>
+    ${failed && run.error ? `<pre class="rt-error">${escapeHtml(run.error)}</pre>` : ''}
+    ${run.steps && run.steps.length ? rtStepsHtml(run.steps, {failedKey: failed && run.failed_step ? run.failed_step.key : null}) : ''}
+    ${rtLogHtml(run.log, failed || rt.logOpen)}`;
+}
+
+// Live steps while retraining; otherwise the run picked in the history, or
+// the last run when it failed (until closed).
+function renderRetrainDetail(data) {
+  const st = data.status || {};
+  const history = st.history || [];
+  const $detail = document.getElementById('rt-run-detail');
+  let html = '';
+  if (data.engine_state === 'retraining' && st.progress) {
+    html = rtStepsHtml(st.progress.steps || [], {running: true}) + rtLogHtml(st.progress.log, rt.logOpen);
+  } else {
+    const last = history[history.length - 1];
+    const run = rt.openRun != null ? history.find(r => r.started_at === rt.openRun)
+      : last && last.result === 'failed' && st.state === 'failed' && rt.closedRun !== last.started_at ? last : null;
+    if (run) html = rtRunDetailHtml(run);
+  }
+  $detail.hidden = !html;
+  // Polled every 2 s: rewrite only on change, so a finished run's panel keeps
+  // its text selection (the log's open state is kept in rt.logOpen).
+  if (rt.detailHtml !== html) $detail.innerHTML = html;
+  rt.detailHtml = html;
 }
 
 function renderRetrain(data) {
@@ -135,6 +236,9 @@ function renderRetrain(data) {
   const resultLabel = run => run.result === 'failed'
     ? `${run.interrupted ? 'interrupted' : 'failed'}${run.rolled_back ? ' · rolled back' : ''}`
     : run.result;
+  // Hover: the error, then how long each step took.
+  const resultTitle = run => [run.error, ...(run.steps || []).map(s => `${s.label}: ${rtDuration(s.duration_seconds)}`)]
+    .filter(Boolean).join('\n');
   document.getElementById('rt-history-tbody').innerHTML = history.length ? history.map(run => {
     const ids = rtChanges(run);
     return `<tr>
@@ -143,12 +247,35 @@ function renderRetrain(data) {
       <td>${escapeHtml(String(run.lookback_hours))} h</td>
       <td>${formatCount(run.max_docs || 0)}</td>
       <td>${escapeHtml(rtDuration(run.duration_seconds))}</td>
-      <td><span class="badge ${badge(run.result)}"${run.error ? ` title="${escapeHtml(run.error)}"` : ''}>${escapeHtml(resultLabel(run))}</span></td>
+      <td><span class="badge ${badge(run.result)}"${resultTitle(run) ? ` title="${escapeHtml(resultTitle(run))}"` : ''}>${escapeHtml(resultLabel(run))}</span>
+        ${run.failed_step ? `<div class="ins-meta">at ${escapeHtml(run.failed_step.label)}</div>` : ''}
+        ${run.steps || run.error ? `<button type="button" class="rt-link" data-rt-run="${run.started_at}">Details</button>` : ''}</td>
       <td>${run.templates != null ? `${formatCount(run.templates)} / ${formatCount(run.groups)}` : '—'}</td>
       <td><span class="ins-meta">${escapeHtml(ids)}</span></td>
     </tr>`;
   }).join('') : '<tr><td colspan="8" class="empty-state">No retrain has run yet.</td></tr>';
+  renderRetrainDetail(data);
 }
+
+document.getElementById('rt-history-tbody').addEventListener('click', event => {
+  const button = event.target.closest('[data-rt-run]');
+  if (!button || !rt.data) return;
+  const startedAt = Number(button.dataset.rtRun);
+  rt.openRun = rt.openRun === startedAt ? null : startedAt;
+  renderRetrainDetail(rt.data);
+  if (rt.openRun != null) document.getElementById('rt-run-detail').scrollIntoView({block: 'nearest'});
+});
+document.getElementById('rt-run-detail').addEventListener('click', event => {
+  if (!event.target.closest('[data-rt-close]') || !rt.data) return;
+  const history = (rt.data.status || {}).history || [];
+  if (rt.openRun == null && history.length) rt.closedRun = history[history.length - 1].started_at;
+  rt.openRun = null;
+  renderRetrainDetail(rt.data);
+});
+// <details> toggle does not bubble; capture it to remember the log's state.
+document.getElementById('rt-run-detail').addEventListener('toggle', event => {
+  if (event.target.matches('[data-rt-log]')) rt.logOpen = event.target.open;
+}, true);
 
 document.getElementById('rt-form').addEventListener('input', rtMarkDirty);
 document.getElementById('rt-days').addEventListener('click', event => {

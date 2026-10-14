@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import tempfile
 import time
 import unittest
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 from logai.config import AppConfig
@@ -133,7 +134,9 @@ class TestEngineRetrain(TempConfig):
         self.assertEqual(p._retrain_trigger["trigger"], "manual")
         with patch("logai.training.train_pipeline.run_training_from_elasticsearch") as train:
             p._run_retrain(p._retrain_trigger)
-        train.assert_called_once_with(p.config, lookback_seconds=6 * 3600, max_docs=5_000)
+        train.assert_called_once_with(
+            p.config, lookback_seconds=6 * 3600, max_docs=5_000, progress=ANY
+        )
         p._reexec.assert_called_once()
         p.documentation_worker.stop.assert_called_once()
         p.incident_classifier.stop.assert_called_once()
@@ -157,11 +160,59 @@ class TestEngineRetrain(TempConfig):
             side_effect=RuntimeError("ES down"),
         ) as train:
             p._run_retrain(p._retrain_trigger)
-        train.assert_called_once_with(p.config, lookback_seconds=12 * 3600, max_docs=7_000)
+        train.assert_called_once_with(
+            p.config, lookback_seconds=12 * 3600, max_docs=7_000, progress=ANY
+        )
         status = self.store.load_status()
         self.assertEqual(status["state"], "failed")
         self.assertIn("ES down", status["error"])
         p._reexec.assert_called_once()  # restarts even after a failure
+
+    def _run_failing_at(self, step, exc):
+        """A retrain whose training reports `read` (then `step`), logs an
+        error and raises `exc`; returns the status seen mid-run and after."""
+        p = self._pipeline()
+        self.store.request_run(lookback_hours=1, max_docs=1_000, now=time.time())
+        p._check_retrain()
+        seen = {}
+
+        def train(*_args, progress, **_kwargs):
+            progress.step("read", fetched=0, target=1_000)
+            progress.detail(fetched=400)  # throttled: same step, < 2 s
+            seen["mid"] = self.store.load_status()
+            if step != "read":
+                progress.step(step)
+            logging.getLogger("logai.collector").error("boom")
+            raise exc
+
+        with patch("logai.training.train_pipeline.run_training_from_elasticsearch", train):
+            p._run_retrain(p._retrain_trigger)
+        return seen["mid"], self.store.load_status()
+
+    def test_progress_is_live_and_kept_in_history(self):
+        mid, status = self._run_failing_at("read", ConnectionError("ES unreachable"))
+        self.assertEqual(mid["state"], "running")
+        self.assertEqual([s["key"] for s in mid["progress"]["steps"]], ["prepare", "read"])
+        self.assertNotIn("progress", status)
+        run = status["history"][-1]
+        self.assertEqual([s["key"] for s in run["steps"]], ["prepare", "read"])
+        self.assertTrue(all(s["duration_seconds"] >= 0 for s in run["steps"]))
+
+    def test_failure_reports_step_error_and_log_tail_for_any_step(self):
+        for step in ("read", "model"):
+            with self.subTest(step=step):
+                _mid, status = self._run_failing_at(step, ConnectionError("ES unreachable"))
+                run = status["history"][-1]
+                self.assertEqual(run["result"], "failed")
+                self.assertEqual(run["failed_step"]["key"], step)
+                self.assertEqual(run["error_type"], "ConnectionError")
+                self.assertIn("ES unreachable", run["error"])
+                self.assertIn("realtime_pipeline.py", run["where"])
+                if step == "read":
+                    self.assertEqual(run["detail"], {"fetched": 400, "target": 1_000})
+                messages = [line["message"] for line in run["log"]]
+                self.assertIn("boom", messages)
+                self.assertTrue(any("Retrain failed at" in m for m in messages))
 
     def test_disabled_never_triggers_and_next_run_is_published(self):
         p = self._pipeline()

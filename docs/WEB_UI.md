@@ -239,7 +239,22 @@ the engine stops while training, the artifacts from before the retrain are
 restored and the run shows as `failed · rolled back` (or `interrupted`). A run
 missed while the engine was down is skipped and listed as `missed`. **Retrain now** asks for one run, with its own lookback and
 max documents. The status line shows the next run (in the schedule's zone and
-your local time), a running retrain with its elapsed time, or the last error;
+your local time), a running retrain with its elapsed time and current step, or
+the last error.
+
+While a retrain runs, a panel lists its steps. Finished steps show ✓, their
+duration and their counts. For the current step it shows:
+- the documents read against the target, as a bar with an ETA;
+- the engine's recent warnings and errors.
+
+When a run fails, the same panel opens with:
+- the step it failed in, the error type and the code location;
+- the full error;
+- the steps up to the failure;
+- the warning/error log lines.
+
+**Details** in a history row opens that run's panel.
+
 **History** lists the last 20 runs with the templates added to existing
 groups and the new groups, from `group_lineage.json`. Two browsers saving from the same snapshot get `409`.
 
