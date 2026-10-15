@@ -75,7 +75,15 @@ class TemplateEmbedder:
                         f"Embedding service returned HTTP {response.status_code}"
                     )
                 else:
-                    response.raise_for_status()
+                    try:
+                        response.raise_for_status()
+                    except requests.HTTPError as exc:
+                        # The body holds the server's reason (e.g. TEI's
+                        # "inputs must have less than 8192 tokens").
+                        body = (getattr(response, "text", "") or "").strip()[:300]
+                        raise EmbeddingServiceError(
+                            f"{exc}: {body}" if body else str(exc)
+                        ) from exc
                     try:
                         return response.json()
                     except ValueError as exc:
@@ -200,7 +208,7 @@ class TemplateEmbedder:
             t_batch = time.time()
             try:
                 batches.append(self._parse_response(self._request(batch), len(batch)))
-            except Exception:
+            except Exception as exc:
                 lengths = [len(text) for text in batch]
                 logger.error(
                     "Embedding batch %d/%d failed: %d text(s), char_len min=%d "
@@ -214,6 +222,13 @@ class TemplateEmbedder:
                     batch[0][:80],
                     batch[-1][:80],
                 )
+                if isinstance(exc, EmbeddingServiceError):
+                    # Carry the batch into the error itself (the Retrain page
+                    # shows the error, not this log line).
+                    raise EmbeddingServiceError(
+                        f"Embedding batch {batch_index}/{total_batches} failed "
+                        f"({len(batch)} texts, longest {max(lengths)} chars): {exc}"
+                    ) from exc
                 raise
             logger.info(
                 "Embedding batch %d/%d complete: %d text(s) in %.2fs",

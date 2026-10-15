@@ -74,7 +74,11 @@ from logai.config import AppConfig
 from logai.anomaly.isolation_forest_model import GLOBAL_MODEL_KEY
 from logai.models import FeatureVector, ParsedEvent, RawLog
 from logai.storage.checkpoint import CheckpointStore
-from logai.training.train_pipeline import TrainingPipeline, run_training_from_elasticsearch
+from logai.training.train_pipeline import (
+    TrainingPipeline,
+    TrainingProgress,
+    run_training_from_elasticsearch,
+)
 
 
 class TestTrainingPipelineStreaming(unittest.TestCase):
@@ -260,6 +264,28 @@ class TestTrainingPipelineStreaming(unittest.TestCase):
         self.assertEqual(t_auth.first_seen, 1000.0)
         self.assertEqual(t_auth.last_seen, 1004.0)
         self.assertTrue(self.pipeline.model_store.exists(GLOBAL_MODEL_KEY))
+
+    def test_progress_reports_every_step_in_order(self):
+        changes = []
+        self.pipeline.progress = TrainingProgress(changes.append)
+        logs = [
+            RawLog(event_id=f"e{i}", timestamp=1000.0 + i, message="m", service="auth", level="INFO")
+            for i in range(7)
+        ]
+
+        self.pipeline.run(logs)
+
+        steps = self.pipeline.progress.snapshot()
+        self.assertEqual(
+            [s["key"] for s in steps],
+            ["read", "templates", "embed", "cluster", "groups", "model", "publish"],
+        )
+        self.assertEqual(changes.count(True), len(steps))
+        read = steps[0]["detail"]
+        self.assertEqual((read["fetched"], read["target"], read["parsed"]), (7, 7, 7))
+        self.assertEqual(steps[5]["detail"]["kept"], 7)
+        self.assertTrue(steps[5]["detail"]["fitted"])
+        self.assertTrue(all(s["finished_at"] for s in steps[:-1]))
 
 
 if __name__ == "__main__":

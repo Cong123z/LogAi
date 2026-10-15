@@ -474,6 +474,24 @@ delayed by the downtime plus catch-up time. Track catch-up with
      training failed.
 - During training a heartbeat in `retrain_status.json` keeps
   `scripts/healthcheck.py` ready.
+- **Progress.** While running, `retrain_status.json` carries `progress`:
+  - `steps`: `prepare`, `range`, `read`, `templates`, `embed`, `cluster`,
+    `groups`, `model`, `publish`. Each has a label, start/finish times and
+    the counts the training log prints (`TrainingProgress` in
+    `train_pipeline.py`). `publish` also covers documentation matching and
+    the final save.
+  - `log`: the last 30 WARNING+ log lines of any module.
+
+  It is written when a step starts and at most every 2 s otherwise.
+- **History entry.** Each run in the history keeps `steps` (with
+  durations) and `log` (only when there were warnings). A failed run, from
+  any step, also records:
+  - `failed_step`: the step that was running;
+  - `error_type` and `error` (up to 1000 chars);
+  - `where`: the innermost `logai/` frame;
+  - `detail`: that step's last counts.
+
+  Embedding errors include the server's response body and the failing batch.
 
 **Rollback.**
 - Just before training, every artifact that training writes is copied to

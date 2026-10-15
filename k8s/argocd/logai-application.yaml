@@ -19,8 +19,8 @@ spec:
     server: https://kubernetes.default.svc
     namespace: logai
   syncPolicy:
-    # automated:
-    #   prune: true      # delete resources removed from Git (the PVC is protected)
-    #   selfHeal: true   # undo manual kubectl edits
+    automated:
+      prune: true      # delete resources removed from Git (the PVC is protected)
+      selfHeal: true   # undo manual kubectl edits
     syncOptions:
       - CreateNamespace=true
