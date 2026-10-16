@@ -57,7 +57,7 @@ class TestRetrain(unittest.TestCase):
             return [AXIS[self.axis[t.removeprefix("text of ")]] for t in texts]
 
         p.embedder.embed = MagicMock(side_effect=embed)
-        p.clusterer.cluster = MagicMock(side_effect=lambda ids, _m: {t: labels[t] for t in ids})
+        p.clusterer.cluster = MagicMock(side_effect=lambda ids, _m, **_: {t: labels[t] for t in ids})
         # Matcher unavailable: the case where documentation carried over by ID
         # used to leak to an unrelated group.
         p.doc_matcher = MagicMock(ready=False, last_error="off", reload=MagicMock(return_value=False))

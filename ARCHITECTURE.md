@@ -444,6 +444,11 @@ delete). Only ungrouped templates (new, or pending from realtime) are placed:
 2. the rest go through HDBSCAN **among themselves** → new groups `G{n:04d}`
    from a monotonic counter (IDs are never reused); noise becomes one-template
    groups (shown as `singleton` in the web).
+   From 2,000 templates the fit runs in a spawned child process: HDBSCAN holds
+   the GIL for the whole O(n²) fit (~12 min for 27k on one core), which in-process
+   froze the retrain heartbeat (the web showed the engine as unavailable) and the
+   metrics port. Every 30 s the parent logs `HDBSCAN still running` and updates
+   the step's `hdbscan_seconds`.
 
 Existing centroids are recomputed from their members. `data/group_lineage.json`
 records `added` (old group → added templates), `new` (new group → members) and
@@ -481,10 +486,12 @@ delayed by the downtime plus catch-up time. Track catch-up with
     `train_pipeline.py`). `publish` also covers documentation matching and
     the final save.
   - `log`: the last 30 WARNING+ log lines of any module.
+  - `memory`: `rss_mb`, `peak_mb` (since the process started) and the
+    container's `limit_mb` (cgroup), refreshed by the 10 s heartbeat.
 
   It is written when a step starts and at most every 2 s otherwise.
 - **History entry.** Each run in the history keeps `steps` (with
-  durations) and `log` (only when there were warnings). A failed run, from
+  durations), `memory` and `log` (only when there were warnings). A failed run, from
   any step, also records:
   - `failed_step`: the step that was running;
   - `error_type` and `error` (up to 1000 chars);
@@ -504,6 +511,10 @@ delayed by the downtime plus catch-up time. Track catch-up with
   index are deleted, and the status reads `failed · rolled back`.
 - If the engine is killed mid-training (status still `running` at start), it
   restores before loading anything and records `failed`, `interrupted: true`.
+  A kill (e.g. OOMKilled) records nothing itself, so the entry is built from
+  the last `progress` the heartbeat saved: `failed_step`, `detail`, `steps`,
+  `log` and `memory`. When the peak was at least 90% of the limit, `error`
+  says it was most likely out of memory.
 - Restore is safe to repeat if it is itself interrupted.
 
 **Missed runs.** On start, the engine takes its last sign of life (heartbeats

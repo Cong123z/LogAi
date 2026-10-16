@@ -710,8 +710,21 @@ class TrainingPipeline:
             floor=int(lineage.get("next_group_number") or 1),
         )
         if rest:
+            joined = sum(len(t) for t in added.values())
+            logger.info(
+                "Phase 4: %d templates joined existing groups; HDBSCAN over the other %d...",
+                joined, len(rest),
+            )
+            self.progress.detail(joined_existing=joined, hdbscan=len(rest), hdbscan_seconds=0)
+
+            def on_wait(elapsed: float) -> None:
+                logger.info(
+                    "Phase 4: HDBSCAN still running over %d templates (%.0fs)", len(rest), elapsed
+                )
+                self.progress.detail(hdbscan_seconds=round(elapsed))
+
             raw_labels = self.clusterer.cluster(
-                rest, np.array([embeddings_map[tid] for tid in rest])
+                rest, np.array([embeddings_map[tid] for tid in rest]), on_wait=on_wait
             )
             # HDBSCAN labels only collect members; noise templates become
             # single-template groups. Numbered by smallest member for stable IDs.

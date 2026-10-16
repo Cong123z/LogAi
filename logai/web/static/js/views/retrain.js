@@ -117,8 +117,6 @@ function rtChanges(run) {
   return `+${growth} templates: ${joined} joined existing groups · ${inNew}`;
 }
 
-<<<<<<< HEAD
-=======
 // One line per training step, from the counts the engine reports for it.
 const rtN = n => formatCount(n || 0);
 const rtTime = ts => new Date(ts * 1000).toLocaleString(undefined, {dateStyle: 'short', timeStyle: 'medium'});
@@ -130,7 +128,9 @@ const RT_STEP_TEXT = {
     d.rate && `${rtN(d.rate)} logs/s`, d.last_event_ts && `logs up to ${rtTime(d.last_event_ts)}`].filter(Boolean).join(' · '),
   templates: d => d.templates == null ? '' : `${rtN(d.templates)} templates: ${rtN(d.seen_in_window)} seen in the window, ${rtN(d.kept)} kept from earlier, ${rtN(d.pruned)} pruned`,
   embed: d => `${rtN(d.to_embed)} new or changed templates to embed · ${rtN(d.reused)} reused`,
-  cluster: d => d.new_groups == null ? `${rtN(d.to_place)} templates without a group to place`
+  cluster: d => d.new_groups == null && d.hdbscan != null
+    ? `${rtN(d.joined_existing)} joined existing groups · HDBSCAN grouping the other ${rtN(d.hdbscan)} (running ${rtDuration(d.hdbscan_seconds)})`
+    : d.new_groups == null ? `${rtN(d.to_place)} templates without a group to place`
     : `${rtN(d.joined_existing)} joined existing groups · ${rtN(d.new_group_templates)} formed ${rtN(d.new_groups)} new groups`,
   groups: d => d.groups == null ? '' : `${rtN(d.groups)} groups (${rtN(d.singletons)} single-template) · ${rtN(d.ungrouped)} templates without a group`,
   model: d => [d.windows != null && `${rtN(d.windows)} (service, group) windows`,
@@ -186,6 +186,8 @@ function rtRunDetailHtml(run) {
   } else {
     head = `Retrain ${escapeHtml(run.result)} in ${escapeHtml(rtDuration(run.duration_seconds))}`;
   }
+  const mem = run.memory || {};
+  if (mem.peak_mb != null) head += ` · memory peak ${escapeHtml(mem.peak_mb)}${mem.limit_mb != null ? ` / ${escapeHtml(mem.limit_mb)}` : ''} MB`;
   return `<div class="rt-run-head${failed ? ' rt-run-failed' : ''}">
       <span>${head}</span>
       <button type="button" class="btn" data-rt-close>Close</button>
@@ -203,7 +205,9 @@ function renderRetrainDetail(data) {
   const $detail = document.getElementById('rt-run-detail');
   let html = '';
   if (data.engine_state === 'retraining' && st.progress) {
-    html = rtStepsHtml(st.progress.steps || [], {running: true}) + rtLogHtml(st.progress.log, rt.logOpen);
+    const mem = st.progress.memory || {};
+    html = (mem.rss_mb != null ? `<div class="ins-meta">Memory ${escapeHtml(mem.rss_mb)} MB · peak ${escapeHtml(mem.peak_mb)}${mem.limit_mb != null ? ` / ${escapeHtml(mem.limit_mb)}` : ''} MB</div>` : '')
+      + rtStepsHtml(st.progress.steps || [], {running: true}) + rtLogHtml(st.progress.log, rt.logOpen);
   } else {
     const last = history[history.length - 1];
     const run = rt.openRun != null ? history.find(r => r.started_at === rt.openRun)
@@ -217,7 +221,6 @@ function renderRetrainDetail(data) {
   rt.detailHtml = html;
 }
 
->>>>>>> a20c75e5e4ce1b8ff90133f788d8286aedb884ca
 function renderRetrain(data) {
   rt.data = data;
   if (!rt.dirty) rtFillForm(data);

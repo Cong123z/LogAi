@@ -312,18 +312,39 @@ class TestRollbackAndRecovery(TempConfig):
         self._write_before()
         snapshot_artifacts(self.cfg)
         self._train_and_break()
+        now = time.time()
         self.store.write_status({
-            "state": "running", "trigger": "schedule", "started_at": time.time() - 60,
-            "heartbeat_at": time.time() - 30, "lookback_hours": 24.0, "max_docs": 1000,
+            "state": "running", "trigger": "schedule", "started_at": now - 60,
+            "heartbeat_at": now - 30, "lookback_hours": 24.0, "max_docs": 1000,
+            # What the heartbeat saved before an OOM kill.
+            "progress": {
+                "steps": [
+                    {"key": "range", "label": "Finding the training range",
+                     "started_at": now - 60, "finished_at": now - 55, "detail": {}},
+                    {"key": "read", "label": "Reading and parsing logs",
+                     "started_at": now - 55, "finished_at": None, "detail": {"docs": 900}},
+                ],
+                "log": [{"ts": now - 40, "level": "WARNING", "logger": "x", "message": "slow"}],
+                "memory": {"rss_mb": 1900, "peak_mb": 1950, "limit_mb": 2048},
+            },
         })
         self._pipeline()  # engine starts again
         self._assert_restored()
         status = self.store.load_status()
         self.assertEqual(status["state"], "failed")
+        self.assertNotIn("progress", status)
         run = status["history"][-1]
         self.assertTrue(run["interrupted"] and run["rolled_back"])
         self.assertEqual(run["trigger"], "schedule")
         self.assertAlmostEqual(run["duration_seconds"], 30, delta=2)
+        self.assertEqual(run["failed_step"]["key"], "read")
+        self.assertEqual(run["detail"], {"docs": 900})
+        self.assertEqual([s["key"] for s in run["steps"]], ["range", "read"])
+        self.assertAlmostEqual(run["steps"][1]["duration_seconds"], 25, delta=2)
+        self.assertEqual(run["log"][0]["message"], "slow")
+        self.assertEqual(run["memory"]["peak_mb"], 1950)
+        self.assertIn("out of memory", run["error"])
+        self.assertIn("Reading and parsing logs", run["error"])
         self._pipeline()
         self.assertEqual(len(self.store.load_status()["history"]), 1)
 
