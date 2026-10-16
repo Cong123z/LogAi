@@ -30,4 +30,4 @@ configMapGenerator:
 images:
   - name: logai-engine
     newName: ghcr.io/cong123z/logai
-    newTag: sha-20f2cc8f3d93b2f420df707660edceacc8e9ea8f
+    newTag: sha-676ec91158574b4a422fe6b1ad75b2758ee8926b
