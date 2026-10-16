@@ -121,6 +121,47 @@ class _LogTail(logging.Handler):
             return list(self._records)
 
 
+def _memory_mb() -> dict:
+    """This process's RSS and peak RSS since start (Linux /proc), and the
+    container's memory limit (cgroup v2, then v1); None where unknown."""
+    out: dict = {"rss_mb": None, "peak_mb": None, "limit_mb": None}
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                key, _, value = line.partition(":")
+                if key in ("VmRSS", "VmHWM"):
+                    out["rss_mb" if key == "VmRSS" else "peak_mb"] = int(value.split()[0]) // 1024
+    except (OSError, ValueError):
+        pass
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path, encoding="ascii") as f:
+                limit = int(f.read().strip())  # "max" (no limit) raises
+        except (OSError, ValueError):
+            continue
+        if limit < 1 << 50:  # cgroup v1 reports "no limit" as a huge number
+            out["limit_mb"] = limit // (1024 * 1024)
+        break
+    return out
+
+
+def _interrupted_error(step: Optional[dict], memory: dict) -> str:
+    """Why a retrain most likely stopped, from what its last heartbeat saw."""
+    at = f" at {step['label']}" if step else ""
+    peak, limit = memory.get("peak_mb"), memory.get("limit_mb")
+    if peak and limit:
+        mem = f"memory peaked at {peak} of {limit} MB"
+        # ponytail: 90% of the limit as the OOM heuristic; the heartbeat is
+        # every 10 s, so a fast final spike can still read lower
+        if peak >= 0.9 * limit:
+            return (f"The engine was killed while retraining{at}: {mem}, most likely out "
+                    "of memory. Lower max_docs or raise the container memory limit.")
+        return (f"The engine stopped while retraining{at} ({mem}): it was killed, "
+                "restarted or redeployed. Check the container's last state (OOMKilled?).")
+    return (f"The engine stopped while retraining{at}: it was killed, restarted or "
+            "redeployed. Check the container's last state (OOMKilled?).")
+
+
 def _raised_where(exc: BaseException) -> Optional[str]:
     """`collector/es_collector.py:301 _search`: the innermost frame in logai/."""
     marker = f"{os.sep}logai{os.sep}"
@@ -1141,7 +1182,9 @@ class RealtimePipeline:
                 if not new_step and time.time() - written_at < 2:
                     return
                 written_at = time.time()
-                status["progress"] = {"steps": progress.snapshot(), "log": log_tail.lines()}
+                status["progress"] = {
+                    "steps": progress.snapshot(), "log": log_tail.lines(), "memory": _memory_mb(),
+                }
                 self.retrain_store.write_status(status)
 
         progress = TrainingProgress(on_progress)
@@ -1151,7 +1194,10 @@ class RealtimePipeline:
                 with status_lock:
                     status["heartbeat_at"] = time.time()
                     if "progress" in status:
+                        # Kept for a kill (e.g. OOM), which records nothing
+                        # itself: the next start reads these.
                         status["progress"]["log"] = log_tail.lines()
+                        status["progress"]["memory"] = _memory_mb()
                     self.retrain_store.write_status(status)
 
         threading.Thread(target=heartbeat, name="retrain-heartbeat", daemon=True).start()
@@ -1205,6 +1251,7 @@ class RealtimePipeline:
             log = log_tail.lines()
             if log:  # warnings and errors only; empty on a clean run
                 run["log"] = log
+            run["memory"] = _memory_mb()  # sizes the next max_docs
             with status_lock:
                 status.pop("progress", None)
                 status.update(
@@ -1265,12 +1312,35 @@ class RealtimePipeline:
             key: status.get(key)
             for key in ("trigger", "started_at", "lookback_hours", "max_docs")
         }
+        # The last progress the heartbeat saved: the step that was running,
+        # its counts, the warning log and memory.
+        progress = status.get("progress") or {}
+        steps = progress.get("steps") or []
+        failed = steps[-1] if steps and steps[-1].get("finished_at") is None else None
+        memory = progress.get("memory") or {}
         run.update(
             result="failed", interrupted=True, rolled_back=rolled_back,
             duration_seconds=max(0.0, last - float(status.get("started_at") or last)),
-            error="The engine stopped while retraining"
-            + ("; the previous version was restored" if rolled_back else ""),
+            error=_interrupted_error(failed, memory)
+            + (" The previous version was restored." if rolled_back else ""),
         )
+        if failed:
+            run["failed_step"] = {"key": failed["key"], "label": failed["label"]}
+            run["detail"] = dict(failed.get("detail") or {})
+        if steps:
+            run["steps"] = [
+                {
+                    "key": s["key"], "label": s["label"],
+                    "duration_seconds": max(0.0, (s.get("finished_at") or last) - s["started_at"]),
+                    "detail": s.get("detail") or {},
+                }
+                for s in steps
+            ]
+        if progress.get("log"):
+            run["log"] = progress["log"]
+        if memory:
+            run["memory"] = memory
+        status.pop("progress", None)
         status.update(
             state="failed", finished_at=time.time(), error=run["error"],
             history=[*status.get("history", []), run],

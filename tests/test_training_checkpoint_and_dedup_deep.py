@@ -93,7 +93,7 @@ class TestTrainingCheckpointAndDedupDeep(unittest.TestCase):
         # Mock embedder and clusterer for deterministic fast testing
         self.pipeline.embedder.embed = MagicMock(return_value=[[0.1] * 8])
         self.pipeline.clusterer.cluster = MagicMock(
-            side_effect=lambda ids, matrix: {tid: idx % 2 for idx, tid in enumerate(ids)}
+            side_effect=lambda ids, matrix, **_: {tid: idx % 2 for idx, tid in enumerate(ids)}
         )
         self.pipeline.clusterer.compute_centroid = MagicMock(return_value=[0.1] * 8)
         self.pipeline.doc_matcher.match_all = MagicMock(return_value={})
@@ -283,7 +283,7 @@ class TestTrainingCheckpointAndDedupDeep(unittest.TestCase):
         self.assertEqual(len(list(self.pipeline.event_index.records())), 15)
 
         # Unmock clusterer to simulate resolved condition
-        self.pipeline.clusterer.cluster.side_effect = lambda ids, matrix: {tid: 0 for tid in ids}
+        self.pipeline.clusterer.cluster.side_effect = lambda ids, matrix, **_: {tid: 0 for tid in ids}
 
         # Rerun with empty stream (as all logs were already fetched and cursor reached end)
         self.pipeline.run([], checkpoint_store=training_cp)
