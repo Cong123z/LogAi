@@ -178,6 +178,4 @@ ARCHITECTURE.md, config.yaml, docker-compose.yml, Dockerfile
 
 ## Validation
 
-Not run yet. logai-engine's reference (Isolation Forest, run
-incident-20261013-0822): 7 false onsets in the 30-min control phase = 14/h,
-28.6/h over the whole run.
+2026-10-20 smoke test (one partial baseline day, not an acceptance run): [docs/validation/2026-10-20-incident-smoke-test.md](docs/validation/2026-10-20-incident-smoke-test.md).
