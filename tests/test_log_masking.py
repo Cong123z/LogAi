@@ -2,18 +2,36 @@
 
 Copied from logai-engine's test_log_masking.py. The originals parsed through
 Drain3 only to read the mined template of a single message, which is the
-normalize output, so they call normalize directly here. Tests of Drain3
-clustering itself (parameters, template convergence, group registry) return
-with the miners in Task 5.
+normalize output, so they call normalize directly here. Tests that need Drain3
+clustering (template convergence) drive normalize then
+``logai2.owner.miners.Miners.match``.
 """
 from __future__ import annotations
 
 import unittest
 
+from logai2.config import Drain3Config
+from logai2.owner.miners import Miners
 from logai2.reader.normalize import normalize
 
 
+def _match(miners: Miners, message: str):
+    return miners.match("svc", normalize(message))
+
+
 class TestLogMasking(unittest.TestCase):
+    def test_t00027_preserves_exception_keyword(self):
+        """T00027 does NOT lose the 'Exception' keyword when IP:port varies."""
+        miners = Miners(Drain3Config(), {})
+        id1, _, _ = _match(miners, "10.250.10.1:50010:Exception writing block blk_111 to mirror 10.250.10.2:50010")
+        id2, template, _ = _match(miners, "10.250.10.3:50010:Exception writing block blk_222 to mirror 10.250.10.4:50010")
+        self.assertEqual(id1, id2)
+        self.assertIn("Exception", template)
+        self.assertIn("writing block", template)
+        self.assertIn("to mirror", template)
+        self.assertNotIn("10.250.10.1", template)
+        self.assertNotIn("blk_111", template)
+
     def test_keywords_preserved_across_critical_messages(self):
         """Verify Transmitted, Failed, and Got exception keywords are preserved."""
         samples = [
@@ -117,6 +135,14 @@ class TestUniversalMaskingRules(unittest.TestCase):
         msg_a = make("1384223044", "W12-89082-1785086988853", "MlebjTtuWaLRN5ek0Rkwn3MuLNc=", "27/07/2026 00:00:00.024", "TransactionManager")
         msg_b = make("999999999", "W99-11111-9999999999999", "ZZZZ9999AAAA1111bbbb2222=", "30/07/2026 11:22:33.999", "TransactionManagerXYZ")
         self.assertEqual(normalize(msg_a), normalize(msg_b))
+
+    def test_logfmt_style_space_separated_converges(self):
+        """A space-separated logfmt-style message (no commas/braces, no
+        [thread]) still converges when only the values differ."""
+        a = normalize("level=info ts=2026-09-30T07:00:32Z component=router req_id=abc123")
+        b = normalize("level=info ts=2026-10-01T09:11:03Z component=router req_id=xyz999")
+        miners = Miners(Drain3Config(), {})
+        self.assertEqual(miners.match("svc", a)[0], miners.match("svc", b)[0])
 
     def test_leading_prefix_stripped_for_any_thread_name(self):
         """The leading date/time/LEVEL/[thread] prefix is stripped regardless

@@ -1,4 +1,4 @@
-"""Wording-only normalisation applied before Drain3."""
+"""Wording-only normalisation applied before ``logai2.owner.miners.Miners``."""
 from __future__ import annotations
 
 import unittest

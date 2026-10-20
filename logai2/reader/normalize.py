@@ -16,8 +16,8 @@ the *wording* of a log line:
 * punctuation separators are dropped and repeated placeholders collapsed so
   the token count stays stable.
 
-The same function runs in training and realtime (both go through
-``Drain3Parser``), which keeps template ids consistent between the two.
+The reader normalizes every line once; ``logai2.owner.miners.Miners`` takes
+the result as is, so the known-line cache and the miners see the same text.
 """
 from __future__ import annotations
 
