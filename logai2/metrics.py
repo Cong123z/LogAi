@@ -1,0 +1,37 @@
+"""Prometheus metrics. Never a per-template series: alert rows only, by service and document."""
+from __future__ import annotations
+
+from prometheus_client import CollectorRegistry, Counter, Gauge, start_http_server
+
+from logai2.alerts import RANK
+
+LABEL = {"service": "service", "template": "undocumented"}
+
+
+class Metrics:
+    def __init__(self, port: int | None):
+        # own registry: tests build many Metrics without duplicate-series errors
+        self.registry = r = CollectorRegistry()
+        self.events = Counter("logai_events_total", "Events read", registry=r)
+        self.cache_hits = Counter("logai_cache_hits_total", "Known-line cache hits", registry=r)
+        self.cache_misses = Counter("logai_cache_misses_total", "Known-line cache misses", registry=r)
+        self.late = Counter("logai_late_counts_total", "Counts for already-closed minutes", registry=r)
+        self.lag = Gauge("logai_lag_seconds", "now - watermark", registry=r)
+        self.miss_ratio = Gauge("logai_miss_ratio", "Cache miss ratio over 5 min", ["service"], registry=r)
+        self.flush_seconds = Gauge("logai_flush_seconds", "Last flush duration", registry=r)
+        self.heartbeat = Gauge("logai_engine_heartbeat_timestamp_seconds", "Last flush time", registry=r)
+        self.alert_state = Gauge("log_alert_state", "1 for the alert row's current state",
+                                 ["service", "doc_id", "state"], registry=r)
+        if port is not None:
+            start_http_server(port, registry=r)
+
+    def export_rows(self, rows: list[dict]) -> None:
+        worst: dict[tuple[str, str], str] = {}   # undocumented template rows of a service share one series
+        for row in rows:
+            key = (row["service"], row["doc_id"] if row["kind"] == "document" else LABEL[row["kind"]])
+            if RANK[row["state"]] > RANK.get(worst.get(key), -1):
+                worst[key] = row["state"]
+        self.alert_state.clear()
+        for (service, doc_id), current in worst.items():
+            for state in RANK:
+                self.alert_state.labels(service, doc_id, state).set(1 if state == current else 0)
