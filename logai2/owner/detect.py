@@ -96,8 +96,10 @@ class Detector:
             dk = (svc, "doc:" + doc_id)
             keys[dk] = keys.get(dk, 0) + cm.keys.get((svc, tid), 0)
             doc_levels.setdefault(dk, []).append(self._level(cm, (svc, tid)))
-        for k in self.not_normal():
-            keys.setdefault(k, 0)  # lets an alert recover after its key leaves the minute
+        # ponytail: full scan of states per minute; index non-idle keys if states grow large
+        for k, r in self.states.items():
+            if r.state != "NORMAL" or r.streak:
+                keys.setdefault(k, 0)  # lets an alert recover, or a streak reset, after its key leaves the minute
 
         at = (cm.minute + 1) * 60.0
         changes = []
@@ -105,7 +107,7 @@ class Detector:
             level = _worst(doc_levels[(svc, key)]) if (svc, key) in doc_levels else self._level(cm, (svc, key))
             v = judge(count, key, level, self.baseline.lookup(svc, key, cm.day, cm.hour), self.cfg)
             prev = self.states.get((svc, key))
-            if not v.high and (prev is None or prev.state == "NORMAL"):
+            if not v.high and (prev is None or (prev.state == "NORMAL" and not prev.streak)):
                 continue
             prev = prev or AlertRow(svc, key)
             row = replace(step(prev, v.high, self.cfg.alert), score=v.score, count=count,
@@ -117,5 +119,4 @@ class Detector:
         return changes
 
     def not_normal(self) -> set[tuple[str, str]]:
-        # ponytail: full scan of states per minute; keep a non-normal set if states grow large
         return {k for k, r in self.states.items() if r.state != "NORMAL"}

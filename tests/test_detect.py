@@ -75,3 +75,14 @@ def test_doc_key_sums_linked_templates(cfg):
     det.run(cm(0, {("s", "s:T1"): 4, ("s", "s:T2"): 4}), historic=False)
     assert set(det.states) == {("s", "doc:DOC-1")}   # each 4 < floor 5; doc 8 ≥ floor, level ERROR
     assert det.states[("s", "doc:DOC-1")].count == 8
+
+
+def test_non_consecutive_highs_reset_streak(cfg):
+    for gap in ({("s", "s:T1"): 1}, {}):   # a low minute, then the key absent from the minute
+        det = Detector(cfg, Baseline({}, {}), {}, {("s", "s:T1"): "ERROR"}, {})
+        seq = []
+        for keys in ({("s", "s:T1"): 40}, gap, {("s", "s:T1"): 40}):
+            det.run(cm(len(seq), keys), historic=False)
+            r = det.states[("s", "s:T1")]
+            seq.append((r.state, r.streak))
+        assert seq == [("NORMAL", 1), ("NORMAL", 0), ("NORMAL", 1)]
