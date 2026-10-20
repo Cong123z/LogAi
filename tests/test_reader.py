@@ -12,6 +12,7 @@ UPPER = T0 + 570_000
 
 def make(cfg, hits, floors, cache=None):
     src = FakeSource(hits)
+    src.size = cfg.elasticsearch.batch_size
     r = Reader(src, cfg, cache or KnownLines(10), now=NOW)
     r.set_indices(floors, {})
     return src, r
@@ -28,8 +29,9 @@ def test_aggregates_and_dedups(cfg):
     c = b["counts"][0]
     assert (c["service"], c["minute"], c["sample"]) == ("s", T0 // 60_000, "boom 1")
     assert c["text"] and c["level"] == "INFO" and c["module"] == ""
-    assert b["positions"]["a"] == {"pos_ms": T0, "caught_up": False, "failing": False}
-    assert b["watermark_ms"] == T0
+    # a short page reached upper_ms: caught up, watermark upper_ms
+    assert b["positions"]["a"] == {"pos_ms": T0, "caught_up": True, "failing": False}
+    assert b["watermark_ms"] == UPPER
     b2 = r.poll()                       # re-reads T0 ms; both ids already seen
     assert b2["counts"] == [] and b2["positions"]["a"]["caught_up"]
     assert b2["watermark_ms"] == UPPER
@@ -60,12 +62,14 @@ def test_malformed_hits_are_counted_not_aggregated(cfg):
 
 
 def test_watermark_is_slowest_index(cfg):
+    cfg.elasticsearch.batch_size = 1    # full pages: neither index reached upper_ms
     _, r = make(cfg, {"a": [hit("1", T0 + 120_000, service="s", message="m")],
                       "b": [hit("2", T0 + 30_000, service="s", message="m")]}, {"a": T0, "b": T0})
     assert r.poll()["watermark_ms"] == T0 + 30_000
 
 
 def test_failing_index_stops_holding_watermark(cfg):
+    cfg.elasticsearch.batch_size = 1
     src, r = make(cfg, {"a": [hit("1", T0 + 120_000, service="s", message="m")],
                         "b": [hit("2", T0 + 30_000, service="s", message="m")]}, {"a": T0, "b": T0})
     for i in range(3):
@@ -77,12 +81,40 @@ def test_failing_index_stops_holding_watermark(cfg):
     assert not b["positions"]["b"]["failing"] and b["watermark_ms"] == T0 + 30_000
 
 
-def test_no_healthy_index_watermark_is_upper(cfg):
-    src, r = make(cfg, {"a": []}, {"a": T0})
+def test_no_healthy_index_holds_watermark(cfg):
+    # ES down: closing minutes up to upper_ms would write them empty and drop the outage docs as late
+    src, r = make(cfg, {"a": [hit("1", T0 + 30_000, service="s", message="m")]}, {"a": T0})
+    assert r.poll()["watermark_ms"] == UPPER
     for _ in range(3):
         src.fail("a")
         b = r.poll()
-    assert b["watermark_ms"] == UPPER
+    assert b["positions"]["a"]["failing"] and b["watermark_ms"] == T0 + 30_000
+
+
+def test_no_indices_watermark_is_upper(cfg):
+    _, r = make(cfg, {}, {})
+    assert r.poll()["watermark_ms"] == UPPER
+
+
+def test_continuous_stream_still_catches_up(cfg):
+    # new docs every poll: a page shorter than the page size reached upper_ms
+    cfg.elasticsearch.batch_size = 5
+    src, r = make(cfg, {"a": []}, {"a": T0})
+    for k in range(4):
+        src.hits["a"] += [hit(f"{k}-{i}", T0 + k * 1000 + i, service="s", message="m") for i in range(3)]
+        b = r.poll()
+        assert b["events"] == 3 and b["positions"]["a"]["caught_up"] and b["watermark_ms"] == UPPER
+
+
+def test_full_page_is_not_caught_up(cfg):
+    cfg.elasticsearch.batch_size = 2
+    _, r = make(cfg, {"a": [hit(str(i), T0 + i, service="s", message="m") for i in range(3)]}, {"a": T0})
+    b = r.poll()
+    assert not b["positions"]["a"]["caught_up"] and b["watermark_ms"] == T0 + 1
+    b = r.poll()                        # re-reads T0+1 plus the last doc: still a full page
+    assert b["events"] == 1 and not b["positions"]["a"]["caught_up"] and b["watermark_ms"] == T0 + 2
+    b = r.poll()                        # short page
+    assert b["events"] == 0 and b["positions"]["a"]["caught_up"] and b["watermark_ms"] == UPPER
 
 
 def test_removed_index_dropped(cfg):
@@ -114,6 +146,7 @@ def test_refresh_does_not_rewind_tracked_index(cfg):
 
 
 def test_caught_up_flips_back_when_new_doc_arrives(cfg):
+    cfg.elasticsearch.batch_size = 2
     src, r = make(cfg, {"a": [hit("1", T0, service="s", message="m")]}, {"a": T0})
     r.poll()
     assert r.poll()["positions"]["a"]["caught_up"]
@@ -154,3 +187,16 @@ def test_known_lines_lru():
     k.put("s", "c", "C")                # evicts b
     assert k.get("s", "b") is None and k.get("s", "c") == "C"
     assert (k.hits, k.misses) == (2, 1)
+
+
+def test_normalize_failure_counts_line_unparsed(cfg, monkeypatch):
+    from logai2.reader import reader as reader_mod
+    real = reader_mod.normalize
+    monkeypatch.setattr(reader_mod, "normalize",
+                        lambda m: (_ for _ in ()).throw(ValueError("bad")) if "poison" in m else real(m))
+    _, r = make(cfg, {"a": [hit("1", T0, service="s", message="poison pill"),
+                            hit("2", T0 + 1, service="s", message="ok")]}, {"a": T0})
+    b = r.poll()
+    assert b["events"] == 2
+    bad = [c for c in b["counts"] if c["text"] is None and c["template_id"] is None]
+    assert len(bad) == 1 and bad[0]["n"] == 1 and bad[0]["sample"] == "poison pill"

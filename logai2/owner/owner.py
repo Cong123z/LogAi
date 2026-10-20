@@ -150,13 +150,15 @@ class Owner:
             template_id, text = c["template_id"], None
             if template_id is None:
                 try:
+                    if c["text"] is None:
+                        raise ValueError("the reader could not normalize the line")
                     template_id, text, _ = self.miners.match(service, c["text"])
                     resolved[(service, c["text"])] = template_id
                 except Exception:  # noqa: BLE001 — one bad line must not stop the engine
                     template_id, text = f"{service}:unparsed", "(unparsed)"
                     if self._unparsed_logged.get(service) != minute:
                         self._unparsed_logged[service] = minute
-                        logger.exception("drain3 failed on a %s line; counted as %s", service, template_id)
+                        logger.exception("could not template a %s line; counted as %s", service, template_id)
             self._see(service, template_id, text, level, c["module"], minute)
             if minute >= self.minutes.next_to_close:  # a late count is dropped, its sample too
                 self._open_samples[minute].append((service, template_id, c["sample"]))

@@ -14,6 +14,7 @@ class FakeSource:
     def __init__(self, hits_by_index: dict[str, list[dict]]):
         self.hits = hits_by_index
         self.failing: set[str] = set()
+        self.size = 10_000   # EsSource's page size (cfg.elasticsearch.batch_size)
 
     def fail(self, index: str) -> None:
         self.failing.add(index)
@@ -23,7 +24,7 @@ class FakeSource:
             self.failing.discard(index)
             raise ConnectionError(f"{index} down")
         hits = [h for h in self.hits.get(index, []) if from_ms <= h["sort"][0] <= upper_ms]
-        return sorted(hits, key=lambda h: h["sort"])[:10_000]
+        return sorted(hits, key=lambda h: h["sort"])[:self.size]
 
     def resolve(self, patterns: list[str]) -> dict[str, list[str]]:
         return {p: sorted(fnmatch.filter(self.hits, p)) for p in patterns}

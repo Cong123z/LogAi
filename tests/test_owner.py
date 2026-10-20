@@ -138,6 +138,7 @@ def test_catch_up_days_back_writes_old_partitions(conn, cfg):
 
 def test_cursor_is_open_minute_boundary(conn, cfg):
     src = FakeSource({"a": lines(0, 2) + lines(1, 2)})
+    src.size = cfg.elasticsearch.batch_size = 4   # a full page: the position (minute 1) holds the watermark
     reader, owner = make(conn, cfg, src, T0 / 1000 + 600)
     batch = tick(reader, owner)
     (c,) = rows(conn, "SELECT * FROM es_cursors")
@@ -167,6 +168,19 @@ def test_level_promoted_and_unparsed(conn, cfg, monkeypatch):
         tick(reader, owner)
     levels = {r["template_id"]: r["level"] for r in rows(conn, "SELECT template_id, level FROM templates")}
     assert levels == {"s:T00001": "ERROR", "s:unparsed": "INFO"}
+    assert rows(conn, "SELECT sum FROM hourly_counts WHERE key = 's:unparsed'")[0]["sum"] == 1
+
+
+def test_normalize_failure_counted_unparsed(conn, cfg, monkeypatch):
+    from logai2.reader import reader as reader_mod
+    real = reader_mod.normalize
+    monkeypatch.setattr(reader_mod, "normalize",
+                        lambda m: (_ for _ in ()).throw(ValueError("bad")) if "poison" in m else real(m))
+    src = FakeSource({"a": lines(0, 1) + [hit("x", T0 + 5000, service="s", message="poison pill")]})
+    reader, owner = make(conn, cfg, src, T0 / 1000 + 240)
+    for _ in range(2):
+        tick(reader, owner)
+    assert rows(conn, "SELECT text FROM templates WHERE template_id = 's:unparsed'") == [{"text": "(unparsed)"}]
     assert rows(conn, "SELECT sum FROM hourly_counts WHERE key = 's:unparsed'")[0]["sum"] == 1
 
 

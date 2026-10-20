@@ -3,8 +3,10 @@ MinuteBatch, a plain dict (a Kafka message in v2).
 
 Each poll reads one page per index starting at its position's millisecond
 (inclusive), so docs sharing that millisecond are re-read and dropped by _id.
-The watermark says every doc before it has been read: an index that is not
-caught up holds it at its position.
+The watermark says every doc before it has been read: an index whose page
+did not reach upper_ms holds it at its position. When every index fails (ES
+down) the watermark is held too: closing the outage minutes would write them
+empty and drop their docs as late on recovery.
 """
 from __future__ import annotations
 
@@ -49,6 +51,7 @@ class Reader:
                  now: Callable[[], float] = time.time):
         self.source = source
         self.cfg = cfg.reader
+        self.page_size = cfg.elasticsearch.batch_size
         self.cache = cache
         self.now = now
         self.malformed = 0
@@ -117,9 +120,10 @@ class Reader:
                     continue
                 events += 1
                 self._add(aggregates, line)
-            # Stall guard: a page of only already-seen ids is caught up for
-            # this poll; the next poll tries again, never loop inside one.
-            self._caught_up[index] = new == 0
+            # A page shorter than the page size reached upper_ms, even under a
+            # continuous stream. Stall guard: a page of only already-seen ids
+            # is caught up for this poll; the next poll tries again.
+            self._caught_up[index] = len(hits) < self.page_size or new == 0
         return {
             "counts": list(aggregates.values()),
             "watermark_ms": self._watermark(upper_ms),
@@ -129,8 +133,11 @@ class Reader:
         }
 
     def _add(self, aggregates: dict[tuple, Count], line) -> None:
-        text = normalize(line.message)
-        template_id = self.cache.get(line.service, text)
+        try:
+            text = normalize(line.message)
+        except Exception:  # noqa: BLE001 — text None: the owner counts (and logs) it as <service>:unparsed
+            text = None
+        template_id = self.cache.get(line.service, text) if text is not None else None
         minute = minute_of(line.ts)
         key = (line.service, template_id or text, template_id is None, line.level, line.module, minute)
         count = aggregates.get(key)
@@ -145,9 +152,10 @@ class Reader:
             count["n"] += 1
 
     def _watermark(self, upper_ms: int) -> int:
-        healthy = [upper_ms if self._caught_up[i] else self._pos[i]
-                   for i in self._floors if self._errors[i] < FAILING_AFTER]
-        return min(healthy, default=upper_ms)
+        marks = {i: upper_ms if self._caught_up[i] else self._pos[i] for i in self._floors}
+        healthy = [m for i, m in marks.items() if self._errors[i] < FAILING_AFTER]
+        # no healthy index: hold at the positions (a failing index is never caught up)
+        return min(healthy or marks.values(), default=upper_ms)
 
     def learn(self, resolved: dict[tuple[str, str], str]) -> None:
         for (service, text), template_id in resolved.items():
