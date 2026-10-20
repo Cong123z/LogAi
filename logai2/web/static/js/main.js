@@ -1,10 +1,14 @@
 // Same order as the sidebar sections; swipe and the slide direction follow it.
-// Alerting, Templates, Documentation and Baseline register here when their views exist;
+// Documentation and Baseline register here when their views exist;
 // until then their links fall back to Pipeline.
 const viewTitles = {
+  alerting: 'Alerting',
   pipeline: 'Pipeline',
+  templates: 'Templates',
   sources: 'Data sources',
 };
+// Templates polls only through its Auto-refresh toggle.
+const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000};
 const viewOrder = Object.keys(viewTitles);
 
 function setView(view, updateHash = true) {
@@ -38,7 +42,7 @@ function setView(view, updateHash = true) {
     state.alertRefreshTimer = null;
   }
   loadData();
-  state.alertRefreshTimer = setInterval(loadData, 2000);
+  if (POLL_MS[view]) state.alertRefreshTimer = setInterval(loadData, POLL_MS[view]);
 }
 
 document.querySelectorAll('.sidebar-nav a[data-view]').forEach(link => {
@@ -131,7 +135,11 @@ setInterval(refreshHealth, 5000);
 // ── Main Load ────────────────────────────────────────────────────
 async function loadData() {
   try {
-    if (state.activeView === 'pipeline') {
+    if (state.activeView === 'alerting') {
+      renderAlerts(await fetchAlerts());
+    } else if (state.activeView === 'templates') {
+      await loadTemplates();
+    } else if (state.activeView === 'pipeline') {
       renderPipeline(await fetchPipeline());
     } else if (state.activeView === 'sources') {
       const sources = await fetchSources();

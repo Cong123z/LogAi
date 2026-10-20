@@ -13,6 +13,8 @@
   <link rel="stylesheet" href="/static/css/app.css">
   <script defer src="/static/js/core.js"></script>
   <script defer src="/static/js/ui.js"></script>
+  <script defer src="/static/js/views/alerting.js"></script>
+  <script defer src="/static/js/views/templates.js"></script>
   <script defer src="/static/js/views/sources.js"></script>
   <script defer src="/static/js/views/pipeline.js"></script>
   <script defer src="/static/js/main.js"></script>
@@ -59,6 +61,57 @@
           <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>Reload</span>
         </button>
       </header>
+      <section class="view groups-section" id="view-alerting" aria-label="Alerts">
+        <div class="stats-row">
+          <button type="button" class="stat-card stat-filter" data-alert-card="all" aria-pressed="true"><div class="stat-icon total"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg></div><div><div class="stat-label">Open alerts</div><div class="stat-value" id="alert-stat-total">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-alert-card="ALERTING" aria-pressed="false"><div class="stat-icon unknown"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 2.9L1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0z"/></svg></div><div><div class="stat-label">Alerting</div><div class="stat-value" id="alert-stat-alerting">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-alert-card="WARMING" aria-pressed="false"><div class="stat-icon services"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v10l4 2"/><circle cx="12" cy="12" r="9"/></svg></div><div><div class="stat-label">Warming</div><div class="stat-value" id="alert-stat-warming">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-alert-card="COOLING" aria-pressed="false"><div class="stat-icon services"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg></div><div><div class="stat-label">Cooling</div><div class="stat-value" id="alert-stat-cooling">—</div></div></button>
+        </div>
+        <div class="filter-bar">
+          <div class="toggle-group" id="alert-status-toggle">
+            <button class="toggle-btn active" data-alert-status="all">All</button>
+            <button class="toggle-btn" data-alert-status="ALERTING">Alerting</button>
+            <button class="toggle-btn" data-alert-status="WARMING">Warming</button>
+            <button class="toggle-btn" data-alert-status="COOLING">Cooling</button>
+          </div>
+          <div class="live-status"><span class="live-dot" aria-hidden="true"></span><span id="alert-last-updated" role="status">Waiting for alert state...</span></div>
+        </div>
+        <div class="alert-cards" id="alert-cards" aria-live="polite"><p class="loading">Loading alert state...</p></div>
+      </section>
+
+      <section class="view groups-section" id="view-templates" aria-label="Templates">
+        <div class="filter-bar">
+          <div class="search-wrap">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="text" class="search-input" id="search-input" placeholder="Search templates..." aria-label="Search template text" autocomplete="off" spellcheck="false">
+          </div>
+          <select class="filter-select" id="filter-service" aria-label="Service"><option value="">All services</option></select>
+          <select class="filter-select" id="filter-level" aria-label="Level"></select>
+          <label class="chip-toggle chip-push"><input type="checkbox" id="auto-refresh"><span>Auto-refresh</span></label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>State</th><th>Template ID</th><th>Template Text</th><th>Level</th>
+                <th title="Average events per minute this hour">Rate</th>
+                <th title="Normal band for this hour: mean ± kσ">Normal</th>
+                <th>Document</th><th>First Seen</th><th>Last Seen</th>
+              </tr>
+            </thead>
+            <tbody id="template-tbody">
+              <tr><td colspan="9" class="loading">Loading templates...</td></tr>
+            </tbody>
+          </table>
+          <div class="pagination" id="pagination">
+            <span id="page-info"></span>
+            <label class="page-size">Rows per page <select id="page-size" class="filter-select"><option>50</option><option selected>100</option><option>200</option></select></label>
+            <div class="pagination-btns" id="page-btns"></div>
+          </div>
+        </div>
+      </section>
+
       <section class="view groups-section" id="view-pipeline" aria-label="Pipeline performance">
         <div class="section-heading">
           <div class="sync-status" id="pl-status" aria-live="polite">Loading pipeline stats...</div>

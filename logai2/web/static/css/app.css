@@ -867,3 +867,26 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 
 .switch:has(input:disabled) { cursor: not-allowed; }
 .switch input:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Alerting: one card per alert row (service · document). */
+.live-status.stale { color: var(--yellow); }
+.live-status.stale .live-dot { background: var(--yellow); box-shadow: 0 0 0 3px var(--yellow-bg); }
+.alert-cards { display: grid; gap: 12px; }
+.alert-card { background: var(--bg-card); border: 1px solid var(--border); border-left: 4px solid var(--border); border-radius: var(--radius); padding: 12px 16px; min-width: 0; }
+.alert-card-alerting { border-left-color: var(--red); }
+.alert-card-warming { border-left-color: var(--yellow); }
+.alert-card-cooling { border-left-color: var(--blue); }
+.alert-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.view .alert-card-title { margin: 0; font-size: 15px; font-weight: 600; text-transform: none; letter-spacing: normal; color: var(--text); overflow-wrap: anywhere; }
+.alert-card-since { margin-left: auto; font-size: 12px; color: var(--text-dim); }
+.alert-lines { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; }
+.alert-line { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.alert-line .tmpl-text, .alert-line-label { flex: 1; min-width: 0; max-width: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alert-rate { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.alert-band { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+@media (max-width: 600px) { .alert-line { flex-wrap: wrap; } .alert-line .tmpl-text, .alert-line-label { flex-basis: 100%; } }
+
+/* Templates: rate above the band, and the per-row document select. */
+.rate-high { color: var(--red); font-weight: 600; }
+.tpl-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.doc-select { max-width: 220px; padding: 4px 26px 4px 8px; font-size: 12px; }

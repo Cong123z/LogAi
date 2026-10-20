@@ -37,9 +37,14 @@ class Baseline:
         self.days = days
 
     @classmethod
-    def load(cls, conn) -> Baseline:
+    def load(cls, conn, keys: list[tuple[str, str]] | None = None) -> Baseline:
+        """keys: only these (service, key) pairs (the web's page of templates), else the whole table."""
+        sql, args = "SELECT service, key, daytype, hour, mean, std FROM baseline", ()
+        if keys is not None:
+            sql += " WHERE (service, key) IN (SELECT * FROM unnest(%s::text[], %s::text[]))"
+            args = ([s for s, _ in keys], [k for _, k in keys])
         stats = {(r["service"], r["key"], r["daytype"], r["hour"]): Stat(r["mean"], r["std"])
-                 for r in conn.execute("SELECT service, key, daytype, hour, mean, std FROM baseline")}
+                 for r in conn.execute(sql, args)}
         days = {(r["service"], r["daytype"]): min(r["n"], DAY_CAP[r["daytype"]])
                 for r in conn.execute("SELECT service, daytype, count(*) AS n FROM day_status "
                                       "WHERE committed GROUP BY 1, 2")}
