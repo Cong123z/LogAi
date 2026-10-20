@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 import yaml
+from psycopg.types.json import Jsonb
 
 from logai2 import commands
 from logai2.alerts import alert_rows
@@ -26,7 +27,7 @@ from logai2.config import AppConfig
 from logai2.db import connect, ensure_partitions, get_setting, migrate, put_setting
 from logai2.jobs.commit import commit
 from logai2.metrics import Metrics
-from logai2.owner.owner import Owner
+from logai2.owner.owner import SQL, Owner
 from logai2.reader.cache import KnownLines
 from logai2.reader.reader import Reader
 from logai2.timeutil import TZ, local
@@ -99,13 +100,17 @@ class Engine:
             self._seed_documents()
         self._apply_connection()
         self.reader = Reader(self.source, self.cfg, KnownLines(self.cfg.reader.cache_size), now=self.now)
-        floors, saved = self._select_indices()
+        floors, saved = self._wait_for_indices()
         start_ms = min((saved.get(i, f) for i, f in floors.items()), default=int(now * 1000))
         # catch-up (first start, or a restart after downtime) writes counts into every day since start_ms
         with self.db.transaction():
             ensure_partitions(self.db, min(_day(start_ms / 1000), today), today + timedelta(days=2))
         self._partitions_day = today
         self.owner = Owner(self.conn, self.cfg, start_ms // 60_000, now=self.now)
+        raised = sum(r.state != "NORMAL" for r in self.owner.detector.states.values())
+        if raised:
+            logger.warning("loaded %d non-NORMAL alert states; they are exported as they were "
+                           "until catch-up re-judges their keys", raised)
         if self._commit_due():
             logger.info("missed daily commit: running it now")
             self._commit()
@@ -131,6 +136,22 @@ class Engine:
             saved = get_setting(self.db, "es_connection") or {}
         self.source.reconnect(replace(self.cfg.elasticsearch,
                                       **{k: saved[k] for k in CONNECTION_FIELDS if k in saved}))
+
+    def _wait_for_indices(self) -> tuple[dict[str, int], dict[str, int]]:
+        """ES unreachable at start: retry with backoff instead of crash-looping; the
+        web shows the warning meanwhile."""
+        delay = 1
+        while True:
+            try:
+                return self._select_indices()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Elasticsearch unreachable at start (%s); retrying in %ss", exc, delay)
+                status = {"heartbeat": self.now(), "bootstrap": self.bootstrap, "last_commit": self.last_commit,
+                          "warnings": [f"Elasticsearch unreachable: {exc}"]}
+                with self.db.transaction():
+                    self.db.execute(SQL["worker_status"], ("engine", Jsonb(status)))
+                self.sleep(delay)
+                delay = min(delay * 2, MAX_BACKOFF_SECONDS)
 
     def _select_indices(self) -> tuple[dict[str, int], dict[str, int]]:
         self._refreshed = self.now()

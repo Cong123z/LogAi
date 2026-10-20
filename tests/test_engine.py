@@ -285,3 +285,59 @@ def test_miss_ratio_warns_only_after_5_minutes_of_data(conn, cfg, make):
         if k == 0:
             assert warnings() == []   # cold cache right after start: no warning yet
     assert warnings() == ["high miss ratio: s 100%"]
+
+
+def test_first_catch_up_completes_under_continuous_traffic(conn, cfg, make):
+    # new docs every poll on a busy index: a short page still counts as caught up
+    cfg.elasticsearch.batch_size = 1000
+    clock = Clock(NOON)
+    hits = history(NOON - 2 * 86400, NOON - 60, 1)
+    src = FakeSource({"a": hits})
+    src.size = 1000
+    engine = make(src, clock)
+    engine.start()
+    for k in range(10):
+        hits.append(hit(f"live{k}", int((clock.t - 31) * 1000), service="s", message="live"))
+        engine.tick()
+        if engine.owner.detection_enabled:
+            break
+        clock.t += 1
+    assert engine.owner.detection_enabled and k >= 2   # 2880 backlog docs took 3 pages
+
+
+def test_first_catch_up_ignores_failing_index(conn, cfg, make, monkeypatch):
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "*", "added_at": 0}]})
+    clock = Clock(NOON)
+    src = FakeSource({"a": history(NOON - 2 * 86400, NOON - 60, 1), "b": []})
+    real = src.page
+    monkeypatch.setattr(src, "page", lambda index, *a: (_ for _ in ()).throw(ConnectionError("b down"))
+                        if index == "b" else real(index, *a))
+    engine = make(src, clock)
+    engine.start()
+    catch_up(engine, clock)
+    status = q(conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]
+    assert status["indices"]["b"]["failing"] and status["indices"]["a"]["caught_up"]
+
+
+def test_start_waits_for_elasticsearch(conn, cfg, make, monkeypatch):
+    src = FakeSource({"a": []})
+    real = src.resolve
+    fails = [ConnectionError("es down"), ConnectionError("es down")]
+    monkeypatch.setattr(src, "resolve", lambda p: (_ for _ in ()).throw(fails.pop()) if fails else real(p))
+    engine = make(src, Clock(NOON))
+    warned = []
+    engine.sleep = lambda s: warned.append((s, q(
+        conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]["warnings"]))
+    engine.start()
+    assert warned == [(1, ["Elasticsearch unreachable: es down"]), (2, ["Elasticsearch unreachable: es down"])]
+    assert set(engine.reader.floors) == {"a"}
+
+
+def test_start_logs_loaded_alerting_states(conn, cfg, make, caplog):
+    cfg.start.days_back = 0
+    conn.execute("INSERT INTO alert_state (service, key, state, since, streak, score, count) "
+                 "VALUES ('s', 's:T1', 'ALERTING', now(), 3, 2.0, 9), ('s', 's:T2', 'NORMAL', now(), 0, 0, 0)")
+    conn.commit()
+    with caplog.at_level("WARNING", logger="logai2.engine"):
+        make(FakeSource({"a": []}), Clock(NOON)).start()
+    assert "1 non-NORMAL alert state" in caplog.text
