@@ -48,6 +48,8 @@ GROUP BY k.service, k.key, h.daytype, h.hour
 
 
 def commit(conn, cfg: AppConfig, today: date) -> dict:
+    """Call on an idle connection (no open transaction): otherwise the block below is only a
+    savepoint and nothing is committed until the caller commits."""
     # db helpers open their own transaction() blocks; inside this one they become savepoints.
     with conn.transaction():
         days = conn.execute(MARK_DAYS, (today,)).rowcount

@@ -23,6 +23,7 @@ def test_next_hour_widens(cfg):
 
 def test_young_band_uses_4_sigma(cfg):
     assert not judge(10, "s:T1", "ERROR", LK(Stat(3, 2), days=2), cfg).high       # edge 11
+    assert judge(12, "s:T1", "ERROR", LK(Stat(3, 2), days=2), cfg).high           # above 11, k=4 applied
 
 
 def test_floor_only_without_baseline(cfg):

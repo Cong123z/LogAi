@@ -73,3 +73,19 @@ def test_commit_is_idempotent_and_catches_up_missed_days(conn, cfg):
     assert baseline_rows(conn) == rows
     assert conn.execute("SELECT to_regclass('hourly_counts_20261101') AS t").fetchone()["t"]
     assert get_setting(conn, "last_commit")["today"] == "2026-10-30"
+
+
+def test_failed_commit_rolls_back_everything(conn, cfg, monkeypatch):
+    seed(conn, "s", date(2026, 10, 12), 10, 60, {"k": (60, 60)})
+    commit(conn, cfg, today=date(2026, 10, 13))
+    before_rows = baseline_rows(conn)
+    seed(conn, "s", date(2026, 10, 13), 10, 60, {"k": (600, 6000)})
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr("logai2.jobs.commit.drop_partitions_before", boom)   # fails after the rebuild
+    with pytest.raises(RuntimeError):
+        commit(conn, cfg, today=date(2026, 10, 14))
+    committed = [r["day"] for r in conn.execute("SELECT day FROM day_status WHERE committed")]
+    assert committed == [date(2026, 10, 12)]
+    assert baseline_rows(conn) == before_rows
