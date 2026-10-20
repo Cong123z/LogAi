@@ -45,12 +45,12 @@ function renderBaseline(data) {
   const count = type => committed.filter(d => d.daytype === type).length;
   const profile = (n, type) => n === 0
     ? (type === 'weekend' ? 'No days yet: weekday profile, upper alerts only' : 'No days yet: floor-only alerts')
-    : (n < data.full_after_days ? `Young: mean ± 4σ until ${data.full_after_days} days` : 'Full: mean ± 3σ');
+    : (n < data.full_after_days[type] ? `Young: mean ± 4σ until ${data.full_after_days[type]} days` : 'Full: mean ± 3σ');
   const weekday = count('weekday'), weekend = count('weekend');
   const last = data.last_commit;
   document.getElementById('bl-stats').innerHTML = [
-    blCard('Weekday days', String(weekday), profile(weekday, 'weekday'), weekday < data.full_after_days ? 'warn' : ''),
-    blCard('Weekend days', String(weekend), profile(weekend, 'weekend'), weekend < data.full_after_days ? 'warn' : ''),
+    blCard('Weekday days', String(weekday), profile(weekday, 'weekday'), weekday < data.full_after_days.weekday ? 'warn' : ''),
+    blCard('Weekend days', String(weekend), profile(weekend, 'weekend'), weekend < data.full_after_days.weekend ? 'warn' : ''),
     blCard('Open suggestions', String(data.suggestions.length), 'Unreviewed hours are kept'),
     blCard('Last commit', last ? new Date(last.at).toLocaleString() : 'Never', last ? `Owner day ${last.today}` : 'Runs at the daily commit'),
   ].join('');
@@ -91,7 +91,7 @@ async function blDecide(day, hourFrom, hourTo, decision) {
     {service: bl.service, day, hour_from: hourFrom, hour_to: hourTo, decision});
   if (result.warning) {
     const one = result.warning.length === 1;
-    notifyDialog(`${one ? 'Hour' : 'Hours'} ${result.warning.map(blHour).join(', ')} now ${one ? 'has' : 'have'} fewer than 3 days of baseline for this day type; ${one ? 'it falls' : 'they fall'} back to floor-only alerts.`, 'Few baseline days left');
+    notifyDialog(`${one ? 'Hour' : 'Hours'} ${result.warning.map(blHour).join(', ')} now ${one ? 'has' : 'have'} fewer than 3 days of baseline for this day type; ${one ? 'its' : 'their'} baseline will be built from only those few days.`, 'Few baseline days left');
   }
   blShowStatus(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${day} ${blHours(hourFrom, hourTo)}.`);
 }

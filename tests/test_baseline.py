@@ -2,7 +2,7 @@ from datetime import date
 
 from logai2.owner.baseline import Baseline, Lookup, Stat, judge
 
-LK = lambda this, nxt=None, days=5, upper_only=False: Lookup(this, nxt, days, upper_only)
+LK = lambda this, nxt=None, days=5, upper_only=False, dt="weekday": Lookup(this, nxt, days, upper_only, dt)
 
 
 def test_upper_needs_band_and_floor(cfg):
@@ -42,6 +42,14 @@ def test_drop_rules(cfg):
     assert not judge(0, "s:T1", "ERROR", LK(Stat(100, 10)), cfg).high               # templates never drop
 
 
+def test_weekend_full_at_its_day_cap(cfg):
+    # only 4 weekend days are ever kept: 4 is a full weekend baseline (k 3, drops allowed)
+    v = judge(0, "*total", "INFO", LK(Stat(100, 10), days=4, dt="weekend"), cfg)
+    assert v.high and v.band_high == 130
+    assert not judge(0, "*total", "INFO", LK(Stat(100, 10), days=3, dt="weekend"), cfg).high   # young
+    assert not judge(0, "*total", "INFO", LK(Stat(100, 10), days=4), cfg).high                 # weekday: young
+
+
 def test_score(cfg):
     assert judge(18, "s:T1", "ERROR", LK(Stat(3, 2)), cfg).score == 2
     assert judge(1, "s:T1", "ERROR", LK(Stat(0, 0)), cfg).score == 1.0
@@ -50,14 +58,14 @@ def test_score(cfg):
 def test_weekend_falls_back_to_weekday():
     b = Baseline({("s", "k", "weekday", 10): Stat(5, 1)}, {("s", "weekday"): 5, ("s", "weekend"): 1})
     lk = b.lookup("s", "k", date(2026, 10, 18), 10)          # Sunday
-    assert lk.this == Stat(5, 1) and lk.upper_only and lk.days == 5
+    assert lk.this == Stat(5, 1) and lk.upper_only and lk.days == 5 and lk.daytype == "weekday"
 
 
 def test_lookup_next_hour_wraps_and_missing():
     b = Baseline({("s", "k", "weekend", 0): Stat(1, 1), ("s", "k", "weekend", 23): Stat(2, 1)},
                  {("s", "weekend"): 2})
     lk = b.lookup("s", "k", date(2026, 10, 17), 23)          # Saturday
-    assert lk == Lookup(Stat(2, 1), Stat(1, 1), 2, False)
+    assert lk == Lookup(Stat(2, 1), Stat(1, 1), 2, False, "weekend")
     assert b.lookup("s", "other", date(2026, 10, 19), 5) == Lookup(None, None, 0, False)
 
 

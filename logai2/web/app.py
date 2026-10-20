@@ -17,7 +17,7 @@ from logai2 import db
 from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
-from logai2.owner.baseline import Baseline, judge
+from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import day_hour, daytype, minute_of
 
@@ -360,7 +360,8 @@ def create_app(cfg: AppConfig) -> Flask:
             d["created_at"] = d["created_at"].timestamp()
         last_commit, _ = setting("last_commit")
         return jsonify({"days": days, "suggestions": suggestions, "decisions": decisions,
-                        "last_commit": last_commit, "full_after_days": cfg.baseline.full_after_days})
+                        "last_commit": last_commit,
+                        "full_after_days": {dt: full_after(cfg, dt) for dt in DAY_CAP}})
 
     @app.post("/api/baseline/decisions")
     def add_decision():
@@ -383,7 +384,7 @@ def create_app(cfg: AppConfig) -> Flask:
                            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                            (service, day, hour_from, hour_to, decision)).fetchone()["id"]
         # Hours of this range left with < 3 of the days the rebuild uses (jobs/commit.py: last 5
-        # committed weekdays / last 4 weekend days) fall back to floor-only.
+        # committed weekdays / last 4 weekend days): their baseline comes from only those few days.
         kind = daytype(day)
         short = [r["h"] for r in c.execute(
             "WITH picked AS (SELECT day FROM day_status WHERE service = %s AND committed AND daytype = %s "
@@ -392,7 +393,7 @@ def create_app(cfg: AppConfig) -> Flask:
             "  SELECT count(*) FROM picked p WHERE NOT EXISTS (SELECT 1 FROM review_exclusions x "
             "    WHERE x.service = %s AND x.day = p.day AND x.decision = 'exclude' "
             "    AND h >= x.hour_from AND h < x.hour_to)) < 3 ORDER BY h",
-            (service, kind, 4 if kind == "weekend" else 5, hour_from, hour_to, service))] if decision == "exclude" else []
+            (service, kind, DAY_CAP[kind], hour_from, hour_to, service))] if decision == "exclude" else []
         c.commit()
         out = {"id": new_id}
         if short:

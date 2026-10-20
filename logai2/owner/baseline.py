@@ -22,6 +22,12 @@ class Lookup(NamedTuple):
     next: Stat | None
     days: int
     upper_only: bool
+    daytype: str = "weekday"   # the profile used (a borrowed weekday one included)
+
+
+def full_after(cfg: AppConfig, daytype: str) -> int:
+    """Committed days for a full baseline: never more than the days the rebuild keeps."""
+    return min(cfg.baseline.full_after_days, DAY_CAP[daytype])
 
 
 class Verdict(NamedTuple):
@@ -57,7 +63,7 @@ class Baseline:
             dt = "weekday"     # too few weekend days: borrow the weekday profile, never alert on drops
         return Lookup(self.stats.get((service, key, dt, hour)),
                       self.stats.get((service, key, dt, (hour + 1) % 24)),
-                      self.days.get((service, dt), 0), upper_only)
+                      self.days.get((service, dt), 0), upper_only, dt)
 
     def lookup_doc(self, service: str, template_ids, day: date, hour: int) -> Lookup:
         """Doc key band: Σmean ± k·Σσ over its linked templates; templates without stats add nothing."""
@@ -68,7 +74,8 @@ class Baseline:
             return Stat(sum(s.mean for s in stats), sum(s.std for s in stats)) if stats else None
 
         return Lookup(total(lk.this for lk in lks), total(lk.next for lk in lks),
-                      min((lk.days for lk in lks), default=0), any(lk.upper_only for lk in lks))
+                      min((lk.days for lk in lks), default=0), any(lk.upper_only for lk in lks),
+                      next((lk.daytype for lk in lks), "weekday"))
 
 
 def judge(count: int, key: str, level: str, lk: Lookup, cfg: AppConfig) -> Verdict:
@@ -78,7 +85,7 @@ def judge(count: int, key: str, level: str, lk: Lookup, cfg: AppConfig) -> Verdi
     if not stats:
         high = floor is not None and count >= floor
         return Verdict(high, count / floor if floor else 0.0, None, None)
-    full = lk.days >= cfg.baseline.full_after_days
+    full = lk.days >= full_after(cfg, lk.daytype)
     k = cfg.baseline.sigma_multiplier if full else cfg.baseline.young_sigma_multiplier
     band_high = max(s.mean + k * s.std for s in stats)
     band_low = min(s.mean - k * s.std for s in stats)
