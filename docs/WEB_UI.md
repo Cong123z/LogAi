@@ -21,6 +21,10 @@ LOGAI2_DATABASE_DSN=postgresql://logai:logai@localhost:5433/logai \
   LOGAI2_WEB_PORT=5555 .venv/bin/python scripts/run_web.py
 ```
 
+Only the engine runs `migrate()`. On a fresh database, start `logai2-engine`
+(or `docker compose up -d`) once before the web's API works; until then the
+tables do not exist.
+
 `run_web.py` starts Flask's threaded development server on `web.host:web.port`
 (default `0.0.0.0:5555`; compose publishes 5565). The look, stack and
 sidebar are copied from logai-engine (vanilla JS, hash routes, light/dark

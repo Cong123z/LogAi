@@ -594,7 +594,7 @@ The web treats a heartbeat older than 30 s as stale (engine not running).
 | `logai_late_counts_total` | counter | — | events for an already-closed minute (should stay 0) |
 | `logai_lag_seconds` | gauge | — | now − watermark, at the last flush |
 | `logai_miss_ratio` | gauge | `service` | cache miss ratio over 5 min; series removed when a service leaves the window |
-| `logai_flush_seconds` | gauge | — | duration of the last flush (including retries) |
+| `logai_flush_seconds` | gauge | — | duration of the last flush attempt (the timer restarts on each retry, so time spent retrying is not included) |
 | `logai_engine_heartbeat_timestamp_seconds` | gauge | — | time of the last flush |
 | `log_alert_state` | gauge | `service`, `doc_id`, `state` | 1 for the alert row's current state, 0 for the other three; `doc_id` = doc id, `undocumented` (all undocumented template rows of a service share one series, worst state wins) or `service` |
 
