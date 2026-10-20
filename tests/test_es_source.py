@@ -14,10 +14,7 @@ import pytest
 from logai2.config import ElasticsearchConfig, ReaderConfig
 from logai2.reader import es_source
 from logai2.reader.es_source import EsSource, hit_to_line
-
-
-def hit(_id, ms, **src):
-    return {"_id": _id, "sort": [ms, 1], "_source": {"@timestamp": ms, **src}}
+from tests.fakes import hit
 
 
 def line_of(**src):
