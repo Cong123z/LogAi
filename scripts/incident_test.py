@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 SAMPLE_SECONDS = 5
 CHECKS = 3  # check 1: the burst template must be ALERTING within this many minute checks
@@ -54,15 +54,17 @@ def _phase(name: str, kind: str, injects: list) -> List[Dict[str, Any]]:
     ]
 
 
+# Consecutive injection phases touch different documents (DOC-001, DOC-003 alternate), so
+# each phase starts 25 min after the last one on its document and has no alert carried over.
 SCENARIO: List[Dict[str, Any]] = [
     {"name": "warmup", "kind": "warmup", "minutes": 30, "targets": [], "injects": []},
     {"name": "control", "kind": "control", "minutes": 30, "targets": [], "injects": []},
     *_phase("B1-x50", "burst", [(LIXI, 150)]),
-    *_phase("B2-x20", "burst", [(LIXI, 60)]),
-    *_phase("B3-x10", "burst", [(LIXI, 30)]),
-    *_phase("B4-rare", "burst", [(SQL_TIMEOUT, 30)]),
     # check 3: two templates of DOC-003 at a modest rate each; the doc key sums them
-    *_phase("B5-spread", "spread", [(SLOW_DB, 10), (SQL_TIMEOUT, 10)]),
+    *_phase("B2-spread", "spread", [(SLOW_DB, 10), (SQL_TIMEOUT, 10)]),
+    *_phase("B3-x20", "burst", [(LIXI, 60)]),
+    *_phase("B4-rare", "burst", [(SQL_TIMEOUT, 30)]),
+    *_phase("B5-x10", "burst", [(LIXI, 30)]),
 ]
 
 
@@ -190,7 +192,8 @@ class Runner:
         for inj in phase["injects"]:
             status, body = http("POST", f"{self.args.replayer}/replay/inject",
                                 {**inj, "minutes": minutes}, timeout=120)
-            print(f"  inject {inj['label']} {inj['per_minute']}/min: {status} {body}", flush=True)
+            print(f"  {'' if status == 200 else 'ERROR '}inject {inj['label']} {inj['per_minute']}/min: "
+                  f"{status} {body}", file=sys.stdout if status == 200 else sys.stderr, flush=True)
             self.write("phases.jsonl", {"event": "inject", "ts": time.time(), "status": status, **inj})
 
     def run(self) -> None:
@@ -233,17 +236,43 @@ def check1_deadline(burst_start: float) -> float:
     return first_minute + CHECKS * 60 + CLOSE_DELAY_SECONDS
 
 
-def first_template_state(samples: List[Dict[str, Any]], service: str, template_id: str,
-                         state: str, start: float) -> Optional[Dict[str, Any]]:
-    """First sample at or after `start` where the template is in `state`: {"ts", "row"}."""
-    for s in samples:
-        if s["ts"] < start:
-            continue
-        for row in s["alerts"]:
-            if row["service"] == service and any(t["template_id"] == template_id and t["state"] == state
-                                                 for t in row["templates"]):
-                return {"ts": s["ts"], "row": row}
-    return None
+def template_row(sample: Dict[str, Any], service: str, template_id: str) -> Optional[Dict[str, Any]]:
+    """The alert row holding the template in this sample (None while it is NORMAL)."""
+    return next((r for r in sample["alerts"] if r["service"] == service
+                 and any(t["template_id"] == template_id for t in r["templates"])), None)
+
+
+def template_state(sample: Dict[str, Any], service: str, template_id: str) -> str:
+    row = template_row(sample, service, template_id)
+    return next(t["state"] for t in row["templates"] if t["template_id"] == template_id) if row else "NORMAL"
+
+
+def doc_row_state(sample: Dict[str, Any], service: str, doc: str) -> str:
+    return next((r["state"] for r in sample["alerts"] if r["kind"] == "document"
+                 and r["service"] == service and r["doc_id"] == doc), "NORMAL")
+
+
+def doc_key_state(sample: Dict[str, Any], service: str, doc: str) -> str:
+    for row in sample["alerts"]:
+        for total in row.get("totals", []):
+            if row["service"] == service and total["key"] == f"doc:{doc}":
+                return total.get("state") or "NORMAL"
+    return "NORMAL"
+
+
+def onset(samples: List[Dict[str, Any]], start: float, end: float,
+          state_of: Callable[[Dict[str, Any]], str]) -> tuple[str, Optional[Dict[str, Any]]]:
+    """A transition into ALERTING inside [start, end): ("onset", sample), ("none", None), or
+    ("carried", None) when the last sample before `start` was already ALERTING."""
+    before = [s for s in samples if s["ts"] < start]
+    if before and state_of(before[-1]) == "ALERTING":
+        return "carried", None
+    hit = next((s for s in samples if start <= s["ts"] < end and state_of(s) == "ALERTING"), None)
+    return ("onset", hit) if hit else ("none", None)
+
+
+def verdict(status: str, ok: bool) -> str:
+    return "n/a: already alerting at start" if status == "carried" else "PASS" if ok else "FAIL"
 
 
 def row_key(row: Dict[str, Any]) -> str:
@@ -266,26 +295,29 @@ def alert_onsets(samples: List[Dict[str, Any]], prev: Optional[set] = None) -> D
     return onsets
 
 
-def doc_key_state(sample: Dict[str, Any], service: str, doc: str) -> Optional[str]:
-    for row in sample["alerts"]:
-        for total in row.get("totals", []):
-            if row["service"] == service and total["key"] == f"doc:{doc}":
-                return total.get("state")
-    return None
-
-
 def summarize(run_dir: Path) -> str:
     meta = json.loads((run_dir / "meta.json").read_text())
     targets = meta["targets"]
-    phases = [p for p in read_jsonl(run_dir / "phases.jsonl") if p["event"] == "phase"]
-    samples = read_jsonl(run_dir / "samples.jsonl")
-    tick = lambda ok: "PASS" if ok else "FAIL"
-    after = lambda ts, start: "–" if ts is None else f"{ts - start:.0f} s"
+    events = read_jsonl(run_dir / "phases.jsonl")
+    phases = [p for p in events if p["event"] == "phase"]
+    samples = sorted(read_jsonl(run_dir / "samples.jsonl"), key=lambda s: s["ts"])
+    after = lambda s, start: "–" if s is None else f"{s['ts'] - start:.0f} s"
+    yes = lambda ok: "yes" if ok else "no"
     lines = [f"# Incident test {run_dir.name}", "", f"- quick: {meta.get('quick')}", "",
              "| target | template | text | document |", "|---|---|---|---|"]
     lines += [f"| {label} | {t['template_id']} | {t['text'][:70]} | {t['doc']} |" for label, t in sorted(targets.items())]
-    lines += ["", "## Bursts: checks 1, 2 and 4", "",
-              "| burst | target | 1: ALERTING after | deadline | 1 | 2: doc row ALERTING (API / metric) | 2 "
+    lines.append("")
+
+    failed = [e for e in events if e["event"] == "inject" and e.get("status") != 200]
+    if failed:
+        lines += ["## ERRORS: replayer injections failed (affected phases are invalid)", ""]
+        lines += [f"- {e['label']}: HTTP {e.get('status')}" for e in failed]
+        lines.append("")
+
+    lines += ["## Bursts: checks 1, 2 and 4", "",
+              "Only a transition into ALERTING inside the phase counts; an alert carried over "
+              "from before the burst is n/a.", "",
+              "| burst | target | 1: ALERTING after | deadline | 1 | 2: doc row ALERTING after (metric seen) | 2 "
               "| 4: document shown | 4 |",
               "|---|---|---:|---:|---|---|---|---|---|"]
     for p in phases:
@@ -294,32 +326,52 @@ def summarize(run_dir: Path) -> str:
         inside = [s for s in samples if s["phase"] == p["name"]]
         for label in p["targets"]:
             t = targets[label]
+            svc, tid, doc = t["service"], t["template_id"], t["doc"]
             deadline = check1_deadline(p["start"])
-            hit = first_template_state(inside, t["service"], t["template_id"], "ALERTING", p["start"])
-            ok1 = hit is not None and hit["ts"] <= deadline
-            api = any(r["kind"] == "document" and r["service"] == t["service"] and r["doc_id"] == t["doc"]
-                      and r["state"] == "ALERTING" for s in inside for r in s["alerts"])
-            metric = any(s["states"].get(f"{t['service']}|{t['doc']}") == "ALERTING" for s in inside)
-            shown = hit["row"]["doc_id"] if hit else None
+            st1, hit = onset(samples, p["start"], p["end"], lambda s: template_state(s, svc, tid))
+            st2, doc_hit = onset(samples, p["start"], p["end"], lambda s: doc_row_state(s, svc, doc))
+            metric = any(s["states"].get(f"{svc}|{doc}") == "ALERTING" for s in inside)
+            shown = (template_row(hit, svc, tid) or {}).get("doc_id") if hit else None
             lines.append(
-                f"| {p['name']} | {label} | {after(hit and hit['ts'], p['start'])} "
-                f"| {deadline - p['start']:.0f} s | {tick(ok1)} | {'yes' if api else 'no'} / {'yes' if metric else 'no'} "
-                f"| {tick(api)} | {shown or '–'} | {tick(shown == t['doc'])} |")
+                f"| {p['name']} | {label} | {after(hit, p['start'])} | {deadline - p['start']:.0f} s "
+                f"| {verdict(st1, hit is not None and hit['ts'] <= deadline)} "
+                f"| {after(doc_hit, p['start'])} ({yes(metric)}) | {verdict(st2, doc_hit is not None)} "
+                f"| {shown or '–'} | {verdict(st1, shown == doc)} |")
     lines.append("")
 
-    lines += ["## Spread: check 3", "", "| phase | document | doc key ALERTING after | 3 |", "|---|---|---:|---|"]
+    lines += ["## Spread: check 3", "",
+              "PASS needs doc:<id> to turn ALERTING inside the phase; the templates should stay below ALERTING "
+              "on their own (else the template keys, not the sum, carried the alert).", "",
+              "| phase | document | doc key ALERTING after | 3 | templates that reached ALERTING on their own |",
+              "|---|---|---:|---|---|"]
     for p in phases:
         if p["kind"] != "spread":
             continue
         inside = [s for s in samples if s["phase"] == p["name"]]
         for svc, doc in sorted({(targets[l]["service"], targets[l]["doc"]) for l in p["targets"]}):
-            hit = next((s["ts"] for s in inside if doc_key_state(s, svc, doc) == "ALERTING"), None)
-            lines.append(f"| {p['name']} | {doc} | {after(hit, p['start'])} | {tick(hit is not None)} |")
+            st, hit = onset(samples, p["start"], p["end"], lambda s: doc_key_state(s, svc, doc))
+            alone = [l for l in p["targets"] if targets[l]["doc"] == doc and any(
+                template_state(s, svc, targets[l]["template_id"]) == "ALERTING" for s in inside)]
+            lines.append(f"| {p['name']} | {doc} | {after(hit, p['start'])} | {verdict(st, hit is not None)} "
+                         f"| {', '.join(alone) or 'none'} |")
     lines.append("")
 
+    lines += ["## Recovery", "", "State at the end of each recovery (NORMAL = clean start for the next phase).", "",
+              "| recovery | target | template | document row |", "|---|---|---|---|"]
+    for p in phases:
+        inside = [s for s in samples if s["phase"] == p["name"]]
+        if p["kind"] != "recovery" or not inside:
+            continue
+        for label in p["targets"]:
+            t = targets[label]
+            lines.append(f"| {p['name']} | {label} | {template_state(inside[-1], t['service'], t['template_id'])} "
+                         f"| {doc_row_state(inside[-1], t['service'], t['doc'])} |")
+    lines.append("")
+
+    ctrl = next((p for p in phases if p["kind"] == "control"), None)
     control = [s for s in samples if s["phase"] == "control"]
-    hours = len(control) * SAMPLE_SECONDS / 3600
-    before = [s for s in samples if s["ts"] < (control[0]["ts"] if control else 0)]
+    hours = (ctrl["end"] - ctrl["start"]) / 3600 if ctrl else 0
+    before = [s for s in samples if ctrl and s["ts"] < ctrl["start"]]
     prev = {row_key(r) for r in before[-1]["alerts"] if r["state"] == "ALERTING"} if before else set()
     onsets = alert_onsets(control, prev)
     total = sum(onsets.values())
