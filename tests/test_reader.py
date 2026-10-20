@@ -95,22 +95,50 @@ def test_removed_index_dropped(cfg):
     assert dict(r.floors) == {"a": T0}
 
 
-def test_saved_cursor_wins_over_floor_and_dedup_survives(cfg):
+def test_saved_cursor_wins_over_floor_for_new_index(cfg):
     src, r = make(cfg, {"a": [hit("1", T0, service="s", message="m"),
-                              hit("2", T0 + 60_000, service="s", message="m")]}, {"a": T0})
-    assert r.poll()["events"] == 2
+                              hit("2", T0 + 60_000, service="s", message="m")]}, {})
     r.set_indices({"a": T0}, {"a": T0 + 60_000})
-    b = r.poll()                        # re-reads from the saved cursor; "2" already seen
-    assert b["events"] == 0 and b["positions"]["a"]["pos_ms"] == T0 + 60_000
+    b = r.poll()
+    assert b["events"] == 1 and b["positions"]["a"]["pos_ms"] == T0 + 60_000
 
 
-def test_forget_before_drops_old_ids_only(cfg):
-    src, r = make(cfg, {"a": [hit("1", T0, service="s", message="m"),
-                              hit("2", T0 + 60_000, service="s", message="m")]}, {"a": T0})
-    r.poll()
-    r.forget_before(T0 + 60_000)
-    r.set_indices({"a": T0}, {})        # rewind to the floor: "1" is read again, "2" is not
+def test_refresh_does_not_rewind_tracked_index(cfg):
+    src, r = make(cfg, {"a": [hit("1", T0 + 60_000, service="s", message="m")]}, {"a": T0})
     assert r.poll()["events"] == 1
+    r.poll()                            # quiet poll: caught up
+    r.set_indices({"a": T0}, {"a": T0})
+    b = r.poll()
+    assert b["events"] == 0 and b["positions"]["a"] == {
+        "pos_ms": T0 + 60_000, "caught_up": True, "failing": False}
+
+
+def test_caught_up_flips_back_when_new_doc_arrives(cfg):
+    src, r = make(cfg, {"a": [hit("1", T0, service="s", message="m")]}, {"a": T0})
+    r.poll()
+    assert r.poll()["positions"]["a"]["caught_up"]
+    src.hits["a"].append(hit("2", T0 + 10, service="s", message="m"))
+    b = r.poll()
+    assert not b["positions"]["a"]["caught_up"] and b["watermark_ms"] == T0 + 10
+
+
+def test_forget_before_keeps_ids_at_or_after_position(cfg):
+    # Idle index: its last doc sits before the boundary and is re-read every poll.
+    _, r = make(cfg, {"a": [hit("1", T0, service="s", message="m"),
+                            hit("2", T0 + 5, service="s", message="m")]}, {"a": T0})
+    assert r.poll()["events"] == 2
+    r.forget_before(T0 + 120_000)
+    b = r.poll()
+    assert b["events"] == 0 and b["positions"]["a"]["caught_up"] and b["watermark_ms"] == UPPER
+    assert set(r._seen["a"]) == {"2"}   # "1" is before the position: forgotten
+
+
+def test_non_numeric_sort_is_malformed(cfg):
+    _, r = make(cfg, {"a": [hit("1", T0, service="s", message="m")]}, {"a": T0})
+    r.source.hits["a"].append({"_id": "x", "sort": ["junk", 1], "_source": {}})
+    r.source.page = lambda *_: r.source.hits["a"]
+    b = r.poll()
+    assert b["events"] == 1 and r.malformed == 1
 
 
 def test_cursors_use_boundary_but_not_before_floor(cfg):

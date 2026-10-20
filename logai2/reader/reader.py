@@ -69,12 +69,14 @@ class Reader:
         for index in set(self._floors) - set(floors):
             for state in (self._pos, self._caught_up, self._errors, self._seen):
                 state.pop(index, None)
-        self._floors = dict(floors)
-        for index, floor in floors.items():
-            self._pos[index] = saved.get(index, floor)
+        # A tracked index keeps its position, caught_up and dedup ids: the
+        # periodic selection refresh must not rewind running indices.
+        for index in set(floors) - set(self._floors):
+            self._pos[index] = saved.get(index, floors[index])
             self._caught_up[index] = False
-            self._errors.setdefault(index, 0)
-            self._seen.setdefault(index, {})
+            self._errors[index] = 0
+            self._seen[index] = {}
+        self._floors = dict(floors)
 
     def poll(self) -> MinuteBatch:
         upper_ms = int((self.now() - self.cfg.upper_bound_seconds) * 1000)
@@ -96,7 +98,11 @@ class Reader:
                 doc_id = h.get("_id")
                 if doc_id in seen:
                     continue
-                ts_ms = int((h.get("sort") or [self._pos[index]])[0])
+                try:
+                    ts_ms = int((h.get("sort") or [self._pos[index]])[0])
+                except (TypeError, ValueError):
+                    self.malformed += 1
+                    continue
                 # Advancing on every hit (malformed too) so a junk doc never
                 # pins the position; a stuck millisecond is the stall below.
                 self._pos[index] = max(self._pos[index], ts_ms)
@@ -148,9 +154,16 @@ class Reader:
             self.cache.put(service, text, template_id)
 
     def cursors(self, boundary_ms: int) -> dict[str, tuple[int, int]]:
+        # ponytail: a failing index gets the boundary too, so its docs from
+        # minutes closed while it failed are lost (they would be late counts
+        # anyway); saving its older position would re-open closed minutes on
+        # restart.
         return {i: (max(boundary_ms, floor), floor) for i, floor in self._floors.items()}
 
     def forget_before(self, boundary_ms: int) -> None:
-        for seen in self._seen.values():
-            for doc_id in [d for d, ts in seen.items() if ts < boundary_ms]:
+        # Never forget ids at or after the position: the next poll re-reads
+        # the position's millisecond and would count them again.
+        for index, seen in self._seen.items():
+            cut = min(boundary_ms, self._pos[index])
+            for doc_id in [d for d, ts in seen.items() if ts < cut]:
                 del seen[doc_id]
