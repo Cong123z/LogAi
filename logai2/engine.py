@@ -139,7 +139,8 @@ class Engine:
 
     def _wait_for_indices(self) -> tuple[dict[str, int], dict[str, int]]:
         """ES unreachable at start: retry with backoff instead of crash-looping; the
-        web shows the warning meanwhile."""
+        web shows the warning meanwhile. Each retry picks up connection settings
+        saved from the web since (commands only run once the loop starts)."""
         delay = 1
         while True:
             try:
@@ -152,6 +153,7 @@ class Engine:
                     self.db.execute(SQL["worker_status"], ("engine", Jsonb(status)))
                 self.sleep(delay)
                 delay = min(delay * 2, MAX_BACKOFF_SECONDS)
+                self._apply_connection()
 
     def _select_indices(self) -> tuple[dict[str, int], dict[str, int]]:
         self._refreshed = self.now()

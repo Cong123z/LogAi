@@ -326,10 +326,15 @@ def test_start_waits_for_elasticsearch(conn, cfg, make, monkeypatch):
     monkeypatch.setattr(src, "resolve", lambda p: (_ for _ in ()).throw(fails.pop()) if fails else real(p))
     engine = make(src, Clock(NOON))
     warned = []
-    engine.sleep = lambda s: warned.append((s, q(
-        conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]["warnings"]))
+
+    def sleep(s):
+        put_setting(conn, "es_connection", {"hosts": ["http://fixed:9200"]})
+        warned.append((s, q(
+            conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]["warnings"]))
+    engine.sleep = sleep
     engine.start()
     assert warned == [(1, ["Elasticsearch unreachable: es down"]), (2, ["Elasticsearch unreachable: es down"])]
+    assert src.connected.hosts == ["http://fixed:9200"]   # settings saved from the web while waiting
     assert set(engine.reader.floors) == {"a"}
 
 
