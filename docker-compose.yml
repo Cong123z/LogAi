@@ -23,7 +23,7 @@ services:
       POSTGRES_PASSWORD: logai
       POSTGRES_DB: logai
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"   # default creds: never on all interfaces
     volumes:
       - logai2-pg:/var/lib/postgresql/data
     healthcheck:
