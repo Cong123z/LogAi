@@ -1,0 +1,6 @@
+drain3==0.9.11
+elasticsearch>=8.15.0,<9.0.0
+prometheus-client>=0.20.0
+PyYAML>=6.0.2
+flask>=3.0.0
+psycopg[binary]>=3.2

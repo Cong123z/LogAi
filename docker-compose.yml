@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: logai
+      POSTGRES_PASSWORD: logai
+      POSTGRES_DB: logai
+    ports:
+      - "5433:5432"
+    volumes:
+      - logai2-pg:/var/lib/postgresql/data
+
+volumes:
+  logai2-pg:
