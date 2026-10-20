@@ -1,4 +1,4 @@
-"""Elasticsearch source: hit -> Line, malformed hits, paging and retry.
+"""Elasticsearch source: hit -> Line, malformed hits, paging and fail-fast search.
 
 Ported from logai-engine tests/test_es_malformed_hits.py,
 test_es_retry_classification.py and test_es_index_selection.py. EsSource is
@@ -28,6 +28,16 @@ def test_hit_to_line_fields():
                            message="2026-10-18 ERROR boom", moduleCode="M1"), "moduleCode", 8192)
     assert (line.service, line.level, line.module, line.doc_id) == ("lixi", "ERROR", "M1", "a")
     assert line.ts == 1_760_000_000.0
+
+
+def test_ts_is_the_sort_value():
+    # the minute comes from the ES sort value (epoch ms), not a re-parse of _source
+    line = hit_to_line({"_id": "a", "sort": [1_760_000_060_000, 3],
+                        "_source": {"@timestamp": "2020-01-01T00:00:00Z"}}, "moduleCode", 8192)
+    assert line.ts == 1_760_000_060.0
+    line = hit_to_line({"_id": "a", "sort": [1_760_000_060_123, 3], "_source": {"@timestamp": "junk"}},
+                       "moduleCode", 8192)
+    assert line.ts == 1_760_000_060.123
 
 
 def test_missing_module_and_service():
@@ -208,7 +218,7 @@ def test_reconnect_builds_new_client():
     assert source.cfg is cfg and source.client is not old
 
 
-# -- retry classification (from test_es_retry_classification.py) ------------
+# -- fail fast (no retry inside a poll) ---------------------------------------
 
 class BadRequestError(Exception): pass          # 400
 class AuthenticationException(Exception): pass  # 401
@@ -219,8 +229,6 @@ class Transient(Exception): pass                # connection / timeout / 5xx
 
 @pytest.fixture
 def retry(monkeypatch):
-    monkeypatch.setattr(es_source, "_ES_NON_RETRYABLE", (
-        BadRequestError, AuthenticationException, AuthorizationException, NotFoundError))
     sleep = MagicMock()
     monkeypatch.setattr(es_source.time, "sleep", sleep)
     source = EsSource(ElasticsearchConfig(), ReaderConfig())
@@ -229,40 +237,11 @@ def retry(monkeypatch):
 
 
 @pytest.mark.parametrize("exc", [
-    BadRequestError, AuthenticationException, AuthorizationException, NotFoundError])
-def test_non_retryable_fails_fast(retry, exc):
+    BadRequestError, AuthenticationException, AuthorizationException, NotFoundError, Transient])
+def test_search_fails_fast(retry, exc):
+    # one attempt, no sleep: a failing index must not stall the poll of the others (spec section 6)
     source, sleep = retry
     source.client.search.side_effect = exc("boom")
-    hook = MagicMock()
-    source._on_retry_hook = hook
     with pytest.raises(exc):
-        source._search({"query": {}}, "idx")
-    assert source.client.search.call_count == 1 and sleep.call_count == 0
-    assert hook.call_count == 0
-
-
-def test_retryable_retries_five_times_then_raises(retry):
-    source, sleep = retry
-    source.client.search.side_effect = Transient("down")
-    with pytest.raises(Transient):
-        source._search({"query": {}}, "idx")
-    assert source.client.search.call_count == 6 and sleep.call_count == 5
-
-
-def test_recovers_after_transient_failures_and_hook_fires(retry):
-    source, sleep = retry
-    source.client.search.side_effect = [Transient("x"), Transient("x"), Transient("x"), {"ok": True}]
-    hook = MagicMock()
-    source._on_retry_hook = hook
-    assert source._search({"query": {}}, "idx") == {"ok": True}
-    assert sleep.call_count == 3
-    assert [c.args[0] for c in hook.call_args_list] == [1, 2, 3]
-
-
-def test_abort_retry_stops_early(retry):
-    source, sleep = retry
-    source.client.search.side_effect = Transient("down")
-    source._abort_retry = lambda: True
-    with pytest.raises(Transient):
         source._search({"query": {}}, "idx")
     assert source.client.search.call_count == 1 and sleep.call_count == 0

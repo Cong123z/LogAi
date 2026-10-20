@@ -2,32 +2,22 @@
 
 The only code that talks to Elasticsearch. `page` returns one page of raw
 hits of one index sorted by (@timestamp, _doc) from a millisecond position;
-the reader keeps the position and drops re-read docs by _id. Retry+backoff
-on transient errors. `hit_to_line` turns a hit into a `Line`.
+the reader keeps the position and drops re-read docs by _id. One attempt per
+search: the reader's failure count and the next poll are the backoff.
+`hit_to_line` turns a hit into a `Line`.
 """
 from __future__ import annotations
 
-import logging
-import random
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
-from elasticsearch import (
-    AuthenticationException,
-    AuthorizationException,
-    BadRequestError,
-    Elasticsearch,
-    NotFoundError,
-)
+from elasticsearch import Elasticsearch
 
 from logai2.config import ElasticsearchConfig, ReaderConfig
 from logai2.reader.normalize import find_level
 
-logger = logging.getLogger("logai2.es_source")
 
-# Client errors that retrying cannot fix (400/401/403/404): fail fast.
-_ES_NON_RETRYABLE = (AuthenticationException, AuthorizationException, BadRequestError, NotFoundError)
 _REQUEST_TIMEOUT_SECONDS = 30.0
 # The @timestamp sort value is always epoch milliseconds (also for a
 # date_nanos field), so a hit's first sort value can start a range query.
@@ -116,9 +106,17 @@ def _parse_timestamp(value: Any) -> float:
     return time.time()
 
 
+def _sort_seconds(hit: Dict[str, Any]) -> Optional[float]:
+    try:
+        return int((hit.get("sort") or [None])[0]) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
 def hit_to_line(hit: Dict[str, Any], module_field: str, max_line_bytes: int) -> Optional[Line]:
     """One ES hit as a Line; None when the hit has no `_id` or no dict
-    `_source` (the caller counts it as malformed)."""
+    `_source` (the caller counts it as malformed). The time is the hit's sort
+    value (epoch ms, what the reader's position uses), else `@timestamp`."""
     if not isinstance(hit, dict):
         return None
     src = hit.get("_source")
@@ -126,9 +124,10 @@ def hit_to_line(hit: Dict[str, Any], module_field: str, max_line_bytes: int) -> 
     if not isinstance(src, dict) or not doc_id:
         return None
     # Byte cut can split a multibyte char; "ignore" drops the partial tail.
+    ts = _sort_seconds(hit)
     message = _coerce_message(src.get("message")).encode("utf-8")[:max_line_bytes].decode("utf-8", "ignore")
     return Line(
-        ts=_parse_timestamp(src.get("@timestamp")),
+        ts=ts if ts is not None else _parse_timestamp(src.get("@timestamp")),
         service=_extract_service(src),
         level=_extract_level({**src, "message": message}),
         message=message,
@@ -138,10 +137,6 @@ def hit_to_line(hit: Dict[str, Any], module_field: str, max_line_bytes: int) -> 
 
 
 class EsSource:
-    _on_retry_hook: Optional[Callable[[int, BaseException], None]] = None
-    # True when retrying is pointless: new connection settings were saved.
-    _abort_retry: Optional[Callable[[], bool]] = None
-
     def __init__(self, cfg: ElasticsearchConfig, reader_cfg: ReaderConfig):
         self.cfg = cfg
         self.reader_cfg = reader_cfg
@@ -155,31 +150,10 @@ class EsSource:
         self.client = _build_client(cfg)
 
     def _search(self, body: Dict[str, Any], index: str) -> Dict[str, Any]:
-        """Search with exponential backoff, classifying ES errors.
-
-        Non-retryable client errors (400/401/403/404) fail fast; retryable
-        ones (connection/timeout, 429, 5xx) back off, up to 5 retries.
-        ``_on_retry_hook`` is invoked before each sleep (retry metric).
-        """
-        attempt = 0
-        while True:
-            try:
-                # A deleted index must not fail the poll of every other one.
-                return self.client.search(index=index, body=body, ignore_unavailable=True,
-                                          filter_path=_FILTER_PATH)
-            except _ES_NON_RETRYABLE:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                attempt += 1
-                if attempt > 5 or (self._abort_retry is not None and self._abort_retry()):
-                    logger.error("_search failed after %d attempts: %s", attempt - 1, exc)
-                    raise
-                delay = min(1.0 * (2 ** (attempt - 1)), 60.0)
-                delay += random.uniform(0, delay * 0.1)  # jitter
-                logger.warning("_search attempt %d/5 failed (%s), retrying in %.2fs", attempt, exc, delay)
-                if self._on_retry_hook is not None:
-                    self._on_retry_hook(attempt, exc)
-                time.sleep(delay)
+        """One attempt, no retry: a failing index must not stall the poll of
+        the others (spec section 6); the reader counts its failures."""
+        # A deleted index must not fail the poll of every other one.
+        return self.client.search(index=index, body=body, ignore_unavailable=True, filter_path=_FILTER_PATH)
 
     def page(self, index: str, from_ms: int, upper_ms: int) -> List[Dict[str, Any]]:
         """Raw hits of `index` with from_ms <= @timestamp <= upper_ms, sorted
