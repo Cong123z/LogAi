@@ -4,3 +4,4 @@ prometheus-client>=0.20.0
 PyYAML>=6.0.2
 flask>=3.0.0
 psycopg[binary]>=3.2
+tzdata

@@ -263,7 +263,8 @@ def create_app(cfg: AppConfig) -> Flask:
             for t in r["templates"]:
                 t.update(normal(r["service"], t["template_id"]))
             # service-wide and doc keys have no template line of their own: the card shows them from here
-            r["totals"] = [{"key": k, "count": by_key[(r["service"], k)]["count"],
+            r["totals"] = [{"key": k, "state": by_key[(r["service"], k)]["state"],
+                            "count": by_key[(r["service"], k)]["count"],
                             "band_low": by_key[(r["service"], k)]["band_low"],
                             "band_high": by_key[(r["service"], k)]["band_high"], **normal(r["service"], k)}
                            for k in r["keys"] if k.startswith(("*", "doc:"))]
