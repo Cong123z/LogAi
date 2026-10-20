@@ -1,13 +1,15 @@
 // Same order as the sidebar sections; swipe and the slide direction follow it.
-// Documentation and Baseline register here when their views exist;
-// until then their links fall back to Pipeline.
+// Unknown routes fall back to Pipeline.
 const viewTitles = {
   alerting: 'Alerting',
   pipeline: 'Pipeline',
   templates: 'Templates',
+  documentation: 'Documentation',
   sources: 'Data sources',
+  baseline: 'Baseline',
 };
-// Templates polls only through its Auto-refresh toggle.
+// Templates polls only through its Auto-refresh toggle; Documentation and
+// Baseline load on entry and after each change (Baseline polls a running recompute).
 const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000};
 const viewOrder = Object.keys(viewTitles);
 
@@ -145,6 +147,10 @@ async function loadData() {
       const sources = await fetchSources();
       renderSources(sources);
       renderConnection(sources.connection);
+    } else if (state.activeView === 'documentation') {
+      await loadDocumentation();
+    } else if (state.activeView === 'baseline') {
+      await loadBaseline();
     }
     document.getElementById('connection-status').hidden = true;
     if (state.reconnectTimer) {

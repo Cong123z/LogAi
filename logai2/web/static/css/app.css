@@ -890,3 +890,11 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 .rate-high { color: var(--red); font-weight: 600; }
 .tpl-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .doc-select { max-width: 220px; padding: 4px 26px 4px 8px; font-size: 12px; }
+
+/* Documentation: templates linked to a document; Baseline: add-range form. */
+.doc-links { min-width: 640px; }
+.doc-links .group-member { grid-template-columns: 110px 150px minmax(260px, 1fr) 90px; }
+#bl-add-form { align-items: center; flex-wrap: wrap; }
+#view-baseline > .section-heading { flex-wrap: wrap; }
+#view-baseline > .section-heading .filter-bar { margin: 0; }
+#view-documentation td:first-child .tmpl-id { white-space: nowrap; }

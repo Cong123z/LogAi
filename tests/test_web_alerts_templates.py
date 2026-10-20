@@ -114,7 +114,7 @@ def test_link_unknown_doc_404_and_link_enqueues_reload(client, conn):
     add_template(conn, "pay:T00001")
     add_doc(conn, "D1")
     conn.commit()
-    assert client.get("/api/documents").get_json() == [{"doc_id": "D1", "title": "Card gateway down"}]
+    assert [(d["doc_id"], d["title"]) for d in client.get("/api/documents").get_json()] == [("D1", "Card gateway down")]
     url = "/api/templates/pay/pay:T00001/link"
     assert client.put(url, json={"doc_id": "nope"}).status_code == 404
     assert client.put("/api/templates/pay/pay:T09999/link", json={"doc_id": "D1"}).status_code == 404

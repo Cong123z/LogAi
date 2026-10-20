@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
+from datetime import date
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
@@ -15,7 +17,8 @@ from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
 from logai2.owner.baseline import Baseline, judge
-from logai2.timeutil import day_hour, minute_of
+from logai2.review import suggest
+from logai2.timeutil import day_hour, daytype, minute_of
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
@@ -271,14 +274,145 @@ def create_app(cfg: AppConfig) -> Flask:
 
     @app.get("/api/documents")
     def documents():
-        # Only what the Templates link select needs; the Documentation page extends this.
-        return jsonify(conn().execute("SELECT doc_id, title FROM documents ORDER BY doc_id").fetchall())
+        # Also feeds the Templates link select (doc_id, title).
+        return jsonify(conn().execute(
+            "SELECT d.doc_id, d.title, d.body, d.error_code, d.revision, count(l.template_id) AS linked_templates "
+            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) GROUP BY d.doc_id ORDER BY d.doc_id"
+        ).fetchall())
+
+    def document_fields() -> dict:
+        payload = body()
+        fields = {"title": payload.get("title"), "body": payload.get("body"), "error_code": payload.get("error_code") or ""}
+        for name, limit in (("title", 200), ("body", 20000), ("error_code", 100)):
+            value = fields[name]
+            if not isinstance(value, str) or len(value) > limit:
+                raise BadRequest(f"{name} must be text of at most {limit} characters")
+            fields[name] = value.strip()
+        if not fields["title"] or not fields["body"]:
+            raise BadRequest("title and body are required")
+        return {**fields, "revision": payload.get("revision")}
+
+    @app.post("/api/documents")
+    def create_document():
+        fields = document_fields()
+        c = conn()
+        c.execute("LOCK TABLE documents IN EXCLUSIVE MODE")   # two creates must not pick the same number
+        top = c.execute("SELECT max(substring(doc_id FROM 5)::int) AS n FROM documents "
+                        "WHERE doc_id ~ '^DOC-[0-9]{1,9}$'").fetchone()["n"] or 0
+        doc_id, revision = f"DOC-{top + 1:03d}", uuid.uuid4().hex
+        c.execute("INSERT INTO documents (doc_id, title, body, error_code, revision) VALUES (%s, %s, %s, %s, %s)",
+                  (doc_id, fields["title"], fields["body"], fields["error_code"], revision))
+        c.commit()   # abort/raise above leave it uncommitted; teardown rolls back
+        return jsonify({"doc_id": doc_id, "revision": revision}), 201
+
+    @app.put("/api/documents/<doc_id>")
+    def update_document(doc_id: str):
+        fields = document_fields()
+        c = conn()
+        row = c.execute("SELECT revision FROM documents WHERE doc_id = %s FOR UPDATE", (doc_id,)).fetchone()
+        if not row:
+            abort(404, "Unknown document")
+        if row["revision"] != fields["revision"]:
+            raise db.StaleRevision(row["revision"])
+        revision = uuid.uuid4().hex
+        c.execute("UPDATE documents SET title = %s, body = %s, error_code = %s, revision = %s, updated_at = now() "
+                  "WHERE doc_id = %s", (fields["title"], fields["body"], fields["error_code"], revision, doc_id))
+        c.commit()
+        return jsonify({"doc_id": doc_id, "revision": revision})
+
+    @app.delete("/api/documents/<doc_id>")
+    def delete_document(doc_id: str):
+        c = conn()
+        # the FK on template_doc_links blocks a link racing in after this count
+        n = c.execute("SELECT count(*) AS n FROM template_doc_links WHERE doc_id = %s", (doc_id,)).fetchone()["n"]
+        if n:
+            return jsonify({"error": "linked", "templates": n}), 409
+        if not c.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,)).rowcount:
+            abort(404, "Unknown document")
+        c.commit()
+        return jsonify({"doc_id": doc_id})
+
+    def known_service(service: str | None) -> str:
+        if not service or not conn().execute("SELECT 1 FROM services WHERE service = %s", (service,)).fetchone():
+            abort(404, "Unknown service")
+        return service
+
+    @app.get("/api/baseline")
+    def baseline_review():
+        service = known_service(request.args.get("service"))
+        c = conn()
+        days = c.execute("SELECT day, committed, daytype FROM day_status WHERE service = %s ORDER BY day DESC",
+                         (service,)).fetchall()
+        decisions = c.execute("SELECT id, day, hour_from, hour_to, decision, created_at FROM review_exclusions "
+                              "WHERE service = %s ORDER BY day DESC, hour_from", (service,)).fetchall()
+        changes = c.execute("SELECT service, key, at, from_state, to_state FROM alert_changes "
+                            "WHERE service = %s ORDER BY at", (service,)).fetchall()
+        decided = {(service, d["day"], h) for d in decisions for h in range(d["hour_from"], d["hour_to"])}
+        suggestions = suggest(changes, decided)
+        for row in (*days, *decisions, *suggestions):
+            row["day"] = row["day"].isoformat()
+        for d in decisions:
+            d["created_at"] = d["created_at"].timestamp()
+        last_commit, _ = setting("last_commit")
+        return jsonify({"days": days, "suggestions": suggestions, "decisions": decisions,
+                        "last_commit": last_commit, "full_after_days": cfg.baseline.full_after_days})
+
+    @app.post("/api/baseline/decisions")
+    def add_decision():
+        payload = body()
+        try:
+            day = date.fromisoformat(payload.get("day"))
+        except (TypeError, ValueError):
+            raise BadRequest("day must be an ISO date (YYYY-MM-DD)") from None
+        hour_from, hour_to, decision = payload.get("hour_from"), payload.get("hour_to"), payload.get("decision")
+        if not (type(hour_from) is int and type(hour_to) is int and 0 <= hour_from < hour_to <= 24):
+            raise BadRequest("hours must be whole numbers with 0 <= hour_from < hour_to <= 24")
+        if decision not in ("exclude", "keep"):
+            raise BadRequest("decision must be 'exclude' or 'keep'")
+        service = known_service(payload.get("service"))
+        c = conn()
+        new_id = c.execute("INSERT INTO review_exclusions (service, day, hour_from, hour_to, decision) "
+                           "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                           (service, day, hour_from, hour_to, decision)).fetchone()["id"]
+        # Hours of this range left with < 3 committed days of the day type fall back to floor-only.
+        short = [r["h"] for r in c.execute(
+            "SELECT h FROM generate_series(%s::int, %s::int - 1) h WHERE ("
+            "  SELECT count(*) FROM day_status d WHERE d.service = %s AND d.committed AND d.daytype = %s "
+            "  AND NOT EXISTS (SELECT 1 FROM review_exclusions x WHERE x.service = d.service AND x.day = d.day "
+            "    AND x.decision = 'exclude' AND h >= x.hour_from AND h < x.hour_to)) < 3 ORDER BY h",
+            (hour_from, hour_to, service, daytype(day)))] if decision == "exclude" else []
+        c.commit()
+        out = {"id": new_id}
+        if short:
+            out["warning"] = short
+        return jsonify(out), 201
+
+    @app.delete("/api/baseline/decisions/<int:decision_id>")
+    def delete_decision(decision_id: int):
+        c = conn()
+        if not c.execute("DELETE FROM review_exclusions WHERE id = %s", (decision_id,)).rowcount:
+            abort(404, "Unknown decision")
+        c.commit()
+        return jsonify({"id": decision_id})
+
+    @app.post("/api/baseline/recompute")
+    def recompute():
+        return jsonify({"id": enqueue(conn(), "recompute_baseline")}), 202
+
+    @app.get("/api/commands/<int:command_id>")
+    def command(command_id: int):
+        row = conn().execute("SELECT id, kind, done_at IS NOT NULL AS done, result FROM commands WHERE id = %s",
+                             (command_id,)).fetchone()
+        if not row:
+            abort(404, "Unknown command")
+        return jsonify(row)
 
     @app.get("/api/templates")
     def templates():
         page, size = int_arg("page", 1, 10**6), int_arg("size", 100, MAX_PAGE_SIZE)
         where, args = ["true"], []
-        for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level"))):
+        for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
+                              ("l.doc_id", request.args.get("doc_id"))):
             if value:
                 where.append(f"{column} = %s")
                 args.append(value)
@@ -287,7 +421,8 @@ def create_app(cfg: AppConfig) -> Flask:
             args.append(request.args["q"])
         where_sql = " AND ".join(where)
         c = conn()
-        total = c.execute(f"SELECT count(*) AS n FROM templates t WHERE {where_sql}", args).fetchone()["n"]
+        total = c.execute("SELECT count(*) AS n FROM templates t LEFT JOIN template_doc_links l "
+                          f"ON l.service = t.service AND l.template_id = t.template_id WHERE {where_sql}", args).fetchone()["n"]
         items = c.execute(
             "SELECT t.service, t.template_id, t.text, t.level, t.first_seen, t.last_seen, l.doc_id, "
             "d.title AS doc_title, COALESCE(a.state, 'NORMAL') AS state FROM templates t "
