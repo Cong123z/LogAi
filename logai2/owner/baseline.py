@@ -54,6 +54,17 @@ class Baseline:
                       self.stats.get((service, key, dt, (hour + 1) % 24)),
                       self.days.get((service, dt), 0), upper_only)
 
+    def lookup_doc(self, service: str, template_ids, day: date, hour: int) -> Lookup:
+        """Doc key band: Σmean ± k·Σσ over its linked templates; templates without stats add nothing."""
+        lks = [self.lookup(service, t, day, hour) for t in template_ids]
+
+        def total(stats):
+            stats = [s for s in stats if s is not None]
+            return Stat(sum(s.mean for s in stats), sum(s.std for s in stats)) if stats else None
+
+        return Lookup(total(lk.this for lk in lks), total(lk.next for lk in lks),
+                      min((lk.days for lk in lks), default=0), any(lk.upper_only for lk in lks))
+
 
 def judge(count: int, key: str, level: str, lk: Lookup, cfg: AppConfig) -> Verdict:
     floor_level = FLOOR_LEVEL.get(KEY_LEVEL.get(key, level.upper()))

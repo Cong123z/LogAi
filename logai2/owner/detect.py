@@ -93,10 +93,12 @@ class Detector:
             return []
         keys = dict(cm.keys)
         doc_levels: dict[tuple[str, str], list[str]] = {}
+        doc_tids: dict[tuple[str, str], list[str]] = {}
         for (svc, tid), doc_id in self.links.items():
             dk = (svc, "doc:" + doc_id)
             keys[dk] = keys.get(dk, 0) + cm.keys.get((svc, tid), 0)
             doc_levels.setdefault(dk, []).append(self._level(cm, (svc, tid)))
+            doc_tids.setdefault(dk, []).append(tid)
         # ponytail: full scan of states per minute; index non-idle keys if states grow large
         for k, r in self.states.items():
             if r.state != "NORMAL" or r.streak:
@@ -106,7 +108,9 @@ class Detector:
         changes = []
         for (svc, key), count in keys.items():
             level = _worst(doc_levels[(svc, key)]) if (svc, key) in doc_levels else self._level(cm, (svc, key))
-            v = judge(count, key, level, self.baseline.lookup(svc, key, cm.day, cm.hour), self.cfg)
+            lk = (self.baseline.lookup_doc(svc, doc_tids[(svc, key)], cm.day, cm.hour) if (svc, key) in doc_tids
+                  else self.baseline.lookup(svc, key, cm.day, cm.hour))
+            v = judge(count, key, level, lk, self.cfg)
             prev = self.states.get((svc, key))
             if not v.high and (prev is None or (prev.state == "NORMAL" and not prev.streak)):
                 continue

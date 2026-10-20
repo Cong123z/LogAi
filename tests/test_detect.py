@@ -86,3 +86,18 @@ def test_non_consecutive_highs_reset_streak(cfg):
             r = det.states[("s", "s:T1")]
             seq.append((r.state, r.streak))
         assert seq == [("NORMAL", 1), ("NORMAL", 0), ("NORMAL", 1)]
+
+
+def test_doc_key_band_is_sum_of_linked_bands(cfg):
+    # T1 3±1, T2 5±2 → doc band high 8 + 3·3 = 17 (not the doc key's own, absent, baseline row)
+    stats = {("s", "s:T1", "weekday", 10): Stat(3, 1), ("s", "s:T2", "weekday", 10): Stat(5, 2)}
+    links = {("s", "s:T1"): "DOC-1", ("s", "s:T2"): "DOC-1"}
+    levels = {("s", "s:T1"): "ERROR", ("s", "s:T2"): "ERROR"}
+    inside = Detector(cfg, Baseline(stats, {("s", "weekday"): 5}), links, levels, {})
+    inside.run(cm(0, {("s", "s:T1"): 6, ("s", "s:T2"): 11}), historic=False)       # doc 17: on the edge
+    assert ("s", "doc:DOC-1") not in inside.states
+    above = Detector(cfg, Baseline(stats, {("s", "weekday"): 5}), links, levels, {})
+    for m in range(3):
+        above.run(cm(m, {("s", "s:T1"): 6, ("s", "s:T2"): 12}), historic=False)    # doc 18 > 17
+    row = above.states[("s", "doc:DOC-1")]
+    assert (row.state, row.band_high, row.count) == ("ALERTING", 17, 18)

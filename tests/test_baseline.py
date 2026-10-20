@@ -71,3 +71,12 @@ def test_load_caps_days(conn):
     b = Baseline.load(conn)
     assert b.days == {("s", "weekday"): 5, ("s", "weekend"): 4}
     assert b.stats == {("s", "k", "weekday", 3): Stat(1.5, 0.5)}
+
+
+def test_lookup_doc_sums_linked_templates():
+    day = date(2026, 10, 20)   # Tuesday
+    b = Baseline({("s", "s:T1", "weekday", 10): Stat(3, 1), ("s", "s:T2", "weekday", 10): Stat(5, 2),
+                  ("s", "s:T2", "weekday", 11): Stat(7, 1)}, {("s", "weekday"): 4})
+    lk = b.lookup_doc("s", ["s:T1", "s:T2", "s:T9"], day, 10)   # T9 has no stats: adds nothing
+    assert lk == Lookup(Stat(8, 3), Stat(7, 1), 4, False)
+    assert b.lookup_doc("s", ["s:T9"], day, 10) == Lookup(None, None, 4, False)   # floor only

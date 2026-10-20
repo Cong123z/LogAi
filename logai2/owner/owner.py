@@ -94,7 +94,12 @@ class Owner:
             blobs = {r["service"]: r["blob"] for r in conn.execute("SELECT service, blob FROM drain3_state")}
             self.levels = {(r["service"], r["template_id"]): r["level"]
                            for r in conn.execute("SELECT service, template_id, level FROM templates")}
-            self.services = {r["service"] for r in conn.execute("SELECT service FROM services")}
+            # service -> first minute it is zero-filled from; a known service counts from its first
+            # template (or from start), so a restart does not zero-fill minutes before it existed
+            self.services = {r["service"]: max(start_minute, int(r["first"].timestamp()) // 60)
+                             if r["first"] else start_minute for r in conn.execute(
+                                 "SELECT s.service, min(t.first_seen) AS first FROM services s "
+                                 "LEFT JOIN templates t USING (service) GROUP BY s.service")}
             self.modules = {r["module_code"] for r in conn.execute("SELECT module_code FROM modules")}
             states = {(r["service"], r["key"]): AlertRow(
                 r["service"], r["key"], r["state"], r["streak"], r["since"].timestamp(), r["score"],
@@ -106,6 +111,9 @@ class Owner:
         self.minutes = OpenMinutes(start_minute)
         self.detector = Detector(cfg, baseline, links, self.levels, states)
         self._unparsed_logged: dict[str, int] = {}  # service -> minute last logged
+        # samples of open minutes, queued only when their minute closes: open minutes are
+        # re-read after a crash, so queuing earlier would insert their samples twice
+        self._open_samples: dict[int, list[tuple[str, str, str]]] = defaultdict(list)
         self._clear()
 
     def _clear(self) -> None:
@@ -150,11 +158,14 @@ class Owner:
                         self._unparsed_logged[service] = minute
                         logger.exception("drain3 failed on a %s line; counted as %s", service, template_id)
             self._see(service, template_id, text, level, c["module"], minute)
+            if minute >= self.minutes.next_to_close:  # a late count is dropped, its sample too
+                self._open_samples[minute].append((service, template_id, c["sample"]))
             self.minutes.add(service, template_id, level, c["module"], minute, c["n"])
-            if self.levels[(service, template_id)].upper() in ERROR_LEVELS:
-                self._samples[(service, template_id)].append((minute, c["sample"]))
 
         for cm in self.minutes.close_before(batch["watermark_ms"] // 60_000, self.services):
+            for service, template_id, sample in self._open_samples.pop(cm.minute, ()):
+                if self.levels[(service, template_id)].upper() in ERROR_LEVELS:
+                    self._samples[(service, template_id)].append((cm.minute, sample))
             for (service, key), n in cm.keys.items():
                 if key == "*total":  # close_before gives every service a *total key
                     self._hours[(service, cm.day, cm.hour)] += 1
@@ -175,9 +186,11 @@ class Owner:
         return resolved
 
     def _see(self, service: str, template_id: str, text: str | None, level: str, module: str, minute: int) -> None:
-        if service not in self.services:
-            self.services.add(service)
+        first = self.services.get(service)
+        if first is None:
             self._services[service] = zlib.crc32(service.encode("utf-8")) % 60
+        if first is None or minute < first:
+            self.services[service] = minute
         if module and module not in self.modules:
             self.modules.add(module)
             self._modules[module] = service

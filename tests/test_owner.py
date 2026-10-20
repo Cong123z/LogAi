@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import zlib
+
 import psycopg
 import pytest
 
@@ -70,7 +72,7 @@ def test_counts_exact(conn, cfg):
     (t,) = rows(conn, "SELECT * FROM templates")
     assert t["template_id"] == "s:T00001" and t["level"] == "INFO"
     assert t["last_seen"] == datetime.fromtimestamp((M + 1) * 60, timezone.utc)
-    assert rows(conn, "SELECT partition FROM services WHERE service = 's'")[0]["partition"] >= 0
+    assert rows(conn, "SELECT partition FROM services WHERE service = 's'")[0]["partition"] == zlib.crc32(b"s") % 60
     assert rows(conn, "SELECT count(*) AS n FROM drain3_state")[0]["n"] == 1
 
 
@@ -120,18 +122,18 @@ def test_flush_failure_keeps_pending(conn, cfg, monkeypatch, schema):
 
 
 def test_catch_up_days_back_writes_old_partitions(conn, cfg):
-    old = T0 - 22 * 86_400_000                                   # 2026-09-28, before the test partitions
-    hits = [hit(str(i), old + 1000 * i, service="s", message="boot ok") for i in range(3)]
-    src = FakeSource({"a": hits})
-    reader, owner = make(conn, cfg, src, old / 1000 + 120, floor_ms=old)
-    tick(reader, owner)                                          # reads; minute still open
-    with pytest.raises(psycopg.Error):                           # closes it: no partition for that day yet
+    # 2026-09-27 23:59 and 2026-09-28 00:00 local: before the test partitions, across a local midnight
+    mid = int(datetime(2026, 9, 27, 17, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    hits = [hit(str(i), mid + off, service="s", message="boot ok") for i, off in enumerate((-60_000, -50_000, 30_000))]
+    reader, owner = make(conn, cfg, FakeSource({"a": hits}), mid / 1000 + 120, floor_ms=mid - 60_000)
+    with pytest.raises(psycopg.Error):                           # closes 23:59: no partition for that day yet
         tick(reader, owner)
-    conn.rollback()
-    ensure_partitions(conn, date(2026, 9, 28), date(2026, 9, 28))   # the engine does this at bootstrap
-    owner.flush(reader.cursors(owner.boundary_ms), {})
-    assert rows(conn, "SELECT day, sum FROM hourly_counts WHERE key = '*total'") == [
-        {"day": date(2026, 9, 28), "sum": 3}]
+    ensure_partitions(conn, date(2026, 9, 27), date(2026, 9, 28))   # the engine does this at bootstrap
+    assert tick(reader, owner)["watermark_ms"] >= mid + 60_000   # closes 00:00; one flush writes both days
+    assert rows(conn, "SELECT day, hour, n_minutes FROM service_hours ORDER BY day") == [
+        {"day": date(2026, 9, 27), "hour": 23, "n_minutes": 1}, {"day": date(2026, 9, 28), "hour": 0, "n_minutes": 1}]
+    assert rows(conn, "SELECT day, hour, sum FROM hourly_counts WHERE key = '*total' ORDER BY day") == [
+        {"day": date(2026, 9, 27), "hour": 23, "sum": 2}, {"day": date(2026, 9, 28), "hour": 0, "sum": 1}]
 
 
 def test_cursor_is_open_minute_boundary(conn, cfg):
@@ -186,3 +188,28 @@ def test_detection_states_survive_restart(conn, cfg):
     assert [(r["key"], r["module_code"], r["count"]) for r in am] == [("s:T00001", "PAY", 10)] * 2
     assert am[0]["minute"] == datetime.fromtimestamp((M + 1) * 60, timezone.utc)
     assert rows(conn, "SELECT module_code, service FROM modules") == [{"module_code": "PAY", "service": "s"}]
+
+
+def test_cursors_of_dropped_indices_are_deleted(conn, cfg):
+    _, owner = make(conn, cfg, FakeSource({}), T0 / 1000)
+    owner.flush({"a": (T0, T0), "b": (T0, T0)}, {})
+    owner.flush({"a": (T0 + 60_000, T0)}, {})
+    assert rows(conn, "SELECT index, since_ms FROM es_cursors") == [{"index": "a", "since_ms": T0 + 60_000}]
+    owner.flush({}, {})                                          # <> ALL('{}') is true: deletes all
+    assert rows(conn, "SELECT count(*) AS n FROM es_cursors")[0]["n"] == 0
+
+
+def test_error_samples_not_duplicated_by_replay(conn, cfg):
+    src = FakeSource({"a": lines(0, 1, msg="db down", level="ERROR") + lines(1, 1, msg="db down", level="ERROR")})
+    reader, owner = make(conn, cfg, src, T0 / 1000 + 120)        # upper = T0 + 90 s
+    tick(reader, owner)                                          # M closed and flushed; M+1 open
+    run_minutes(conn, cfg, None, T0 + 120_000, src=src)          # crash, restart re-reads M+1
+    got = rows(conn, "SELECT at FROM error_samples ORDER BY at")
+    assert [r["at"] for r in got] == [datetime.fromtimestamp(m * 60, timezone.utc) for m in (M, M + 1)]
+
+
+def test_new_service_zero_filled_from_first_minute(conn, cfg):
+    hits = lines(0, 1) + [hit("t1", T0 + 120_000, service="t", message="hello")]
+    run_minutes(conn, cfg, hits, T0 + 180_000)                   # one batch closes M..M+2
+    got = {r["service"]: r["n_minutes"] for r in rows(conn, "SELECT service, n_minutes FROM service_hours")}
+    assert got == {"s": 3, "t": 1}

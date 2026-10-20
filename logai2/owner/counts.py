@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from logai2.timeutil import day_hour
 
@@ -53,8 +53,9 @@ class OpenMinutes:
         if old is None or SEVERITY.get(level.upper(), 0) > SEVERITY.get(old.upper(), 0):
             cm.levels[tkey] = level
 
-    def close_before(self, minute_excl: int, services: Iterable[str]) -> list[ClosedMinute]:
-        services = list(services)
+    def close_before(self, minute_excl: int, services: Iterable[str] | Mapping[str, int]) -> list[ClosedMinute]:
+        """``services`` may map service -> first minute seen: a service is zero-filled only from then on."""
+        first = dict(services) if isinstance(services, Mapping) else dict.fromkeys(services)
         closed = []
         for m in range(self.next_to_close, minute_excl):
             cm = self._open.pop(m, None)
@@ -66,7 +67,8 @@ class OpenMinutes:
                 self.hour_keys = {dh: set()}
                 seen = self.hour_keys[dh]
             keys = {k: 0 for k in seen}
-            for s in {*services, *(k[0] for k in cm.keys)}:  # an unlisted service still gets *error
+            listed = (s for s, f in first.items() if f is None or f <= m)
+            for s in {*listed, *(k[0] for k in cm.keys)}:  # an unlisted service still gets *error
                 keys[(s, "*total")] = 0
                 keys[(s, "*error")] = 0
             keys.update(cm.keys)
