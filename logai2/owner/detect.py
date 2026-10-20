@@ -83,6 +83,7 @@ class Detector:
         self.links = links
         self.levels = levels
         self.states = states
+        self.touched: set[tuple[str, str]] = set()  # keys stepped since the owner last persisted them
 
     def _level(self, cm: ClosedMinute, k: tuple[str, str]) -> str:
         return self.levels.get(k) or cm.levels.get(k) or "INFO"
@@ -116,6 +117,7 @@ class Detector:
                 row.since = at
                 changes.append(Change(svc, key, at, prev.state, row.state, count, v.band_low, v.band_high))
             self.states[(svc, key)] = row
+            self.touched.add((svc, key))
         return changes
 
     def not_normal(self) -> set[tuple[str, str]]:
