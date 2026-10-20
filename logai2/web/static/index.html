@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <title>LogAI2 Console</title>
+  <script>
+    // Apply a saved theme before first paint to avoid a flash.
+    try { const t = localStorage.getItem('logai.theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) { /* storage unavailable */ }
+  </script>
+  <link rel="stylesheet" href="/static/css/tokens.css">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script defer src="/static/js/core.js"></script>
+  <script defer src="/static/js/ui.js"></script>
+  <script defer src="/static/js/views/alerting.js"></script>
+  <script defer src="/static/js/views/templates.js"></script>
+  <script defer src="/static/js/views/sources.js"></script>
+  <script defer src="/static/js/views/pipeline.js"></script>
+  <script defer src="/static/js/views/documentation.js"></script>
+  <script defer src="/static/js/views/baseline.js"></script>
+  <script defer src="/static/js/main.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#page-title">Skip to content</a>
+  <div class="app">
+    <aside class="sidebar" aria-label="Main navigation">
+      <div class="sidebar-logo">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        <span class="nav-label">LogAI2 Console</span>
+      </div>
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <div class="nav-section"><div class="nav-heading">Monitor</div>
+          <a href="#alerting" data-view="alerting" title="Alerting"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg><span class="nav-label">Alerting</span></a>
+          <a href="#pipeline" data-view="pipeline" title="Pipeline"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="nav-label">Pipeline</span></a>
+        </div>
+        <div class="nav-section"><div class="nav-heading">Catalog</div>
+          <a href="#templates" data-view="templates" title="Templates"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg><span class="nav-label">Templates</span></a>
+          <a href="#documentation" data-view="documentation" title="Documentation"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span class="nav-label">Documentation</span></a>
+        </div>
+        <div class="nav-section"><div class="nav-heading">Settings</div>
+          <a href="#sources" data-view="sources" title="Data sources"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg><span class="nav-label">Data sources</span></a>
+          <a href="#baseline" data-view="baseline" title="Baseline"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5"/><path d="M9 2h6"/></svg><span class="nav-label">Baseline</span></a>
+        </div>
+      </nav>
+      <button type="button" class="sidebar-collapse" id="sidebar-collapse" aria-expanded="true" aria-controls="sidebar-nav" title="Collapse sidebar">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg><span class="nav-label">Collapse</span>
+      </button>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h1 class="page-title" id="page-title" tabindex="-1">Pipeline</h1>
+        <span class="connection-status" id="connection-status" role="status" hidden>Reconnecting...</span>
+        <span class="health-pill" id="engine-health" role="status" title="Engine heartbeat">
+          <span class="health-dot" aria-hidden="true"></span><span id="engine-health-text">Engine…</span>
+        </span>
+        <button type="button" class="icon-btn" id="theme-toggle" aria-label="Switch theme" title="Switch theme">
+          <svg class="icon-sun" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          <svg class="icon-moon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        </button>
+        <button type="button" class="btn" id="reload-app" title="Reload application">
+          <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 11a8 8 0 1 0-2.34 5.66"/><path d="M20 4v7h-7"/></svg><span>Reload</span>
+        </button>
+      </header>
+      <section class="view groups-section" id="view-alerting" aria-label="Alerts">
+        <div class="stats-row">
+          <button type="button" class="stat-card stat-filter" data-alert-card="all" aria-pressed="true"><div class="stat-icon total"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg></div><div><div class="stat-label">Open alerts</div><div class="stat-value" id="alert-stat-total">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-alert-card="ALERTING" aria-pressed="false"><div class="stat-icon unknown"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 2.9L1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0z"/></svg></div><div><div class="stat-label">Alerting</div><div class="stat-value" id="alert-stat-alerting">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-alert-card="WARMING" aria-pressed="false"><div class="stat-icon services"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v10l4 2"/><circle cx="12" cy="12" r="9"/></svg></div><div><div class="stat-label">Warming</div><div class="stat-value" id="alert-stat-warming">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-alert-card="COOLING" aria-pressed="false"><div class="stat-icon services"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v6h-6"/></svg></div><div><div class="stat-label">Cooling</div><div class="stat-value" id="alert-stat-cooling">—</div></div></button>
+        </div>
+        <div class="filter-bar">
+          <div class="toggle-group" id="alert-status-toggle">
+            <button class="toggle-btn active" data-alert-status="all">All</button>
+            <button class="toggle-btn" data-alert-status="ALERTING">Alerting</button>
+            <button class="toggle-btn" data-alert-status="WARMING">Warming</button>
+            <button class="toggle-btn" data-alert-status="COOLING">Cooling</button>
+          </div>
+          <div class="live-status"><span class="live-dot" aria-hidden="true"></span><span id="alert-last-updated" role="status">Waiting for alert state...</span></div>
+        </div>
+        <div class="alert-cards" id="alert-cards" aria-live="polite"><p class="loading">Loading alert state...</p></div>
+      </section>
+
+      <section class="view groups-section" id="view-templates" aria-label="Templates">
+        <div class="filter-bar">
+          <div class="search-wrap">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="text" class="search-input" id="search-input" placeholder="Search templates..." aria-label="Search template text" autocomplete="off" spellcheck="false">
+          </div>
+          <select class="filter-select" id="filter-service" aria-label="Service"><option value="">All services</option></select>
+          <select class="filter-select" id="filter-level" aria-label="Level"></select>
+          <label class="chip-toggle chip-push"><input type="checkbox" id="auto-refresh"><span>Auto-refresh</span></label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>State</th><th>Template ID</th><th>Template Text</th><th>Level</th>
+                <th title="Average events per minute this hour">Rate</th>
+                <th title="Normal band for this hour: mean ± kσ">Normal</th>
+                <th>Document</th><th>First Seen</th><th>Last Seen</th>
+              </tr>
+            </thead>
+            <tbody id="template-tbody">
+              <tr><td colspan="9" class="loading">Loading templates...</td></tr>
+            </tbody>
+          </table>
+          <div class="pagination" id="pagination">
+            <span id="page-info"></span>
+            <label class="page-size">Rows per page <select id="page-size" class="filter-select"><option>50</option><option selected>100</option><option>200</option></select></label>
+            <div class="pagination-btns" id="page-btns"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view groups-section" id="view-documentation" aria-label="Documentation">
+        <div class="section-heading">
+          <div class="sync-status" id="doc-sync-status" aria-live="polite">Loading documentation...</div>
+          <button type="button" class="btn btn-primary" id="add-document-btn">Add document</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-document-sort="doc_id" class="sorted">ID <span class="sort-arrow">▲</span></th><th data-document-sort="title">Title <span class="sort-arrow"></span></th><th>Documentation text</th><th data-document-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-document-sort="linked_templates">Linked templates <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
+            <tbody id="documentation-tbody"><tr><td colspan="6" class="loading">Loading documentation...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view groups-section" id="view-pipeline" aria-label="Pipeline performance">
+        <div class="section-heading">
+          <div class="sync-status" id="pl-status" aria-live="polite">Loading pipeline stats...</div>
+        </div>
+        <div id="pl-warnings"></div>
+        <h3>Throughput</h3>
+        <div class="stats-row" id="pl-throughput"></div>
+        <figure class="stat-card pl-chart">
+          <svg id="pl-spark" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Events per second"></svg>
+          <figcaption class="pl-sub" id="pl-spark-caption">Collecting samples…</figcaption>
+        </figure>
+        <h3>Detection and baseline</h3>
+        <div class="stats-row" id="pl-engine"></div>
+        <h3>Indices being read</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Index</th><th>Position</th><th>Reads from</th><th>Status</th></tr></thead>
+            <tbody id="pl-indices-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view groups-section" id="view-sources" aria-label="Elasticsearch data sources">
+        <div class="section-heading">
+          <div class="sync-status" id="src-status" aria-live="polite">Loading data sources...</div>
+          <div class="btn-row">
+            <button class="btn" id="src-discard-btn" disabled>Discard changes</button>
+            <button class="btn btn-primary" id="src-save-btn" disabled>Save selection</button>
+          </div>
+        </div>
+        <p class="ins-toast ins-toast-error" id="src-action-status" aria-live="polite"></p>
+        <form id="src-conn-form" class="rt-form" autocomplete="off">
+          <h3>Connection</h3>
+          <p class="sync-status" id="src-conn-status" aria-live="polite">Loading connection...</p>
+          <div class="form-field"><label for="src-conn-hosts">Elasticsearch endpoint</label>
+            <input id="src-conn-hosts" placeholder="https://elasticsearch:9200" maxlength="2000" spellcheck="false" required aria-describedby="src-conn-hosts-hint">
+            <span class="ins-meta" id="src-conn-hosts-hint">Separate several nodes of one cluster with commas.</span>
+          </div>
+          <div class="rt-row">
+            <div class="form-field"><label for="src-conn-user">Username</label><input id="src-conn-user" maxlength="200" autocomplete="username" spellcheck="false"></div>
+            <div class="form-field"><label for="src-conn-password">Password</label><input id="src-conn-password" type="password" maxlength="500" autocomplete="new-password"></div>
+          </div>
+          <div class="form-field">
+            <label class="switch"><input type="checkbox" role="switch" id="src-conn-verify" aria-describedby="src-conn-verify-hint"><span>Verify TLS certificate</span></label>
+            <span class="ins-meta" id="src-conn-verify-hint">Turn off only for a self-signed certificate on a trusted network.</span>
+          </div>
+          <p class="ins-toast ins-toast-error" id="src-conn-error" aria-live="polite"></p>
+          <div class="btn-row">
+            <button type="button" class="btn" id="src-conn-discard-btn" disabled>Discard changes</button>
+            <button type="submit" class="btn btn-primary" id="src-conn-save-btn" disabled>Save connection</button>
+          </div>
+        </form>
+        <h3>Indices</h3>
+        <form class="btn-row" id="src-add-form">
+          <label for="src-pattern" class="filter-label">Index or pattern</label>
+          <input id="src-pattern" placeholder="app-logs-*" maxlength="255" autocomplete="off" spellcheck="false">
+          <button class="btn" type="submit">Add</button>
+        </form>
+        <h3>Selected</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Index or pattern</th><th>Reading</th><th>Added</th><th></th></tr></thead>
+            <tbody id="src-selected-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+        <h3>Available indices</h3>
+        <input id="src-filter" placeholder="Filter indices" autocomplete="off" spellcheck="false">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Read</th><th>Index</th><th>Documents</th><th>Health</th></tr></thead>
+            <tbody id="src-available-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="view groups-section" id="view-baseline" aria-label="Baseline review">
+        <div class="section-heading">
+          <div class="filter-bar">
+            <label for="bl-service" class="filter-label">Service</label>
+            <select class="filter-select" id="bl-service"></select>
+          </div>
+          <button type="button" class="btn btn-primary" id="bl-recompute">Recompute baseline now</button>
+        </div>
+        <p class="ins-toast" id="bl-status" role="status" aria-live="polite"></p>
+        <div class="stats-row" id="bl-stats"></div>
+        <p class="sync-status">Decisions take effect at the next daily commit or after <strong>Recompute baseline now</strong>. Unreviewed hours are kept in the baseline.</p>
+        <h3>Suggested periods</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Day</th><th>Hours</th><th>Keys not NORMAL</th><th>Decision</th></tr></thead>
+            <tbody id="bl-suggest-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+        <h3>Add range</h3>
+        <form class="btn-row" id="bl-add-form">
+          <label for="bl-add-day" class="filter-label">Day</label>
+          <input type="date" id="bl-add-day" class="filter-select" required>
+          <label for="bl-add-from" class="filter-label">From</label>
+          <select id="bl-add-from" class="filter-select"></select>
+          <label for="bl-add-to" class="filter-label">To</label>
+          <select id="bl-add-to" class="filter-select"></select>
+          <select id="bl-add-decision" class="filter-select" aria-label="Decision">
+            <option value="exclude">Exclude: real incident</option>
+            <option value="keep">Keep: normal</option>
+          </select>
+          <button type="submit" class="btn">Add range</button>
+        </form>
+        <p class="sync-status">For a maintenance window, load test or missed incident.</p>
+        <h3>Decisions</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Day</th><th>Hours</th><th>Decision</th><th>Decided</th><th></th></tr></thead>
+            <tbody id="bl-decisions-tbody"><tr><td colspan="5" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+        <h3>Committed days</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Day</th><th>Day type</th><th>Status</th></tr></thead>
+            <tbody id="bl-days-tbody"><tr><td colspan="3" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-overlay" id="document-modal" role="dialog" aria-modal="true" aria-labelledby="document-modal-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="document-modal-title">Add document</h2><button type="button" class="modal-close" data-close="document-modal" aria-label="Close">&times;</button></div>
+      <form id="document-form">
+        <input type="hidden" id="document-id">
+        <div class="form-field"><label for="document-title">Title</label><input id="document-title" maxlength="200" required></div>
+        <div class="form-field"><label for="document-text">Documentation text</label><textarea id="document-text" maxlength="20000" required></textarea></div>
+        <div class="form-field"><label for="document-error-code">Error code</label><input id="document-error-code" maxlength="100"></div>
+        <div class="form-error" id="document-error" aria-live="polite"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close="document-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-modal-title" aria-describedby="confirm-modal-message">
+    <div class="modal modal-sm">
+      <div class="modal-header"><h2 id="confirm-modal-title">Confirm</h2><button type="button" class="modal-close" data-close="confirm-modal" aria-label="Close">&times;</button></div>
+      <p class="delete-warning" id="confirm-modal-message"></p>
+      <div class="form-actions"><button type="button" class="btn" data-close="confirm-modal" id="confirm-modal-cancel">Cancel</button><button type="button" class="btn btn-danger" id="confirm-modal-ok">Confirm</button></div>
+    </div>
+  </div>
+
+</body>
+</html>

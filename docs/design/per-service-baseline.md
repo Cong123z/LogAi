@@ -1,6 +1,9 @@
 # Per-service templates, statistical baselines, document-centric alerts
 
-Status: **draft, under discussion** (2026-10-19). Nothing is built yet.
+Status: **sub-project 1 built** (2026-10-20, branch `core-engine-v1`): spec
+[`docs/specs/2026-10-20-core-engine-design.md`](../specs/2026-10-20-core-engine-design.md),
+as implemented in [`ARCHITECTURE.md`](../../ARCHITECTURE.md). The rest of this
+design (sub-projects 0, 2–7) is not built yet. Drafted 2026-10-19.
 Built as a **new project from scratch**, borrowing modules from logai-engine
 (collector, preprocessor/normalize, Drain3 wrapper, alert state machine, web
 parts). Template and group IDs, manual overrides and the Isolation Forest

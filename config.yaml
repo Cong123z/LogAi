@@ -1,0 +1,9 @@
+# Overrides on top of the defaults in logai2/config.py. Secrets and
+# deployment endpoints come from LOGAI2_* env vars instead.
+elasticsearch:
+  index: "recharge-logs"   # the recharge replayer's index
+baseline:
+  sigma_multiplier: 3.0
+floors:
+  ERROR: 5
+  WARN: 10

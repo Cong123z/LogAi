@@ -1,0 +1,83 @@
+# logai2 alongside an already-running stack (Elasticsearch, replayer) on the
+# external `aiops-net` network, the same one logai-engine joins.
+#
+#   docker compose up -d postgres          # test DB only (host port 5433)
+#   docker compose up -d --build           # Postgres + engine + web
+#
+# Host ports avoid a running logai-engine (9108/5555): engine metrics 9118, web 5565.
+
+# Fixed project and volume names, so the data volume does not depend on the
+# checkout folder's name.
+name: logai2
+
+x-logai2-env: &logai2-env
+  LOGAI2_DATABASE_DSN: postgresql://logai:logai@postgres:5432/logai
+  # empty = keep config.yaml / the default (http://elasticsearch:9200, recharge-logs)
+  LOGAI2_ES_HOSTS: ${LOGAI2_ES_HOSTS:-}
+  LOGAI2_ES_INDEX: ${LOGAI2_ES_INDEX:-}
+  LOGAI2_ES_USER: ${LOGAI2_ES_USER:-}
+  LOGAI2_ES_PASSWORD: ${LOGAI2_ES_PASSWORD:-}
+  LOGAI2_ES_VERIFY_CERTS: ${LOGAI2_ES_VERIFY_CERTS:-true}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: logai
+      POSTGRES_PASSWORD: logai
+      POSTGRES_DB: logai
+    ports:
+      - "127.0.0.1:5433:5432"   # default creds: never on all interfaces
+    volumes:
+      - logai2-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "logai", "-d", "logai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  logai2-engine:
+    build: .
+    image: logai2
+    container_name: logai2-engine
+    command: ["python", "scripts/run_engine.py"]
+    environment:
+      <<: *logai2-env
+      # logai-engine's corpus seeds the documents table once, while it is empty
+      LOGAI2_DOC_SEED_PATH: /seed/documentation_corpus.json
+    ports:
+      - "9118:9108"
+    volumes:
+      - logai-seed:/seed:ro
+    networks: [default, aiops-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  logai2-web:
+    build: .
+    image: logai2
+    container_name: logai2-web
+    command: ["python", "scripts/run_web.py"]
+    environment: *logai2-env
+    ports:
+      - "5565:5555"
+    networks: [default, aiops-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  aiops-net:
+    name: ${LOGAI2_NETWORK:-aiops-net}
+    external: true
+
+volumes:
+  logai2-pg:
+    name: logai2-pg
+  # logai-engine's data volume (holds documentation_corpus.json); read-only here
+  logai-seed:
+    name: ${LOGAI2_DOC_SEED_VOLUME:-logai-data}
+    external: true
