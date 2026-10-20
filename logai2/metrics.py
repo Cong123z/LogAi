@@ -22,6 +22,7 @@ class Metrics:
         self.heartbeat = Gauge("logai_engine_heartbeat_timestamp_seconds", "Last flush time", registry=r)
         self.alert_state = Gauge("log_alert_state", "1 for the alert row's current state",
                                  ["service", "doc_id", "state"], registry=r)
+        self._alert_keys: set[tuple[str, str]] = set()
         if port is not None:
             start_http_server(port, registry=r)
 
@@ -31,7 +32,11 @@ class Metrics:
             key = (row["service"], row["doc_id"] if row["kind"] == "document" else LABEL[row["kind"]])
             if RANK[row["state"]] > RANK.get(worst.get(key), -1):
                 worst[key] = row["state"]
-        self.alert_state.clear()
+        # set the new series, then drop stale ones: clear() first would let a scrape see none
         for (service, doc_id), current in worst.items():
             for state in RANK:
                 self.alert_state.labels(service, doc_id, state).set(1 if state == current else 0)
+        for service, doc_id in self._alert_keys - set(worst):
+            for state in RANK:
+                self.alert_state.remove(service, doc_id, state)
+        self._alert_keys = set(worst)

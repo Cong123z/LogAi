@@ -240,3 +240,48 @@ def test_seed_documents(conn, cfg, make, tmp_path):
     make(FakeSource({"a": []}), Clock(NOON)).start()
     assert q(conn, "SELECT doc_id, title, body, error_code FROM documents") == [
         {"doc_id": "D1", "title": "Pay", "body": "body", "error_code": "E1"}]
+
+
+def test_restart_after_long_downtime_creates_partitions(conn, cfg, make):
+    # first run on 11-05 creates 11-05..11-07; the restart on 11-12 resumes from the 11-05 cursor
+    cfg.start.days_back = 0
+    first = datetime(2026, 11, 5, 12, 0, tzinfo=TZ).timestamp()
+    clock = Clock(first)
+    hits = []
+    src = FakeSource({"a": hits})
+    engine = make(src, clock)
+    engine.start()
+    catch_up(engine, clock)
+    restart = datetime(2026, 11, 12, 12, 0, tzinfo=TZ).timestamp()
+    hits += [hit(f"d{m}", m * 60_000, service="s", message="nightly job ok")
+             for m in range(int(first) // 60 + 5, int(restart) // 60 - 5, 30)]
+    clock2 = Clock(restart)
+    engine2 = make(src, clock2)
+    engine2.start()
+    engine2.tick()
+    clock2.t += 1
+    engine2.tick()
+    days = [r["day"] for r in q(conn, "SELECT DISTINCT day FROM hourly_counts ORDER BY day")]
+    assert days == [date(2026, 11, d) for d in range(5, 13)]
+    assert engine2.sleeps == []
+
+
+def test_miss_ratio_warns_only_after_5_minutes_of_data(conn, cfg, make):
+    cfg.start.days_back = 0
+    cfg.flush.seconds = 0
+    cfg.reader.cache_size = 0   # every line misses
+    clock = Clock(NOON)
+    hits = []
+    engine = make(FakeSource({"a": hits}), clock)
+    engine.start()
+
+    def warnings():
+        return q(conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]["warnings"]
+    for k in range(7):
+        start = NOON + k * 60
+        hits += history(start, start + 60, 200 if k == 0 else 30, prefix=f"k{k}-")
+        clock.t = start + 60 + 31
+        engine.tick()
+        if k == 0:
+            assert warnings() == []   # cold cache right after start: no warning yet
+    assert warnings() == ["high miss ratio: s 100%"]

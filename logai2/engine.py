@@ -36,6 +36,7 @@ logger = logging.getLogger("logai2.engine")
 AVAILABLE_REFRESH_SECONDS = 30
 MISS_WINDOW_SECONDS = 300
 MISS_WARN_RATIO = 0.5
+MISS_WARN_MIN_EVENTS = 100   # a tiny service's few cold lines are not a warning
 MAX_BACKOFF_SECONDS = 30
 CONNECTION_FIELDS = ("hosts", "username", "password", "verify_certs")
 
@@ -71,6 +72,8 @@ class Engine:
         self._pending_events = 0
         self._last_flush = now()
         # ponytail: miss ratio is a 5-min sliding sum of per-tick counts, not "above 50% for 5 min straight"
+        self._observing_since: float | None = None
+        self._miss_services: set[str] = set()
         self._miss_window: deque[tuple[float, dict[str, list[int]]]] = deque()
         self._totals = {"hits": 0, "misses": 0, "late": 0}
 
@@ -91,17 +94,17 @@ class Engine:
             if self.bootstrap is None:
                 self.bootstrap = {"since": now - self.cfg.start.days_back * 86400, "until": now}
                 put_setting(self.db, "bootstrap", self.bootstrap)
-                # catch-up writes counts into every day since bootstrap.since
-                ensure_partitions(self.db, _day(self.bootstrap["since"]), today + timedelta(days=2))
                 logger.info("first start: reading from %s", local(int(self.bootstrap["since"] // 60)))
-            ensure_partitions(self.db, today, today + timedelta(days=2))
             self.last_commit = get_setting(self.db, "last_commit")
             self._seed_documents()
-        self._partitions_day = today
         self._apply_connection()
         self.reader = Reader(self.source, self.cfg, KnownLines(self.cfg.reader.cache_size), now=self.now)
         floors, saved = self._select_indices()
         start_ms = min((saved.get(i, f) for i, f in floors.items()), default=int(now * 1000))
+        # catch-up (first start, or a restart after downtime) writes counts into every day since start_ms
+        with self.db.transaction():
+            ensure_partitions(self.db, min(_day(start_ms / 1000), today), today + timedelta(days=2))
+        self._partitions_day = today
         self.owner = Owner(self.conn, self.cfg, start_ms // 60_000, now=self.now)
         if self._commit_due():
             logger.info("missed daily commit: running it now")
@@ -216,6 +219,8 @@ class Engine:
             acc = per.setdefault(c["service"], [0, 0])
             acc[0] += c["n"] if c["template_id"] is None else 0
             acc[1] += c["n"]
+        if self._observing_since is None:
+            self._observing_since = now
         self._miss_window.append((now, per))
         while self._miss_window[0][0] < now - MISS_WINDOW_SECONDS:
             self._miss_window.popleft()
@@ -252,6 +257,9 @@ class Engine:
         m.lag.set(status["lag_seconds"])
         for service, ratio in status["miss_ratio"].items():
             m.miss_ratio.labels(service).set(ratio)
+        for service in self._miss_services - set(status["miss_ratio"]):   # left the window
+            m.miss_ratio.remove(service)
+        self._miss_services = set(status["miss_ratio"])
         m.export_rows(alert_rows([asdict(r) for r in self.owner.detector.states.values()],
                                  self.owner.detector.links, {}, {}))
 
@@ -264,6 +272,10 @@ class Engine:
                 acc[0] += miss
                 acc[1] += total
         ratios = {s: miss / total for s, (miss, total) in sums.items() if total}
+        # warn only once the window holds 5 min of data: right after a restart every line misses
+        full = self._observing_since is not None and now - self._observing_since >= MISS_WINDOW_SECONDS
+        warn = sorted(s for s, r in ratios.items()
+                      if full and r > MISS_WARN_RATIO and sums[s][1] >= MISS_WARN_MIN_EVENTS)
         cache = self.reader.cache
         lookups = cache.hits + cache.misses
         elapsed = now - self._last_flush
@@ -279,7 +291,7 @@ class Engine:
             "indices": {i: {**self._positions.get(i, {}), "floor": f} for i, f in self.reader.floors.items()},
             "available_indices": self.available,
             "resolution": self.resolution,
-            "warnings": [f"high miss ratio: {s} {r:.0%}" for s, r in sorted(ratios.items()) if r > MISS_WARN_RATIO],
+            "warnings": [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn],
         }
 
     def _owner_day(self) -> date:
