@@ -58,12 +58,12 @@ def ensure_partitions(conn: psycopg.Connection, first: date, last: date) -> None
 def drop_partitions_before(conn: psycopg.Connection, table: str, day: date) -> list[str]:
     if table not in PARTITIONED:
         raise ValueError(f"not a partitioned table: {table}")
-    rows = conn.execute(
-        "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
-        "WHERE i.inhparent = to_regclass(%s)", (table,)).fetchall()
-    old = sorted(r["relname"] for r in rows
-                 if datetime.strptime(r["relname"].rsplit("_", 1)[1], "%Y%m%d").date() < day)
     with conn.transaction():
+        rows = conn.execute(
+            "SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
+            "WHERE i.inhparent = to_regclass(%s)", (table,)).fetchall()
+        old = sorted(r["relname"] for r in rows
+                     if datetime.strptime(r["relname"].rsplit("_", 1)[1], "%Y%m%d").date() < day)
         for name in old:
             conn.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(name)))
     return old
