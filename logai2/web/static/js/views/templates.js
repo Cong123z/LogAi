@@ -117,8 +117,16 @@ function getPageRange(current, total) {
   return pages;
 }
 
+let tplSeq = 0;
 async function loadTemplates() {
+  const seq = ++tplSeq;
   const [data, services, docs] = await Promise.all([fetchTemplates(), fetchServices(), fetchDocuments()]);
+  if (seq !== tplSeq) return;   // a newer request (filter, page) is in flight: drop this answer
+  const lastPage = Math.max(1, Math.ceil(data.total / tpl.size));
+  if (tpl.page > lastPage) {    // the list shrank under us: show its last page instead of an empty one
+    tpl.page = lastPage;
+    return loadTemplates();
+  }
   renderServiceFilter(services);
   renderTemplates(data, docs);
 }

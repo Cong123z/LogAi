@@ -44,17 +44,25 @@ def test_alerts_grouped_by_document(client, conn):
     add_state(conn, "pay:T00002", "WARMING", 12, 0.0, 6.0)
     add_state(conn, "pay:T00003", "NORMAL", 1, 0.0, 6.0)
     add_state(conn, "*total", "WARMING", 900, 100.0, 500.0)
+    add_state(conn, "doc:D1", "WARMING", 52, 0.0, 13.0)
+    day, hour = day_hour(minute_of(time.time()))
+    for tid, mean, std in (("pay:T00001", 3.0, 2.0), ("pay:T00002", 1.0, 0.5)):
+        conn.execute("INSERT INTO baseline VALUES ('pay', %s, %s, %s, %s, %s, 5)", (tid, daytype(day), hour, mean, std))
     conn.commit()
 
     rows = client.get("/api/alerts").get_json()
     assert [(r["kind"], r["state"]) for r in rows] == [("document", "ALERTING"), ("service", "WARMING")]
     doc, svc = rows
     assert doc["doc_id"] == "D1" and doc["title"] == "Card gateway down"
-    assert [(t["template_id"], t["text"], t["count"], t["band_low"], t["band_high"]) for t in doc["templates"]] == [
-        ("pay:T00001", "<b>timeout 1</b>", 40, 1.0, 9.0), ("pay:T00002", "<b>timeout 2</b>", 12, 0.0, 6.0)]
+    assert [(t["template_id"], t["text"], t["count"], t["band_low"], t["band_high"], t["mean"], t["std"])
+            for t in doc["templates"]] == [("pay:T00001", "<b>timeout 1</b>", 40, 1.0, 9.0, 3.0, 2.0),
+                                           ("pay:T00002", "<b>timeout 2</b>", 12, 0.0, 6.0, 1.0, 0.5)]
+    # the doc key's normal is the sum over its linked templates
+    assert doc["totals"] == [{"key": "doc:D1", "count": 52, "band_low": 0.0, "band_high": 13.0, "mean": 4.0, "std": 2.5}]
     assert isinstance(doc["since"], float)
     # service-wide and doc keys have no template text: their counts ride along for the card
-    assert svc["totals"] == [{"key": "*total", "count": 900, "band_low": 100.0, "band_high": 500.0}]
+    assert svc["totals"] == [{"key": "*total", "count": 900, "band_low": 100.0, "band_high": 500.0,
+                              "mean": None, "std": None}]
 
 
 def test_templates_rate_and_band(client, conn):
@@ -127,6 +135,8 @@ def test_every_error_is_json(app):
     assert r.status_code == 500 and r.get_json() == {"error": "Internal server error"}
     r = client.get("/api/nothing-here")
     assert r.status_code == 404 and "error" in r.get_json()
+    r = client.delete("/api/alerts")
+    assert r.status_code == 405 and "GET" in r.headers["Allow"] and "error" in r.get_json()
 
 
 def test_verify_certs_must_be_boolean(client):

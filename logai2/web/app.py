@@ -123,7 +123,11 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.errorhandler(Exception)
     def any_error(exc):
         if isinstance(exc, HTTPException):
-            return jsonify({"error": exc.description}), exc.code
+            response = exc.get_response()   # keeps headers such as Allow on 405 and Location on redirects
+            if exc.code is not None and exc.code >= 400:
+                response.set_data(app.json.dumps({"error": exc.description}))
+                response.content_type = "application/json"
+            return response
         app.logger.exception("Unhandled error on %s %s", request.method, request.path)
         return jsonify({"error": "Internal server error"}), 500
 
@@ -220,21 +224,44 @@ def create_app(cfg: AppConfig) -> Flask:
     def alerts():
         c = conn()
         states = c.execute("SELECT * FROM alert_state WHERE state <> 'NORMAL'").fetchall()
-        # ponytail: all links and titles per poll; filter to the alerting keys if these tables grow large
-        links = {(r["service"], r["template_id"]): r["doc_id"]
-                 for r in c.execute("SELECT service, template_id, doc_id FROM template_doc_links")}
-        titles = {r["doc_id"]: r["title"] for r in c.execute("SELECT doc_id, title FROM documents")}
+        pairs = [(s["service"], s["key"]) for s in states]
+        docs = [(svc, k[4:]) for svc, k in pairs if k.startswith("doc:")]
+        # Links of the alerting templates (for grouping) and of the alerting doc keys (for their mean ± σ).
+        link_rows = c.execute(
+            "SELECT service, template_id, doc_id FROM template_doc_links "
+            "WHERE (service, template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[])) "
+            "OR (service, doc_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+            ([s for s, _ in pairs], [k for _, k in pairs], [s for s, _ in docs], [d for _, d in docs])).fetchall()
+        links = {(r["service"], r["template_id"]): r["doc_id"] for r in link_rows}
+        doc_ids = list({r["doc_id"] for r in link_rows} | {d for _, d in docs})
+        titles = {r["doc_id"]: r["title"] for r in c.execute(
+            "SELECT doc_id, title FROM documents WHERE doc_id = ANY(%s)", (doc_ids,))}
         texts = {(r["service"], r["template_id"]): r["text"] for r in c.execute(
             "SELECT t.service, t.template_id, t.text FROM templates t JOIN alert_state a "
             "ON a.service = t.service AND a.key = t.template_id WHERE a.state <> 'NORMAL'")}
+
+        # Normal mean and σ of this local hour, from the same lookups detection uses.
+        day, hour = day_hour(minute_of(time.time()))
+        baseline = Baseline.load(c, pairs + [(r["service"], r["template_id"]) for r in link_rows])
+
+        def normal(svc: str, key: str) -> dict:
+            if key.startswith("doc:"):
+                tids = [r["template_id"] for r in link_rows if r["service"] == svc and r["doc_id"] == key[4:]]
+                stat = baseline.lookup_doc(svc, tids, day, hour).this
+            else:
+                stat = baseline.lookup(svc, key, day, hour).this
+            return {"mean": stat.mean if stat else None, "std": stat.std if stat else None}
+
         by_key = {(s["service"], s["key"]): s for s in states}
         rows = alert_rows(states, links, titles, texts)
         for r in rows:
             r["since"] = r["since"].timestamp()
+            for t in r["templates"]:
+                t.update(normal(r["service"], t["template_id"]))
             # service-wide and doc keys have no template line of their own: the card shows them from here
             r["totals"] = [{"key": k, "count": by_key[(r["service"], k)]["count"],
                             "band_low": by_key[(r["service"], k)]["band_low"],
-                            "band_high": by_key[(r["service"], k)]["band_high"]}
+                            "band_high": by_key[(r["service"], k)]["band_high"], **normal(r["service"], k)}
                            for k in r["keys"] if k.startswith(("*", "doc:"))]
         return jsonify(rows)
 

@@ -10,16 +10,17 @@ function fetchAlerts() { return getJson('/api/alerts', 'Unable to load alert sta
 
 const alNum = n => (Math.round(n * 10) / 10).toLocaleString();
 
-// The band is mean ± kσ (the wider of this hour's and the next): show its centre and half-width.
-function alNormal(low, high) {
-  if (low == null || high == null) return '<span class="alert-band" title="No committed baseline yet: floor only">(no baseline yet)</span>';
-  return `<span class="alert-band" title="Normal band ${alNum(Math.max(low, 0))}–${alNum(high)}/min">(normal ${alNum((low + high) / 2)} ± ${alNum((high - low) / 2)})</span>`;
+// Normal = this hour's baseline mean ± σ; the hover shows the alert band (mean ± kσ).
+function alNormal({mean, std, band_low: low, band_high: high}) {
+  if (mean == null) return '<span class="alert-band" title="No committed baseline yet: floor only">(no baseline yet)</span>';
+  const band = high == null ? '' : ` title="Alert band ${alNum(Math.max(low, 0))}–${alNum(high)}/min"`;
+  return `<span class="alert-band"${band}>(normal ${alNum(mean)} ± ${alNum(std)})</span>`;
 }
 
-function alLine(label, count, low, high, mono) {
+function alLine(label, item, mono) {
   return `<li class="alert-line">
     <div class="${mono ? 'tmpl-text' : 'alert-line-label'}" title="${escapeHtml(label)}">${escapeHtml(label)}</div>
-    <span class="alert-rate">${alNum(count)}/min</span>${alNormal(low, high)}
+    <span class="alert-rate">${alNum(item.count)}/min</span>${alNormal(item)}
   </li>`;
 }
 
@@ -45,8 +46,8 @@ function renderAlerts(rows) {
   // Rows arrive ranked (ALERTING first, then oldest); keep that order.
   $alertCards.innerHTML = shown.map(row => {
     const st = row.state.toLowerCase();
-    const lines = row.totals.map(t => alLine(TOTAL_LABELS[t.key] || 'Linked templates combined', t.count, t.band_low, t.band_high, false))
-      .concat(row.templates.map(t => alLine(t.text || t.template_id, t.count, t.band_low, t.band_high, true)));
+    const lines = row.totals.map(t => alLine(TOTAL_LABELS[t.key] || 'Linked templates combined', t, false))
+      .concat(row.templates.map(t => alLine(t.text || t.template_id, t, true)));
     return `<article class="alert-card alert-card-${escapeHtml(st)}">
       <header class="alert-card-head">
         <span class="badge alert-state-${escapeHtml(st)}">${escapeHtml(row.state)}</span>
