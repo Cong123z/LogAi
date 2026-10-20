@@ -6,6 +6,10 @@
 #
 # Host ports avoid a running logai-engine (9108/5555): engine metrics 9118, web 5565.
 
+# Fixed project and volume names, so the data volume does not depend on the
+# checkout folder's name.
+name: logai2
+
 x-logai2-env: &logai2-env
   LOGAI2_DATABASE_DSN: postgresql://logai:logai@postgres:5432/logai
   # empty = keep config.yaml / the default (http://elasticsearch:9200, recharge-logs)
@@ -72,6 +76,7 @@ networks:
 
 volumes:
   logai2-pg:
+    name: logai2-pg
   # logai-engine's data volume (holds documentation_corpus.json); read-only here
   logai-seed:
     name: ${LOGAI2_DOC_SEED_VOLUME:-logai-data}
