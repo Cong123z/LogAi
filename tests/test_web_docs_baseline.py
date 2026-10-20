@@ -77,10 +77,40 @@ def test_decision_warns_under_3_days(client, conn):
 
     page = client.get("/api/baseline?service=pay").get_json()
     assert [d["day"] for d in page["days"]] == ["2026-10-18", "2026-10-14", "2026-10-13", "2026-10-12"]
-    assert len(page["decisions"]) == 4 and page["last_commit"] is None
+    # 4 rows minus the 10-13 keep that the later 10-13 exclude overlapped
+    assert len(page["decisions"]) == 3 and page["last_commit"] is None
     assert client.delete(f"/api/baseline/decisions/{body['id']}").status_code == 200
     assert client.delete(f"/api/baseline/decisions/{body['id']}").status_code == 404
     assert client.get("/api/baseline?service=nope").status_code == 404
+
+
+def test_warning_counts_only_the_days_the_rebuild_uses(client, conn):
+    conn.execute("INSERT INTO services VALUES ('pay', 0)")
+    # 7 committed weekdays; the rebuild uses the last 5: 10-14, 10-13, 10-12, 10-09, 10-08
+    add_days(conn, "pay", [date(2026, 10, d) for d in (6, 7, 8, 9, 12, 13, 14)])
+    conn.execute("INSERT INTO review_exclusions (service, day, hour_from, hour_to, decision) "
+                 "VALUES ('pay', '2026-10-14', 10, 11, 'exclude'), ('pay', '2026-10-13', 10, 11, 'exclude')")
+    conn.commit()
+    r = client.post("/api/baseline/decisions",
+                    json={"service": "pay", "day": "2026-10-12", "hour_from": 10, "hour_to": 12, "decision": "exclude"})
+    # hour 10: 5 picked - 3 excluded = 2 (all 7 days would leave 4); hour 11: 5 - 1 = 4
+    assert r.get_json()["warning"] == [10]
+
+
+def test_latest_decision_replaces_overlapping_opposite_ones(client, conn):
+    conn.execute("INSERT INTO services VALUES ('pay', 0)")
+    conn.execute("INSERT INTO review_exclusions (service, day, hour_from, hour_to, decision) VALUES "
+                 "('pay', '2026-10-14', 9, 12, 'exclude'), ('pay', '2026-10-14', 13, 14, 'exclude'), "
+                 "('pay', '2026-10-15', 11, 12, 'exclude'), ('pay', '2026-10-14', 10, 11, 'keep')")
+    conn.commit()
+    r = client.post("/api/baseline/decisions",
+                    json={"service": "pay", "day": "2026-10-14", "hour_from": 11, "hour_to": 13, "decision": "keep"})
+    assert r.status_code == 201
+    rows = conn.execute("SELECT day::text, hour_from, hour_to, decision FROM review_exclusions "
+                        "ORDER BY day, hour_from, decision").fetchall()
+    assert [tuple(x.values()) for x in rows] == [
+        ("2026-10-14", 10, 11, "keep"), ("2026-10-14", 11, 13, "keep"),
+        ("2026-10-14", 13, 14, "exclude"), ("2026-10-15", 11, 12, "exclude")]
 
 
 def test_baseline_suggestions_skip_decided_hours(client, conn):

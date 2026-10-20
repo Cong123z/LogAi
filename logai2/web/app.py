@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
 
+import psycopg
 from flask import Flask, abort, g, jsonify, request, send_from_directory
 from werkzeug.exceptions import HTTPException
 
@@ -323,11 +324,14 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.delete("/api/documents/<doc_id>")
     def delete_document(doc_id: str):
         c = conn()
-        # the FK on template_doc_links blocks a link racing in after this count
-        n = c.execute("SELECT count(*) AS n FROM template_doc_links WHERE doc_id = %s", (doc_id,)).fetchone()["n"]
-        if n:
+        # Delete first and let the FK on template_doc_links refuse: no window for a link to race in.
+        try:
+            deleted = c.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,)).rowcount
+        except psycopg.errors.ForeignKeyViolation:
+            c.rollback()
+            n = c.execute("SELECT count(*) AS n FROM template_doc_links WHERE doc_id = %s", (doc_id,)).fetchone()["n"]
             return jsonify({"error": "linked", "templates": n}), 409
-        if not c.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,)).rowcount:
+        if not deleted:
             abort(404, "Unknown document")
         c.commit()
         return jsonify({"doc_id": doc_id})
@@ -371,16 +375,23 @@ def create_app(cfg: AppConfig) -> Flask:
             raise BadRequest("decision must be 'exclude' or 'keep'")
         service = known_service(payload.get("service"))
         c = conn()
+        # The latest decision wins: drop overlapping rows of the opposite decision on that day.
+        c.execute("DELETE FROM review_exclusions WHERE service = %s AND day = %s AND decision <> %s "
+                  "AND hour_from < %s AND hour_to > %s", (service, day, decision, hour_to, hour_from))
         new_id = c.execute("INSERT INTO review_exclusions (service, day, hour_from, hour_to, decision) "
                            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                            (service, day, hour_from, hour_to, decision)).fetchone()["id"]
-        # Hours of this range left with < 3 committed days of the day type fall back to floor-only.
+        # Hours of this range left with < 3 of the days the rebuild uses (jobs/commit.py: last 5
+        # committed weekdays / last 4 weekend days) fall back to floor-only.
+        kind = daytype(day)
         short = [r["h"] for r in c.execute(
+            "WITH picked AS (SELECT day FROM day_status WHERE service = %s AND committed AND daytype = %s "
+            "                ORDER BY day DESC LIMIT %s) "
             "SELECT h FROM generate_series(%s::int, %s::int - 1) h WHERE ("
-            "  SELECT count(*) FROM day_status d WHERE d.service = %s AND d.committed AND d.daytype = %s "
-            "  AND NOT EXISTS (SELECT 1 FROM review_exclusions x WHERE x.service = d.service AND x.day = d.day "
-            "    AND x.decision = 'exclude' AND h >= x.hour_from AND h < x.hour_to)) < 3 ORDER BY h",
-            (hour_from, hour_to, service, daytype(day)))] if decision == "exclude" else []
+            "  SELECT count(*) FROM picked p WHERE NOT EXISTS (SELECT 1 FROM review_exclusions x "
+            "    WHERE x.service = %s AND x.day = p.day AND x.decision = 'exclude' "
+            "    AND h >= x.hour_from AND h < x.hour_to)) < 3 ORDER BY h",
+            (service, kind, 4 if kind == "weekend" else 5, hour_from, hour_to, service))] if decision == "exclude" else []
         c.commit()
         out = {"id": new_id}
         if short:
