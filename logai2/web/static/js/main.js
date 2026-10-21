@@ -14,8 +14,11 @@ const viewTitles = {
 const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000};
 const viewOrder = Object.keys(viewTitles);
 
-function setView(view, updateHash = true) {
+// A route may carry a sub-view after a slash (#documentation/suggestions); the view reads state.subView.
+function setView(route, updateHash = true) {
+  let [view, sub] = String(route).split('/');
   if (!viewTitles[view]) view = 'pipeline';
+  state.subView = sub || '';
   const previousView = state.activeView;
   const previousIndex = viewOrder.indexOf(previousView);
   const nextIndex = viewOrder.indexOf(view);
@@ -39,7 +42,8 @@ function setView(view, updateHash = true) {
     }
   });
   document.getElementById('page-title').textContent = viewTitles[view];
-  if (updateHash && window.location.hash !== `#${view}`) history.pushState(null, '', `#${view}`);
+  const hash = `#${view}${sub ? `/${sub}` : ''}`;
+  if (updateHash && window.location.hash !== hash) history.pushState(null, '', hash);
   if (state.alertRefreshTimer) {
     clearInterval(state.alertRefreshTimer);
     state.alertRefreshTimer = null;

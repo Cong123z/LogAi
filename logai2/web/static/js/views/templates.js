@@ -2,7 +2,8 @@
 // A service's templates with this hour's rate against its normal band, and
 // the document each one is linked to: by hand (the select), inherited, auto-matched on a
 // document's ERROR lines, or by the LLM; automatic links can be confirmed or rejected.
-const tpl = {search: '', service: '', level: '', link: '', page: 1, size: 100, refreshTimer: null};
+const tpl = {search: '', service: '', level: '', link: '', page: 1, size: 100, refreshTimer: null,
+             items: new Map(), docs: []};
 const $tplTbody = document.getElementById('template-tbody');
 const $tplService = document.getElementById('filter-service');
 const $tplLevel = document.getElementById('filter-level');
@@ -53,31 +54,33 @@ function tplBand(t) {
 
 const tplSim = x => (x == null ? '' : x.toFixed(2));
 
-function tplDocSelect(t, docs) {
-  const none = t.link_source === 'manual' && !t.doc_id;
-  const options = [`<option value="">Automatic</option>`,
-    `<option value="${NO_DOCUMENT}"${none ? ' selected' : ''}>No document</option>`].concat(docs.map(d =>
-    `<option value="${escapeHtml(d.doc_id)}"${d.doc_id === t.doc_id ? ' selected' : ''}>${escapeHtml(d.doc_id)} · ${escapeHtml(d.title)}</option>`));
-  return `<select class="filter-select doc-select" data-service="${escapeHtml(t.service)}" data-template="${escapeHtml(t.template_id)}" aria-label="Document for ${escapeHtml(t.template_id)}">${options.join('')}</select>`;
+// How the template got its document: one badge, the detail is in the drawer.
+function linkSourceBadge(t) {
+  const sim = t.similarity == null ? '' : ` ${tplSim(t.similarity)}`;
+  return {
+    manual: t.doc_id ? '<span class="badge badge-gray">manual</span>' : '<span class="badge badge-gray">no document (set by hand)</span>',
+    inherited: `<span class="badge badge-blue">inherited${sim}</span>`,
+    corpus: `<span class="badge badge-yellow">auto-matched${sim}</span>`,
+    llm: '<span class="badge badge-yellow">AI-confirmed</span>',
+    draft: '<span class="badge badge-yellow">AI suggestion · unverified</span>',
+    rejected: '<span class="badge badge-gray">AI result rejected</span>',
+  }[t.link_source] || '';
 }
 
-// What linked it, and Confirm / Reject for the automatic sources.
-function tplLinkMeta(t) {
-  const src = t.link_source;
-  if (!src) return t.embedded ? '' : '<span class="link-meta" title="The linker has not embedded this template yet">not embedded yet</span>';
-  const doc = t.doc_id ? escapeHtml(t.doc_id) : '';
-  const label = {
-    manual: t.doc_id ? '<span class="badge badge-gray">manual</span>' : '<span class="badge badge-gray" title="Never linked automatically">no document</span>',
-    inherited: `<span class="badge badge-blue" title="Nearest manually linked template of this service and level">inherited ${tplSim(t.similarity)}</span> from <span class="tmpl-id">${escapeHtml(t.inherited_from || '')}</span>`,
-    corpus: `<span class="badge badge-yellow" title="Matched on ${doc}'s ERROR lines">auto ${tplSim(t.similarity)}</span>`,
-    llm: `<span class="badge badge-yellow" title="${escapeHtml(t.note || '')}">AI-confirmed</span>`,
-    draft: `<span class="badge badge-yellow" title="Unverified: check commands before running them">AI suggestion ${doc}</span>`,
-    rejected: `<span class="badge badge-gray" title="Rejected ${doc}; not sent to the LLM again">rejected</span>`,
-  }[src] || escapeHtml(src);
-  const safe = t.doc_verdict === 'safe' ? ' <span class="badge badge-green" title="Normal operation, no action">SAFE</span>' : '';
-  const actions = AUTOMATIC_SOURCES.includes(src)
-    ? ` <button type="button" class="btn link-confirm">Confirm</button><button type="button" class="btn btn-danger link-reject">Reject</button>` : '';
-  return `<span class="link-meta" data-service="${escapeHtml(t.service)}" data-template="${escapeHtml(t.template_id)}">${label}${safe}${actions}</span>`;
+// URL-encoded parts: survives an HTML attribute (a NUL separator does not) and stays unambiguous.
+const tplKey = t => `${encodeURIComponent(t.service)}/${encodeURIComponent(t.template_id)}`;
+
+// Table cell: the document (wrapped, readable) and how it was linked; Review opens the drawer.
+function tplLinkCell(t) {
+  const doc = t.doc_id && t.link_source !== 'rejected'
+    ? `<div class="link-doc"><span class="tmpl-id">${escapeHtml(t.doc_id)}</span>${escapeHtml(t.doc_title || '')}</div>` : '';
+  const none = !t.link_source
+    ? `<span class="link-meta">${t.embedded ? 'Not linked' : 'Not linked · not embedded yet'}</span>` : '';
+  const needsReview = AUTOMATIC_SOURCES.includes(t.link_source);
+  return `<div class="link-cell">${doc}${none}<span class="link-meta">${linkSourceBadge(t)}${t.doc_verdict === 'safe' && doc
+      ? '<span class="badge badge-green">SAFE</span>' : ''}</span>
+    <button type="button" class="btn${needsReview ? ' btn-primary' : ''} tpl-review" data-key="${escapeHtml(tplKey(t))}"
+      aria-label="${needsReview ? 'Review' : 'Link'} ${escapeHtml(t.template_id)}">${needsReview ? 'Review' : t.doc_id ? 'Change' : 'Link…'}</button></div>`;
 }
 
 function renderServiceFilter(services) {
@@ -93,8 +96,6 @@ function renderServiceFilter(services) {
 }
 
 function renderTemplates(data, docs) {
-  // Do not swap the table under an operator who is choosing a document.
-  if ($tplTbody.contains(document.activeElement)) return;
   if (!data.items.length) {
     $tplTbody.innerHTML = `
       <tr><td colspan="9" class="empty-state">
@@ -112,7 +113,7 @@ function renderTemplates(data, docs) {
         <td><span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span></td>
         <td class="tpl-num">${tplRate(t)}</td>
         <td class="tpl-num">${tplBand(t)}</td>
-        <td><div class="link-cell">${tplDocSelect(t, docs)}${tplLinkMeta(t)}</div></td>
+        <td>${tplLinkCell(t)}</td>
         <td title="${escapeHtml(formatFullTs(t.first_seen))}">${escapeHtml(formatTs(t.first_seen))}</td>
         <td title="${escapeHtml(formatFullTs(t.last_seen))}">${escapeHtml(formatTs(t.last_seen))}</td>
       </tr>`).join('');
@@ -157,6 +158,8 @@ async function loadTemplates() {
     return loadTemplates();
   }
   renderServiceFilter(services);
+  tpl.items = new Map(data.items.map(t => [tplKey(t), t]));
+  tpl.docs = docs;
   renderTemplates(data, docs);
 }
 
@@ -173,32 +176,104 @@ $tplPageBtns.addEventListener('click', event => {
 const linkUrl = (service, template, suffix = '') =>
   `/api/templates/${encodeURIComponent(service)}/${encodeURIComponent(template)}/link${suffix}`;
 
-$tplTbody.addEventListener('change', async event => {
-  const select = event.target.closest('.doc-select');
-  if (!select) return;
-  const {service, template} = select.dataset;
-  const value = select.value;
-  select.disabled = true;
-  try {
-    if (!value) await apiMutation(linkUrl(service, template), 'DELETE', {});
-    else await apiMutation(linkUrl(service, template), 'PUT', {doc_id: value === NO_DOCUMENT ? null : value});
-    if (value && value !== NO_DOCUMENT) await offerSimilar(service, template, value);
-  } catch (error) {
-    notifyDialog(`Could not link ${template}: ${error.message}`);
-  }
-  select.blur();
-  loadData();
+const $tplDrawer = document.getElementById('tpl-drawer');
+const $tplDrawerBody = document.getElementById('tpl-drawer-body');
+
+$tplTbody.addEventListener('click', event => {
+  const button = event.target.closest('.tpl-review');
+  if (button) openTemplateDrawer(tpl.items.get(button.dataset.key));
 });
 
-$tplTbody.addEventListener('click', async event => {
-  const button = event.target.closest('.link-confirm, .link-reject');
+// The linked document's text, so the operator can judge the link without leaving the drawer.
+async function linkedDocument(t) {
+  if (!t.doc_id) return null;
+  const found = tpl.docs.find(d => d.doc_id === t.doc_id);
+  if (found) return found;
+  const status = t.link_source === 'draft' ? 'draft' : t.link_source === 'rejected' ? 'rejected' : 'active';
+  const list = await getJson(`/api/documents?status=${status}`, 'Unable to load the document');
+  return list.find(d => d.doc_id === t.doc_id) || null;
+}
+
+async function openTemplateDrawer(t) {
+  if (!t) return;
+  document.getElementById('tpl-drawer-title').textContent = t.template_id;
+  const src = t.link_source;
+  const how = {
+    manual: t.doc_id ? 'Linked by hand.' : 'Set by hand to "no document": never linked automatically.',
+    inherited: `Inherited from <span class="tmpl-id">${escapeHtml(t.inherited_from || '')}</span>, the most similar manually linked template of this service and level (similarity ${tplSim(t.similarity)}).`,
+    corpus: `Matched automatically on the document's ERROR line (similarity ${tplSim(t.similarity)}).`,
+    llm: 'Confirmed by the LLM among the nearest documents.',
+    draft: 'Written by the LLM for this template; unverified until approved.',
+    rejected: 'An AI result was rejected: this template is not sent to the LLM again.',
+  }[src] || 'Not linked to a document.';
+  const options = [`<option value="">Automatic (let the linker decide)</option>`,
+    `<option value="${NO_DOCUMENT}"${src === 'manual' && !t.doc_id ? ' selected' : ''}>No document</option>`]
+    .concat(tpl.docs.map(d => `<option value="${escapeHtml(d.doc_id)}"${d.doc_id === t.doc_id && src === 'manual' ? ' selected' : ''}>${escapeHtml(d.doc_id)} · ${escapeHtml(d.title)}</option>`));
+  $tplDrawerBody.innerHTML = `
+    <section class="pane-section"><h3>Template</h3>
+      <div class="pane-badges"><span class="tmpl-id">${escapeHtml(t.service)}</span>
+        <span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span>
+        <span class="badge alert-state-${escapeHtml(t.state.toLowerCase())}">${escapeHtml(t.state)}</span>
+        <span>rate ${tplRate(t)} · normal ${tplBand(t)}</span></div>
+      <div class="code-block" style="margin-top:6px">${highlightWildcards(escapeHtml(t.text))}</div></section>
+    <section class="pane-section"><h3>Document</h3>
+      <div class="pane-badges">${linkSourceBadge(t)}</div>
+      <p class="reason" style="margin-top:6px">${how}</p>
+      ${t.note ? `<p class="hint">LLM's reason:</p><p class="reason">${escapeHtml(t.note)}</p>` : ''}
+      <div id="tpl-drawer-doc">${t.doc_id ? '<p class="loading">Loading the document…</p>' : ''}</div></section>
+    ${AUTOMATIC_SOURCES.includes(src) ? `<div class="drawer-actions">
+      <button type="button" class="btn btn-primary" data-act="confirm">${src === 'draft' ? 'Approve suggestion' : 'Confirm link'}</button>
+      <button type="button" class="btn btn-danger" data-act="reject">Reject</button></div>` : ''}
+    <section class="pane-section"><h3>Link by hand</h3>
+      <div class="link-picker"><select class="filter-select" id="tpl-drawer-select" aria-label="Document for ${escapeHtml(t.template_id)}">${options.join('')}</select>
+        <button type="button" class="btn" data-act="link">Save link</button></div>
+      <p class="hint">"Automatic" removes any link and lets inheritance, ERROR matching and the LLM decide again.</p></section>
+    <div class="form-error" id="tpl-drawer-error" aria-live="polite"></div>`;
+  $tplDrawerBody.dataset.key = tplKey(t);
+  $tplDrawer.classList.add('open');
+  try {
+    const doc = await linkedDocument(t);
+    const $doc = document.getElementById('tpl-drawer-doc');
+    if (!$doc || $tplDrawerBody.dataset.key !== tplKey(t)) return;
+    $doc.innerHTML = doc ? `
+      <div class="pane-head" style="margin-top:10px"><h2 style="font-size:16px">${escapeHtml(doc.title)}</h2>
+        <div class="pane-badges"><span class="tmpl-id">${escapeHtml(doc.doc_id)}</span>${doc.verdict === 'safe'
+          ? '<span class="badge badge-green">SAFE</span>' : ''}${doc.error_code ? `<span class="tmpl-id">${escapeHtml(doc.error_code)}</span>` : ''}</div></div>
+      <p class="hint">ERROR</p>${doc.error ? `<div class="code-block">${highlightWildcards(escapeHtml(doc.error))}</div>` : '<p class="prose-empty">No ERROR line.</p>'}
+      <p class="hint">Handling</p>${doc.handling ? `<div class="prose">${escapeHtml(handlingText(doc.handling))}</div>` : '<p class="prose-empty">No handling text.</p>'}`
+      : (t.doc_id ? '<p class="prose-empty">Document not found.</p>' : '');
+  } catch (err) {
+    const $doc = document.getElementById('tpl-drawer-doc');
+    if ($doc) $doc.innerHTML = `<p class="form-error">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+$tplDrawerBody.addEventListener('click', async event => {
+  const button = event.target.closest('[data-act]');
   if (!button) return;
-  const {service, template} = button.closest('.link-meta').dataset;
+  const t = tpl.items.get($tplDrawerBody.dataset.key);
+  if (!t) return;
+  const act = button.dataset.act;
   button.disabled = true;
   try {
-    await apiMutation(linkUrl(service, template, button.classList.contains('link-confirm') ? '/confirm' : '/reject'), 'POST', {});
+    if (act === 'confirm' || act === 'reject') {
+      if (act === 'reject' && !(await confirmDialog(`The ${t.link_source === 'draft' ? 'AI suggestion' : 'link'} for ${t.template_id} will be rejected.`,
+        {title: 'Reject this link?', confirmLabel: 'Reject'}))) { button.disabled = false; return; }
+      await apiMutation(linkUrl(t.service, t.template_id, `/${act}`), 'POST', {});
+      showToast(`${t.template_id}: ${act === 'confirm' ? 'link confirmed' : 'rejected'}`);
+      $tplDrawer.classList.remove('open');
+    } else if (act === 'link') {
+      const value = document.getElementById('tpl-drawer-select').value;
+      if (!value) await apiMutation(linkUrl(t.service, t.template_id), 'DELETE', {});
+      else await apiMutation(linkUrl(t.service, t.template_id), 'PUT', {doc_id: value === NO_DOCUMENT ? null : value});
+      showToast(`${t.template_id}: ${!value ? 'back to automatic' : value === NO_DOCUMENT ? 'no document' : `linked to ${value}`}`);
+      $tplDrawer.classList.remove('open');
+      if (value && value !== NO_DOCUMENT) await offerSimilar(t.service, t.template_id, value);
+    }
   } catch (error) {
-    notifyDialog(`Could not update ${template}: ${error.message}`);
+    document.getElementById('tpl-drawer-error').textContent = error.message;
+    button.disabled = false;
+    return;
   }
   loadData();
 });

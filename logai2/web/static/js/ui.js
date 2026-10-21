@@ -123,3 +123,14 @@ document.addEventListener('input', event => {
   const field = event.target.closest('.form-field input[maxlength], .form-field textarea[maxlength]');
   if (field) updateCharCounts(field.closest('.form-field'));
 });
+
+// Brief status after an action; polite live region, never takes focus.
+let toastTimer = null;
+function showToast(message, isError = false) {
+  const $t = document.getElementById('toast');
+  $t.textContent = message;
+  $t.classList.toggle('error', isError);
+  $t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $t.classList.remove('show'), 4000);
+}

@@ -38,7 +38,7 @@ CONFIRM_TASK = ("Pick the document whose ERROR field describes the same error as
 SUGGEST_TASK = ("No runbook covers this template. Write one. If the line shows normal operation (for example a "
                 'success or progress message), set "verdict": "safe" and start "handling" with "SAFE: normal '
                 'operation, no action needed." followed by what a spike or a drop of this line would mean. '
-                'Otherwise set "verdict": "action" and give numbered, concrete steps. Reply {"verdict": "action" '
+                'Otherwise set "verdict": "action" and give numbered, concrete steps, one step per line. Reply {"verdict": "action" '
                 'or "safe", "title": "<short title>", "error_code": "<UPPER_SNAKE_CASE>", "error": "<the '
                 'template\'s log line, <*> kept>", "handling": "<text>", "confidence": <0..1>}.')
 

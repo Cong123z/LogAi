@@ -42,7 +42,7 @@ function llmStats(usage, actives) {
       `limit ${usage.limits.per_service_hour} per service`),
     plCard('Last 24 h', String(count('day', 'llm', 'draft', 'rejected')),
       `${count('day', 'llm')} confirmed · ${count('day', 'draft')} suggested · ${count('day', 'rejected')} rejected · limit ${usage.limits.daily_max}`),
-    plCard('Suggestions waiting', String(usage.drafts_waiting), 'Documentation → AI suggestions', usage.drafts_waiting ? 'warn' : ''),
+    plCard('Suggestions waiting', String(usage.drafts_waiting), 'review in Documentation → AI suggestions', usage.drafts_waiting ? 'warn' : ''),
     plCard('Last cycle', last ? `${last.confirmed + last.suggested} done` : '—',
       last ? `${last.failed} failed · ${last.none} none` : 'no LLM call yet'),
   ].join('');
@@ -82,7 +82,8 @@ function llmStatusBadge(p) {
   if (!p.active) return '<span class="badge badge-gray">inactive</span>';
   const h = (llm.health || {})[p.name];
   return h && h.down_until
-    ? `<span class="badge badge-red" title="${escapeHtml(h.error || '')}">failing: skipped until ${escapeHtml(new Date(h.down_until * 1000).toLocaleTimeString())}</span>`
+    ? `<span class="badge badge-red">failing, skipped until ${escapeHtml(new Date(h.down_until * 1000).toLocaleTimeString())}</span>
+       <div class="hint" style="max-width:40ch;overflow-wrap:anywhere">${escapeHtml(h.error || '')}</div>`
     : '<span class="badge badge-green">active</span>';
 }
 

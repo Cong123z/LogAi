@@ -104,50 +104,56 @@ counted minutes; red when above the band), **band** (`mean ± kσ` for this
 hour, judged exactly as detection does; "—" without a baseline), the
 **document** select, first seen, last seen.
 
-The document select (ARCHITECTURE §5.1 for the layers):
+The **Document** column shows the linked document (id and title, wrapped)
+and a badge for how it was linked: `manual`, `no document (set by hand)`,
+`inherited 0.91`, `auto-matched 0.87`, `AI-confirmed`, `AI suggestion ·
+unverified`, `AI result rejected`; or "Not linked". Its button (**Review**
+for automatic links, else **Link…** / **Change**) opens a side drawer with
+everything needed to decide (ARCHITECTURE §5.1 for the layers):
 
-- a document: a **manual** link (`PUT …/link`). If similar templates of the
-  same service and level exist, an **Apply to similar** dialog lists them
-  (similarity ≥ `suggest_similarity`), pre-ticked at the inherit threshold;
-  the ticked ones become manual links too, in one request;
-- **No document**: a sticky manual "no document" (never linked
-  automatically);
-- **Automatic**: removes the row (`DELETE …/link`); the linker may link it
-  again.
+- the full template text, level, state, rate and band;
+- how it got its document, in words (inherited from which template and at
+  what similarity, matched on ERROR, confirmed by the LLM) and the LLM's
+  reason in full;
+- the linked document's ERROR and Handling;
+- **Confirm** (→ manual; for a draft, approve) and **Reject** for an
+  automatic link;
+- **Link by hand**: a document (a manual link, then the **Apply to
+  similar** dialog when similar templates of the same service and level
+  exist, pre-ticked at the inherit threshold), **No document** (a sticky
+  manual "no document"), or **Automatic** (removes the row; the linker may
+  link it again).
 
-Under the select, the link source: `manual`, `no document`, `inherited 0.91
-from <template>`, `auto 0.87`, `AI-confirmed`, `AI suggestion`,
-`rejected`, or "not embedded yet". Automatic links have **Confirm** (→
-manual) and **Reject** buttons. Each change enqueues `reload_links`, so the
-engine's doc keys and alert rows follow within a tick. The table is not
-re-rendered while a select has focus.
+Template text wraps everywhere (never cut off). Each change enqueues
+`reload_links`, so the engine's doc keys and alert rows follow within a
+tick. A short confirmation appears bottom right (a polite live region).
 
 ## Documentation
 
-The runbook corpus (active documents): id, title, **ERROR / Handling**,
-error code and the number of linked templates (expandable to the linked
-templates, from `/api/templates?doc_id=…`). Columns sort client-side.
+A list on the left and the selected item in full on the right, with its
+actions pinned under the text; ↑/↓ move through the list, a search box
+filters it (title, error code, ERROR, Handling, template). Below 900 px the
+two stack. Two tabs (deep links `#documentation` and
+`#documentation/suggestions`):
 
-A document has an **ERROR** field, the log line(s) it is for, one per line,
-and a **Handling** field, what to do. Only the ERROR lines are matched
-against templates; the list shows them normalized as matched ("no ERROR
-line" = never matched automatically, "embedding…" until the linker has
-embedded the current revision).
-
-- **Add document** opens the editor; the server assigns the next
-  `DOC-NNN` id.
-- **Edit** sends the revision read with the list; a 409 `stale` says the
-  document changed in another window.
-- **Delete** asks for confirmation and is refused while templates are
-  linked (also when a link raced in after the list loaded: 409 `linked`).
-
-**AI suggestions** (the toggle; count in brackets) lists the documents the
-LLM wrote for templates no document matched (`status draft`), with the
-template each was written for and the LLM's confidence: **Approve** (the
-document becomes active and the link manual), **Edit** (saving approves),
-**Reject** (the template is never sent to the LLM again). **Approve all
-SAFE** approves every normal-operation suggestion at once. Suggestions are
-unverified: check commands before running them.
+- **Documents** (active): each item shows id, title, error code, linked
+  template count and "no ERROR" when it has none. The pane shows the title,
+  the ERROR block with the lines as matched ("embedding…" until the linker
+  has embedded this revision; no ERROR line = never matched automatically),
+  the Handling text (numbered steps written on one line are shown one per
+  line), and the linked templates in full with their link source.
+  **Edit** opens the form in the pane (title, error code, ERROR, Handling;
+  a 409 `stale` says it changed in another window), **Delete** asks first
+  and is refused while templates are linked. **Add document** opens an
+  empty form; the server assigns the next `DOC-NNN` id.
+- **AI suggestions** (count in the tab): the LLM's drafts. Each item shows
+  ACTION or SAFE, the confidence and the template it was written for. The
+  pane warns that it is unverified, then shows that template in full
+  (level, state, rate), the ERROR and the Handling. **Approve** (the
+  document becomes active and the link manual), **Edit** (saving
+  approves), **Reject** (asks first; the template is never sent to the LLM
+  again); the next suggestion is selected after each decision. **Approve
+  all SAFE** approves every normal-operation suggestion after listing them.
 
 On the first engine start, an empty table is seeded from
 `documentation.seed_path` (ARCHITECTURE §4.4).
