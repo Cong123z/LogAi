@@ -86,6 +86,10 @@
 
       <section class="view groups-section" id="view-templates" aria-label="Templates">
         <div class="filter-bar">
+          <div class="toggle-group" id="tpl-mode-toggle" role="tablist" aria-label="Templates to review or all">
+            <button class="toggle-btn" role="tab" aria-selected="false" data-tpl-mode="review">To review<span class="count-pill" id="tpl-review-count" hidden></span></button>
+            <button class="toggle-btn" role="tab" aria-selected="false" data-tpl-mode="all">All templates</button>
+          </div>
           <div class="search-wrap">
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
             <input type="text" class="search-input" id="search-input" placeholder="Search templates..." aria-label="Search template text" autocomplete="off" spellcheck="false">
@@ -104,14 +108,13 @@
           <table>
             <thead>
               <tr>
-                <th>State</th><th>Template ID</th><th>Template Text</th><th>Level</th>
-                <th title="Average events per minute this hour">Rate</th>
-                <th title="Normal band for this hour: mean ± kσ">Normal</th>
-                <th>Document</th><th>First Seen</th><th>Last Seen</th>
+                <th>State</th><th>Template</th>
+                <th title="Average events per minute this hour, against the normal band (mean ± kσ)">Rate</th>
+                <th>Document</th><th>Last seen</th><th><span class="visually-hidden">Action</span></th>
               </tr>
             </thead>
             <tbody id="template-tbody">
-              <tr><td colspan="9" class="loading">Loading templates...</td></tr>
+              <tr><td colspan="6" class="loading">Loading templates...</td></tr>
             </tbody>
           </table>
           <div class="pagination" id="pagination">
@@ -309,7 +312,7 @@
 
   <div class="modal-overlay modal-drawer" id="tpl-drawer" role="dialog" aria-modal="true" aria-labelledby="tpl-drawer-title">
     <div class="modal">
-      <div class="modal-header"><h2 id="tpl-drawer-title">Template</h2><button type="button" class="modal-close" data-close="tpl-drawer" aria-label="Close">&times;</button></div>
+      <div class="modal-header"><h2 id="tpl-drawer-title" tabindex="-1">Template</h2><button type="button" class="modal-close" data-close="tpl-drawer" aria-label="Close">&times;</button></div>
       <div class="drawer-body" id="tpl-drawer-body"></div>
     </div>
   </div>

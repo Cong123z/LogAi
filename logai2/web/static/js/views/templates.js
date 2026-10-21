@@ -1,9 +1,12 @@
 // ── Templates (adapted from logai-engine views/templates.js) ──
-// A service's templates with this hour's rate against its normal band, and
-// the document each one is linked to: by hand (the select), inherited, auto-matched on a
-// document's ERROR lines, or by the LLM; automatic links can be confirmed or rejected.
-const tpl = {search: '', service: '', level: '', link: '', page: 1, size: 100, refreshTimer: null,
-             items: new Map(), docs: []};
+// Two modes: "To review" lists the automatic links (inherited, auto-matched, AI) waiting for a
+// person, alerting first; "All templates" lists every template. Each row shows this hour's rate
+// against its normal band and the linked document; the drawer holds the decision.
+// mode null = not chosen yet: the first answer picks "review" when anything waits for review.
+const tpl = {mode: null, search: '', service: '', level: '', link: '', page: 1, size: 100, refreshTimer: null,
+             items: new Map(), order: [], docs: []};
+const $tplModeToggle = document.getElementById('tpl-mode-toggle');
+const $tplReviewCount = document.getElementById('tpl-review-count');
 const $tplTbody = document.getElementById('template-tbody');
 const $tplService = document.getElementById('filter-service');
 const $tplLevel = document.getElementById('filter-level');
@@ -21,7 +24,8 @@ function fetchTemplates() {
   if (tpl.search) params.set('q', tpl.search);
   if (tpl.service) params.set('service', tpl.service);
   if (tpl.level) params.set('level', tpl.level);
-  if (tpl.link) params.set('link_source', tpl.link);
+  if (tpl.mode === 'review') params.set('link_source', 'review');
+  else if (tpl.link) params.set('link_source', tpl.link);
   return getJson(`/api/templates?${params}`, 'Unable to load templates');
 }
 function fetchServices() { return getJson('/api/services', 'Unable to load services'); }
@@ -41,15 +45,17 @@ function levelBadgeClass(level) {
 
 const tplNum = n => (Math.round(n * 10) / 10).toLocaleString();
 
-function tplRate(t) {
-  if (t.rate == null) return '<span class="sync-status" title="No minutes counted for this service this hour">—</span>';
-  const high = t.band_high != null && t.rate > t.band_high;
-  return `<span class="${high ? 'rate-high' : ''}" title="Average per minute this hour">${tplNum(t.rate)}/min</span>`;
-}
-
-function tplBand(t) {
-  if (t.band_high == null) return '<span class="sync-status" title="No committed baseline yet">—</span>';
-  return `<span title="Normal band for this hour (mean ± kσ)">${tplNum(Math.max(t.band_low, 0))}–${tplNum(t.band_high)}/min</span>`;
+// This hour's rate, and under it the normal band; above the band says so in words, not only in red.
+function tplRateHtml(t) {
+  const high = t.rate != null && t.band_high != null && t.rate > t.band_high;
+  const rate = t.rate == null
+    ? '<span class="sync-status" title="No minutes counted for this service this hour">—</span>'
+    : `<span class="${high ? 'rate-high' : ''}" title="Average per minute this hour">${tplNum(t.rate)}/min${high ? ' ▲ above normal' : ''}</span>`;
+  const band = t.band_high == null
+    ? '<span title="No committed baseline yet">normal —</span>'
+    : `<span title="Normal band for this hour (mean ± kσ)">normal ${t.band_low <= 0
+        ? `≤ ${tplNum(t.band_high)}` : `${tplNum(t.band_low)}–${tplNum(t.band_high)}`}/min</span>`;
+  return `<div class="cell-stack tpl-num">${rate}<span class="link-meta">${band}</span></div>`;
 }
 
 const tplSim = x => (x == null ? '' : x.toFixed(2));
@@ -70,17 +76,29 @@ function linkSourceBadge(t) {
 // URL-encoded parts: survives an HTML attribute (a NUL separator does not) and stays unambiguous.
 const tplKey = t => `${encodeURIComponent(t.service)}/${encodeURIComponent(t.template_id)}`;
 
-// Table cell: the document (wrapped, readable) and how it was linked; Review opens the drawer.
-function tplLinkCell(t) {
-  const doc = t.doc_id && t.link_source !== 'rejected'
-    ? `<div class="link-doc"><span class="tmpl-id">${escapeHtml(t.doc_id)}</span>${escapeHtml(t.doc_title || '')}</div>` : '';
-  const none = !t.link_source
-    ? `<span class="link-meta">${t.embedded ? 'Not linked' : 'Not linked · not embedded yet'}</span>` : '';
+// Document cell: the document (or why there is none), then how it was linked.
+function tplDocCell(t) {
+  const linked = t.doc_id && t.link_source !== 'rejected';
+  const head = linked
+    ? `<div class="link-doc"><span class="tmpl-id">${escapeHtml(t.doc_id)}</span>${escapeHtml(t.doc_title || '')}</div>`
+    : t.link_source === 'manual' ? '<div class="link-doc">No document (set by hand)</div>'
+    : `<div class="link-doc">${t.embedded ? 'Not linked' : 'Not linked · not embedded yet'}</div>`;
+  const how = t.link_source === 'manual' && !t.doc_id ? '' : linkSourceBadge(t);
+  const safe = linked && t.doc_verdict === 'safe' ? '<span class="badge badge-green">SAFE</span>' : '';
+  return `<div class="cell-stack">${head}${how || safe ? `<span class="link-meta">${how}${safe}</span>` : ''}</div>`;
+}
+
+// Review for an automatic link, else Link… / Change; the row opens the same drawer.
+function tplActionButton(t) {
   const needsReview = AUTOMATIC_SOURCES.includes(t.link_source);
-  return `<div class="link-cell">${doc}${none}<span class="link-meta">${linkSourceBadge(t)}${t.doc_verdict === 'safe' && doc
-      ? '<span class="badge badge-green">SAFE</span>' : ''}</span>
-    <button type="button" class="btn${needsReview ? ' btn-primary' : ''} tpl-review" data-key="${escapeHtml(tplKey(t))}"
-      aria-label="${needsReview ? 'Review' : 'Link'} ${escapeHtml(t.template_id)}">${needsReview ? 'Review' : t.doc_id ? 'Change' : 'Link…'}</button></div>`;
+  const label = needsReview ? 'Review' : t.doc_id ? 'Change' : 'Link…';
+  return `<button type="button" class="btn${needsReview ? ' btn-primary' : ''} tpl-review" data-key="${escapeHtml(tplKey(t))}"
+    aria-label="${label.replace('…', '')} ${escapeHtml(t.template_id)}">${label}</button>`;
+}
+
+function tplStateCell(t) {
+  return t.state === 'NORMAL' ? '<span class="link-meta">normal</span>'
+    : `<span class="badge alert-state-${escapeHtml(t.state.toLowerCase())}">${escapeHtml(t.state)}</span>`;
 }
 
 function renderServiceFilter(services) {
@@ -95,10 +113,16 @@ function renderServiceFilter(services) {
   });
 }
 
-function renderTemplates(data, docs) {
-  if (!data.items.length) {
+function renderTemplates(data) {
+  if (!data.items.length && tpl.mode === 'review') {
     $tplTbody.innerHTML = `
-      <tr><td colspan="9" class="empty-state">
+      <tr><td colspan="6" class="empty-state">
+        <p>Nothing to review${tpl.search || tpl.service || tpl.level ? ' for these filters' : ''}.</p>
+        <button type="button" class="btn" data-tpl-goto="all">Show all templates</button>
+      </td></tr>`;
+  } else if (!data.items.length) {
+    $tplTbody.innerHTML = `
+      <tr><td colspan="6" class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
         </svg>
@@ -106,16 +130,15 @@ function renderTemplates(data, docs) {
       </td></tr>`;
   } else {
     $tplTbody.innerHTML = data.items.map(t => `
-      <tr>
-        <td><span class="badge alert-state-${escapeHtml(t.state.toLowerCase())}">${escapeHtml(t.state)}</span></td>
-        <td><span class="tmpl-id">${escapeHtml(t.template_id)}</span></td>
-        <td><div class="tmpl-text" title="${escapeHtml(t.text)}">${highlightWildcards(escapeHtml(t.text))}</div></td>
-        <td><span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span></td>
-        <td class="tpl-num">${tplRate(t)}</td>
-        <td class="tpl-num">${tplBand(t)}</td>
-        <td>${tplLinkCell(t)}</td>
-        <td title="${escapeHtml(formatFullTs(t.first_seen))}">${escapeHtml(formatTs(t.first_seen))}</td>
-        <td title="${escapeHtml(formatFullTs(t.last_seen))}">${escapeHtml(formatTs(t.last_seen))}</td>
+      <tr class="tpl-row" data-key="${escapeHtml(tplKey(t))}">
+        <td>${tplStateCell(t)}</td>
+        <td><div class="cell-stack"><span class="link-meta"><span class="tmpl-id">${escapeHtml(t.template_id)}</span>
+          <span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span></span>
+          <div class="tmpl-text">${highlightWildcards(escapeHtml(t.text))}</div></div></td>
+        <td>${tplRateHtml(t)}</td>
+        <td>${tplDocCell(t)}</td>
+        <td class="tpl-num" title="${escapeHtml(formatFullTs(t.last_seen))}">${escapeHtml(formatTs(t.last_seen))}</td>
+        <td class="tpl-action">${tplActionButton(t)}</td>
       </tr>`).join('');
   }
   renderTplPagination(data.total);
@@ -152,6 +175,10 @@ async function loadTemplates() {
   const seq = ++tplSeq;
   const [data, services, docs] = await Promise.all([fetchTemplates(), fetchServices(), fetchDocuments()]);
   if (seq !== tplSeq) return;   // a newer request (filter, page) is in flight: drop this answer
+  if (tpl.mode === null) {      // first load: open on To review when anything waits for a decision
+    setTplMode(data.review_total > 0 ? 'review' : 'all');
+    if (tpl.mode === 'review') return loadTemplates();
+  }
   const lastPage = Math.max(1, Math.ceil(data.total / tpl.size));
   if (tpl.page > lastPage) {    // the list shrank under us: show its last page instead of an empty one
     tpl.page = lastPage;
@@ -159,9 +186,33 @@ async function loadTemplates() {
   }
   renderServiceFilter(services);
   tpl.items = new Map(data.items.map(t => [tplKey(t), t]));
+  tpl.order = data.items.map(tplKey);
   tpl.docs = docs;
-  renderTemplates(data, docs);
+  $tplReviewCount.textContent = data.review_total;
+  $tplReviewCount.hidden = !data.review_total;
+  $tplModeToggle.querySelector('[data-tpl-mode="review"]')
+    .setAttribute('aria-label', `To review, ${data.review_total} template${data.review_total === 1 ? '' : 's'}`);
+  renderTemplates(data);
 }
+
+// The link filter overlaps To review (it lists only automatic links): hidden and cleared there.
+function setTplMode(mode) {
+  tpl.mode = mode;
+  tpl.page = 1;
+  $tplModeToggle.querySelectorAll('[data-tpl-mode]').forEach(b => {
+    b.classList.toggle('active', b.dataset.tplMode === mode);
+    b.setAttribute('aria-selected', String(b.dataset.tplMode === mode));
+  });
+  $tplLink.hidden = mode === 'review';
+  if (mode === 'review') tpl.link = $tplLink.value = '';
+}
+
+$tplModeToggle.addEventListener('click', event => {
+  const button = event.target.closest('[data-tpl-mode]');
+  if (!button || button.dataset.tplMode === tpl.mode) return;
+  setTplMode(button.dataset.tplMode);
+  loadData();
+});
 
 // ── Event listeners ──
 $tplLevel.innerHTML = '<option value="">All levels</option>' + TPL_LEVELS.map(l => `<option value="${l}">${l}</option>`).join('');
@@ -179,9 +230,17 @@ const linkUrl = (service, template, suffix = '') =>
 const $tplDrawer = document.getElementById('tpl-drawer');
 const $tplDrawerBody = document.getElementById('tpl-drawer-body');
 
+// The button is the keyboard path; a click anywhere else on the row opens the same drawer.
 $tplTbody.addEventListener('click', event => {
-  const button = event.target.closest('.tpl-review');
-  if (button) openTemplateDrawer(tpl.items.get(button.dataset.key));
+  if (event.target.closest('[data-tpl-goto]')) {
+    setTplMode('all');
+    loadData();
+    return;
+  }
+  const target = event.target.closest('.tpl-review, .tpl-row');
+  if (target && (target.matches('.tpl-review') || !event.target.closest('a, button, input, select'))) {
+    openTemplateDrawer(tpl.items.get(target.dataset.key));
+  }
 });
 
 // The linked document's text, so the operator can judge the link without leaving the drawer.
@@ -216,7 +275,7 @@ async function openTemplateDrawer(t) {
       <div class="pane-badges"><span class="tmpl-id">${escapeHtml(t.service)}</span>
         <span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span>
         <span class="badge alert-state-${escapeHtml(t.state.toLowerCase())}">${escapeHtml(t.state)}</span>
-        <span>rate ${tplRate(t)} · normal ${tplBand(t)}</span></div>
+        ${tplRateHtml(t)}</div>
       <div class="code-block" style="margin-top:6px">${highlightWildcards(escapeHtml(t.text))}</div></section>
     <section class="pane-section"><h3>Document</h3>
       <div class="pane-badges">${linkSourceBadge(t)}</div>
