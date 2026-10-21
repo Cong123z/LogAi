@@ -30,12 +30,13 @@ from logai2.metrics import Metrics
 from logai2.owner.owner import SQL, Owner
 from logai2.reader.cache import KnownLines
 from logai2.reader.reader import Reader
-from logai2.timeutil import TZ, local
+from logai2.timeutil import TZ, local, minute_of
 
 logger = logging.getLogger("logai2.engine")
 
 AVAILABLE_REFRESH_SECONDS = 30
 MISS_WINDOW_SECONDS = 300
+STATS_WINDOW_SECONDS = 900   # flush-time max and events/s in the status
 MISS_WARN_RATIO = 0.5
 MISS_WARN_MIN_EVENTS = 100   # a tiny service's few cold lines are not a warning
 MAX_BACKOFF_SECONDS = 30
@@ -77,6 +78,9 @@ class Engine:
         self._miss_services: set[str] = set()
         self._miss_window: deque[tuple[float, dict[str, list[int]]]] = deque()
         self._totals = {"hits": 0, "misses": 0, "late": 0}
+        self._flush_times: deque[tuple[float, float]] = deque()   # (finished at, seconds), last 900 s
+        self._event_window: deque[tuple[float, int]] = deque()    # (observed at, events), last 900 s
+        self._history: deque[dict] = deque(maxlen=60)             # one point per wall minute
 
     def _connect(self):
         c = connect(self.cfg.database.dsn)
@@ -230,6 +234,9 @@ class Engine:
         self._positions = batch["positions"]
         self._watermark_ms = batch["watermark_ms"]
         self._pending_events += batch["events"]
+        self._event_window.append((now, batch["events"]))
+        while self._event_window[0][0] < now - STATS_WINDOW_SECONDS:
+            self._event_window.popleft()
         m = self.metrics
         m.events.inc(batch["events"])
         cache = self.reader.cache
@@ -275,7 +282,9 @@ class Engine:
         self._pending_events = 0
         self._last_flush = self.now()
         m = self.metrics
-        m.flush_seconds.set(time.monotonic() - started)
+        took = time.monotonic() - started
+        self._flush_times.append((self._last_flush, took))
+        m.flush_seconds.set(took)
         m.heartbeat.set(status["heartbeat"])
         m.lag.set(status["lag_seconds"])
         for service, ratio in status["miss_ratio"].items():
@@ -302,9 +311,25 @@ class Engine:
         cache = self.reader.cache
         lookups = cache.hits + cache.misses
         elapsed = now - self._last_flush
+        lag = max(0.0, now - self._watermark_ms / 1000)
+        # the status a flush writes is built before it runs, so it reports the previous completed flush
+        while self._flush_times and self._flush_times[0][0] < now - STATS_WINDOW_SECONDS:
+            self._flush_times.popleft()
+        while self._event_window and self._event_window[0][0] < now - STATS_WINDOW_SECONDS:
+            self._event_window.popleft()
+        events = sum(n for _, n in self._event_window)
+        covered = max(1.0, min(STATS_WINDOW_SECONDS, now - (self._observing_since or now)))
+        if not self._history or self._history[-1]["t"] != minute_of(now) * 60:
+            last_minute = sum(n for t, n in self._event_window if t >= now - 60)
+            self._history.append({"t": minute_of(now) * 60, "lag": lag, "eps": last_minute / 60})
         return {
             "heartbeat": now,
-            "lag_seconds": max(0.0, now - self._watermark_ms / 1000),
+            "lag_seconds": lag,
+            "flush_seconds": self._flush_times[-1][1] if self._flush_times else 0.0,
+            "flush_seconds_max": max((d for _, d in self._flush_times), default=0.0),
+            "late_counts": self.owner.minutes.late,
+            "events_per_second_15m": events / covered,
+            "history": list(self._history),
             "events_per_second": self._pending_events / elapsed if elapsed > 0 else 0.0,
             "cache_hit_ratio": cache.hits / lookups if lookups else None,
             "miss_ratio": ratios,

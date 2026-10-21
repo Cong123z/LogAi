@@ -346,3 +346,37 @@ def test_start_logs_loaded_alerting_states(conn, cfg, make, caplog):
     with caplog.at_level("WARNING", logger="logai2.engine"):
         make(FakeSource({"a": []}), Clock(NOON)).start()
     assert "1 non-NORMAL alert state" in caplog.text
+
+
+def _run_minutes(engine, clock, hits, minutes):
+    for k in range(minutes):
+        start = NOON + k * 60
+        hits += history(start, start + 60, 30, prefix=f"k{k}-")
+        clock.t = start + 60 + 31
+        engine.tick()
+
+
+def test_status_history_and_flush_fields(conn, cfg, make):
+    cfg.start.days_back = 0
+    cfg.flush.seconds = 0
+    clock = Clock(NOON)
+    hits = []
+    engine = make(FakeSource({"a": hits}), clock)
+    engine.start()
+    _run_minutes(engine, clock, hits, 3)
+    s = q(conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]
+    assert 2 <= len(s["history"]) <= 60 and set(s["history"][0]) == {"t", "lag", "eps"}
+    assert s["history"][-1]["t"] % 60 == 0 and s["events_per_second_15m"] > 0
+    assert s["flush_seconds"] >= 0 and s["flush_seconds_max"] >= s["flush_seconds"] and s["late_counts"] == 0
+
+
+def test_history_keeps_60_minutes(conn, cfg, make):
+    cfg.start.days_back = 0
+    cfg.flush.seconds = 0
+    clock = Clock(NOON)
+    hits = []
+    engine = make(FakeSource({"a": hits}), clock)
+    engine.start()
+    _run_minutes(engine, clock, hits, 70)
+    h = q(conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]["history"]
+    assert len(h) == 60 and h[0]["t"] < h[-1]["t"]

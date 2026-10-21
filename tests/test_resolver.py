@@ -195,3 +195,11 @@ def test_the_llm_sees_levels_and_a_draft_takes_the_templates_level(conn, cfg, pr
     assert confirm["template"]["level"] == "INFO" and confirm["documents"][0]["level"] == "ERROR"
     d = conn.execute("SELECT level, verdict FROM documents WHERE title = 'Log success'").fetchone()
     assert d == {"level": "INFO", "verdict": "safe"}
+
+
+def test_llm_today_counts_results_and_failed_calls(conn, cfg, profile):
+    tmpl(conn, "A", v=vec((0, 1.0))), alerting(conn, "A")
+    tmpl(conn, "B", v=vec((1, 1.0))), alerting(conn, "B")
+    status = run(conn, cfg, Chat({"title": "t", "handling": "h"}, LlmError("junk")))
+    assert status["llm"]["suggested"] == 1 and status["llm"]["failed"] == 1
+    assert status["llm_today"] == 2
