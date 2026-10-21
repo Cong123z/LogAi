@@ -41,7 +41,11 @@ source design for all sub-projects:
   template of its service and level, else is linked to the document whose
   ERROR line it matches (threshold and margin). Changes enqueue
   `reload_links` for the engine. A document is **ERROR** (the log lines it
-  is for, the only part matched) + **Handling** (what to do).
+  is for, the only part matched) + **Handling** (what to do). Templates still
+  unmatched go to the LLM of the active profile (Data sources page): it
+  confirms a near document, or writes a suggestion (an action runbook, or
+  SAFE for a normal-operation line) that waits for approval on the
+  Documentation page.
 - **Web** (`scripts/run_web.py`, Flask): six pages (Alerting, Pipeline,
   Templates, Documentation, Data sources, Baseline). It reads Postgres and
   writes settings, documents, links, review decisions and commands; it never
@@ -194,9 +198,10 @@ logai2/
   alerts.py, review.py               alert rows, baseline review suggestions
   commands.py, metrics.py, engine.py the engine loop
   embed.py, links.py, linker.py      embeddings client, layered links (SQL), the linker loop
+  llm.py, resolver.py                LLM client (active profile), confirm-or-suggest resolver
   web/app.py, web/static/            Flask API and the six pages
 scripts/run_engine.py, run_web.py, run_linker.py, incident_test.py,
-        split_doc_errors.py (seeded ERROR/Handling split), link_eval.py (measure link thresholds)
+        split_doc_errors.py (seeded ERROR/Handling split), link_eval.py (measure link thresholds and the LLM)
 tests/                               pytest (Postgres on 5433)
 docs/specs/, docs/plans/, docs/design/, docs/WEB_UI.md
 ARCHITECTURE.md, config.yaml, docker-compose.yml, Dockerfile

@@ -180,7 +180,10 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `documentation.cluster_similarity` | 0.85 | undocumented alerting templates joined into one row |
 | `embedding.url` / `model` | `http://bge-m3:8080` / `bge-m3` | OpenAI-style `/v1/embeddings`; empty url = nothing is embedded |
 | `embedding.batch` / `cycle_seconds` | 32 / 30 | texts per request; linker cycle |
-| `llm.*` | | Phase B (LLM resolver), not used yet |
+| `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
+| `llm.per_service_hour` / `daily_max` | 5 / 50 | LLM results per service per hour, in all per day |
+| `llm.new_hours` | 24 | a template first seen this recently is resolved even when not alerting |
+| `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |
 
 The repo's `config.yaml` sets only `elasticsearch.index: recharge-logs`,
 `baseline.sigma_multiplier: 3.0` and the two floors. Secrets and endpoints
@@ -315,8 +318,8 @@ One `template_doc_links` row per template; its `source` is the layer
 | 0 | `manual` | set on the web; `doc_id NULL` = "no document" | yes (NULL: no) |
 | 1 | `inherited` | nearest **manual** template of the same service and level class (ERROR/FATAL/CRITICAL, WARN/WARNING, other), cosine ≥ `inherit_similarity[class]`; `inherited_from` names it | yes |
 | 2 | `corpus` | best **active** document by its best ERROR line, ≥ `corpus_similarity[class]` and ≥ `corpus_margin` above the next document | yes |
-| 3 | `llm` | Phase B: the LLM picked a candidate document | yes |
-| 4 | `draft` | Phase B: the LLM wrote a document (`status draft`) | no |
+| 3 | `llm` | the LLM picked one of the template's candidate documents; `note` = its reason | yes |
+| 4 | `draft` | the LLM wrote a document (`status draft`, `source llm`, `verdict` action or safe) | no, until approved |
 | — | `rejected` | the operator rejected a layer 3–4 result | no |
 
 "Drives alerts" = loaded by the detector (`doc:` keys, metrics) and used
@@ -334,6 +337,30 @@ Inheritance only reads manual links, so links never drift. Templates are
 embedded with `AND text = <text read>`, documents with `AND revision =
 <revision read>`; the engine clears a template's vector when its text
 changes.
+
+**LLM resolver** (`logai2/resolver.py`, layers 3–4, run by the linker after
+`apply_links`). With an active `llm_profiles` row, it takes templates that
+have a vector and no link row at all, that are ALERTING or first seen within
+`llm.new_hours` (24), ALERTING first then ERROR > WARN > INFO, at most 3 LLM
+calls per cycle, `llm.per_service_hour` (5) per service and `llm.daily_max`
+(50) in all (counted from `llm` / `draft` / `rejected` rows by `linked_at`;
+a rejection keeps it). For each:
+
+1. candidates = active documents whose best ERROR line is ≥
+   `llm.candidate_similarity` (0.60), top `llm.candidates` (3). If any, the
+   LLM is asked which fits; a listed `doc_id` becomes an `llm` link (with
+   `reload_links`).
+2. Otherwise (or `null`), the LLM writes `{verdict, title, error_code, error,
+   handling, confidence}`; it is stored as a `draft` document (next `DOC-NNN`
+   id) linked as `draft`, in one transaction.
+
+The LLM sees only service, level and the normalized template text, plus the
+candidates' title, ERROR and Handling (≤ `llm.max_input_chars`); never raw
+log lines. Any link written meanwhile wins (`ON CONFLICT DO NOTHING`; a
+draft is rolled back). A failed call backs the template off for 30 min (in
+memory). The client (`logai2/llm.py`) sends JSON mode, strips `<think>`
+blocks, takes the first JSON object of the reply, and retries once on a
+timeout only.
 
 ## 6. Reader
 
@@ -687,7 +714,7 @@ service-scoped primary key.
 | `documents` | `doc_id` | `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action`/`safe`), `confidence`, `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`) |
 | `document_errors` | `doc_id, n` | `text` (normalized ERROR line), `embedding` | linker |
 | `template_doc_links` | `service, template_id` | `doc_id` (FK → documents, NULL = no document), `source` (§5.1), `similarity`, `inherited_from`, `note`, `linked_at` | web, linker |
-| `llm_profiles` | `name` | `base_url`, `model`, `api_key`, `timeout_seconds`, `active` (at most one), `revision` | Phase B |
+| `llm_profiles` | `name` | `base_url`, `model`, `api_key` (clear text, never returned by the API), `timeout_seconds`, `active` (at most one), `revision`, `updated_at` | web |
 | `error_samples` | — (index `service, template_id, at DESC`) | `service`, `template_id`, `at`, `line` | flush |
 | `settings` | `key` | `value` (jsonb), `revision`, `updated_at` | web, engine |
 | `commands` | `id` | `kind`, `payload` (jsonb), `created_at`, `done_at`, `result` (jsonb) | web enqueues, engine finishes |
@@ -757,6 +784,8 @@ Any other kind fails with `unknown command kind`.
 | Bad command | `commands.result.error`; the engine continues |
 | Embeddings service down | the linker logs it, reports `last_error` and pending counts in `worker_status['linker']`, keeps every existing link and retries next cycle |
 | Linker down | no new vectors or automatic links; existing links keep working; the Pipeline page shows the linker stale after 90 s |
+| LLM down, slow or answering junk | the template is skipped (30 min back-off) and `last_error` is reported; each call waits up to the profile timeout, retried once on a timeout |
+| No active LLM profile | the resolver idles with a warning in `worker_status['linker']` |
 
 No DLQ.
 
@@ -783,7 +812,8 @@ No DLQ.
 | Commands | Polled every tick, no `LISTEN`; `recompute_baseline` is not deduplicated | a burst of recompute clicks runs the commit several times |
 | Web | Flask development server, one connection per request, no auth, no pagination on `/api/baseline` | expose only on a trusted network; add a pool if many operators |
 | Web | A `/` in a service name cannot be linked through `PUT /api/templates/<service>/<id>/link` | 404 |
-| Database | `migrate()` has no advisory lock; the ES password is stored in clear | only the engine migrates; review before production |
+| Database | `migrate()` has no advisory lock; the ES password and LLM API keys are stored in clear | only the engine migrates; review before production |
+| LLM | Up to 3 calls per cycle, one at a time; failure back-off is in memory | a cycle can take minutes with a slow model; a restart retries failed templates |
 | Scale | One engine thread per database | v2 (Kafka, many readers/owners) is sub-project 7 |
 | Links | `apply_links` compares every template with every ERROR line and every manual template each cycle, exact search, no vector index | fine for thousands of templates; restrict to changed rows past ~50k |
 | Links | Thresholds are starting values (design test, same model) | calibrate with `scripts/link_eval.py` on real manual links |
@@ -814,7 +844,7 @@ No DLQ.
 5. `logai2/owner/owner.py`: the flush transaction.
 6. `logai2/jobs/commit.py`, `logai2/review.py`: the daily commit and suggestions.
 7. `logai2/engine.py`, `logai2/commands.py`, `logai2/metrics.py`: the loop.
-8. `logai2/links.py`, `logai2/embed.py`, `logai2/linker.py`: document links (§5.1).
+8. `logai2/links.py`, `logai2/embed.py`, `logai2/linker.py`, `logai2/llm.py`, `logai2/resolver.py`: document links (§5.1).
 9. `logai2/web/app.py` and [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
 Tests under `tests/` are executable examples of these contracts. Good starting

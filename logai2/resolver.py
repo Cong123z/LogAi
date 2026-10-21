@@ -41,6 +41,10 @@ SUGGEST_TASK = ("No runbook covers this template. Write one. If the line shows n
                 'template\'s log line, <*> kept>", "handling": "<text>", "confidence": <0..1>}.')
 
 
+def _template(t: dict) -> dict:
+    return {"service": t["service"], "level": t["level"], "text": t["text"]}
+
+
 def _text(value, limit: int) -> str:
     return value.strip()[:limit] if isinstance(value, str) else ""
 
@@ -107,19 +111,23 @@ class Resolver:
         lc = self.cfg.llm
         with self.conn.transaction():
             docs = candidates(self.conn, t["service"], t["template_id"], lc.candidates, lc.candidate_similarity)
-        template = {"service": t["service"], "level": t["level"], "text": t["text"]}
         if docs:
-            budget = max(200, (lc.max_input_chars - len(t["text"]) - 1000) // len(docs))
-            listed = [{"doc_id": d["doc_id"], "title": d["title"], "error": d["error"][:budget // 2],
-                       "handling": d["handling"][:budget // 2]} for d in docs]
-            reply = self.chat(profile, SYSTEM, json.dumps({"template": template, "documents": listed,
-                                                           "task": CONFIRM_TASK}, ensure_ascii=False))
-            pick = next((d for d in docs if d["doc_id"] == reply.get("doc_id")), None)   # only a listed one
+            pick, reason = self.confirm(profile, t, docs)
             if pick:
-                return "confirmed" if self._write_llm_link(t, pick, _text(reply.get("reason"), 500)) else "none"
-        reply = self.chat(profile, SYSTEM, json.dumps({"template": template, "task": SUGGEST_TASK},
+                return "confirmed" if self._write_llm_link(t, pick, reason) else "none"
+        reply = self.chat(profile, SYSTEM, json.dumps({"template": _template(t), "task": SUGGEST_TASK},
                                                       ensure_ascii=False))
         return "suggested" if self._write_draft(t, reply) else "none"
+
+    def confirm(self, profile: dict, t: dict, docs: list[dict]) -> tuple[dict | None, str]:
+        """Ask which candidate fits; (the candidate or None, reason). Writes nothing (link_eval uses it)."""
+        budget = max(200, (self.cfg.llm.max_input_chars - len(t["text"]) - 1000) // len(docs))
+        listed = [{"doc_id": d["doc_id"], "title": d["title"], "error": d["error"][:budget // 2],
+                   "handling": d["handling"][:budget // 2]} for d in docs]
+        reply = self.chat(profile, SYSTEM, json.dumps({"template": _template(t), "documents": listed,
+                                                       "task": CONFIRM_TASK}, ensure_ascii=False))
+        pick = next((d for d in docs if d["doc_id"] == reply.get("doc_id")), None)   # only a listed one
+        return pick, _text(reply.get("reason"), 500)
 
     def _write_llm_link(self, t: dict, doc: dict, reason: str) -> bool:
         with self.conn.transaction():

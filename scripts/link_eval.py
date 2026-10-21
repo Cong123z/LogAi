@@ -1,9 +1,12 @@
-"""Measure the automatic link layers against the manual links: python scripts/link_eval.py [config.yaml] [--whole-docs]
+"""Measure the automatic link layers against the manual links:
+python scripts/link_eval.py [config.yaml] [--whole-docs] [--llm]
 
 Read-only. Ground truth = every manual link with a document. Prints a Markdown report:
 - layer 1 (inherit), leave-one-out: the nearest *other* manual template of the same service and level class;
 - layer 2 (corpus), per threshold and margin: the best active document by ERROR lines;
-- --whole-docs: layer 2 again with each document embedded whole (title + ERROR + Handling), for comparison.
+- --whole-docs: layer 2 again with each document embedded whole (title + ERROR + Handling), for comparison;
+- --llm: layer 3, the active LLM profile asked to confirm among each template's candidates (writes nothing;
+  one LLM call per template that has candidates).
 right = the document a person chose; wrong = another one; none = nothing passed.
 Thresholds are the lowest values with 0 wrong; change config only on this evidence.
 """
@@ -17,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from logai2.config import load_config  # noqa: E402
 from logai2.db import connect  # noqa: E402
 from logai2.embed import embed  # noqa: E402
-from logai2.links import class_sql, level_class  # noqa: E402
+from logai2.links import candidates, class_sql, level_class  # noqa: E402
+from logai2.llm import LlmError, active_profile  # noqa: E402
+from logai2.resolver import Resolver  # noqa: E402
 
 THRESHOLDS = (0.70, 0.75, 0.80, 0.82, 0.85, 0.88, 0.90, 0.92)
 MARGINS = (0.0, 0.05, 0.10)
@@ -25,7 +30,7 @@ MARGINS = (0.0, 0.05, 0.10)
 
 def truth(conn) -> list[dict]:
     return conn.execute(
-        "SELECT t.service, t.template_id, t.level, t.embedding::text AS vec, l.doc_id FROM templates t "
+        "SELECT t.service, t.template_id, t.level, t.text, t.embedding::text AS vec, l.doc_id FROM templates t "
         "JOIN template_doc_links l USING (service, template_id) "
         "WHERE l.source = 'manual' AND l.doc_id IS NOT NULL AND t.embedding IS NOT NULL").fetchall()
 
@@ -121,7 +126,37 @@ def main() -> None:
     if "--whole-docs" in sys.argv:
         out += layer2_table("Whole documents (title + ERROR + Handling), for comparison", templates,
                             whole_doc_top2(conn, cfg, templates))
+    if "--llm" in sys.argv:
+        out += llm_table(conn, cfg, templates)
     print("\n".join(out))
+
+
+def llm_table(conn, cfg, templates: list[dict]) -> list[str]:
+    profile = active_profile(conn)
+    if not profile:
+        return ["## Layer 3: LLM", "", "No active LLM profile.", ""]
+    resolver = Resolver(cfg, conn)
+    right = wrong = none = failed = no_candidates = 0
+    for t in templates:
+        docs = candidates(conn, t["service"], t["template_id"], cfg.llm.candidates, cfg.llm.candidate_similarity)
+        if not docs:
+            no_candidates += 1
+            continue
+        try:
+            pick, _ = resolver.confirm(profile, t, docs)
+        except LlmError:
+            failed += 1
+            continue
+        if pick is None:
+            none += 1
+        elif pick["doc_id"] == t["doc_id"]:
+            right += 1
+        else:
+            wrong += 1
+    return ["## Layer 3: LLM confirm", "", f"Profile `{profile['name']}` ({profile['model']}), candidates ≥ "
+            f"{cfg.llm.candidate_similarity}, top {cfg.llm.candidates}.", "",
+            "| right | wrong | none | failed | no candidates |", "|---|---|---|---|---|",
+            f"| {right} | {wrong} | {none} | {failed} | {no_candidates} |", ""]
 
 
 if __name__ == "__main__":

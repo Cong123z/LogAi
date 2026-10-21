@@ -2,8 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **FINAL, all decisions confirmed by the user on 2026-10-21**;
-waiting for the go to implement. Covers sub-projects 2/3 (embeddings, links)
+Status: **implemented** on branch `embeddings-doc-links` (2026-10-21),
+Phases A and B; all decisions confirmed by the user on 2026-10-21.
+Departures: no `corpus_mode` switch (a `corpus_similarity` above 1 turns
+layer 2 off); no hint layer; no "test" button on LLM profiles (the web
+never calls the LLM; the linker reports LLM errors on the Pipeline page);
+`DELETE …/link` added (back to automatic) next to the sticky `PUT null`. Covers sub-projects 2/3 (embeddings, links)
 and absorbs sub-project 8 (AI drafts) as Phase B.
 
 **Goal:** a corpus document has two parts: **ERROR** (the log line(s) it is

@@ -141,6 +141,14 @@ embedded the current revision).
 - **Delete** asks for confirmation and is refused while templates are
   linked (also when a link raced in after the list loaded: 409 `linked`).
 
+**AI suggestions** (the toggle; count in brackets) lists the documents the
+LLM wrote for templates no document matched (`status draft`), with the
+template each was written for and the LLM's confidence: **Approve** (the
+document becomes active and the link manual), **Edit** (saving approves),
+**Reject** (the template is never sent to the LLM again). **Approve all
+SAFE** approves every normal-operation suggestion at once. Suggestions are
+unverified: check commands before running them.
+
 On the first engine start, an empty table is seeded from
 `documentation.seed_path` (ARCHITECTURE §4.4).
 
@@ -165,6 +173,15 @@ certificates. The password is never shown; leave it empty to keep the
 stored one. Saving endpoints that point at another cluster asks for
 confirmation ("earlier logs are not backfilled") and the server requires
 the password again. The engine reconnects on the `reload_sources` command.
+
+## LLM profiles (on the Data sources page)
+
+As in logai-engine: name, OpenAI-compatible base URL (`…/v1`; the linker
+posts to `/chat/completions`), model, API key and timeout (5–600 s, default
+120). At most one profile is **active**; the linker's resolver uses it, and
+with none active templates are not sent to an LLM. The API key is
+write-only: the list shows only whether one is saved, and a save with an
+empty key keeps the saved one.
 
 ## Baseline
 
@@ -216,6 +233,10 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `POST /api/documents` | `{title, error?, handling?, error_code?}` | `201 {doc_id, revision}` | 400 | — |
 | `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
+| `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
+| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, revision}` | `{name, revision}` | 400, 409 | — |
+| `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
+| `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
 | `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, full_after_days}` | 404 | — |
 | `POST /api/baseline/decisions` | `{service, day, hour_from, hour_to, decision}` | `201 {id, warning?}` | 400, 404 | — |
 | `DELETE /api/baseline/decisions/<id>` | — | `{id}` | 404 | — |
@@ -374,6 +395,19 @@ template has no vector (then the list is empty).
 - `PUT`: same fields plus `revision`; 404 `"Unknown document"`; 409 stale.
 - `DELETE`: 409 `linked` with the number of linked templates (the foreign
   key decides, so a link created concurrently is caught); 404.
+
+### LLM profiles
+
+- `GET /api/llm/profiles`: `[{name, base_url, model, timeout_seconds,
+  active, has_api_key, revision}]` sorted by name; never the key.
+- `PUT /api/llm/profiles/<name>`: creates (`revision` null) or updates
+  (the revision read; else 409 stale). `name` 1–64 of letters, digits, `.`,
+  `_`, `-`; `base_url` http(s) without credentials (trailing `/` dropped);
+  `model` required; `timeout_seconds` integer 5–600; `api_key` without
+  control characters (it goes into a header), empty keeps the saved one.
+- `POST …/activate {"active": true}` makes it the only active profile;
+  `false` leaves none active. `DELETE` removes it. Unknown name: 404
+  `"Unknown profile"`.
 
 ### `GET /api/baseline?service=<service>`
 
