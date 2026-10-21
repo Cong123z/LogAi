@@ -8,15 +8,19 @@ const viewTitles = {
   sources: 'Data sources',
   llm: 'LLM profiles',
   baseline: 'Baseline',
+  review: 'Review',
 };
 // Templates polls only through its Auto-refresh toggle; Documentation and
 // Baseline load on entry and after each change (Baseline polls a running recompute).
 const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000};
 const viewOrder = Object.keys(viewTitles);
 
-// A route may carry a sub-view after a slash (#documentation/suggestions); the view reads state.subView.
+// A route may carry a sub-view after the first slash (#documentation/suggestions, #review/svc/key/14); the view reads state.subView.
 function setView(route, updateHash = true) {
-  let [view, sub] = String(route).split('/');
+  route = String(route);
+  const slash = route.indexOf('/');
+  let view = slash < 0 ? route : route.slice(0, slash);
+  const sub = slash < 0 ? '' : route.slice(slash + 1);
   if (!viewTitles[view]) view = 'pipeline';
   state.subView = sub || '';
   const previousView = state.activeView;
@@ -163,6 +167,8 @@ async function loadData() {
       await loadLlmPage();
     } else if (state.activeView === 'baseline') {
       await loadBaseline();
+    } else if (state.activeView === 'review') {
+      await loadReview();
     }
     document.getElementById('connection-status').hidden = true;
     if (state.reconnectTimer) {

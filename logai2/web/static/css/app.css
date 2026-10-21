@@ -892,12 +892,9 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 .tpl-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .doc-select { max-width: 220px; padding: 4px 26px 4px 8px; font-size: 12px; }
 
-/* Documentation: templates linked to a document; Baseline: add-range form. */
+/* Documentation: templates linked to a document */
 .doc-links { min-width: 640px; }
 .doc-links .group-member { grid-template-columns: 110px 150px minmax(260px, 1fr) 90px; }
-#bl-add-form { align-items: center; flex-wrap: wrap; }
-#view-baseline > .section-heading { flex-wrap: wrap; }
-#view-baseline > .section-heading .filter-bar { margin: 0; }
 #view-documentation td:first-child .tmpl-id { white-space: nowrap; }
 
 /* ── Layered document links ─────────────────────────────────────────────
@@ -991,3 +988,42 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 .svc-chip.shared { border-style:dashed; }
 .versions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px; color:var(--text-dim); }
 .versions .toggle-btn { padding:4px 10px; font-size:12px; border:1px solid var(--border); border-radius:var(--radius-sm); }
+
+/* ── Review page ──────────────────────────────────────────────── */
+#view-review > .section-heading { flex-wrap: wrap; }
+#view-review > .section-heading .filter-bar { margin: 0; }
+#view-review { min-width: 0; }
+.rv-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px; min-width: 0; }
+.rv-panel[hidden] { display: none; }
+.rv-panel h4 { margin: 16px 0 6px; font-size: 13px; color: var(--text-dim); }
+.rv-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.rv-head h3 { margin: 0; }
+.rv-split { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; margin-top: 10px; }
+.rv-main, .rv-side { min-width: 0; }
+.rv-side h3 { margin: 0 0 6px; font-size: 14px; }
+.rv-side h3 + .rv-list { margin-bottom: 14px; }
+.rv-scroll { overflow-x: auto; }
+.rv-chart { width: 100%; height: 300px; }
+.rv-scroll > .rv-chart { min-width: 640px; }
+.rv-chart-sm { height: 260px; }
+.rv-chart-xs { height: 110px; }
+.rv-chart:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.rv-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-dim); margin: 8px 0; }
+.rv-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 5px; vertical-align: -2px; border: 1px solid var(--border); }
+.rv-list { display: flex; flex-direction: column; gap: 6px; }
+.rv-item { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 8px 10px; background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); cursor: pointer; }
+.rv-item:hover { border-color: var(--accent); }
+.rv-item[aria-current="true"] { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.rv-item.rv-row { flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; cursor: default; }
+.rv-sentence { font-size: 14px; margin-bottom: 4px; }
+.rv-effect { font-size: 13px; color: var(--text-dim); margin-bottom: 10px; }
+.rv-effect.warn { color: var(--orange); }
+.rv-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.rv-chip { padding: 2px 8px; border: 1px solid var(--border); border-radius: 12px; font-size: 12px; font-family: var(--font-mono); }
+.rv-link { background: none; border: none; color: var(--accent); cursor: pointer; text-align: left; padding: 0; font: inherit; }
+.rv-link:hover { text-decoration: underline; }
+#rv-matrix-table table { font-size: 12px; }
+#rv-matrix-table td.r, #rv-matrix-table th.r { text-align: right; }
+@media (max-width: 900px) { .rv-split { grid-template-columns: minmax(0, 1fr); } }
+button.stat-card { text-align: left; color: inherit; font: inherit; cursor: pointer; }
+button.stat-card:disabled { cursor: default; }
