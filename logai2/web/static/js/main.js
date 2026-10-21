@@ -147,6 +147,7 @@ async function loadData() {
       const sources = await fetchSources();
       renderSources(sources);
       renderConnection(sources.connection);
+      await loadLlmProfiles();
     } else if (state.activeView === 'documentation') {
       await loadDocumentation();
     } else if (state.activeView === 'baseline') {

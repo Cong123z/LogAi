@@ -19,6 +19,7 @@
   <script defer src="/static/js/views/pipeline.js"></script>
   <script defer src="/static/js/views/documentation.js"></script>
   <script defer src="/static/js/views/baseline.js"></script>
+  <script defer src="/static/js/views/llm.js"></script>
   <script defer src="/static/js/main.js"></script>
 </head>
 <body>
@@ -122,12 +123,17 @@
 
       <section class="view groups-section" id="view-documentation" aria-label="Documentation">
         <div class="section-heading">
+          <div class="toggle-group" id="doc-mode-toggle">
+            <button class="toggle-btn active" data-doc-mode="active">Documents</button>
+            <button class="toggle-btn" data-doc-mode="draft">AI suggestions <span id="doc-draft-count"></span></button>
+          </div>
           <div class="sync-status" id="doc-sync-status" aria-live="polite">Loading documentation...</div>
+          <button type="button" class="btn" id="approve-safe-btn" hidden>Approve all SAFE</button>
           <button type="button" class="btn btn-primary" id="add-document-btn">Add document</button>
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th data-document-sort="doc_id" class="sorted">ID <span class="sort-arrow">▲</span></th><th data-document-sort="title">Title <span class="sort-arrow"></span></th><th title="Only the ERROR lines are matched against templates">ERROR / Handling</th><th data-document-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-document-sort="linked_templates">Linked templates <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
+            <thead><tr><th data-document-sort="doc_id" class="sorted">ID <span class="sort-arrow">▲</span></th><th data-document-sort="title">Title <span class="sort-arrow"></span></th><th title="Only the ERROR lines are matched against templates">ERROR / Handling</th><th data-document-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-document-sort="linked_templates" id="doc-links-th">Linked templates <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
             <tbody id="documentation-tbody"><tr><td colspan="6" class="loading">Loading documentation...</td></tr></tbody>
           </table>
         </div>
@@ -206,6 +212,19 @@
             <tbody id="src-available-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
           </table>
         </div>
+        <div class="section-heading">
+          <h3>LLM profiles</h3>
+          <button type="button" class="btn btn-primary" id="llm-add-btn">Add profile</button>
+        </div>
+        <p class="sync-status">The linker sends templates no document matches to the <strong>active</strong> profile
+          (OpenAI-compatible <code>/chat/completions</code>): it confirms a near document or suggests a new one. Only the
+          template text and candidate documents are sent, never raw log lines.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Name</th><th>Endpoint</th><th>Model</th><th>Timeout</th><th>API key</th><th>Active</th><th></th></tr></thead>
+            <tbody id="llm-tbody"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
       </section>
       <section class="view groups-section" id="view-baseline" aria-label="Baseline review">
         <div class="section-heading">
@@ -270,6 +289,21 @@
         <div class="form-field"><label for="document-text">Handling: what to do</label><textarea id="document-text" maxlength="20000"></textarea></div>
         <div class="form-error" id="document-error" aria-live="polite"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="document-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="llm-modal" role="dialog" aria-modal="true" aria-labelledby="llm-modal-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="llm-modal-title">LLM profile</h2><button type="button" class="modal-close" data-close="llm-modal" aria-label="Close">&times;</button></div>
+      <form id="llm-form" autocomplete="off">
+        <div class="form-field"><label for="llm-name">Name</label><input id="llm-name" maxlength="64" pattern="[A-Za-z0-9._\-]+" required spellcheck="false"></div>
+        <div class="form-field"><label for="llm-base-url">Base URL (…/v1)</label><input id="llm-base-url" maxlength="500" required spellcheck="false" placeholder="https://api.example.com/v1"></div>
+        <div class="form-field"><label for="llm-model">Model</label><input id="llm-model" maxlength="500" required spellcheck="false"></div>
+        <div class="form-field"><label for="llm-api-key">API key</label><input id="llm-api-key" type="password" maxlength="500" autocomplete="new-password" placeholder="leave empty to keep the saved key"></div>
+        <div class="form-field"><label for="llm-timeout">Timeout (seconds)</label><input id="llm-timeout" type="number" min="5" max="600" value="120" required></div>
+        <div class="form-error" id="llm-error" aria-live="polite"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close="llm-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
       </form>
     </div>
   </div>

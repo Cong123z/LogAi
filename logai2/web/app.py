@@ -38,6 +38,7 @@ MAX_PAGE_SIZE = 500
 MAX_ERROR_LINES = 50
 DOC_STATUSES = ("active", "draft", "rejected")
 AUTOMATIC_SOURCES = ("inherited", "corpus", "llm", "draft")
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 LINK_SOURCES = ("manual", "inherited", "corpus", "llm", "draft", "rejected")
 
 
@@ -599,6 +600,71 @@ def create_app(cfg: AppConfig) -> Flask:
         for i in items:
             i["pre_ticked"] = i["similarity"] >= tick and i["current_source"] != "manual"
         return jsonify({"embedded": row["embedded"], "items": items})
+
+    # --- LLM profiles (as in logai-engine): the linker's resolver uses the active one. The API key is
+    # write-only: never returned, kept when a save leaves it empty.
+
+    def profile_or_404(c, name: str) -> dict:
+        row = c.execute("SELECT * FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
+        if not row:
+            abort(404, "Unknown profile")
+        return row
+
+    @app.get("/api/llm/profiles")
+    def llm_profiles():
+        return jsonify(conn().execute(
+            "SELECT name, base_url, model, timeout_seconds, active, api_key <> '' AS has_api_key, revision "
+            "FROM llm_profiles ORDER BY name").fetchall())
+
+    @app.put("/api/llm/profiles/<name>")
+    def put_llm_profile(name: str):
+        payload = body()
+        if not PROFILE_NAME_RE.match(name):
+            raise BadRequest("name must be 1-64 letters, digits, '.', '_' or '-'")
+        base_url, model = _text(payload.get("base_url"), "base_url"), _text(payload.get("model"), "model")
+        url = urlparse(base_url)
+        if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
+            raise BadRequest("base_url must be an http(s) URL without credentials")
+        if not model:
+            raise BadRequest("model is required")
+        timeout = payload.get("timeout_seconds", 120)
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
+            raise BadRequest("timeout_seconds must be an integer from 5 to 600")
+        api_key = _text(payload.get("api_key"), "api_key")   # no control characters: it goes into a header
+        c = conn()
+        row = c.execute("SELECT revision, api_key FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
+        if (row["revision"] if row else None) != payload.get("revision"):
+            raise db.StaleRevision(row["revision"] if row else None)
+        revision = uuid.uuid4().hex
+        c.execute("INSERT INTO llm_profiles (name, base_url, model, api_key, timeout_seconds, revision) "
+                  "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url, "
+                  "model = EXCLUDED.model, api_key = EXCLUDED.api_key, timeout_seconds = EXCLUDED.timeout_seconds, "
+                  "revision = EXCLUDED.revision, updated_at = now()",
+                  (name, base_url.rstrip("/"), model, api_key or (row["api_key"] if row else ""), timeout, revision))
+        c.commit()
+        return jsonify({"name": name, "revision": revision})
+
+    @app.post("/api/llm/profiles/<name>/activate")
+    def activate_llm_profile(name: str):
+        """{"active": true} makes it the only active profile; false leaves none active (the resolver idles)."""
+        active = body().get("active")
+        if not isinstance(active, bool):
+            raise BadRequest("active must be true or false")
+        c = conn()
+        profile_or_404(c, name)
+        c.execute("UPDATE llm_profiles SET active = false WHERE active")
+        if active:
+            c.execute("UPDATE llm_profiles SET active = true WHERE name = %s", (name,))
+        c.commit()
+        return jsonify({"name": name, "active": active})
+
+    @app.delete("/api/llm/profiles/<name>")
+    def delete_llm_profile(name: str):
+        c = conn()
+        profile_or_404(c, name)
+        c.execute("DELETE FROM llm_profiles WHERE name = %s", (name,))
+        c.commit()
+        return jsonify({"name": name})
 
     @app.get("/")
     def index():

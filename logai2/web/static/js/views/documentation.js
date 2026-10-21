@@ -3,7 +3,9 @@
 // while templates link to it) and, per document, the templates linked to it.
 // A document is ERROR (the log lines it is for: the only part matched against
 // templates) plus Handling (what to do).
-const docs = {items: [], sort: 'doc_id', order: 'asc', expanded: new Set()};
+// "AI suggestions" lists the LLM's draft documents with the template each was written for:
+// Approve (the link becomes manual, the document active), Edit (saving approves), Reject.
+const docs = {items: [], sort: 'doc_id', order: 'asc', expanded: new Set(), mode: 'active', drafts: new Map()};
 const $docTbody = document.getElementById('documentation-tbody');
 const $documentModal = document.getElementById('document-modal');
 
@@ -14,16 +16,48 @@ function docCompare(a, b) {
 }
 
 async function loadDocumentation() {
-  docs.items = await getJson('/api/documents', 'Unable to load documentation');
+  const [items, drafts, draftLinks] = await Promise.all([
+    getJson(`/api/documents?status=${docs.mode}`, 'Unable to load documentation'),
+    docs.mode === 'draft' ? null : getJson('/api/documents?status=draft', 'Unable to load AI suggestions'),
+    docs.mode === 'draft' ? getJson('/api/templates?link_source=draft&size=500', 'Unable to load AI suggestions') : null,
+  ]);
+  docs.items = items;
+  if (draftLinks) docs.drafts = new Map(draftLinks.items.map(t => [t.doc_id, t]));
+  const nDrafts = drafts ? drafts.length : items.length;
+  document.getElementById('doc-draft-count').textContent = nDrafts ? `(${nDrafts})` : '';
   renderDocumentation();
 }
 
+function draftCell(doc) {
+  const t = docs.drafts.get(doc.doc_id);
+  const conf = doc.confidence == null ? '' : ` · confidence ${doc.confidence.toFixed(2)}`;
+  return t
+    ? `<div><span class="tmpl-id">${escapeHtml(t.service)} · ${escapeHtml(t.template_id)}</span>${escapeHtml(conf)}</div>
+       <div class="tmpl-text" title="${escapeHtml(t.text)}">${highlightWildcards(escapeHtml(t.text))}</div>`
+    : '<span class="sync-status">no template (linked otherwise since)</span>';
+}
+
+function docActions(doc) {
+  if (docs.mode !== 'draft') {
+    return '<button type="button" class="btn edit-document">Edit</button><button type="button" class="btn btn-danger delete-document">Delete</button>';
+  }
+  const linked = docs.drafts.has(doc.doc_id);
+  return (linked ? '<button type="button" class="btn btn-primary approve-draft">Approve</button>' : '')
+    + '<button type="button" class="btn edit-document">Edit</button>'
+    + (linked ? '<button type="button" class="btn btn-danger reject-draft">Reject</button>' : '');
+}
+
 function renderDocumentation() {
+  const drafting = docs.mode === 'draft';
+  document.getElementById('doc-links-th').firstChild.textContent = drafting ? 'Written for ' : 'Linked templates ';
+  document.getElementById('approve-safe-btn').hidden = !drafting || !docs.items.some(d => d.verdict === 'safe' && docs.drafts.has(d.doc_id));
+  document.getElementById('add-document-btn').hidden = drafting;
   const linked = docs.items.filter(d => d.linked_templates > 0).length;
-  document.getElementById('doc-sync-status').textContent =
-    `${docs.items.length} document${docs.items.length === 1 ? '' : 's'} · ${linked} linked to templates`;
+  document.getElementById('doc-sync-status').textContent = drafting
+    ? `${docs.items.length} AI suggestion${docs.items.length === 1 ? '' : 's'}: unverified, check commands before running them`
+    : `${docs.items.length} document${docs.items.length === 1 ? '' : 's'} · ${linked} linked to templates`;
   if (!docs.items.length) {
-    $docTbody.innerHTML = '<tr><td colspan="6" class="empty-state">No documentation entries.</td></tr>';
+    $docTbody.innerHTML = `<tr><td colspan="6" class="empty-state">${drafting ? 'No AI suggestions waiting.' : 'No documentation entries.'}</td></tr>`;
     return;
   }
   const items = [...docs.items].sort((l, r) => {
@@ -39,10 +73,10 @@ function renderDocumentation() {
       <td>${escapeHtml(doc.title || 'Untitled')}</td>
       <td>${docErrorCell(doc)}</td>
       <td><span class="tmpl-id">${escapeHtml(doc.error_code || '—')}</span></td>
-      <td>${doc.linked_templates
+      <td>${drafting ? draftCell(doc) : doc.linked_templates
         ? `<button type="button" class="group-expand doc-links-toggle${open ? ' expanded' : ''}" aria-expanded="${open}"><span class="group-expand-icon" aria-hidden="true">›</span>${doc.linked_templates}</button>`
         : '0'}</td>
-      <td><div class="btn-row"><button type="button" class="btn edit-document">Edit</button><button type="button" class="btn btn-danger delete-document">Delete</button></div></td>
+      <td><div class="btn-row">${docActions(doc)}</div></td>
     </tr>
     <tr class="group-members-row" data-links-for="${id}"${open ? '' : ' hidden'}><td colspan="6"><div class="group-members-panel"><p class="loading">Loading linked templates...</p></div></td></tr>`;
   }).join('');
@@ -81,7 +115,8 @@ async function loadDocLinks(docId) {
 
 function openDocumentEditor(docId = null) {
   const doc = docs.items.find(item => item.doc_id === docId);
-  document.getElementById('document-modal-title').textContent = doc ? `Edit ${doc.doc_id}` : 'Add document';
+  document.getElementById('document-modal-title').textContent = !doc ? 'Add document'
+    : docs.mode === 'draft' ? `Edit AI suggestion ${doc.doc_id} (saving approves it)` : `Edit ${doc.doc_id}`;
   document.getElementById('document-id').value = doc ? doc.doc_id : '';
   document.getElementById('document-title').value = doc ? doc.title : '';
   document.getElementById('document-error-lines').value = doc ? doc.error : '';
@@ -113,11 +148,28 @@ async function deleteDocument(docId) {
   await loadData();
 }
 
+async function decideDraft(docId, decision) {
+  const t = docs.drafts.get(docId);
+  if (!t) return;
+  await apiMutation(`/api/templates/${encodeURIComponent(t.service)}/${encodeURIComponent(t.template_id)}/link/${decision}`, 'POST', {});
+}
+
+async function decideAndReload(docIds, decision) {
+  try {
+    for (const docId of docIds) await decideDraft(docId, decision);
+  } catch (err) {
+    notifyDialog(err.message, 'Unable to update the suggestion');
+  }
+  await loadData();
+}
+
 $docTbody.addEventListener('click', event => {
   const row = event.target.closest('tr[data-doc-id]');
   if (!row) return;
   const docId = row.dataset.docId;
-  if (event.target.closest('.edit-document')) openDocumentEditor(docId);
+  if (event.target.closest('.approve-draft')) decideAndReload([docId], 'confirm');
+  else if (event.target.closest('.reject-draft')) decideAndReload([docId], 'reject');
+  else if (event.target.closest('.edit-document')) openDocumentEditor(docId);
   else if (event.target.closest('.delete-document')) deleteDocument(docId);
   else if (event.target.closest('.doc-links-toggle')) {
     const button = event.target.closest('.doc-links-toggle');
@@ -145,6 +197,18 @@ document.querySelectorAll('#view-documentation th[data-document-sort]').forEach(
 });
 
 document.getElementById('add-document-btn').addEventListener('click', () => openDocumentEditor());
+document.getElementById('approve-safe-btn').addEventListener('click', async () => {
+  const safe = docs.items.filter(d => d.verdict === 'safe' && docs.drafts.has(d.doc_id)).map(d => d.doc_id);
+  if (!(await confirmDialog(`${safe.length} SAFE suggestion${safe.length === 1 ? '' : 's'} will become active documents linked to their templates.`,
+    {title: 'Approve all SAFE suggestions?', confirmLabel: 'Approve', danger: false}))) return;
+  decideAndReload(safe, 'confirm');
+});
+document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(b => b.classList.toggle('active', b === button));
+  docs.mode = button.dataset.docMode;
+  docs.expanded.clear();
+  loadData();
+}));
 document.getElementById('document-form').addEventListener('submit', async event => {
   event.preventDefault();
   const docId = document.getElementById('document-id').value;
@@ -159,6 +223,7 @@ document.getElementById('document-form').addEventListener('submit', async event 
   if (submit) submit.disabled = true;
   try {
     await apiMutation(docId ? `/api/documents/${encodeURIComponent(docId)}` : '/api/documents', docId ? 'PUT' : 'POST', payload);
+    if (docId && docs.mode === 'draft') await decideDraft(docId, 'confirm');   // saving a suggestion approves it
     $documentModal.classList.remove('open');
     await loadData();
   } catch (err) {
