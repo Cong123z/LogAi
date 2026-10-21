@@ -88,6 +88,8 @@ def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: st
         mean, std = (lk.this.mean, lk.this.std) if lk.this else (None, None)
         none = lk.this is None or (mean == 0 and std == 0)
         z, cls = None, "none"
+        if lk.this is not None and none:       # a zero baseline: any event is the top step
+            cls = "up3" if rate > 0 else "in"
         if not none:
             z = (rate - mean) / (max(std, SIGMA_FLOOR) if mean > 0 else std)
             full = lk.days >= full_after(cfg, lk.daytype)

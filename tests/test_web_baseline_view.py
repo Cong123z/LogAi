@@ -159,3 +159,15 @@ def test_left_days_before_the_click(conn, cfg):
     seed_pay(conn)
     assert left_days(conn, "pay", date(2026, 10, 20), 2, 4, True) == [
         {"hour": 2, "days": 2, "of": 5}, {"hour": 3, "days": 4, "of": 5}]
+
+
+def test_zero_baseline_with_events_is_up3(conn, cfg):
+    service(conn, "pay")
+    committed(conn, "pay", WEEKDAYS)
+    base(conn, "pay", "*total", "weekday", 3, 0, 0)
+    hours(conn, "pay", "*total", date(2026, 10, 20), {3: (120, 0, 60)})
+    hours(conn, "pay", "*total", date(2026, 10, 19), {3: (0, 0, 60)})
+    m = matrix(conn, cfg, "pay", "*total", 14, TODAY, NOW)
+    busy, quiet = cell(m, "2026-10-20", 3), cell(m, "2026-10-19", 3)
+    assert (busy["no_baseline"], busy["z"], busy["cls"]) == (True, None, "up3")
+    assert (quiet["no_baseline"], quiet["z"], quiet["cls"]) == (True, None, "in")
