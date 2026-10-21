@@ -414,7 +414,8 @@ template has no vector (then the list is empty).
   alerts.
 - `POST`: `title` (≤ 200) required, and `error` (≤ 5000, ≤ 50 lines) or
   `handling` (≤ 20000) non-empty after trimming; `error_code` optional (≤
-  100). The id is `DOC-` + the next number
+  100); `verdict` `action` (ERROR, the default) or `safe` (SAFE), else 400
+  `"verdict must be action or safe"`. The id is `DOC-` + the next number
   after the highest `DOC-<digits>` id, zero-padded to 3 (`DOC-013`); the
   table is locked during the insert so two creates never collide. 400
   `"<field> must be text of at most N characters"`, `"title and an ERROR or
