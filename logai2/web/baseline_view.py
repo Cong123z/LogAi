@@ -1,13 +1,13 @@
 """Review page data: the days x hours matrix of one key against its baseline, and what the baseline is built from."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from logai2.config import AppConfig
 from logai2.links import ALERTING_SOURCES
-from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
+from logai2.owner.baseline import DAY_CAP, Baseline, Stat, full_after, judge
 from logai2.review import keys_by_hour, minutes_by_hour, periods
-from logai2.timeutil import daytype
+from logai2.timeutil import TZ, daytype
 
 DROP_KEYS = ("*total", "*error")     # the only keys that alert (and colour) low
 SIGMA_FLOOR = 1.0                    # events/min: a flat key (σ 0) still needs a scale
@@ -146,3 +146,78 @@ def matrix(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
             "k": {dt: cfg.baseline.sigma_multiplier if len(picked[dt]) >= full_after(cfg, dt)
                   else cfg.baseline.young_sigma_multiplier for dt in DAY_CAP},
             "days": rows, "coverage": coverage, "profiles": {dt: profile(dt) for dt in DAY_CAP}}
+
+
+def inspect(conn, cfg: AppConfig, service: str, key: str, day: date, hour_from: int, hour_to: int,
+            now: float) -> dict:
+    """The inspector card of one selection: sentence, the day against its band, contributors, keys, left days."""
+    kind, ids = resolve_key(conn, service, key)
+    cells = _cells(conn, cfg, service, ids, kind, [day, day - timedelta(days=7)])
+    rng = range(hour_from, hour_to)
+    start = datetime(day.year, day.month, day.day, tzinfo=TZ)
+    t0, t1 = (start + timedelta(hours=hour_from)).timestamp(), (start + timedelta(hours=hour_to)).timestamp()
+
+    changes = conn.execute("SELECT key, at, to_state FROM alert_changes WHERE service = %s ORDER BY at",
+                           (service,)).fetchall()
+    ps = periods(changes, now)
+    not_normal, keys = minutes_by_hour(ps), keys_by_hour(ps)
+    opened = {(c["key"], c["at"].timestamp()): c["to_state"] for c in changes}
+
+    def minutes(h: int, only: str | None = None) -> int:
+        if only is None:
+            return not_normal.get((day, h), 0)
+        return minutes_by_hour([p for p in ps if p[0] == only]).get((day, h), 0)
+
+    series = []
+    for h in range(24):
+        c, lw = cells.get((day, h)), cells.get((day - timedelta(days=7), h))
+        series.append({"hour": h, "rate": c and c["rate"], "band_low": c and c["band_low"],
+                       "band_high": c and c["band_high"], "last_week": lw and lw["rate"],
+                       "not_normal_minutes": minutes(h)})
+    seen = [(h, cells[(day, h)]) for h in rng if (day, h) in cells]
+    peak = max(seen, key=lambda hc: hc[1]["rate"], default=None)
+    decision = conn.execute(
+        "SELECT decision FROM review_exclusions WHERE service = %s AND day = %s AND hour_from < %s AND hour_to > %s "
+        "ORDER BY id DESC LIMIT 1", (service, day, hour_to, hour_from)).fetchone()
+    in_range = {k for h in rng for k in keys.get((day, h), ())}
+    sentence = {"keys": len(in_range), "not_normal_minutes": sum(minutes(h) for h in rng),
+                "peak": peak and {"hour": peak[0], "rate": peak[1]["rate"], "z": peak[1]["z"]},
+                "expected": peak and {"mean": peak[1]["mean"], "std": peak[1]["std"]},
+                "in_baseline": day in picked_days(conn, service)[daytype(day)],
+                "decision": decision and decision["decision"]}
+
+    # contributors: every template of the service over the selected hours
+    mins = {r["hour"]: r["n_minutes"] for r in conn.execute(
+        "SELECT hour, n_minutes FROM service_hours WHERE service = %s AND day = %s AND hour = ANY(%s) "
+        "AND n_minutes > 0", (service, day, list(rng)))}
+    sums = {}
+    for r in conn.execute("SELECT key, hour, sum FROM hourly_counts WHERE service = %s AND day = %s "
+                          "AND hour = ANY(%s) AND key IN (SELECT template_id FROM templates WHERE service = %s)",
+                          (service, day, list(mins), service)):
+        sums.setdefault(r["key"], {})[r["hour"]] = r["sum"]
+    tpl = {r["template_id"]: r for r in conn.execute(
+        "SELECT t.template_id, t.text, t.level, t.first_seen, l.doc_id, d.title AS doc_title FROM templates t "
+        "LEFT JOIN template_doc_links l USING (service, template_id) LEFT JOIN documents d USING (doc_id) "
+        "WHERE t.service = %s", (service,))}
+    bl = Baseline.load(conn, [(service, t) for t in sums])
+    n_all = sum(mins.values())
+    rows = []
+    for tid, by_hour in sums.items():
+        rate = sum(by_hour.values()) / n_all
+        mean = sum((bl.lookup(service, tid, day, h).this or Stat(0, 0)).mean for h in mins) / len(mins)
+        rows.append({"template_id": tid, "text": tpl[tid]["text"], "level": tpl[tid]["level"], "rate": rate,
+                     "mean": mean, "excess": rate - mean, "times_normal": round(rate / mean, 1) if mean > 0 else None,
+                     "not_normal_minutes": sum(minutes(h, tid) for h in rng),
+                     "doc_id": tpl[tid]["doc_id"], "doc_title": tpl[tid]["doc_title"]})
+    increased = sorted((r for r in rows if r["excess"] > 0), key=lambda r: -r["excess"])[:10]
+    new = [{"template_id": t, "text": r["text"], "level": r["level"], "first_seen": r["first_seen"].timestamp(),
+            "rate": sum(sums.get(t, {}).values()) / n_all if n_all else 0.0, "doc_id": r["doc_id"]}
+           for t, r in tpl.items() if t0 - 3600 <= r["first_seen"].timestamp() < t1]
+
+    by_key: dict[str, list[dict]] = {}
+    for k, a, b in ps:
+        if a < t1 and b > t0:
+            by_key.setdefault(k, []).append({"from": a, "to": b, "state": opened.get((k, a), "ALERTING")})
+    return {"sentence": sentence, "day": series, "increased": increased, "new": new,
+            "keys": [{"key": k, "periods": v} for k, v in sorted(by_key.items())],
+            "left_days": left_days(conn, service, day, hour_from, hour_to, True)}

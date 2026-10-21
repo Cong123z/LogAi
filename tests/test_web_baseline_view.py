@@ -4,7 +4,7 @@ import pytest
 
 from logai2.timeutil import TZ
 from logai2.web.app import create_app
-from logai2.web.baseline_view import left_days, matrix
+from logai2.web.baseline_view import inspect, left_days, matrix
 from tests.conftest import TEST_DSN
 
 TODAY = date(2026, 10, 21)
@@ -171,3 +171,60 @@ def test_zero_baseline_with_events_is_up3(conn, cfg):
     busy, quiet = cell(m, "2026-10-20", 3), cell(m, "2026-10-19", 3)
     assert (busy["no_baseline"], busy["z"], busy["cls"]) == (True, None, "up3")
     assert (quiet["no_baseline"], quiet["z"], quiet["cls"]) == (True, None, "in")
+
+
+def seed_inspect(conn):
+    seed_pay(conn)
+    hours(conn, "pay", "*total", date(2026, 10, 13), {2: (530 * 60, 0, 60)})
+    hours(conn, "pay", "*total", date(2026, 10, 20), {3: (600 * 60, 0, 60)})
+    conn.execute("INSERT INTO documents VALUES ('DOC-1', 'Recharge failures', '', 'b', 'r')")
+    for tid, first in (("T00032", "2026-10-10 00:00+07"), ("T00141", "2026-10-10 00:00+07"),
+                       ("T00309", "2026-10-20 01:30+07"), ("T00001", "2026-10-19 12:00+07")):
+        conn.execute("INSERT INTO templates VALUES ('pay', %s, 'ERROR', %s, %s, %s)",
+                     (f"pay:{tid}", f"text {tid}", first, first))
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id) VALUES ('pay', 'pay:T00032', 'DOC-1')")
+    conn.commit()
+    for tid, rate, mean in (("T00032", 175, 36), ("T00141", 90, 30), ("T00309", 12, None), ("T00001", 5, 5)):
+        hours(conn, "pay", f"pay:{tid}", date(2026, 10, 20), {2: (rate * 60, 0, 60), 3: (rate * 60, 0, 60)})
+        for h in (2, 3):
+            if mean:
+                base(conn, "pay", f"pay:{tid}", "weekday", h, mean, 3)
+
+
+def test_inspect_day_series_band_and_last_week(conn, cfg):
+    seed_inspect(conn)
+    r = inspect(conn, cfg, "pay", "*total", date(2026, 10, 20), 2, 4, NOW)
+    h2 = r["day"][2]
+    assert (round(h2["rate"]), h2["band_low"], h2["band_high"], round(h2["last_week"])) == (1840, 369.0, 711.0, 530)
+    assert r["day"][5]["rate"] is None            # no service_hours row
+    assert r["sentence"]["peak"]["hour"] == 2 and r["sentence"]["in_baseline"] is True
+    assert r["sentence"]["keys"] == 1 and r["sentence"]["not_normal_minutes"] == 41
+    assert r["keys"] == [{"key": "*total", "periods": [{"from": datetime(2026, 10, 20, 2, 10, tzinfo=TZ).timestamp(),
+                                                        "to": datetime(2026, 10, 20, 2, 51, tzinfo=TZ).timestamp(),
+                                                        "state": "ALERTING"}]}]
+
+
+def test_inspect_contributors_increased_and_new(conn, cfg):
+    seed_inspect(conn)
+    r = inspect(conn, cfg, "pay", "*total", date(2026, 10, 20), 2, 4, NOW)
+    assert [i["template_id"] for i in r["increased"]][:2] == ["pay:T00032", "pay:T00141"]
+    top = r["increased"][0]
+    assert (top["rate"], top["mean"], top["excess"], top["times_normal"]) == (175.0, 36.0, 139.0, 4.9)
+    assert (top["doc_id"], top["doc_title"]) == ("DOC-1", "Recharge failures")
+    assert all(i["excess"] > 0 for i in r["increased"]) and len(r["increased"]) <= 10
+    assert [n["template_id"] for n in r["new"]] == ["pay:T00309"]   # first seen 01:30; T00001 (19 Oct) is not new
+    assert r["new"][0]["rate"] == 12.0
+    assert r["left_days"] == [{"hour": 2, "days": 2, "of": 5}, {"hour": 3, "days": 4, "of": 5}]
+
+
+def test_inspect_route_and_validation(client, conn):
+    seed_inspect(conn)
+    q = "/api/baseline/inspect?service=pay&key=*total&day=2026-10-20&hour_from=2&hour_to=4"
+    assert client.get(q).get_json()["sentence"]["peak"]["hour"] == 2
+    assert client.get(q.replace("key=*total", "key=nope")).status_code == 404
+    assert client.get(q.replace("service=pay", "service=zzz")).status_code == 404
+    r = client.get("/api/baseline/inspect?service=pay&key=*total&day=2026-10-20&hour_from=4&hour_to=4")
+    assert (r.status_code, r.get_json()["error"]) == (400, "hours must be whole numbers with 0 <= hour_from < hour_to <= 24")
+    assert client.get("/api/baseline/inspect?service=pay&key=*total&day=2026-10-20&hour_from=a&hour_to=4").status_code == 400
+    r = client.get("/api/baseline/inspect?service=pay&key=*total&day=nope&hour_from=1&hour_to=2")
+    assert (r.status_code, r.get_json()["error"]) == (400, "day must be an ISO date (YYYY-MM-DD)")

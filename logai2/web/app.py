@@ -21,7 +21,7 @@ from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
-from logai2.web.baseline_view import UnknownKey, left_days, matrix
+from logai2.web.baseline_view import UnknownKey, inspect, left_days, matrix
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
@@ -400,6 +400,20 @@ def create_app(cfg: AppConfig) -> Flask:
             abort(404, "Unknown service")
         return service
 
+    def parse_range(args) -> tuple[date, int, int]:
+        """day, hour_from, hour_to of a query string (or any mapping), the rules of POST /api/baseline/decisions."""
+        try:
+            day = date.fromisoformat(args.get("day"))
+        except (TypeError, ValueError):
+            raise BadRequest("day must be an ISO date (YYYY-MM-DD)") from None
+        try:
+            hour_from, hour_to = int(args.get("hour_from")), int(args.get("hour_to"))
+            if not 0 <= hour_from < hour_to <= 24:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise BadRequest("hours must be whole numbers with 0 <= hour_from < hour_to <= 24") from None
+        return day, hour_from, hour_to
+
     @app.get("/api/baseline/matrix")
     def baseline_matrix():
         service = known_service(request.args.get("service"))
@@ -412,6 +426,16 @@ def create_app(cfg: AppConfig) -> Flask:
         try:
             return jsonify(matrix(conn(), cfg, service, request.args.get("key", "*total"), ndays,
                                   datetime.now(TZ).date(), time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
+
+    @app.get("/api/baseline/inspect")
+    def baseline_inspect():
+        service = known_service(request.args.get("service"))
+        day, hour_from, hour_to = parse_range(request.args)
+        try:
+            return jsonify(inspect(conn(), cfg, service, request.args.get("key", "*total"), day,
+                                   hour_from, hour_to, time.time()))
         except UnknownKey:
             abort(404, "Unknown key")
 
