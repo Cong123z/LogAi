@@ -975,3 +975,5 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 
 /* Templates table: give the text room before it wraps */
 #template-tbody .tmpl-text { min-width:34ch; }
+.kind-count { font-size:11px; opacity:.8; margin-left:2px; }
+.kind-count:empty { display:none; }

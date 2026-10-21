@@ -3,7 +3,9 @@
 // under it. A document is ERROR (the log lines it is for: the only part matched against templates)
 // plus Handling (what to do). "AI suggestions" lists the LLM's drafts with the template each was
 // written for: Approve (link becomes manual, document active), Edit (saving approves), Reject.
-const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', links: new Map()};
+// Every document is of one kind: ERROR (verdict "action": something to fix) or SAFE (normal operation);
+// the All / ERROR / SAFE buttons filter the list.
+const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: ''};
 const $docList = document.getElementById('doc-list');
 const $docPane = document.getElementById('doc-pane');
 const $docSearch = document.getElementById('doc-search');
@@ -40,14 +42,16 @@ async function loadDocumentation() {
   const $count = document.getElementById('doc-draft-count');
   $count.hidden = !nDrafts;
   $count.textContent = nDrafts;
-  if (!docs.items.some(d => d.doc_id === docs.selected)) {
-    docs.selected = docs.items.length ? docs.items[0].doc_id : null;
+  const shown = docs.items.filter(docMatches);
+  if (!shown.some(d => d.doc_id === docs.selected) && !(docs.editing && docs.selected === null)) {
+    docs.selected = shown.length ? shown[0].doc_id : null;
     docs.editing = false;
   }
   renderDocumentation();
 }
 
 function docMatches(doc) {
+  if (docs.kind && doc.verdict !== docs.kind) return false;
   const q = docs.query.toLowerCase();
   if (!q) return true;
   const t = docs.drafts.get(doc.doc_id);
@@ -65,7 +69,12 @@ function handlingText(text) {
 function verdictBadge(doc) {
   return doc.verdict === 'safe'
     ? '<span class="badge badge-green" title="Normal operation, no action needed">SAFE</span>'
-    : '<span class="badge badge-warn" title="Something to do">ACTION</span>';
+    : '<span class="badge badge-error" title="An error: something to fix">ERROR</span>';
+}
+
+function renderKindCounts() {
+  const n = kind => docs.items.filter(d => !kind || d.verdict === kind).length;
+  document.querySelectorAll('#doc-kind-toggle .kind-count').forEach(el => { el.textContent = n(el.dataset.count); });
 }
 
 function renderDocumentation() {
@@ -77,6 +86,7 @@ function renderDocumentation() {
   document.getElementById('doc-sync-status').textContent = drafting
     ? `${plural(docs.items.length, 'suggestion')} to review. Unverified: check commands before running them.`
     : `${plural(docs.items.length, 'document')} · ${linked} linked to templates`;
+  renderKindCounts();
   renderDocList();
   renderDocPane();
 }
@@ -84,7 +94,8 @@ function renderDocumentation() {
 function renderDocList() {
   const shown = docs.items.filter(docMatches);
   if (!shown.length) {
-    $docList.innerHTML = `<p class="empty-state">${docs.items.length ? 'No match for this search.'
+    $docList.innerHTML = `<p class="empty-state">${docs.items.length
+      ? `No ${docs.kind ? (docs.kind === 'safe' ? 'SAFE ' : 'ERROR ') : ''}document${docs.query ? ' matches this search' : 's here'}.`
       : isDraftMode() ? 'No AI suggestions waiting. New ones appear as the LLM writes them.' : 'No documents yet.'}</p>`;
     return;
   }
@@ -93,9 +104,8 @@ function renderDocList() {
     const top = isDraftMode()
       ? `<span class="tmpl-id">${escapeHtml(doc.doc_id)}</span>${verdictBadge(doc)}${doc.confidence == null ? ''
           : `<span class="split-item-meta">confidence ${doc.confidence.toFixed(2)}</span>`}`
-      : `<span class="tmpl-id">${escapeHtml(doc.doc_id)}</span>${doc.error_lines.length ? ''
-          : '<span class="badge badge-gray" title="Never matched automatically">no ERROR</span>'}${doc.verdict === 'safe'
-          ? '<span class="badge badge-green">SAFE</span>' : ''}<span class="split-item-meta">${plural(doc.linked_templates, 'template')}</span>`;
+      : `<span class="tmpl-id">${escapeHtml(doc.doc_id)}</span>${verdictBadge(doc)}${doc.error_lines.length ? ''
+          : '<span class="badge badge-gray" title="No ERROR line: never matched automatically">no log line</span>'}<span class="split-item-meta">${plural(doc.linked_templates, 'template')}</span>`;
     const meta = isDraftMode()
       ? (t ? `${escapeHtml(t.service)} · ${escapeHtml(t.template_id)} · ${escapeHtml(t.level)}` : 'its template is linked otherwise now')
       : escapeHtml(doc.error_code || '');
@@ -121,7 +131,7 @@ function renderDocPane() {
   const drafting = isDraftMode();
   const badges = [
     drafting ? '<span class="badge badge-yellow">AI suggestion · unverified</span>' : '',
-    drafting || doc.verdict === 'safe' ? verdictBadge(doc) : '',
+    verdictBadge(doc),
     !drafting && doc.source === 'llm' ? '<span class="badge badge-yellow">AI-written, approved</span>' : '',
     doc.error_code ? `<span class="tmpl-id">${escapeHtml(doc.error_code)}</span>` : '',
     doc.confidence != null && drafting ? `<span>confidence ${doc.confidence.toFixed(2)}</span>` : '',
@@ -146,6 +156,7 @@ function renderDocPane() {
          : `<button type="button" class="btn" data-act="edit">Edit</button>`)
       + '<span class="spacer"></span><kbd>↑ ↓ move between suggestions</kbd>'
     : `<button type="button" class="btn btn-primary" data-act="edit">Edit</button>
+       <button type="button" class="btn" data-act="kind">${doc.verdict === 'safe' ? 'Mark as ERROR' : 'Mark as SAFE'}</button>
        <button type="button" class="btn btn-danger" data-act="delete">Delete</button>`;
   $docPane.innerHTML = `
     <div class="pane-body">
@@ -190,6 +201,11 @@ function renderDocEditor() {
           ${approving ? '<div class="pane-callout">Saving approves this suggestion: the template is linked to it.</div>' : ''}</header>
         <div class="form-field"><label for="doc-f-title">Title</label><input id="doc-f-title" maxlength="200" required value="${escapeHtml(doc ? doc.title : '')}"></div>
         <div class="form-field"><label for="doc-f-code">Error code</label><input id="doc-f-code" maxlength="100" value="${escapeHtml(doc ? doc.error_code : '')}"></div>
+        <div class="form-field"><label for="doc-f-verdict">Kind</label>
+          <select id="doc-f-verdict">
+            <option value="action"${doc && doc.verdict === 'safe' ? '' : ' selected'}>ERROR: something to fix</option>
+            <option value="safe"${doc && doc.verdict === 'safe' ? ' selected' : ''}>SAFE: normal operation, no action needed</option>
+          </select></div>
         <div class="form-field"><label for="doc-f-error">ERROR: the log line(s) this document is for, one per line</label>
           <textarea id="doc-f-error" class="mono-input" maxlength="5000" placeholder="TransactionManager Transaction timeout reqID 123 msisdn 84912345678">${escapeHtml(doc ? doc.error : '')}</textarea>
           <p class="hint">Only these lines are matched against templates (numbers and ids become &lt;*&gt;). Empty: never matched automatically.</p></div>
@@ -215,6 +231,7 @@ async function saveDocument(event) {
     error_code: document.getElementById('doc-f-code').value,
     error: document.getElementById('doc-f-error').value,
     handling: document.getElementById('doc-f-handling').value,
+    verdict: document.getElementById('doc-f-verdict').value,
   };
   const submit = event.submitter;
   if (submit) submit.disabled = true;
@@ -255,6 +272,18 @@ async function decide(docIds, decision) {
       : `${plural(done, 'suggestion')} approved`);
   } catch (err) {
     showToast(`Could not update the suggestion: ${err.message}`, true);
+  }
+  await loadDocumentation();
+}
+
+// One click from the reading pane: the document stays as written, only its kind changes.
+async function setKind(doc, verdict) {
+  try {
+    await apiMutation(docUrl(doc.doc_id), 'PUT', {revision: doc.revision, title: doc.title, error_code: doc.error_code,
+                                                 error: doc.error, handling: doc.handling, verdict});
+    showToast(`${doc.doc_id} is now ${verdict === 'safe' ? 'SAFE' : 'ERROR'}`);
+  } catch (err) {
+    showToast(err.status === 409 ? `${doc.doc_id} changed in another window; reloaded` : `Could not change ${doc.doc_id}: ${err.message}`, true);
   }
   await loadDocumentation();
 }
@@ -310,6 +339,7 @@ $docPane.addEventListener('click', async event => {
   if (act === 'edit') { docs.editing = true; renderDocPane(); return; }
   if (act === 'cancel') { docs.editing = false; if (!doc) docs.selected = docs.items.length ? docs.items[0].doc_id : null; renderDocPane(); return; }
   if (!doc) return;
+  if (act === 'kind') { button.disabled = true; await setKind(doc, doc.verdict === 'safe' ? 'action' : 'safe'); return; }
   if (act === 'approve') { button.disabled = true; await decide([doc.doc_id], 'confirm'); }
   else if (act === 'reject') {
     if (await confirmDialog(`${doc.doc_id} will be rejected. Its template stays undocumented and is not sent to the LLM again (you can still link it by hand).`,
@@ -338,6 +368,18 @@ document.getElementById('approve-safe-btn').addEventListener('click', async () =
     {title: 'Approve all SAFE suggestions?', confirmLabel: 'Approve', danger: false}))) return;
   decide(safe, 'confirm');
 });
+
+document.querySelectorAll('#doc-kind-toggle .toggle-btn').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('#doc-kind-toggle .toggle-btn').forEach(b => {
+    b.classList.toggle('active', b === button);
+    b.setAttribute('aria-pressed', String(b === button));
+  });
+  docs.kind = button.dataset.docKind;
+  const shown = docs.items.filter(docMatches);
+  if (!shown.some(d => d.doc_id === docs.selected)) { docs.selected = shown.length ? shown[0].doc_id : null; docs.editing = false; }
+  renderDocList();
+  renderDocPane();
+}));
 
 document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(button => button.addEventListener('click', () => {
   document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(b => {

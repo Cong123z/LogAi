@@ -144,3 +144,20 @@ def test_recompute_enqueues(client, conn):
     conn.commit()
     assert client.get(f"/api/commands/{cid}").get_json()["result"] == {"baseline_rows": 3}
     assert client.get("/api/commands/999999").status_code == 404
+
+
+def test_document_kind_error_or_safe(client, conn):
+    r = client.post("/api/documents", json={"title": "Send OK", "error": "send ok", "verdict": "safe"})
+    doc = r.get_json()
+    assert r.status_code == 201
+    listed = {d["doc_id"]: d for d in client.get("/api/documents").get_json()}
+    assert listed[doc["doc_id"]]["verdict"] == "safe"
+    # an update without a verdict keeps it; with one, changes it
+    r = client.put(f"/api/documents/{doc['doc_id']}", json={"title": "Send OK", "error": "send ok", "revision": doc["revision"]})
+    assert {d["doc_id"]: d for d in client.get("/api/documents").get_json()}[doc["doc_id"]]["verdict"] == "safe"
+    r = client.put(f"/api/documents/{doc['doc_id']}", json={"title": "Send OK", "error": "send ok", "verdict": "action",
+                                                          "revision": r.get_json()["revision"]})
+    assert {d["doc_id"]: d for d in client.get("/api/documents").get_json()}[doc["doc_id"]]["verdict"] == "action"
+    assert client.post("/api/documents", json={"title": "t", "error": "e", "verdict": "maybe"}).status_code == 400
+    plain = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
+    assert {d["doc_id"]: d for d in client.get("/api/documents").get_json()}[plain["doc_id"]]["verdict"] == "action"

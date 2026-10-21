@@ -136,15 +136,21 @@ filters it (title, error code, ERROR, Handling, template). Below 900 px the
 two stack. Two tabs (deep links `#documentation` and
 `#documentation/suggestions`):
 
-- **Documents** (active): each item shows id, title, error code, linked
-  template count and "no ERROR" when it has none. The pane shows the title,
+Every document is of one **kind**: **ERROR** (`verdict` `action`: an
+error, something to fix) or **SAFE** (`verdict` `safe`: normal operation,
+no action needed). The **All / ERROR / SAFE** buttons, with counts, filter
+the list in both tabs.
+
+- **Documents** (active): each item shows id, kind, title, error code,
+  linked template count and "no log line" when it has no ERROR line. The pane shows the title,
   the ERROR block with the lines as matched ("embedding…" until the linker
   has embedded this revision; no ERROR line = never matched automatically),
   the Handling text (numbered steps written on one line are shown one per
   line), and the linked templates in full with their link source.
-  **Edit** opens the form in the pane (title, error code, ERROR, Handling;
+  **Edit** opens the form in the pane (title, error code, kind, ERROR, Handling;
   a 409 `stale` says it changed in another window), **Delete** asks first
-  and is refused while templates are linked. **Add document** opens an
+  and is refused while templates are linked. **Mark as SAFE / Mark as
+  ERROR** changes only the kind, in one click. **Add document** opens an
   empty form; the server assigns the next `DOC-NNN` id.
 - **AI suggestions** (count in the tab): the LLM's drafts. Each item shows
   ACTION or SAFE, the confidence and the template it was written for. The
@@ -250,8 +256,8 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `POST /api/templates/<service>/<template_id>/link/reject` | — | `{source}` | 404, 409 | `reload_links` |
 | `GET /api/templates/<service>/<template_id>/similar` | — | `{embedded, items}` | 404 | — |
 | `GET /api/documents` | query `status` (`active` default, `draft`, `rejected`) | `[document]` | 400 | — |
-| `POST /api/documents` | `{title, error?, handling?, error_code?}` | `201 {doc_id, revision}` | 400 | — |
-| `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
+| `POST /api/documents` | `{title, error?, handling?, error_code?, verdict?}` | `201 {doc_id, revision}` | 400 | — |
+| `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, verdict?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
 | `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
 | `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, profiles, warnings}` | — | — |
@@ -413,7 +419,8 @@ template has no vector (then the list is empty).
   table is locked during the insert so two creates never collide. 400
   `"<field> must be text of at most N characters"`, `"title and an ERROR or
   Handling text are required"` or `"error must have at most 50 lines"`.
-- `PUT`: same fields plus `revision`; 404 `"Unknown document"`; 409 stale.
+- `PUT`: same fields plus `revision`; a missing `verdict` keeps the
+  current kind; 404 `"Unknown document"`; 409 stale.
 - `DELETE`: 409 `linked` with the number of linked templates (the foreign
   key decides, so a link created concurrently is caught); 404.
 
