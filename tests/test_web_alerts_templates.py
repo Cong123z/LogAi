@@ -11,7 +11,7 @@ from tests.conftest import TEST_DSN
 
 @pytest.fixture
 def app(conn, cfg, schema):
-    cfg.database.dsn = f"{TEST_DSN}?options=-csearch_path%3D{schema}"
+    cfg.database.dsn = f"{TEST_DSN}?options=-csearch_path%3D{schema}%2Cpublic"
     return create_app(cfg)
 
 
@@ -26,7 +26,7 @@ def add_template(conn, tid, text="user <*> logged in", level="INFO", service="pa
 
 
 def add_doc(conn, doc_id, title="Card gateway down"):
-    conn.execute("INSERT INTO documents (doc_id, title, body, revision) VALUES (%s, %s, '', 'r1')", (doc_id, title))
+    conn.execute("INSERT INTO documents (doc_id, title, handling, revision) VALUES (%s, %s, '', 'r1')", (doc_id, title))
 
 
 def add_state(conn, key, state, count, low=None, high=None, service="pay"):

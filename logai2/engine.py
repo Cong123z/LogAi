@@ -125,10 +125,10 @@ class Engine:
         docs = (data.get("entries") or data.get("documents") or []) if isinstance(data, dict) else data or []
         with self.db.cursor() as cur:
             cur.executemany(
-                "INSERT INTO documents (doc_id, title, error_code, body, revision) "
-                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
-                [(str(d["id"]), d.get("title") or str(d["id"]), d.get("error_code") or "",
-                  d.get("text") or "", uuid.uuid4().hex) for d in docs])
+                "INSERT INTO documents (doc_id, title, error_code, error, handling, revision) "
+                "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                [(str(d["id"]), d.get("title") or str(d["id"]), d.get("error_code") or "", d.get("error") or "",
+                  d.get("handling") or d.get("text") or "", uuid.uuid4().hex) for d in docs])
         logger.info("seeded %d documents from %s", len(docs), path)
 
     def _apply_connection(self) -> None:

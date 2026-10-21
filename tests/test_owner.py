@@ -108,7 +108,7 @@ def test_flush_failure_keeps_pending(conn, cfg, monkeypatch, schema):
         owner.flush(reader.cursors(owner.boundary_ms), {})
     other = connect(TEST_DSN)
     try:
-        other.execute(f"SET search_path TO {schema}")
+        other.execute(f"SET search_path TO {schema}, public")
         for table in ("hourly_counts", "templates", "services", "drain3_state", "es_cursors"):
             assert other.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"] == 0, table
     finally:
@@ -227,3 +227,22 @@ def test_new_service_zero_filled_from_first_minute(conn, cfg):
     run_minutes(conn, cfg, hits, T0 + 180_000)                   # one batch closes M..M+2
     got = {r["service"]: r["n_minutes"] for r in rows(conn, "SELECT service, n_minutes FROM service_hours")}
     assert got == {"s": 3, "t": 1}
+
+
+def test_text_change_clears_the_vector_and_only_alerting_links_load(conn, cfg):
+    from logai2.owner.owner import SQL
+    vec = "[" + ",".join(["0.1"] * 1024) + "]"
+    conn.execute("INSERT INTO templates VALUES ('s', 's:T1', 'ERROR', 'a <*>', now(), now(), %s::vector)", (vec,))
+    conn.execute(SQL["templates"], ("s", "s:T1", "ERROR", "a <*>", datetime.now(timezone.utc), datetime.now(timezone.utc)))
+    assert conn.execute("SELECT embedding IS NOT NULL AS v FROM templates").fetchone()["v"]   # same text: kept
+    conn.execute(SQL["templates"], ("s", "s:T1", "ERROR", "a <*> b", datetime.now(timezone.utc), datetime.now(timezone.utc)))
+    assert conn.execute("SELECT embedding IS NULL AS v FROM templates").fetchone()["v"]       # new text: cleared
+
+    conn.execute("INSERT INTO documents (doc_id, title, handling, revision) VALUES ('D1', 't', 'h', 'r')")
+    for tid, doc, source in [("s:T1", "D1", "manual"), ("s:T2", "D1", "corpus"), ("s:T3", "D1", "llm"),
+                             ("s:T4", "D1", "draft"), ("s:T5", "D1", "rejected"), ("s:T6", None, "manual")]:
+        conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('s', %s, %s, %s)",
+                     (tid, doc, source))
+    conn.commit()
+    owner = Owner(conn, cfg, start_minute=0)
+    assert owner.detector.links == {("s", "s:T1"): "D1", ("s", "s:T2"): "D1", ("s", "s:T3"): "D1"}

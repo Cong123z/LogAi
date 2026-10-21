@@ -17,6 +17,7 @@ from logai2 import db
 from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
+from logai2.links import ALERTING_SOURCES, error_lines
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import day_hour, daytype, minute_of
@@ -33,6 +34,8 @@ _PATTERN_RE = re.compile(r"^[a-z0-9*][a-z0-9*._#-]*$")
 MAX_HOSTS = 10
 TEXT_LIMIT = 500
 MAX_PAGE_SIZE = 500
+MAX_ERROR_LINES = 50
+DOC_STATUSES = ("active", "draft", "rejected")
 
 
 class BadRequest(ValueError):
@@ -232,10 +235,11 @@ def create_app(cfg: AppConfig) -> Flask:
         docs = [(svc, k[4:]) for svc, k in pairs if k.startswith("doc:")]
         # Links of the alerting templates (for grouping) and of the alerting doc keys (for their mean ± σ).
         link_rows = c.execute(
-            "SELECT service, template_id, doc_id FROM template_doc_links "
-            "WHERE (service, template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[])) "
-            "OR (service, doc_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
-            ([s for s, _ in pairs], [k for _, k in pairs], [s for s, _ in docs], [d for _, d in docs])).fetchall()
+            "SELECT service, template_id, doc_id FROM template_doc_links WHERE doc_id IS NOT NULL AND source = ANY(%s) "
+            "AND ((service, template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[])) "
+            "OR (service, doc_id) IN (SELECT * FROM unnest(%s::text[], %s::text[])))",
+            (list(ALERTING_SOURCES), [s for s, _ in pairs], [k for _, k in pairs],
+             [s for s, _ in docs], [d for _, d in docs])).fetchall()
         links = {(r["service"], r["template_id"]): r["doc_id"] for r in link_rows}
         doc_ids = list({r["doc_id"] for r in link_rows} | {d for _, d in docs})
         titles = {r["doc_id"]: r["title"] for r in c.execute(
@@ -276,22 +280,32 @@ def create_app(cfg: AppConfig) -> Flask:
 
     @app.get("/api/documents")
     def documents():
-        # Also feeds the Templates link select (doc_id, title).
-        return jsonify(conn().execute(
-            "SELECT d.doc_id, d.title, d.body, d.error_code, d.revision, count(l.template_id) AS linked_templates "
-            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) GROUP BY d.doc_id ORDER BY d.doc_id"
-        ).fetchall())
+        # Also feeds the Templates link select (doc_id, title). Drafts and rejected ones: ?status=draft|rejected.
+        status = request.args.get("status", "active")
+        if status not in DOC_STATUSES:
+            raise BadRequest(f"status must be one of {', '.join(DOC_STATUSES)}")
+        rows = conn().execute(
+            "SELECT d.doc_id, d.title, d.error_code, d.error, d.handling, d.status, d.source, d.verdict, "
+            "d.confidence, d.revision, d.embedded_revision IS NOT DISTINCT FROM d.revision AS embedded, "
+            "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates "
+            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) WHERE d.status = %s "
+            "GROUP BY d.doc_id ORDER BY d.doc_id", (list(ALERTING_SOURCES), status)).fetchall()
+        for r in rows:
+            r["error_lines"] = error_lines(r["error"])   # what the linker embeds; empty = never auto-matched
+        return jsonify(rows)
 
     def document_fields() -> dict:
         payload = body()
-        fields = {"title": payload.get("title"), "body": payload.get("body"), "error_code": payload.get("error_code") or ""}
-        for name, limit in (("title", 200), ("body", 20000), ("error_code", 100)):
+        fields = {name: payload.get(name) or "" for name in ("title", "error_code", "error", "handling")}
+        for name, limit in (("title", 200), ("error_code", 100), ("error", 5000), ("handling", 20000)):
             value = fields[name]
             if not isinstance(value, str) or len(value) > limit:
                 raise BadRequest(f"{name} must be text of at most {limit} characters")
             fields[name] = value.strip()
-        if not fields["title"] or not fields["body"]:
-            raise BadRequest("title and body are required")
+        if not fields["title"] or not (fields["error"] or fields["handling"]):
+            raise BadRequest("title and an ERROR or Handling text are required")
+        if len(fields["error"].splitlines()) > MAX_ERROR_LINES:
+            raise BadRequest(f"error must have at most {MAX_ERROR_LINES} lines")
         return {**fields, "revision": payload.get("revision")}
 
     @app.post("/api/documents")
@@ -302,8 +316,9 @@ def create_app(cfg: AppConfig) -> Flask:
         top = c.execute("SELECT max(substring(doc_id FROM 5)::int) AS n FROM documents "
                         "WHERE doc_id ~ '^DOC-[0-9]{1,9}$'").fetchone()["n"] or 0
         doc_id, revision = f"DOC-{top + 1:03d}", uuid.uuid4().hex
-        c.execute("INSERT INTO documents (doc_id, title, body, error_code, revision) VALUES (%s, %s, %s, %s, %s)",
-                  (doc_id, fields["title"], fields["body"], fields["error_code"], revision))
+        c.execute("INSERT INTO documents (doc_id, title, error_code, error, handling, revision) "
+                  "VALUES (%s, %s, %s, %s, %s, %s)",
+                  (doc_id, fields["title"], fields["error_code"], fields["error"], fields["handling"], revision))
         c.commit()   # abort/raise above leave it uncommitted; teardown rolls back
         return jsonify({"doc_id": doc_id, "revision": revision}), 201
 
@@ -317,8 +332,9 @@ def create_app(cfg: AppConfig) -> Flask:
         if row["revision"] != fields["revision"]:
             raise db.StaleRevision(row["revision"])
         revision = uuid.uuid4().hex
-        c.execute("UPDATE documents SET title = %s, body = %s, error_code = %s, revision = %s, updated_at = now() "
-                  "WHERE doc_id = %s", (fields["title"], fields["body"], fields["error_code"], revision, doc_id))
+        c.execute("UPDATE documents SET title = %s, error_code = %s, error = %s, handling = %s, revision = %s, "
+                  "updated_at = now() WHERE doc_id = %s",
+                  (fields["title"], fields["error_code"], fields["error"], fields["handling"], revision, doc_id))
         c.commit()
         return jsonify({"doc_id": doc_id, "revision": revision})
 

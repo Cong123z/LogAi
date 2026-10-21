@@ -20,6 +20,7 @@ from psycopg.types.json import Jsonb
 
 from logai2.config import AppConfig
 from logai2.db import get_setting
+from logai2.links import ALERTING_SOURCES
 from logai2.owner.baseline import Baseline
 from logai2.owner.counts import ERROR_LEVELS, SEVERITY, OpenMinutes
 from logai2.owner.detect import AlertRow, Detector
@@ -38,7 +39,9 @@ SQL = {
         "INSERT INTO templates (service, template_id, level, text, first_seen, last_seen) "
         "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (service, template_id) DO UPDATE SET "
         "level = EXCLUDED.level, text = EXCLUDED.text, "
-        "last_seen = GREATEST(templates.last_seen, EXCLUDED.last_seen)"),
+        "last_seen = GREATEST(templates.last_seen, EXCLUDED.last_seen), "
+        # a changed text makes the vector stale; the linker embeds it again
+        "embedding = CASE WHEN templates.text IS DISTINCT FROM EXCLUDED.text THEN NULL ELSE templates.embedding END"),
     # a cache hit carries no text; its template row was inserted by the miss that taught the cache
     "templates_seen": (
         "UPDATE templates SET level = %s, last_seen = GREATEST(last_seen, %s) "
@@ -129,7 +132,8 @@ class Owner:
 
     def _load_links(self) -> dict[tuple[str, str], str]:
         return {(r["service"], r["template_id"]): r["doc_id"]
-                for r in self.conn.execute("SELECT service, template_id, doc_id FROM template_doc_links")}
+                for r in self.conn.execute("SELECT service, template_id, doc_id FROM template_doc_links "
+                                           "WHERE doc_id IS NOT NULL AND source = ANY(%s)", (list(ALERTING_SOURCES),))}
 
     def reload_baseline(self) -> None:
         with self.conn.transaction():

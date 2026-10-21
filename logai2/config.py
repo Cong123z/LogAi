@@ -95,9 +95,37 @@ class WebConfig:
     port: int = 5555
 
 
+def _by_class(error: float, warn: float, info: float):
+    return field(default_factory=lambda: {"ERROR": error, "WARN": warn, "INFO": info})
+
+
 @dataclass
 class DocumentationConfig:
     seed_path: str = ""
+    # similarity thresholds per level class (ERROR, WARN, INFO); starting values, calibrate on real data
+    inherit_similarity: dict = _by_class(0.85, 0.88, 0.92)   # nearest manually linked template
+    corpus_similarity: dict = _by_class(0.85, 0.88, 0.92)    # template vs a document's ERROR lines
+    corpus_margin: float = 0.05                              # over the best ERROR line of any other document
+    suggest_similarity: float = 0.80                         # "apply to similar" list
+    cluster_similarity: float = 0.85                         # undocumented alerting templates in one row
+
+
+@dataclass
+class EmbeddingConfig:
+    url: str = "http://bge-m3:8080"   # OpenAI-style /v1/embeddings (TEI); empty = the linker does not embed
+    model: str = "bge-m3"
+    batch: int = 32
+    cycle_seconds: float = 30.0
+
+
+@dataclass
+class LlmConfig:
+    candidate_similarity: float = 0.60   # documents the LLM may confirm
+    candidates: int = 3
+    per_service_hour: int = 5
+    daily_max: int = 50
+    new_hours: int = 24                  # a template first seen this recently is resolved even when not alerting
+    max_input_chars: int = 8000
 
 
 @dataclass
@@ -116,6 +144,8 @@ class AppConfig:
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     web: WebConfig = field(default_factory=WebConfig)
     documentation: DocumentationConfig = field(default_factory=DocumentationConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    llm: LlmConfig = field(default_factory=LlmConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
@@ -161,4 +191,6 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.web.port = int(env("LOGAI2_WEB_PORT"))
     if env("LOGAI2_DOC_SEED_PATH"):
         cfg.documentation.seed_path = env("LOGAI2_DOC_SEED_PATH")
+    if env("LOGAI2_EMBEDDING_URL"):
+        cfg.embedding.url = env("LOGAI2_EMBEDDING_URL")
     return cfg
