@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
@@ -20,7 +20,8 @@ from logai2.config import AppConfig
 from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
-from logai2.timeutil import day_hour, daytype, minute_of
+from logai2.timeutil import TZ, day_hour, minute_of
+from logai2.web.baseline_view import UnknownKey, left_days, matrix
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
@@ -399,6 +400,21 @@ def create_app(cfg: AppConfig) -> Flask:
             abort(404, "Unknown service")
         return service
 
+    @app.get("/api/baseline/matrix")
+    def baseline_matrix():
+        service = known_service(request.args.get("service"))
+        try:
+            ndays = int(request.args.get("days", "14"))
+            if not 1 <= ndays <= 28:
+                raise ValueError
+        except ValueError:
+            raise BadRequest("days must be an integer from 1 to 28") from None
+        try:
+            return jsonify(matrix(conn(), cfg, service, request.args.get("key", "*total"), ndays,
+                                  datetime.now(TZ).date(), time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
+
     @app.get("/api/baseline")
     def baseline_review():
         service = known_service(request.args.get("service"))
@@ -440,17 +456,9 @@ def create_app(cfg: AppConfig) -> Flask:
         new_id = c.execute("INSERT INTO review_exclusions (service, day, hour_from, hour_to, decision) "
                            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                            (service, day, hour_from, hour_to, decision)).fetchone()["id"]
-        # Hours of this range left with < 3 of the days the rebuild uses (jobs/commit.py: last 5
-        # committed weekdays / last 4 weekend days): their baseline comes from only those few days.
-        kind = daytype(day)
-        short = [r["h"] for r in c.execute(
-            "WITH picked AS (SELECT day FROM day_status WHERE service = %s AND committed AND daytype = %s "
-            "                ORDER BY day DESC LIMIT %s) "
-            "SELECT h FROM generate_series(%s::int, %s::int - 1) h WHERE ("
-            "  SELECT count(*) FROM picked p WHERE NOT EXISTS (SELECT 1 FROM review_exclusions x "
-            "    WHERE x.service = %s AND x.day = p.day AND x.decision = 'exclude' "
-            "    AND h >= x.hour_from AND h < x.hour_to)) < 3 ORDER BY h",
-            (service, kind, DAY_CAP[kind], hour_from, hour_to, service))] if decision == "exclude" else []
+        # Hours of this range left with < 3 of the days the rebuild uses: their baseline comes from only those few.
+        short = [d["hour"] for d in left_days(c, service, day, hour_from, hour_to, True) if d["days"] < 3] \
+            if decision == "exclude" else []
         c.commit()
         out = {"id": new_id}
         if short:
