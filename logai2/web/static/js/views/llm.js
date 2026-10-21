@@ -6,6 +6,7 @@ const $llmTbody = document.getElementById('llm-tbody');
 const $llmModal = document.getElementById('llm-modal');
 
 function llmBanner(usage, active) {
+  const down = Object.entries(usage.profiles || {}).filter(([, h]) => h.down_until);
   const $b = document.getElementById('llm-banner');
   let cls = '', text = '';
   if (!active) {
@@ -14,8 +15,12 @@ function llmBanner(usage, active) {
   } else if (!usage.linker_running) {
     cls = 'llm-error';
     text = 'The linker is not running: nothing is sent to the LLM. Check the logai2-linker container.';
+  } else if (down.length) {
+    cls = down.length === active.length ? 'llm-error' : 'llm-disabled';
+    text = `${down.map(([name, h]) => `${name} is failing (${h.error})`).join('; ')}`
+      + (down.length === active.length ? '. No active profile answers.' : '. The next active profile answers instead.');
   } else if (usage.last_error) {
-    cls = 'llm-error';
+    cls = 'llm-disabled';
     text = `Last LLM error: ${usage.last_error}`;
   } else if (usage.warnings.some(w => w.startsWith('LLM daily limit'))) {
     cls = 'llm-disabled';
@@ -26,11 +31,13 @@ function llmBanner(usage, active) {
   $b.textContent = text;
 }
 
-function llmStats(usage, active) {
+function llmStats(usage, actives) {
+  const active = actives[0];
   const count = (period, ...sources) => sources.reduce((n, s) => n + (usage[period][s] || 0), 0);
   const last = usage.last_cycle;
   document.getElementById('llm-stats').innerHTML = [
-    plCard('Active profile', active ? active.name : 'None', active ? active.model : 'nothing is sent', active ? '' : 'warn'),
+    plCard('Active profiles', active ? String(actives.length) : 'None',
+      active ? actives.map(p => p.name).join(' → ') : 'nothing is sent', active ? '' : 'warn'),
     plCard('Last hour', String(count('hour', 'llm', 'draft', 'rejected')),
       `limit ${usage.limits.per_service_hour} per service`),
     plCard('Last 24 h', String(count('day', 'llm', 'draft', 'rejected')),
@@ -46,26 +53,36 @@ async function loadLlmPage() {
     getJson('/api/llm/profiles', 'Unable to load LLM profiles'),
     getJson('/api/llm/usage', 'Unable to load LLM usage'),
   ]);
-  const active = items.find(p => p.active);
-  llmBanner(usage, active);
-  llmStats(usage, active);
+  const actives = items.filter(p => p.active);
+  llmBanner(usage, actives.length ? actives : null);
+  llmStats(usage, actives);
+  llm.health = usage.profiles || {};
   if ($llmTbody.contains(document.activeElement)) return;   // do not swap the table under a click
   llm.items = items;
   $llmTbody.innerHTML = llm.items.length ? llm.items.map(p => `
     <tr data-profile="${escapeHtml(p.name)}">
+      <td>${p.priority}</td>
       <td>${escapeHtml(p.name)}</td>
       <td><span class="tmpl-id">${escapeHtml(p.base_url)}</span></td>
       <td>${escapeHtml(p.model)}</td>
       <td>${p.timeout_seconds}s</td>
       <td>${p.has_api_key ? 'saved' : '—'}</td>
-      <td>${p.active ? '<span class="badge badge-green">active</span>' : '<span class="badge badge-gray">inactive</span>'}</td>
+      <td>${llmStatusBadge(p)}</td>
       <td><div class="btn-row">
         <button type="button" class="btn llm-activate">${p.active ? 'Deactivate' : 'Activate'}</button>
         <button type="button" class="btn llm-edit">Edit</button>
         <button type="button" class="btn btn-danger llm-delete">Delete</button>
       </div></td>
     </tr>`).join('')
-    : '<tr><td colspan="7" class="empty-state">No profile: templates are not sent to an LLM.</td></tr>';
+    : '<tr><td colspan="8" class="empty-state">No profile: templates are not sent to an LLM.</td></tr>';
+}
+
+function llmStatusBadge(p) {
+  if (!p.active) return '<span class="badge badge-gray">inactive</span>';
+  const h = (llm.health || {})[p.name];
+  return h && h.down_until
+    ? `<span class="badge badge-red" title="${escapeHtml(h.error || '')}">failing: skipped until ${escapeHtml(new Date(h.down_until * 1000).toLocaleTimeString())}</span>`
+    : '<span class="badge badge-green">active</span>';
 }
 
 function openLlmEditor(name = null) {
@@ -78,6 +95,7 @@ function openLlmEditor(name = null) {
   document.getElementById('llm-model').value = p ? p.model : '';
   document.getElementById('llm-api-key').value = '';
   document.getElementById('llm-timeout').value = p ? p.timeout_seconds : 120;
+  document.getElementById('llm-priority').value = p ? p.priority : 100;
   document.getElementById('llm-error').textContent = '';
   $llmModal.classList.add('open');
 }
@@ -111,6 +129,7 @@ document.getElementById('llm-form').addEventListener('submit', async event => {
     model: document.getElementById('llm-model').value.trim(),
     api_key: document.getElementById('llm-api-key').value,
     timeout_seconds: Number(document.getElementById('llm-timeout').value),
+    priority: Number(document.getElementById('llm-priority').value),
     revision: llm.editing ? llm.editing.revision : null,
   };
   const submit = event.submitter;

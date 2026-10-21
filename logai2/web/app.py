@@ -617,8 +617,8 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.get("/api/llm/profiles")
     def llm_profiles():
         return jsonify(conn().execute(
-            "SELECT name, base_url, model, timeout_seconds, active, api_key <> '' AS has_api_key, revision "
-            "FROM llm_profiles ORDER BY name").fetchall())
+            "SELECT name, base_url, model, timeout_seconds, priority, active, api_key <> '' AS has_api_key, revision "
+            "FROM llm_profiles ORDER BY active DESC, priority, name").fetchall())
 
     @app.get("/api/llm/usage")
     def llm_usage():
@@ -636,7 +636,8 @@ def create_app(cfg: AppConfig) -> Flask:
             "drafts_waiting": pending, "limits": {"per_service_hour": cfg.llm.per_service_hour,
                                                   "daily_max": cfg.llm.daily_max},
             "linker_running": bool(linker) and time.time() - (linker.get("heartbeat") or 0) <= LINKER_STALE_SECONDS,
-            "last_cycle": linker.get("llm"), "last_error": linker.get("last_error"),
+            "last_cycle": linker.get("llm"), "last_error": linker.get("llm_last_error"),
+            "profiles": linker.get("llm_profiles") or {},
             "warnings": linker.get("warnings") or []})
 
     @app.put("/api/llm/profiles/<name>")
@@ -650,9 +651,11 @@ def create_app(cfg: AppConfig) -> Flask:
             raise BadRequest("base_url must be an http(s) URL without credentials")
         if not model:
             raise BadRequest("model is required")
-        timeout = payload.get("timeout_seconds", 120)
+        timeout, priority = payload.get("timeout_seconds", 120), payload.get("priority", 100)
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
             raise BadRequest("timeout_seconds must be an integer from 5 to 600")
+        if not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 1000:
+            raise BadRequest("priority must be an integer from 0 to 1000")
         api_key = _text(payload.get("api_key"), "api_key")   # no control characters: it goes into a header
         if not api_key.isascii():
             raise BadRequest("api_key must be ASCII")
@@ -663,12 +666,12 @@ def create_app(cfg: AppConfig) -> Flask:
         revision = uuid.uuid4().hex
         # a create (no row read) must not overwrite one created meanwhile: DO UPDATE only on an update
         written = c.execute(
-            "INSERT INTO llm_profiles (name, base_url, model, api_key, timeout_seconds, revision) "
-            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url, "
+            "INSERT INTO llm_profiles (name, base_url, model, api_key, timeout_seconds, priority, revision) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url, "
             "model = EXCLUDED.model, api_key = EXCLUDED.api_key, timeout_seconds = EXCLUDED.timeout_seconds, "
-            "revision = EXCLUDED.revision, updated_at = now() WHERE %s",
-            (name, base_url.rstrip("/"), model, api_key or (row["api_key"] if row else ""), timeout, revision,
-             row is not None)).rowcount
+            "priority = EXCLUDED.priority, revision = EXCLUDED.revision, updated_at = now() WHERE %s",
+            (name, base_url.rstrip("/"), model, api_key or (row["api_key"] if row else ""), timeout, priority,
+             revision, row is not None)).rowcount
         if not written:
             c.rollback()
             current = c.execute("SELECT revision FROM llm_profiles WHERE name = %s", (name,)).fetchone()
@@ -678,15 +681,13 @@ def create_app(cfg: AppConfig) -> Flask:
 
     @app.post("/api/llm/profiles/<name>/activate")
     def activate_llm_profile(name: str):
-        """{"active": true} makes it the only active profile; false leaves none active (the resolver idles)."""
+        """Every active profile is used, in priority order: a dead one fails over to the next."""
         active = body().get("active")
         if not isinstance(active, bool):
             raise BadRequest("active must be true or false")
         c = conn()
         profile_or_404(c, name)
-        c.execute("UPDATE llm_profiles SET active = false WHERE active")
-        if active:
-            c.execute("UPDATE llm_profiles SET active = true WHERE name = %s", (name,))
+        c.execute("UPDATE llm_profiles SET active = %s WHERE name = %s", (active, name))
         c.commit()
         return jsonify({"name": name, "active": active})
 

@@ -11,17 +11,29 @@ import re
 import socket
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 _THINK = re.compile(r"<think>.*?</think>", re.S)
 
 
 class LlmError(RuntimeError):
-    pass
+    """The model answered something unusable (no JSON object)."""
 
 
-def active_profile(conn) -> dict | None:
+class LlmUnavailable(LlmError):
+    """The profile could not be used: network, HTTP error, timeout. The caller fails over to the next."""
+
+
+def active_profiles(conn) -> list[dict]:
+    """Active profiles in the order they are tried: priority (lowest first), then name."""
     return conn.execute("SELECT name, base_url, model, api_key, timeout_seconds FROM llm_profiles "
-                        "WHERE active").fetchone()
+                        "WHERE active ORDER BY priority, name").fetchall()
+
+
+def endpoint(base_url: str) -> str:
+    """…/v1 -> …/v1/chat/completions; a bare host (as logai-engine profiles are saved) gets /v1 first."""
+    base = base_url.rstrip("/")
+    return base + ("/chat/completions" if urlparse(base).path else "/v1/chat/completions")
 
 
 def parse_json_reply(content: str) -> dict:
@@ -60,7 +72,7 @@ def chat_json(profile: dict, system: str, user: str) -> dict:
     headers = {"Content-Type": "application/json"}
     if profile.get("api_key"):
         headers["Authorization"] = f"Bearer {profile['api_key']}"
-    url = profile["base_url"].rstrip("/") + "/chat/completions"
+    url = endpoint(profile["base_url"])
     for attempt in (1, 2):
         request = urllib.request.Request(url, data=body.encode(), headers=headers, method="POST")
         try:
@@ -73,5 +85,5 @@ def chat_json(profile: dict, system: str, user: str) -> dict:
             if attempt == 1 and _timed_out(exc):
                 continue
             # never the request: it carries the API key
-            raise LlmError(f"{type(exc).__name__}: {exc}") from None
+            raise LlmUnavailable(f"{type(exc).__name__}: {exc}") from None
     raise AssertionError("unreachable")

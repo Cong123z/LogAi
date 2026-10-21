@@ -19,12 +19,13 @@ import psycopg
 from logai2.commands import enqueue
 from logai2.config import AppConfig
 from logai2.links import candidates, class_sql, next_doc_id
-from logai2.llm import LlmError, active_profile, chat_json
+from logai2.llm import LlmError, LlmUnavailable, active_profiles, chat_json
 
 logger = logging.getLogger("logai2.resolver")
 
 PER_CYCLE = 3                 # LLM calls per cycle (slow, 6-60 s); a template's second call may exceed it by one
 FAILURE_BACKOFF_SECONDS = 1800
+PROFILE_DOWN_SECONDS = 300    # a profile that failed (network, HTTP, timeout) is skipped this long
 
 SYSTEM = ("You link log templates of a telecom platform to operational runbooks. Answer only from the "
           "template and documents given; never invent facts about the system. In template text, <*> marks a "
@@ -63,6 +64,26 @@ class Resolver:
         self._failed: dict[tuple[str, str], float] = {}
         self._spent: list[tuple[str, float]] = []
         self._calls = 0
+        self.profiles: list[dict] = []                      # active ones, in the order they are tried
+        self._down: dict[str, tuple[float, str]] = {}      # profile name -> (skipped until, error)
+        self.last_error: str | None = None                  # kept across cycles for the web's banner
+
+    def ask(self, system: str, user: str) -> dict:
+        """One question to the first working active profile; a profile that fails is skipped for
+        PROFILE_DOWN_SECONDS and the next one is tried. Raises LlmUnavailable when none answers."""
+        now = self.now()
+        for profile in self.profiles:
+            if self._down.get(profile["name"], (0, ""))[0] > now:
+                continue
+            try:
+                reply = self.chat(profile, system, user)
+            except LlmUnavailable as exc:
+                self._down[profile["name"]] = (self.now() + PROFILE_DOWN_SECONDS, str(exc))
+                self.last_error = f"{profile['name']}: {exc}"
+                logger.warning("LLM profile %s failed, trying the next one: %s", profile["name"], exc)
+                continue
+            return reply
+        raise LlmUnavailable("no active LLM profile answered")
 
     def _counted(self, chat: Callable) -> Callable:
         def call(*args):
@@ -77,9 +98,10 @@ class Resolver:
         now = self.now()
         self._failed = {k: t for k, t in self._failed.items() if t > now}
         self._spent = [(svc, t) for svc, t in self._spent if t > now - 86400]
+        self._down = {name: v for name, v in self._down.items() if v[0] > now}
         with self.conn.transaction():
-            profile = active_profile(self.conn)
-            if not profile:
+            self.profiles = active_profiles(self.conn)
+            if not self.profiles:
                 status["warnings"].append("no active LLM profile: templates are not sent to the LLM")
                 return
             # results in the last day / hour (rejected rows came from the LLM too), plus calls that failed
@@ -117,11 +139,14 @@ class Resolver:
             if per_service.get(t["service"], 0) >= lc.per_service_hour:
                 continue
             try:
-                outcome = self._resolve(profile, t)
+                outcome = self._resolve(t)
+            except LlmUnavailable as exc:   # every profile is down: not this template's fault, stop here
+                status["warnings"].append(f"LLM unavailable: {exc}")
+                break
             except (LlmError, psycopg.Error, ValueError) as exc:   # a bad answer must not stop the linker
                 self._failed[key] = self.now() + FAILURE_BACKOFF_SECONDS
                 outcome = "failed"
-                status["last_error"] = f"llm: {exc}"
+                self.last_error = status["last_error"] = f"llm: {exc}"
                 logger.warning("LLM resolution failed for %s %s: %s", *key, exc)
             done[outcome] += 1
             if outcome in ("failed", "none"):   # a call that wrote nothing still costs budget
@@ -131,28 +156,31 @@ class Resolver:
             status["llm"] = done
             progress()
         status["llm"] = done
+        status["llm_profiles"] = {p["name"]: ({"down_until": self._down[p["name"]][0], "error": self._down[p["name"]][1]}
+                                              if p["name"] in self._down else {"down_until": None, "error": None})
+                                  for p in self.profiles}
+        status["llm_last_error"] = self.last_error
         if day >= lc.daily_max:
             status["warnings"].append(f"LLM daily limit reached ({lc.daily_max})")
 
-    def _resolve(self, profile: dict, t: dict) -> str:
+    def _resolve(self, t: dict) -> str:
         lc = self.cfg.llm
         with self.conn.transaction():
             docs = candidates(self.conn, t["service"], t["template_id"], lc.candidates, lc.candidate_similarity)
         if docs:
-            pick, reason = self.confirm(profile, t, docs)
+            pick, reason = self.confirm(t, docs)
             if pick:
                 return "confirmed" if self._write_llm_link(t, pick, reason) else "none"
-        reply = self.chat(profile, SYSTEM, json.dumps({"template": _template(t), "task": SUGGEST_TASK},
-                                                      ensure_ascii=False))
+        reply = self.ask(SYSTEM, json.dumps({"template": _template(t), "task": SUGGEST_TASK}, ensure_ascii=False))
         return "suggested" if self._write_draft(t, reply) else "none"
 
-    def confirm(self, profile: dict, t: dict, docs: list[dict]) -> tuple[dict | None, str]:
+    def confirm(self, t: dict, docs: list[dict]) -> tuple[dict | None, str]:
         """Ask which candidate fits; (the candidate or None, reason). Writes nothing (link_eval uses it)."""
         budget = max(200, (self.cfg.llm.max_input_chars - len(t["text"]) - 1000) // len(docs))
         listed = [{"doc_id": d["doc_id"], "title": d["title"], "error": d["error"][:budget // 2],
                    "handling": d["handling"][:budget // 2]} for d in docs]
-        reply = self.chat(profile, SYSTEM, json.dumps({"template": _template(t), "documents": listed,
-                                                       "task": CONFIRM_TASK}, ensure_ascii=False))
+        reply = self.ask(SYSTEM, json.dumps({"template": _template(t), "documents": listed,
+                                             "task": CONFIRM_TASK}, ensure_ascii=False))
         pick = next((d for d in docs if d["doc_id"] == reply.get("doc_id")), None)   # only a listed one
         return pick, _text(reply.get("reason"), 500)
 

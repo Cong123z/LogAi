@@ -25,15 +25,20 @@ def test_profiles_crud_key_is_write_only_and_one_active(client, conn):
     assert "sk-1" not in json.dumps(listed) and [p["has_api_key"] for p in listed] == [False, True]
 
     activate = lambda name, active: client.post(f"/api/llm/profiles/{name}/activate", json={"active": active})
+    assert put("deep", base_url="http://d", model="deepseek", priority=5,
+               revision=client.get("/api/llm/profiles").get_json()[0]["revision"]).status_code == 200
     assert activate("gemini", True).status_code == 200 and activate("deep", True).status_code == 200
-    assert [p["name"] for p in client.get("/api/llm/profiles").get_json() if p["active"]] == ["deep"]
+    # every active profile is used, lowest priority first
+    assert [(p["name"], p["priority"]) for p in client.get("/api/llm/profiles").get_json() if p["active"]] == [
+        ("deep", 5), ("gemini", 100)]
     assert activate("deep", False).status_code == 200
-    assert not any(p["active"] for p in client.get("/api/llm/profiles").get_json())
+    assert [p["name"] for p in client.get("/api/llm/profiles").get_json() if p["active"]] == ["gemini"]
     assert activate("nope", True).status_code == 404 and activate("deep", "yes").status_code == 400
 
     for bad in ({"base_url": "ftp://x", "model": "m"}, {"base_url": "https://u:p@x", "model": "m"},
                 {"base_url": "https://x", "model": ""}, {"base_url": "https://x", "model": "m", "timeout_seconds": 1},
-                {"base_url": "https://x", "model": "m", "api_key": "a\nb"}):
+                {"base_url": "https://x", "model": "m", "api_key": "a\nb"},
+                {"base_url": "https://x", "model": "m", "priority": -1}):
         assert put("bad", revision=None, **bad).status_code == 400, bad
     assert put("bad name!", base_url="https://x", model="m", revision=None).status_code == 400
     assert client.delete("/api/llm/profiles/deep").status_code == 200
@@ -57,8 +62,10 @@ def test_usage_counts_llm_results_and_reports_the_linker(client, conn):
                  "('s', 'C', 'D1', 'manual', now())")
     conn.execute("INSERT INTO worker_status VALUES ('linker', %s, now())",
                  ('{"heartbeat": 9999999999, "llm": {"confirmed": 1, "suggested": 0, "none": 0, "failed": 0}, '
-                  '"last_error": "llm: timeout", "warnings": []}',))
+                  '"llm_last_error": "llm: timeout", "warnings": [], '
+                  '"llm_profiles": {"p": {"down_until": 1, "error": "502"}}}',))
     conn.commit()
     u = client.get("/api/llm/usage").get_json()
     assert u["hour"] == {"llm": 1, "draft": 0} and u["day"] == {"llm": 1, "draft": 1} and u["drafts_waiting"] == 1
     assert u["linker_running"] and u["last_error"] == "llm: timeout" and u["limits"]["daily_max"] == 50
+    assert u["profiles"] == {"p": {"down_until": 1, "error": "502"}}

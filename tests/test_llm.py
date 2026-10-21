@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from logai2.llm import LlmError, chat_json, parse_json_reply
+from logai2.llm import LlmError, LlmUnavailable, chat_json, endpoint, parse_json_reply
 from tests.fake_http import FakeHttp
 
 
@@ -76,3 +76,15 @@ def test_redirects_are_not_followed(server):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_endpoint_adds_v1_to_a_bare_host_and_http_errors_mean_unavailable(server):
+    assert endpoint("https://zendigikey.shop") == "https://zendigikey.shop/v1/chat/completions"
+    assert endpoint("https://zendigikey.shop/") == "https://zendigikey.shop/v1/chat/completions"
+    assert endpoint("https://api.x/v1/") == "https://api.x/v1/chat/completions"
+    assert endpoint("http://h:8000/openai/v1") == "http://h:8000/openai/v1/chat/completions"
+    s = server(lambda p, b: (502, "error code: 502"))
+    pytest.raises(LlmUnavailable, chat_json, {"base_url": s.url, "model": "m", "timeout_seconds": 5}, "s", "u")
+    junk = server(lambda p, b: reply("no json"))
+    err = pytest.raises(LlmError, chat_json, {"base_url": junk.url, "model": "m", "timeout_seconds": 5}, "s", "u")
+    assert not isinstance(err.value, LlmUnavailable)

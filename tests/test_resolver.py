@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from logai2.llm import LlmError
+from logai2.llm import LlmError, LlmUnavailable
 from logai2.resolver import Resolver
 from tests.test_links import at, doc, tmpl, vec
 
@@ -135,3 +135,37 @@ def test_progress_is_reported_after_each_template(conn, cfg, profile):
     Resolver(cfg, conn, chat=Chat({"title": "t", "handling": "h"})).run(
         {"warnings": [], "last_error": None}, progress=lambda: beats.append(1))
     assert beats == [1]
+
+
+def test_a_dead_profile_fails_over_to_the_next_and_is_skipped_for_a_while(conn, cfg, profile):
+    conn.execute("INSERT INTO llm_profiles (name, base_url, model, active, priority, revision) "
+                 "VALUES ('first', 'http://dead', 'm', true, 1, 'r'), ('off', 'http://x', 'm', false, 0, 'r')")
+    for n in range(3):
+        tmpl(conn, f"T{n}", v=vec((n, 1.0))), alerting(conn, f"T{n}")
+    asked = []
+
+    def chat(profile, system, user):
+        asked.append(profile["name"])
+        if profile["name"] == "first":
+            raise LlmUnavailable("HTTPError: HTTP Error 502")
+        return {"title": "t", "handling": "h"}
+    status = {"warnings": [], "last_error": None}
+    conn.commit()
+    resolver = Resolver(cfg, conn, chat=chat)
+    resolver.run(status)
+    # the dead profile is tried once (that call counts in the 3 per cycle), then skipped; "off" never
+    assert status["llm"]["suggested"] == 2 and status["llm"]["failed"] == 0
+    assert asked == ["first", "p", "p"]
+    assert status["llm_profiles"]["first"]["error"] == "HTTPError: HTTP Error 502"
+    assert status["llm_profiles"]["p"] == {"down_until": None, "error": None}
+    assert status["llm_last_error"] == "first: HTTPError: HTTP Error 502"
+
+
+def test_all_profiles_down_stops_the_cycle_without_blaming_templates(conn, cfg, profile):
+    tmpl(conn, "A", v=vec((0, 1.0))), alerting(conn, "A")
+    conn.commit()
+    resolver = Resolver(cfg, conn, chat=Chat(LlmUnavailable("timeout")))
+    status = {"warnings": [], "last_error": None}
+    resolver.run(status)
+    assert status["warnings"] == ["LLM unavailable: no active LLM profile answered"]
+    assert resolver._failed == {} and resolver._spent == []

@@ -21,7 +21,7 @@ from logai2.config import load_config  # noqa: E402
 from logai2.db import connect  # noqa: E402
 from logai2.embed import embed  # noqa: E402
 from logai2.links import candidates, class_sql, level_class  # noqa: E402
-from logai2.llm import LlmError, active_profile  # noqa: E402
+from logai2.llm import LlmError, active_profiles  # noqa: E402
 from logai2.resolver import Resolver  # noqa: E402
 
 THRESHOLDS = (0.70, 0.75, 0.80, 0.82, 0.85, 0.88, 0.90, 0.92)
@@ -132,10 +132,11 @@ def main() -> None:
 
 
 def llm_table(conn, cfg, templates: list[dict]) -> list[str]:
-    profile = active_profile(conn)
-    if not profile:
+    profiles = active_profiles(conn)
+    if not profiles:
         return ["## Layer 3: LLM", "", "No active LLM profile.", ""]
     resolver = Resolver(cfg, conn)
+    resolver.profiles = profiles
     right = wrong = none = failed = no_candidates = 0
     for t in templates:
         docs = candidates(conn, t["service"], t["template_id"], cfg.llm.candidates, cfg.llm.candidate_similarity)
@@ -143,7 +144,7 @@ def llm_table(conn, cfg, templates: list[dict]) -> list[str]:
             no_candidates += 1
             continue
         try:
-            pick, _ = resolver.confirm(profile, t, docs)
+            pick, _ = resolver.confirm(t, docs)
         except LlmError:
             failed += 1
             continue
@@ -153,7 +154,8 @@ def llm_table(conn, cfg, templates: list[dict]) -> list[str]:
             right += 1
         else:
             wrong += 1
-    return ["## Layer 3: LLM confirm", "", f"Profile `{profile['name']}` ({profile['model']}), candidates ≥ "
+    names = ", ".join(f"`{p['name']}` ({p['model']})" for p in profiles)
+    return ["## Layer 3: LLM confirm", "", f"Profiles in order: {names}; candidates ≥ "
             f"{cfg.llm.candidate_similarity}, top {cfg.llm.candidates}.", "",
             "| right | wrong | none | failed | no candidates |", "|---|---|---|---|---|",
             f"| {right} | {wrong} | {none} | {failed} | {no_candidates} |", ""]

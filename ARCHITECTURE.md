@@ -339,7 +339,7 @@ embedded with `AND text = <text read>`, documents with `AND revision =
 changes.
 
 **LLM resolver** (`logai2/resolver.py`, layers 3–4, run by the linker after
-`apply_links`). With an active `llm_profiles` row, it takes templates that
+`apply_links`). With at least one active `llm_profiles` row, it takes templates that
 have a vector and no link row at all, that are ALERTING or first seen within
 `llm.new_hours` (24), ALERTING first then ERROR > WARN > INFO, about 3 LLM
 calls per cycle (a template's second call may exceed it by one),
@@ -367,7 +367,17 @@ memory); so does an answer Postgres cannot store (NUL characters are
 stripped first) or any other database error on its write. The client
 (`logai2/llm.py`) sends JSON mode, strips `<think>` blocks, takes the first
 JSON object of the reply, retries once on a timeout only, and never follows
-a redirect (it would carry the API key elsewhere).
+a redirect (it would carry the API key elsewhere). A base URL without a
+path gets `/v1` (`https://host` → `https://host/v1/chat/completions`).
+
+**Failover.** Every active profile is used, lowest `priority` first, then
+by name. A profile that fails with a network or HTTP error or a timeout
+(`LlmUnavailable`) is skipped for 5 minutes and the next one answers the
+same question; the failed call counts in the 3 per cycle. A reply that is
+not a JSON object fails the template, not the profile. When no active
+profile answers, the cycle stops with a warning and no template is blamed.
+Each profile's state (`down_until`, `error`) and the last LLM error are in
+`worker_status['linker']` (`llm_profiles`, `llm_last_error`).
 
 ## 6. Reader
 
@@ -721,7 +731,7 @@ service-scoped primary key.
 | `documents` | `doc_id` | `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action`/`safe`), `confidence`, `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`) |
 | `document_errors` | `doc_id, n` | `text` (normalized ERROR line), `embedding` | linker |
 | `template_doc_links` | `service, template_id` | `doc_id` (FK → documents, NULL = no document), `source` (§5.1), `similarity`, `inherited_from`, `note`, `linked_at` | web, linker |
-| `llm_profiles` | `name` | `base_url`, `model`, `api_key` (clear text, never returned by the API), `timeout_seconds`, `active` (at most one), `revision`, `updated_at` | web |
+| `llm_profiles` | `name` | `base_url`, `model`, `api_key` (clear text, never returned by the API), `timeout_seconds`, `priority` (lowest tried first), `active` (any number), `revision`, `updated_at` | web |
 | `error_samples` | — (index `service, template_id, at DESC`) | `service`, `template_id`, `at`, `line` | flush |
 | `settings` | `key` | `value` (jsonb), `revision`, `updated_at` | web, engine |
 | `commands` | `id` | `kind`, `payload` (jsonb), `created_at`, `done_at`, `result` (jsonb) | web enqueues, engine finishes |
@@ -793,6 +803,7 @@ Any other kind fails with `unknown command kind`.
 | Linker down | no new vectors or automatic links; existing links keep working; the Pipeline page shows the linker stale after 90 s |
 | LLM down, slow or answering junk | the template is skipped (30 min back-off) and `last_error` is reported; each call waits up to the profile timeout, retried once on a timeout |
 | No active LLM profile | the resolver idles with a warning in `worker_status['linker']` |
+| One LLM profile dead (502, timeout, refused) | the next active profile answers; the dead one is retried after 5 min; the LLM profiles page marks it failing |
 
 No DLQ.
 
@@ -844,7 +855,7 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/`, `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover), `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.
