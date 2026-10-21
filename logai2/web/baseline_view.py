@@ -69,6 +69,12 @@ def _cls(z: float, k: float, down_ok: bool) -> str:
     return ("up" if z > 0 else "down") + ("1" if m <= 6 else "2" if m <= 10 else "3")
 
 
+def _lookup(bl: Baseline, cfg: AppConfig, service: str, template_ids: list[str], kind: str, day: date, hour: int):
+    key = "doc" if kind == "doc" else template_ids[0]
+    lk = bl.lookup_doc(service, template_ids, day, hour) if kind == "doc" else bl.lookup(service, key, day, hour)
+    return lk, judge(0, key, "INFO", lk, cfg)     # count 0: only the band is used
+
+
 def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: str,
            days: list[date]) -> dict[tuple[date, int], dict]:
     """Per (day, hour) with minutes read: rate, mean, std, band_low, band_high, z, no_baseline, cls."""
@@ -83,8 +89,7 @@ def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: st
     out = {}
     for (day, hour), n in minutes.items():
         rate = sums.get((day, hour), 0.0) / n
-        lk = bl.lookup_doc(service, template_ids, day, hour) if kind == "doc" else bl.lookup(service, key, day, hour)
-        v = judge(0, key, "INFO", lk, cfg)     # count 0: only the band is used
+        lk, v = _lookup(bl, cfg, service, template_ids, kind, day, hour)
         mean, std = (lk.this.mean, lk.this.std) if lk.this else (None, None)
         none = lk.this is None or (mean == 0 and std == 0)
         z, cls = None, "none"
@@ -168,11 +173,14 @@ def inspect(conn, cfg: AppConfig, service: str, key: str, day: date, hour_from: 
             return not_normal.get((day, h), 0)
         return minutes_by_hour([p for p in ps if p[0] == only]).get((day, h), 0)
 
+    bl_key = Baseline.load(conn, [(service, t) for t in ids])
     series = []
     for h in range(24):
         c, lw = cells.get((day, h)), cells.get((day - timedelta(days=7), h))
-        series.append({"hour": h, "rate": c and c["rate"], "band_low": c and c["band_low"],
-                       "band_high": c and c["band_high"], "last_week": lw and lw["rate"],
+        band = c or (lambda v: {"band_low": v.band_low, "band_high": v.band_high})(
+            _lookup(bl_key, cfg, service, ids, kind, day, h)[1])     # a baseline hour without a row still has its band
+        series.append({"hour": h, "rate": c and c["rate"], "band_low": band["band_low"],
+                       "band_high": band["band_high"], "last_week": lw and lw["rate"],
                        "not_normal_minutes": minutes(h)})
     seen = [(h, cells[(day, h)]) for h in rng if (day, h) in cells]
     peak = max(seen, key=lambda hc: hc[1]["rate"], default=None)
@@ -209,10 +217,12 @@ def inspect(conn, cfg: AppConfig, service: str, key: str, day: date, hour_from: 
                      "mean": mean, "excess": rate - mean, "times_normal": round(rate / mean, 1) if mean > 0 else None,
                      "not_normal_minutes": sum(minutes(h, tid) for h in rng),
                      "doc_id": tpl[tid]["doc_id"], "doc_title": tpl[tid]["doc_title"]})
-    increased = sorted((r for r in rows if r["excess"] > 0), key=lambda r: -r["excess"])[:10]
     new = [{"template_id": t, "text": r["text"], "level": r["level"], "first_seen": r["first_seen"].timestamp(),
             "rate": sum(sums.get(t, {}).values()) / n_all if n_all else 0.0, "doc_id": r["doc_id"]}
            for t, r in tpl.items() if t0 - 3600 <= r["first_seen"].timestamp() < t1]
+    fresh = {n["template_id"] for n in new}      # new templates have no baseline: listed once, under "new"
+    increased = sorted((r for r in rows if r["excess"] > 0 and r["template_id"] not in fresh),
+                       key=lambda r: -r["excess"])[:10]
 
     by_key: dict[str, list[dict]] = {}
     for k, a, b in ps:

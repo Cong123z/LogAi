@@ -395,24 +395,26 @@ def create_app(cfg: AppConfig) -> Flask:
         c.commit()
         return jsonify({"doc_id": doc_id})
 
-    def known_service(service: str | None) -> str:
-        if not service or not conn().execute("SELECT 1 FROM services WHERE service = %s", (service,)).fetchone():
-            abort(404, "Unknown service")
-        return service
-
-    def parse_range(args) -> tuple[date, int, int]:
-        """day, hour_from, hour_to of a query string (or any mapping), the rules of POST /api/baseline/decisions."""
+    def parse_range(args, strict: bool = False) -> tuple[date, int, int]:
+        """day, hour_from, hour_to of a query string, or of a JSON body with strict=True (hours must be real ints)."""
         try:
             day = date.fromisoformat(args.get("day"))
         except (TypeError, ValueError):
             raise BadRequest("day must be an ISO date (YYYY-MM-DD)") from None
         try:
-            hour_from, hour_to = int(args.get("hour_from")), int(args.get("hour_to"))
-            if not 0 <= hour_from < hour_to <= 24:
+            hour_from, hour_to = args.get("hour_from"), args.get("hour_to")
+            if not strict:
+                hour_from, hour_to = int(hour_from), int(hour_to)
+            if not (type(hour_from) is int and type(hour_to) is int and 0 <= hour_from < hour_to <= 24):
                 raise ValueError
         except (TypeError, ValueError):
             raise BadRequest("hours must be whole numbers with 0 <= hour_from < hour_to <= 24") from None
         return day, hour_from, hour_to
+
+    def known_service(service: str | None) -> str:
+        if not service or not conn().execute("SELECT 1 FROM services WHERE service = %s", (service,)).fetchone():
+            abort(404, "Unknown service")
+        return service
 
     @app.get("/api/baseline/matrix")
     def baseline_matrix():
@@ -463,13 +465,8 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.post("/api/baseline/decisions")
     def add_decision():
         payload = body()
-        try:
-            day = date.fromisoformat(payload.get("day"))
-        except (TypeError, ValueError):
-            raise BadRequest("day must be an ISO date (YYYY-MM-DD)") from None
-        hour_from, hour_to, decision = payload.get("hour_from"), payload.get("hour_to"), payload.get("decision")
-        if not (type(hour_from) is int and type(hour_to) is int and 0 <= hour_from < hour_to <= 24):
-            raise BadRequest("hours must be whole numbers with 0 <= hour_from < hour_to <= 24")
+        day, hour_from, hour_to = parse_range(payload, strict=True)
+        decision = payload.get("decision")
         if decision not in ("exclude", "keep"):
             raise BadRequest("decision must be 'exclude' or 'keep'")
         service = known_service(payload.get("service"))

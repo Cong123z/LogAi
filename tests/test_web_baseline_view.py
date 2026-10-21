@@ -214,6 +214,7 @@ def test_inspect_contributors_increased_and_new(conn, cfg):
     assert all(i["excess"] > 0 for i in r["increased"]) and len(r["increased"]) <= 10
     assert [n["template_id"] for n in r["new"]] == ["pay:T00309"]   # first seen 01:30; T00001 (19 Oct) is not new
     assert r["new"][0]["rate"] == 12.0
+    assert not {n["template_id"] for n in r["new"]} & {i["template_id"] for i in r["increased"]}
     assert r["left_days"] == [{"hour": 2, "days": 2, "of": 5}, {"hour": 3, "days": 4, "of": 5}]
 
 
@@ -228,3 +229,11 @@ def test_inspect_route_and_validation(client, conn):
     assert client.get("/api/baseline/inspect?service=pay&key=*total&day=2026-10-20&hour_from=a&hour_to=4").status_code == 400
     r = client.get("/api/baseline/inspect?service=pay&key=*total&day=nope&hour_from=1&hour_to=2")
     assert (r.status_code, r.get_json()["error"]) == (400, "day must be an ISO date (YYYY-MM-DD)")
+
+
+def test_inspect_band_for_hour_without_service_hours_row(conn, cfg):
+    seed_inspect(conn)
+    base(conn, "pay", "*total", "weekday", 5, 100, 10)
+    base(conn, "pay", "*total", "weekday", 6, 100, 10)
+    h5 = inspect(conn, cfg, "pay", "*total", date(2026, 10, 20), 2, 4, NOW)["day"][5]
+    assert (h5["rate"], h5["band_low"], h5["band_high"]) == (None, 70.0, 130.0)
