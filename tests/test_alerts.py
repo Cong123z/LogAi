@@ -31,3 +31,15 @@ def test_service_rows_split_by_service_and_doc_key_alone():
     assert [(r["service"], r["kind"], r["state"], r["since"]) for r in rows] == [
         ("b", "service", "ALERTING", 1), ("a", "service", "ALERTING", 5), ("a", "document", "WARMING", 3)]
     assert rows[2]["doc_id"] == "D" and rows[2]["title"] is None and rows[2]["templates"] == []
+
+
+def test_similar_undocumented_templates_become_one_cluster_row():
+    states = [st("s:T1", "WARMING", 100), st("s:T2", "ALERTING", 50), st("s:T3", "ALERTING", 70),
+              st("s:T4", "ALERTING", 60), st("o:T1", "ALERTING", 10, service="o")]
+    edges = [("s", "s:T1", "s:T2"), ("s", "s:T2", "s:T4"),   # T4 is documented: never joined
+             ("o", "o:T1", "o:T9")]
+    rows = alert_rows(states, {("s", "s:T4"): "D1"}, {}, {}, edges)
+    assert [(r["service"], r["kind"], sorted(r["keys"])) for r in rows] == [
+        ("o", "template", ["o:T1"]), ("s", "cluster", ["s:T1", "s:T2"]),
+        ("s", "document", ["s:T4"]), ("s", "template", ["s:T3"])]
+    assert rows[1]["state"] == "ALERTING" and rows[1]["since"] == 50

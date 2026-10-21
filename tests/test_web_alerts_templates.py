@@ -123,9 +123,11 @@ def test_link_unknown_doc_404_and_link_enqueues_reload(client, conn):
 
     assert client.put(url, json={"doc_id": "D1"}).status_code == 200
     assert conn.execute("SELECT doc_id FROM template_doc_links").fetchall() == [{"doc_id": "D1"}]
-    assert client.put(url, json={"doc_id": None}).status_code == 200
+    assert client.put(url, json={"doc_id": None}).status_code == 200      # sticky "no document"
+    assert conn.execute("SELECT doc_id, source FROM template_doc_links").fetchall() == [{"doc_id": None, "source": "manual"}]
+    assert client.delete(url).status_code == 200                           # back to automatic
     assert conn.execute("SELECT count(*) AS n FROM template_doc_links").fetchone()["n"] == 0
-    assert [r["kind"] for r in conn.execute("SELECT kind FROM commands ORDER BY id")] == ["reload_links"] * 2
+    assert [r["kind"] for r in conn.execute("SELECT kind FROM commands ORDER BY id")] == ["reload_links"] * 3
 
 
 def test_every_error_is_json(app):
