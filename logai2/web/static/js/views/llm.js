@@ -1,11 +1,56 @@
-// ── LLM profiles (Data sources page; as in logai-engine) ──
-// The linker's resolver uses the one active profile. The API key is write-only.
+// ── LLM profiles (as in logai-engine) ──
+// The linker's resolver uses the one active profile; the API key is write-only. The banner and the
+// cards show the resolver's state and what it produced (polled every 5 s).
 const llm = {items: [], editing: null};
 const $llmTbody = document.getElementById('llm-tbody');
 const $llmModal = document.getElementById('llm-modal');
 
-async function loadLlmProfiles() {
-  llm.items = await getJson('/api/llm/profiles', 'Unable to load LLM profiles');
+function llmBanner(usage, active) {
+  const $b = document.getElementById('llm-banner');
+  let cls = '', text = '';
+  if (!active) {
+    cls = 'llm-disabled';
+    text = 'No active profile: templates are not sent to an LLM. Add a profile and activate it.';
+  } else if (!usage.linker_running) {
+    cls = 'llm-error';
+    text = 'The linker is not running: nothing is sent to the LLM. Check the logai2-linker container.';
+  } else if (usage.last_error) {
+    cls = 'llm-error';
+    text = `Last LLM error: ${usage.last_error}`;
+  } else if (usage.warnings.some(w => w.startsWith('LLM daily limit'))) {
+    cls = 'llm-disabled';
+    text = usage.warnings.find(w => w.startsWith('LLM daily limit'));
+  }
+  $b.hidden = !text;
+  $b.className = `llm-banner ${cls}`;
+  $b.textContent = text;
+}
+
+function llmStats(usage, active) {
+  const count = (period, ...sources) => sources.reduce((n, s) => n + (usage[period][s] || 0), 0);
+  const last = usage.last_cycle;
+  document.getElementById('llm-stats').innerHTML = [
+    plCard('Active profile', active ? active.name : 'None', active ? active.model : 'nothing is sent', active ? '' : 'warn'),
+    plCard('Last hour', String(count('hour', 'llm', 'draft', 'rejected')),
+      `limit ${usage.limits.per_service_hour} per service`),
+    plCard('Last 24 h', String(count('day', 'llm', 'draft', 'rejected')),
+      `${count('day', 'llm')} confirmed · ${count('day', 'draft')} suggested · ${count('day', 'rejected')} rejected · limit ${usage.limits.daily_max}`),
+    plCard('Suggestions waiting', String(usage.drafts_waiting), 'Documentation → AI suggestions', usage.drafts_waiting ? 'warn' : ''),
+    plCard('Last cycle', last ? `${last.confirmed + last.suggested} done` : '—',
+      last ? `${last.failed} failed · ${last.none} none` : 'no LLM call yet'),
+  ].join('');
+}
+
+async function loadLlmPage() {
+  const [items, usage] = await Promise.all([
+    getJson('/api/llm/profiles', 'Unable to load LLM profiles'),
+    getJson('/api/llm/usage', 'Unable to load LLM usage'),
+  ]);
+  const active = items.find(p => p.active);
+  llmBanner(usage, active);
+  llmStats(usage, active);
+  if ($llmTbody.contains(document.activeElement)) return;   // do not swap the table under a click
+  llm.items = items;
   $llmTbody.innerHTML = llm.items.length ? llm.items.map(p => `
     <tr data-profile="${escapeHtml(p.name)}">
       <td>${escapeHtml(p.name)}</td>
@@ -13,7 +58,7 @@ async function loadLlmProfiles() {
       <td>${escapeHtml(p.model)}</td>
       <td>${p.timeout_seconds}s</td>
       <td>${p.has_api_key ? 'saved' : '—'}</td>
-      <td>${p.active ? '<span class="badge badge-green">active</span>' : ''}</td>
+      <td>${p.active ? '<span class="badge badge-green">active</span>' : '<span class="badge badge-gray">inactive</span>'}</td>
       <td><div class="btn-row">
         <button type="button" class="btn llm-activate">${p.active ? 'Deactivate' : 'Activate'}</button>
         <button type="button" class="btn llm-edit">Edit</button>
@@ -55,7 +100,7 @@ $llmTbody.addEventListener('click', async event => {
   } catch (err) {
     notifyDialog(err.message, 'Unable to update the profile');
   }
-  loadLlmProfiles();
+  loadLlmPage();
 });
 
 document.getElementById('llm-form').addEventListener('submit', async event => {
@@ -73,7 +118,7 @@ document.getElementById('llm-form').addEventListener('submit', async event => {
   try {
     await apiMutation(`/api/llm/profiles/${encodeURIComponent(name)}`, 'PUT', payload);
     $llmModal.classList.remove('open');
-    loadLlmProfiles();
+    loadLlmPage();
   } catch (err) {
     document.getElementById('llm-error').textContent = err.status === 409
       ? 'This profile changed in another window (or the name is taken). Close and try again.' : err.message;

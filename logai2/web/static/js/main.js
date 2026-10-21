@@ -6,11 +6,12 @@ const viewTitles = {
   templates: 'Templates',
   documentation: 'Documentation',
   sources: 'Data sources',
+  llm: 'LLM profiles',
   baseline: 'Baseline',
 };
 // Templates polls only through its Auto-refresh toggle; Documentation and
 // Baseline load on entry and after each change (Baseline polls a running recompute).
-const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000};
+const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000};
 const viewOrder = Object.keys(viewTitles);
 
 function setView(view, updateHash = true) {
@@ -147,9 +148,10 @@ async function loadData() {
       const sources = await fetchSources();
       renderSources(sources);
       renderConnection(sources.connection);
-      await loadLlmProfiles();
     } else if (state.activeView === 'documentation') {
       await loadDocumentation();
+    } else if (state.activeView === 'llm') {
+      await loadLlmPage();
     } else if (state.activeView === 'baseline') {
       await loadBaseline();
     }

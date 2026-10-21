@@ -42,12 +42,12 @@ source design for all sub-projects:
   ERROR line it matches (threshold and margin). Changes enqueue
   `reload_links` for the engine. A document is **ERROR** (the log lines it
   is for, the only part matched) + **Handling** (what to do). Templates still
-  unmatched go to the LLM of the active profile (Data sources page): it
+  unmatched go to the LLM of the active profile (LLM profiles page): it
   confirms a near document, or writes a suggestion (an action runbook, or
   SAFE for a normal-operation line) that waits for approval on the
   Documentation page.
-- **Web** (`scripts/run_web.py`, Flask): six pages (Alerting, Pipeline,
-  Templates, Documentation, Data sources, Baseline). It reads Postgres and
+- **Web** (`scripts/run_web.py`, Flask): seven pages (Alerting, Pipeline,
+  Templates, Documentation, Data sources, LLM profiles, Baseline). It reads Postgres and
   writes settings, documents, links, review decisions and commands; it never
   talks to Elasticsearch or to the engine.
 

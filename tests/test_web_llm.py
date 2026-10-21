@@ -45,3 +45,20 @@ def test_profile_key_must_be_ascii_and_name_has_no_newline(client):
                                                    "revision": None}).status_code == 400
     assert client.put("/api/llm/profiles/p%0A", json={"base_url": "https://x", "model": "m",
                                                       "revision": None}).status_code == 400
+
+
+def test_usage_counts_llm_results_and_reports_the_linker(client, conn):
+    conn.execute("INSERT INTO templates VALUES ('s', 'A', 'ERROR', 'a', now(), now()), ('s', 'B', 'ERROR', 'b', now(), now()), "
+                 "('s', 'C', 'ERROR', 'c', now(), now())")
+    conn.execute("INSERT INTO documents (doc_id, title, handling, status, revision) VALUES ('D1', 't', 'h', 'active', 'r'), "
+                 "('D2', 't', 'h', 'draft', 'r')")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source, linked_at) VALUES "
+                 "('s', 'A', 'D1', 'llm', now()), ('s', 'B', 'D2', 'draft', now() - interval '2 hours'), "
+                 "('s', 'C', 'D1', 'manual', now())")
+    conn.execute("INSERT INTO worker_status VALUES ('linker', %s, now())",
+                 ('{"heartbeat": 9999999999, "llm": {"confirmed": 1, "suggested": 0, "none": 0, "failed": 0}, '
+                  '"last_error": "llm: timeout", "warnings": []}',))
+    conn.commit()
+    u = client.get("/api/llm/usage").get_json()
+    assert u["hour"] == {"llm": 1, "draft": 0} and u["day"] == {"llm": 1, "draft": 1} and u["drafts_waiting"] == 1
+    assert u["linker_running"] and u["last_error"] == "llm: timeout" and u["limits"]["daily_max"] == 50

@@ -620,6 +620,25 @@ def create_app(cfg: AppConfig) -> Flask:
             "SELECT name, base_url, model, timeout_seconds, active, api_key <> '' AS has_api_key, revision "
             "FROM llm_profiles ORDER BY name").fetchall())
 
+    @app.get("/api/llm/usage")
+    def llm_usage():
+        """What the resolver produced (by link source) in the last hour and day, and the linker's LLM state."""
+        c = conn()
+        rows = c.execute(
+            "SELECT source, count(*) FILTER (WHERE linked_at > now() - interval '1 hour') AS hour, count(*) AS day "
+            "FROM template_doc_links WHERE source IN ('llm', 'draft', 'rejected') "
+            "AND linked_at > now() - interval '1 day' GROUP BY source").fetchall()
+        pending = c.execute("SELECT count(*) AS n FROM documents WHERE status = 'draft'").fetchone()["n"]
+        row = c.execute("SELECT status FROM worker_status WHERE worker = 'linker'").fetchone()
+        linker = row["status"] if row else {}
+        return jsonify({
+            "hour": {r["source"]: r["hour"] for r in rows}, "day": {r["source"]: r["day"] for r in rows},
+            "drafts_waiting": pending, "limits": {"per_service_hour": cfg.llm.per_service_hour,
+                                                  "daily_max": cfg.llm.daily_max},
+            "linker_running": bool(linker) and time.time() - (linker.get("heartbeat") or 0) <= LINKER_STALE_SECONDS,
+            "last_cycle": linker.get("llm"), "last_error": linker.get("last_error"),
+            "warnings": linker.get("warnings") or []})
+
     @app.put("/api/llm/profiles/<name>")
     def put_llm_profile(name: str):
         payload = body()
