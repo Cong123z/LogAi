@@ -157,7 +157,7 @@ def test_a_dead_profile_fails_over_to_the_next_and_is_skipped_for_a_while(conn, 
     assert status["llm"]["suggested"] == 2 and status["llm"]["failed"] == 0
     assert asked == ["first", "p", "p"]
     assert status["llm_profiles"]["first"]["error"] == "HTTPError: HTTP Error 502"
-    assert status["llm_profiles"]["p"] == {"down_until": None, "error": None}
+    assert status["llm_profiles"]["p"] == {"down_until": None, "error": None, "answers": 2}
     assert status["llm_last_error"] == "first: HTTPError: HTTP Error 502"
 
 

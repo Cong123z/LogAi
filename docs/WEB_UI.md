@@ -186,7 +186,8 @@ Edit, Activate / Deactivate and Delete. Every active profile is used,
 lowest **priority** first: when one fails (network, HTTP error, timeout)
 the next one answers and the failing one is skipped for 5 minutes; its
 row shows "failing" with the error, and the banner says whether another
-profile is answering.
+profile is answering. **Answers** counts each active profile's answers
+since the linker started.
 
 Each profile, as in logai-engine: name, OpenAI-compatible base URL
 (`…/v1`, or a bare host which gets `/v1`; the linker posts to
@@ -426,7 +427,7 @@ template has no vector (then the list is empty).
   `drafts_waiting` = draft documents; `limits` = `llm.per_service_hour`,
   `llm.daily_max`; `linker_running` (heartbeat within 90 s), `last_cycle`
   (`{confirmed, suggested, none, failed}`), `last_error` (the last LLM
-  error, kept across cycles), `profiles` (`{name: {down_until, error}}` of
+  error, kept across cycles), `profiles` (`{name: {down_until, error, answers}}` of
   the active profiles), `warnings` from the linker's status.
 - `POST …/activate {"active": true|false}` turns one profile on or off;
   any number can be active. `DELETE` removes it. Unknown name: 404

@@ -68,13 +68,14 @@ async function loadLlmPage() {
       <td>${p.timeout_seconds}s</td>
       <td>${p.has_api_key ? 'saved' : '—'}</td>
       <td>${llmStatusBadge(p)}</td>
+      <td>${p.active ? ((llm.health[p.name] || {}).answers || 0) : '—'}</td>
       <td><div class="btn-row">
         <button type="button" class="btn llm-activate">${p.active ? 'Deactivate' : 'Activate'}</button>
         <button type="button" class="btn llm-edit">Edit</button>
         <button type="button" class="btn btn-danger llm-delete">Delete</button>
       </div></td>
     </tr>`).join('')
-    : '<tr><td colspan="8" class="empty-state">No profile: templates are not sent to an LLM.</td></tr>';
+    : '<tr><td colspan="9" class="empty-state">No profile: templates are not sent to an LLM.</td></tr>';
 }
 
 function llmStatusBadge(p) {

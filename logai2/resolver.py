@@ -67,6 +67,7 @@ class Resolver:
         self.profiles: list[dict] = []                      # active ones, in the order they are tried
         self._down: dict[str, tuple[float, str]] = {}      # profile name -> (skipped until, error)
         self.last_error: str | None = None                  # kept across cycles for the web's banner
+        self.answers: dict[str, int] = {}                   # profile name -> answers since the linker started
 
     def ask(self, system: str, user: str) -> dict:
         """One question to the first working active profile; a profile that fails is skipped for
@@ -82,6 +83,7 @@ class Resolver:
                 self.last_error = f"{profile['name']}: {exc}"
                 logger.warning("LLM profile %s failed, trying the next one: %s", profile["name"], exc)
                 continue
+            self.answers[profile["name"]] = self.answers.get(profile["name"], 0) + 1
             return reply
         raise LlmUnavailable("no active LLM profile answered")
 
@@ -156,8 +158,9 @@ class Resolver:
             status["llm"] = done
             progress()
         status["llm"] = done
-        status["llm_profiles"] = {p["name"]: ({"down_until": self._down[p["name"]][0], "error": self._down[p["name"]][1]}
-                                              if p["name"] in self._down else {"down_until": None, "error": None})
+        status["llm_profiles"] = {p["name"]: {"down_until": self._down.get(p["name"], (None, None))[0],
+                                              "error": self._down.get(p["name"], (None, None))[1],
+                                              "answers": self.answers.get(p["name"], 0)}
                                   for p in self.profiles}
         status["llm_last_error"] = self.last_error
         if day >= lc.daily_max:
