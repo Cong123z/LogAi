@@ -48,8 +48,10 @@ function rvApplyRoute() {
   if (p[1]) rv.key = p[1];
   if (p[2] === '14' || p[2] === '28') rv.days = Number(p[2]);
   rv.sel = null;
-  if (p.length >= 6 && /^\d{4}-\d\d-\d\d$/.test(p[3]) && p[4] >= 0 && p[5] > p[4]) {
-    rv.sel = {day: p[3], from: Number(p[4]), to: Number(p[5])};
+  const from = Number(p[4]), to = Number(p[5]);
+  if (p.length >= 6 && /^\d{4}-\d\d-\d\d$/.test(p[3]) && !Number.isNaN(Date.parse(p[3]))
+      && Number.isInteger(from) && Number.isInteger(to) && from >= 0 && from < to && to <= 24) {
+    rv.sel = {day: p[3], from, to};
   }
 }
 function rvWriteRoute() {
@@ -89,7 +91,7 @@ async function loadReview() {
       getJson(`/api/baseline/matrix?service=${svc}&key=${encodeURIComponent(rv.key)}&days=${rv.days}`, 'Unable to load the matrix'),
       getJson(`/api/baseline?service=${svc}`, 'Unable to load baseline')]);
   } catch (err) {
-    if (seq === rv.seq) rvStatus(`${err.message} for "${rv.key}".`, true);
+    if (seq === rv.seq) rvShowLoadError(`${err.message} for "${rv.key}".`);
     return;
   }
   if (seq !== rv.seq) return;
@@ -97,6 +99,22 @@ async function loadReview() {
   rv.matrix = matrixData; rv.base = base;
   rvIndexMatrix();
   rvRenderAll();
+}
+
+// A failed load must not leave the previous key's data on screen: nothing may be decided on it.
+function rvShowLoadError(message) {
+  rv.matrix = rv.base = rv.insp = null; rv.sel = null; rv.cells = new Map(); rv.rows = []; rv.index = new Map();
+  rvWriteRoute();
+  rvStatus(message, true);
+  $rv('rv-inspector').hidden = true;
+  ['rv-matrix', 'rv-coverage'].forEach(id => echarts.getInstanceByDom($rv(id))?.clear());
+  $rv('rv-cards').innerHTML = '';
+  $rv('rv-legend').innerHTML = '';
+  $rv('rv-matrix-table').innerHTML = '';
+  $rv('rv-review-count').textContent = '';
+  $rv('rv-review-list').innerHTML = '<p class="sync-status">Nothing to show: the data did not load.</p>';
+  $rv('rv-decision-list').innerHTML = '';
+  $rv('rv-cov-summary').textContent = '';
 }
 
 function rvRenderControls() {
@@ -190,9 +208,11 @@ function rvRenderMatrix() {
     const fill = t.cls[c.cls] || t.cls.none;
     const mark = c.decision ? (c.decision === 'exclude' ? '✕' : '✓') : c.suggested ? '▲' : '';
     const sel = rvSelected(c.row.day, c.hour);
+    // ponytail: browser clock hour on the newest row (the server's today); differs only if the zones differ
+    const now = c.y === 0 && c.hour === new Date().getHours();
     const item = {
       value: [c.hour, c.y, c.z ?? 0], cell: c, mark,   // a null value would hide the cell
-      itemStyle: {color: fill, borderColor: sel ? t.accent : (c.cls === 'none' ? t.dim : t.card), borderWidth: sel ? 3 : c.cls === 'none' ? 1 : 1.5,
+      itemStyle: {color: fill, borderColor: sel ? t.accent : (now || c.cls === 'none' ? t.dim : t.card), borderWidth: sel ? 3 : now ? 2 : c.cls === 'none' ? 1 : 1.5,
                   opacity: c.decision === 'exclude' ? 0.6 : 1},
       label: {color: rvInk(fill)},
     };
@@ -267,6 +287,7 @@ function rvSelectSuggestion(s) {
   rvSelectionChanged();
 }
 function rvSelectionChanged() {
+  rv.note = null; rvDecisionNote('');
   rvWriteRoute();
   rvRenderMatrix(); rvRenderLists(); loadInspector();
   $rv('rv-inspector').scrollIntoView({block: 'nearest', behavior: REDUCED_MOTION ? 'auto' : 'smooth'});
@@ -447,6 +468,7 @@ function rvOpenTemplate(item) {
 }
 
 function rvRenderEffect(sel, d, row, decided) {
+  if (rv.note) rvDecisionNote(rv.note.text, rv.note.error);
   const effect = $rv('rv-effect');
   $rv('rv-exclude').hidden = $rv('rv-keep').hidden = Boolean(decided);
   $rv('rv-undo').hidden = !decided;
@@ -467,6 +489,13 @@ function rvRenderEffect(sel, d, row, decided) {
   }
 }
 
+// Result line in the inspector's decision row; survives the re-render that follows a decision.
+function rvDecisionNote(text, error = false) {
+  rv.note = {text, error};
+  const el = $rv('rv-note');
+  el.textContent = text; el.hidden = !text;
+  el.classList.toggle('ins-toast-error', error);
+}
 async function rvDecide(decision) {
   const sel = rv.sel;
   $rv('rv-exclude').disabled = $rv('rv-keep').disabled = true;
@@ -475,6 +504,7 @@ async function rvDecide(decision) {
       {service: rv.service, day: sel.day, hour_from: sel.from, hour_to: sel.to, decision});
     if (result.warning) showToast(`${result.warning.map(rvHour).join(', ')} now ${result.warning.length === 1 ? 'has' : 'have'} fewer than 3 days of baseline: floor-only alerts there.`, true);
     rvStatus(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (02:00) or Recompute.`);
+    rvDecisionNote(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (02:00) or Recompute.`);
     await rvReloadData();
     const next = rvSuggestions()[0];
     rv.sel = next ? {day: next.day, from: next.hour_from, to: next.hour_to} : null;
@@ -482,6 +512,10 @@ async function rvDecide(decision) {
     rvRenderAll();
   } catch (err) {
     rvStatus(`Could not save the decision: ${err.message}`, true);
+    rvDecisionNote(`Could not save the decision: ${err.message}`, true);
+    if (err.status === 409) {   // the data changed under us: show what is true now
+      try { await rvReloadData(); rvRenderAll(); rvDecisionNote(`Could not save the decision: ${err.message}. The data was reloaded.`, true); } catch (e) { /* keep the error shown */ }
+    }
   } finally { $rv('rv-exclude').disabled = $rv('rv-keep').disabled = false; }
 }
 async function rvUndo(id) {
