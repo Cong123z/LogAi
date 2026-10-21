@@ -45,6 +45,10 @@ _DECIDED = ("NOT EXISTS (SELECT 1 FROM template_doc_links x WHERE x.service = t.
             "AND x.template_id = t.template_id AND x.source IN ('manual', 'rejected'))")
 
 
+# A document applies to its own service's templates, or to all when shared (service NULL).
+_SAME_SERVICE = "(d.service IS NULL OR d.service = t.service)"
+
+
 def desired_inherited(conn, thresholds: dict) -> dict[tuple[str, str], tuple]:
     """Layer 1: (service, template) -> (doc_id, similarity, inherited_from), nearest manual template."""
     t_cls, s_cls = class_sql("t.level"), class_sql("s.level")
@@ -70,7 +74,7 @@ def desired_corpus(conn, thresholds: dict, margin: float) -> dict[tuple[str, str
         WITH per_doc AS (
           SELECT t.service, t.template_id, {t_cls} AS cls, e.doc_id, max(1 - (e.embedding <=> t.embedding)) AS sim
           FROM templates t CROSS JOIN document_errors e JOIN documents d ON d.doc_id = e.doc_id AND d.status = 'active'
-          WHERE t.embedding IS NOT NULL AND {_DECIDED}
+          WHERE t.embedding IS NOT NULL AND {_DECIDED} AND {_SAME_SERVICE}
           GROUP BY 1, 2, 3, 4),
         ranked AS (
           SELECT *, row_number() OVER w AS rn, lead(sim) OVER w AS second FROM per_doc
@@ -146,12 +150,14 @@ def similar(conn, service: str, template_id: str, min_sim: float, limit: int = 2
         (service, template_id, min_sim, limit)).fetchall()
 
 
-def candidates(conn, service: str, template_id: str, k: int, min_sim: float) -> list[dict]:
-    """Active documents ranked by their best ERROR line against the template (for the LLM)."""
-    return conn.execute("""
-        SELECT d.doc_id, d.title, d.error, d.handling, max(1 - (e.embedding <=> t.embedding)) AS similarity
+def candidates(conn, service: str, template_id: str, k: int, min_sim: float, other_services: bool = False) -> list[dict]:
+    """Active documents ranked by their best ERROR line against the template (for the LLM): of its own
+    service and shared ones; with other_services, only other services' documents (references to adapt)."""
+    scope = "d.service IS NOT NULL AND d.service <> t.service" if other_services else _SAME_SERVICE
+    return conn.execute(f"""
+        SELECT d.doc_id, d.service, d.title, d.error, d.handling, max(1 - (e.embedding <=> t.embedding)) AS similarity
         FROM templates t CROSS JOIN document_errors e JOIN documents d ON d.doc_id = e.doc_id AND d.status = 'active'
-        WHERE t.service = %s AND t.template_id = %s AND t.embedding IS NOT NULL
+        WHERE t.service = %s AND t.template_id = %s AND t.embedding IS NOT NULL AND {scope}
         GROUP BY d.doc_id HAVING max(1 - (e.embedding <=> t.embedding)) >= %s
         ORDER BY similarity DESC, d.doc_id LIMIT %s""", (service, template_id, min_sim, k)).fetchall()
 

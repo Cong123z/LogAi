@@ -208,7 +208,9 @@ async function openTemplateDrawer(t) {
   }[src] || 'Not linked to a document.';
   const options = [`<option value="">Automatic (let the linker decide)</option>`,
     `<option value="${NO_DOCUMENT}"${src === 'manual' && !t.doc_id ? ' selected' : ''}>No document</option>`]
-    .concat(tpl.docs.map(d => `<option value="${escapeHtml(d.doc_id)}"${d.doc_id === t.doc_id && src === 'manual' ? ' selected' : ''}>${escapeHtml(d.doc_id)} · ${escapeHtml(d.title)}</option>`));
+    // this service's documents and the shared ones first; another service's only if picked on purpose
+    .concat([...tpl.docs].sort((a, b) => (a.service && a.service !== t.service) - (b.service && b.service !== t.service))
+      .map(d => `<option value="${escapeHtml(d.doc_id)}"${d.doc_id === t.doc_id && src === 'manual' ? ' selected' : ''}>${escapeHtml(d.doc_id)} · ${escapeHtml(d.title)} [${escapeHtml(d.service || 'shared')}]</option>`));
   $tplDrawerBody.innerHTML = `
     <section class="pane-section"><h3>Template</h3>
       <div class="pane-badges"><span class="tmpl-id">${escapeHtml(t.service)}</span>

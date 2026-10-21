@@ -310,6 +310,13 @@ A document is **ERROR** (the log line(s) it is for, one per line) plus
 `normalize()` first (`links.error_lines`), so they compare with template
 texts; a document with no ERROR line is never matched automatically.
 
+**Documents belong to a service** (`documents.service`; NULL = shared,
+applying to every service). Automatic matching (layer 2) and the LLM's
+candidates (layer 3) only consider documents of the template's own service
+and shared ones, so each service's links point to its own, specific
+runbook. Migration 004 gave each existing document the one service whose
+templates use it, else shared. A manual link may still point anywhere.
+
 One `template_doc_links` row per template; its `source` is the layer
 (`logai2/links.py`, design section 3):
 
@@ -317,7 +324,7 @@ One `template_doc_links` row per template; its `source` is the layer
 |---|---|---|---|
 | 0 | `manual` | set on the web; `doc_id NULL` = "no document" | yes (NULL: no) |
 | 1 | `inherited` | nearest **manual** template of the same service and level class (ERROR/FATAL/CRITICAL, WARN/WARNING, other), cosine ≥ `inherit_similarity[class]`; `inherited_from` names it | yes |
-| 2 | `corpus` | best **active** document by its best ERROR line, ≥ `corpus_similarity[class]` and ≥ `corpus_margin` above the next document | yes |
+| 2 | `corpus` | best **active** document **of the template's service or shared**, by its best ERROR line, ≥ `corpus_similarity[class]` and ≥ `corpus_margin` above the next document | yes |
 | 3 | `llm` | the LLM picked one of the template's candidate documents; `note` = its reason | yes |
 | 4 | `draft` | the LLM wrote a document (`status draft`, `source llm`, `verdict` action or safe) | no, until approved |
 | — | `rejected` | the operator rejected a layer 3–4 result | no |
@@ -356,8 +363,12 @@ look stale. For each:
    LLM is asked which fits; a listed `doc_id` becomes an `llm` link (with
    `reload_links`).
 2. Otherwise (or `null`), the LLM writes `{verdict, title, error_code, error,
-   handling, confidence}`; it is stored as a `draft` document (next `DOC-NNN`
-   id) linked as `draft`, in one transaction.
+   handling, confidence}` for the template's service; it is stored as a
+   `draft` document of that service (next `DOC-NNN` id) linked as `draft`,
+   in one transaction. When other services already document a similar
+   error (their documents' ERROR lines ≥ `llm.candidate_similarity`, top
+   `llm.candidates`), those are sent as `references` to adapt, and the draft
+   records them in `documents.based_on`.
 
 The LLM sees only service, level and the normalized template text, plus the
 candidates' title, ERROR and Handling (≤ `llm.max_input_chars`); never raw
@@ -728,7 +739,7 @@ service-scoped primary key.
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |
 | `alert_state` | `service, key` | `state`, `since`, `streak`, `score`, `count`, `band_low`, `band_high` | flush |
 | `alert_changes` | `service, key, at` | `from_state`, `to_state`, `count`, `band_low`, `band_high` | flush |
-| `documents` | `doc_id` | `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action`/`safe`), `confidence`, `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`) |
+| `documents` | `doc_id` | `service` (NULL = shared), `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action` = ERROR / `safe` = SAFE), `confidence`, `based_on` (documents an LLM draft adapted), `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`, drafts) |
 | `document_errors` | `doc_id, n` | `text` (normalized ERROR line), `embedding` | linker |
 | `template_doc_links` | `service, template_id` | `doc_id` (FK → documents, NULL = no document), `source` (§5.1), `similarity`, `inherited_from`, `note`, `linked_at` | web, linker |
 | `llm_profiles` | `name` | `base_url`, `model`, `api_key` (clear text, never returned by the API), `timeout_seconds`, `priority` (lowest tried first), `active` (any number), `revision`, `updated_at` | web |
@@ -855,7 +866,7 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover), `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service), `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.

@@ -35,7 +35,10 @@ CONFIRM_TASK = ("Pick the document whose ERROR field describes the same error as
                 "whose Handling applies to it. If none clearly fits, answer null. "
                 'Reply {"doc_id": "<one of the given doc_id values>" or null, "reason": "<one sentence>"}.')
 
-SUGGEST_TASK = ("No runbook covers this template. Write one. If the line shows normal operation (for example a "
+SUGGEST_TASK = ("No runbook of this template's service covers it. Write one for this service. If \"references\" "
+                "are given, they are runbooks other services wrote for a similar error: adapt them to this service "
+                "and template, keep what applies, drop what is specific to the other service. "
+                "If the line shows normal operation (for example a "
                 'success or progress message), set "verdict": "safe" and start "handling" with "SAFE: normal '
                 'operation, no action needed." followed by what a spike or a drop of this line would mean. '
                 'Otherwise set "verdict": "action" and give numbered, concrete steps, one step per line. Reply {"verdict": "action" '
@@ -174,18 +177,28 @@ class Resolver:
             pick, reason = self.confirm(t, docs)
             if pick:
                 return "confirmed" if self._write_llm_link(t, pick, reason) else "none"
-        reply = self.ask(SYSTEM, json.dumps({"template": _template(t), "task": SUGGEST_TASK}, ensure_ascii=False))
-        return "suggested" if self._write_draft(t, reply) else "none"
+        # the same error documented by other services: the LLM adapts them instead of starting blank
+        with self.conn.transaction():
+            refs = candidates(self.conn, t["service"], t["template_id"], lc.candidates, lc.candidate_similarity,
+                              other_services=True)
+        question = {"template": _template(t), "task": SUGGEST_TASK}
+        if refs:
+            question["references"] = self._listed(t, refs)
+        reply = self.ask(SYSTEM, json.dumps(question, ensure_ascii=False))
+        return "suggested" if self._write_draft(t, reply, [r["doc_id"] for r in refs]) else "none"
 
     def confirm(self, t: dict, docs: list[dict]) -> tuple[dict | None, str]:
         """Ask which candidate fits; (the candidate or None, reason). Writes nothing (link_eval uses it)."""
-        budget = max(200, (self.cfg.llm.max_input_chars - len(t["text"]) - 1000) // len(docs))
-        listed = [{"doc_id": d["doc_id"], "title": d["title"], "error": d["error"][:budget // 2],
-                   "handling": d["handling"][:budget // 2]} for d in docs]
+        listed = self._listed(t, docs)
         reply = self.ask(SYSTEM, json.dumps({"template": _template(t), "documents": listed,
                                              "task": CONFIRM_TASK}, ensure_ascii=False))
         pick = next((d for d in docs if d["doc_id"] == reply.get("doc_id")), None)   # only a listed one
         return pick, _text(reply.get("reason"), 500)
+
+    def _listed(self, t: dict, docs: list[dict]) -> list[dict]:
+        budget = max(200, (self.cfg.llm.max_input_chars - len(t["text"]) - 1000) // len(docs))
+        return [{"doc_id": d["doc_id"], "service": d["service"] or "shared", "title": d["title"],
+                 "error": d["error"][:budget // 2], "handling": d["handling"][:budget // 2]} for d in docs]
 
     def _write_llm_link(self, t: dict, doc: dict, reason: str) -> bool:
         with self.conn.transaction():
@@ -198,7 +211,7 @@ class Resolver:
             enqueue(self.conn, "reload_links")   # an llm link drives alerts
         return True
 
-    def _write_draft(self, t: dict, reply: dict) -> bool:
+    def _write_draft(self, t: dict, reply: dict, based_on: list[str] = ()) -> bool:
         handling = _text(reply.get("handling"), 20000)
         title = _text(reply.get("title"), 200)
         if not handling or not title:
@@ -214,10 +227,11 @@ class Resolver:
         with self.conn.transaction():
             doc_id = next_doc_id(self.conn)
             self.conn.execute(
-                "INSERT INTO documents (doc_id, title, error_code, error, handling, status, source, verdict, "
-                "confidence, revision) VALUES (%s, %s, %s, %s, %s, 'draft', 'llm', %s, %s, %s)",
-                (doc_id, title, _text(reply.get("error_code"), 100), _text(reply.get("error"), 5000) or t["text"],
-                 handling, verdict, confidence, uuid.uuid4().hex))
+                "INSERT INTO documents (doc_id, service, title, error_code, error, handling, status, source, verdict, "
+                "confidence, based_on, revision) VALUES (%s, %s, %s, %s, %s, %s, 'draft', 'llm', %s, %s, %s, %s)",
+                (doc_id, t["service"], title, _text(reply.get("error_code"), 100),
+                 _text(reply.get("error"), 5000) or t["text"], handling, verdict, confidence, list(based_on),
+                 uuid.uuid4().hex))
             written = bool(self.conn.execute(
                 "INSERT INTO template_doc_links (service, template_id, doc_id, source) "
                 "VALUES (%s, %s, %s, 'draft') ON CONFLICT DO NOTHING",

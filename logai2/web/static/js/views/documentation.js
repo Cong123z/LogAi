@@ -5,7 +5,16 @@
 // written for: Approve (link becomes manual, document active), Edit (saving approves), Reject.
 // Every document is of one kind: ERROR (verdict "action": something to fix) or SAFE (normal operation);
 // the All / ERROR / SAFE buttons filter the list.
-const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: ''};
+// Documents belong to a service (or are shared). One service shows its own and the shared ones; "All
+// services" groups documents with the same ERROR line into one row, with a version per service.
+const SHARED = '__shared__';
+const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: '',
+              service: '', services: []};
+const $docService = document.getElementById('doc-service');
+const svcLabel = service => service || 'shared';
+const svcChip = service => `<span class="svc-chip${service ? '' : ' shared'}" title="${service ? 'Service' : 'Shared: applies to every service'}">${escapeHtml(svcLabel(service))}</span>`;
+// Same ERROR = the same normalized ERROR lines; a document without one is its own group.
+const errorKey = doc => (doc.error_lines.length ? `e:${doc.error_lines.join('\n')}` : `d:${doc.doc_id}`);
 const $docList = document.getElementById('doc-list');
 const $docPane = document.getElementById('doc-pane');
 const $docSearch = document.getElementById('doc-search');
@@ -37,6 +46,8 @@ async function loadDocumentation() {
     isDraftMode() ? getJson('/api/templates?link_source=draft&size=500', 'Unable to load AI suggestions') : null,
   ]);
   docs.items = items;
+  docs.services = await getJson('/api/services', 'Unable to load services');
+  renderServiceOptions();
   if (draftLinks) docs.drafts = new Map(draftLinks.items.map(t => [t.doc_id, t]));
   const nDrafts = drafts ? drafts.length : items.length;
   const $count = document.getElementById('doc-draft-count');
@@ -50,8 +61,17 @@ async function loadDocumentation() {
   renderDocumentation();
 }
 
+function renderServiceOptions() {
+  const current = docs.service;
+  $docService.innerHTML = '<option value="">All services</option><option value="__shared__">Shared only</option>'
+    + docs.services.map(svc => `<option value="${escapeHtml(svc)}">${escapeHtml(svc)} (+ shared)</option>`).join('');
+  $docService.value = current;
+}
+
 function docMatches(doc) {
   if (docs.kind && doc.verdict !== docs.kind) return false;
+  if (docs.service === SHARED && doc.service) return false;
+  if (docs.service && docs.service !== SHARED && doc.service && doc.service !== docs.service) return false;
   const q = docs.query.toLowerCase();
   if (!q) return true;
   const t = docs.drafts.get(doc.doc_id);
@@ -73,7 +93,9 @@ function verdictBadge(doc) {
 }
 
 function renderKindCounts() {
-  const n = kind => docs.items.filter(d => !kind || d.verdict === kind).length;
+  const inService = d => !(docs.service === SHARED && d.service)
+    && !(docs.service && docs.service !== SHARED && d.service && d.service !== docs.service);
+  const n = kind => docs.items.filter(d => inService(d) && (!kind || d.verdict === kind)).length;
   document.querySelectorAll('#doc-kind-toggle .kind-count').forEach(el => { el.textContent = n(el.dataset.count); });
 }
 
@@ -99,7 +121,14 @@ function renderDocList() {
       : isDraftMode() ? 'No AI suggestions waiting. New ones appear as the LLM writes them.' : 'No documents yet.'}</p>`;
     return;
   }
-  $docList.innerHTML = shown.map(doc => {
+  const groups = new Map();
+  for (const doc of shown) {
+    const key = docs.service ? `d:${doc.doc_id}` : errorKey(doc);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(doc);
+  }
+  $docList.innerHTML = [...groups.values()].map(group => {
+    const doc = group.find(d => d.doc_id === docs.selected) || group[0];
     const t = docs.drafts.get(doc.doc_id);
     const top = isDraftMode()
       ? `<span class="tmpl-id">${escapeHtml(doc.doc_id)}</span>${verdictBadge(doc)}${doc.confidence == null ? ''
@@ -109,11 +138,15 @@ function renderDocList() {
     const meta = isDraftMode()
       ? (t ? `${escapeHtml(t.service)} · ${escapeHtml(t.template_id)} · ${escapeHtml(t.level)}` : 'its template is linked otherwise now')
       : escapeHtml(doc.error_code || '');
+    const services = group.length > 1
+      ? `<span class="split-item-top"><span class="split-item-meta">same ERROR in ${group.length}:</span>${group.map(d => svcChip(d.service)).join('')}</span>`
+      : `<span class="split-item-top">${svcChip(doc.service)}</span>`;
     return `<button type="button" class="split-item" role="option" data-doc-id="${escapeHtml(doc.doc_id)}"
-        aria-selected="${doc.doc_id === docs.selected}">
+        aria-selected="${group.some(d => d.doc_id === docs.selected)}">
       <span class="split-item-top">${top}</span>
       <span class="split-item-title">${escapeHtml(doc.title || 'Untitled')}</span>
       ${meta ? `<span class="split-item-meta">${meta}</span>` : ''}
+      ${services}
     </button>`;
   }).join('');
 }
@@ -131,6 +164,7 @@ function renderDocPane() {
   const drafting = isDraftMode();
   const badges = [
     drafting ? '<span class="badge badge-yellow">AI suggestion · unverified</span>' : '',
+    svcChip(doc.service),
     verdictBadge(doc),
     !drafting && doc.source === 'llm' ? '<span class="badge badge-yellow">AI-written, approved</span>' : '',
     doc.error_code ? `<span class="tmpl-id">${escapeHtml(doc.error_code)}</span>` : '',
@@ -145,6 +179,13 @@ function renderDocPane() {
         ${t.rate == null ? '' : `<span>${tplNum(t.rate)}/min this hour</span>`}</div>
       <div class="code-block" style="margin-top:6px">${highlightWildcards(escapeHtml(t.text))}</div>
     </section>` : '<div class="pane-callout">Its template has been linked another way since; this suggestion can only be edited or left.</div>') : '';
+  const versions = docs.items.filter(d => doc.error_lines.length && errorKey(d) === errorKey(doc));
+  const versionBar = versions.length > 1 ? `<div class="versions" role="group" aria-label="Same ERROR in other services">
+      Same ERROR in ${versions.length} services:
+      ${versions.map(d => `<button type="button" class="toggle-btn${d.doc_id === doc.doc_id ? ' active' : ''}" data-act="version"
+        data-doc-id="${escapeHtml(d.doc_id)}" aria-pressed="${d.doc_id === doc.doc_id}">${escapeHtml(svcLabel(d.service))} · ${escapeHtml(d.doc_id)}</button>`).join('')}</div>` : '';
+  const basedOn = doc.based_on && doc.based_on.length
+    ? `<p class="hint">Adapted from ${doc.based_on.map(id => `<span class="tmpl-id">${escapeHtml(id)}</span>`).join(', ')}, written for another service.</p>` : '';
   const errorSection = doc.error
     ? `<div class="code-block">${highlightWildcards(escapeHtml(doc.error))}</div>
        ${doc.error_lines.length ? `<p class="hint">Matched as: <span class="tmpl-text">${highlightWildcards(escapeHtml(doc.error_lines.join(' | ')))}</span>${doc.embedded ? '' : ' (embedding…)'}</p>` : ''}`
@@ -161,7 +202,7 @@ function renderDocPane() {
   $docPane.innerHTML = `
     <div class="pane-body">
       <header class="pane-head"><h2>${escapeHtml(doc.title || 'Untitled')}</h2>
-        <div class="pane-badges"><span class="tmpl-id">${escapeHtml(doc.doc_id)}</span>${badges}</div></header>
+        <div class="pane-badges"><span class="tmpl-id">${escapeHtml(doc.doc_id)}</span>${badges}</div>${versionBar}${basedOn}</header>
       ${drafting ? '<div class="pane-callout">Written by the LLM from the template text only. Read it in full and check every command before approving: approving links the template to it and makes it an active document.</div>' : ''}
       ${written}
       <section class="pane-section"><h3>ERROR · the log line(s) it is for</h3>${errorSection}</section>
@@ -201,6 +242,11 @@ function renderDocEditor() {
           ${approving ? '<div class="pane-callout">Saving approves this suggestion: the template is linked to it.</div>' : ''}</header>
         <div class="form-field"><label for="doc-f-title">Title</label><input id="doc-f-title" maxlength="200" required value="${escapeHtml(doc ? doc.title : '')}"></div>
         <div class="form-field"><label for="doc-f-code">Error code</label><input id="doc-f-code" maxlength="100" value="${escapeHtml(doc ? doc.error_code : '')}"></div>
+        <div class="form-field"><label for="doc-f-service">Service</label>
+          <select id="doc-f-service">
+            <option value="">Shared: every service</option>
+            ${docs.services.map(svc => `<option value="${escapeHtml(svc)}"${(doc ? doc.service === svc : docs.service === svc) ? ' selected' : ''}>${escapeHtml(svc)}</option>`).join('')}
+          </select></div>
         <div class="form-field"><label for="doc-f-verdict">Kind</label>
           <select id="doc-f-verdict">
             <option value="action"${doc && doc.verdict === 'safe' ? '' : ' selected'}>ERROR: something to fix</option>
@@ -232,6 +278,7 @@ async function saveDocument(event) {
     error: document.getElementById('doc-f-error').value,
     handling: document.getElementById('doc-f-handling').value,
     verdict: document.getElementById('doc-f-verdict').value,
+    service: document.getElementById('doc-f-service').value,
   };
   const submit = event.submitter;
   if (submit) submit.disabled = true;
@@ -280,7 +327,7 @@ async function decide(docIds, decision) {
 async function setKind(doc, verdict) {
   try {
     await apiMutation(docUrl(doc.doc_id), 'PUT', {revision: doc.revision, title: doc.title, error_code: doc.error_code,
-                                                 error: doc.error, handling: doc.handling, verdict});
+                                                 error: doc.error, handling: doc.handling, verdict});   // service kept
     showToast(`${doc.doc_id} is now ${verdict === 'safe' ? 'SAFE' : 'ERROR'}`);
   } catch (err) {
     showToast(err.status === 409 ? `${doc.doc_id} changed in another window; reloaded` : `Could not change ${doc.doc_id}: ${err.message}`, true);
@@ -336,6 +383,7 @@ $docPane.addEventListener('click', async event => {
   if (!button) return;
   const doc = selectedDoc();
   const act = button.dataset.act;
+  if (act === 'version') { selectDoc(button.dataset.docId); return; }
   if (act === 'edit') { docs.editing = true; renderDocPane(); return; }
   if (act === 'cancel') { docs.editing = false; if (!doc) docs.selected = docs.items.length ? docs.items[0].doc_id : null; renderDocPane(); return; }
   if (!doc) return;
@@ -367,6 +415,15 @@ document.getElementById('approve-safe-btn').addEventListener('click', async () =
   if (!(await confirmDialog(`${plural(safe.length, 'SAFE suggestion')} will become active documents linked to their templates: ${safe.join(', ')}.`,
     {title: 'Approve all SAFE suggestions?', confirmLabel: 'Approve', danger: false}))) return;
   decide(safe, 'confirm');
+});
+
+$docService.addEventListener('change', () => {
+  docs.service = $docService.value;
+  const shown = docs.items.filter(docMatches);
+  if (!shown.some(d => d.doc_id === docs.selected)) { docs.selected = shown.length ? shown[0].doc_id : null; docs.editing = false; }
+  renderKindCounts();
+  renderDocList();
+  renderDocPane();
 });
 
 document.querySelectorAll('#doc-kind-toggle .toggle-btn').forEach(button => button.addEventListener('click', () => {

@@ -161,3 +161,19 @@ def test_document_kind_error_or_safe(client, conn):
     assert client.post("/api/documents", json={"title": "t", "error": "e", "verdict": "maybe"}).status_code == 400
     plain = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
     assert {d["doc_id"]: d for d in client.get("/api/documents").get_json()}[plain["doc_id"]]["verdict"] == "action"
+
+
+def test_document_service_shared_by_default_kept_on_update(client, conn):
+    conn.execute("INSERT INTO services VALUES ('pay', 0), ('web', 1)")
+    conn.commit()
+    shared = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
+    owned = client.post("/api/documents", json={"title": "t", "error": "e", "service": "pay"}).get_json()
+    listed = lambda: {d["doc_id"]: d for d in client.get("/api/documents").get_json()}
+    assert listed()[shared["doc_id"]]["service"] is None and listed()[owned["doc_id"]]["service"] == "pay"
+    r = client.put(f"/api/documents/{owned['doc_id']}", json={"title": "t2", "error": "e", "revision": owned["revision"]})
+    assert listed()[owned["doc_id"]]["service"] == "pay"                    # left out: kept
+    client.put(f"/api/documents/{owned['doc_id']}", json={"title": "t2", "error": "e", "service": "",
+                                                          "revision": r.get_json()["revision"]})
+    assert listed()[owned["doc_id"]]["service"] is None                     # "" = shared
+    assert client.post("/api/documents", json={"title": "t", "error": "e", "service": "nope"}).status_code == 400
+    assert listed()[shared["doc_id"]]["based_on"] == []

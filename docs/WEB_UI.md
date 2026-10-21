@@ -136,6 +136,16 @@ filters it (title, error code, ERROR, Handling, template). Below 900 px the
 two stack. Two tabs (deep links `#documentation` and
 `#documentation/suggestions`):
 
+Every document belongs to a **service**, or is **shared** (applies to
+every service). The service filter shows one service's documents plus the
+shared ones, or "Shared only". With **All services**, documents whose ERROR
+lines are the same (after normalizing) form one row with a chip per
+service ("same ERROR in 3: recharge · topup · payment"), so one error is
+never listed three times; the pane has a switch between the services'
+versions. Automatic matching only uses a template's own service's and the
+shared documents. An AI suggestion belongs to its template's service and
+says which other services' documents it was adapted from.
+
 Every document is of one **kind**: **ERROR** (`verdict` `action`: an
 error, something to fix) or **SAFE** (`verdict` `safe`: normal operation,
 no action needed). The **All / ERROR / SAFE** buttons, with counts, filter
@@ -147,7 +157,7 @@ the list in both tabs.
   has embedded this revision; no ERROR line = never matched automatically),
   the Handling text (numbered steps written on one line are shown one per
   line), and the linked templates in full with their link source.
-  **Edit** opens the form in the pane (title, error code, kind, ERROR, Handling;
+  **Edit** opens the form in the pane (title, error code, service, kind, ERROR, Handling;
   a 409 `stale` says it changed in another window), **Delete** asks first
   and is refused while templates are linked. **Mark as SAFE / Mark as
   ERROR** changes only the kind, in one click. **Add document** opens an
@@ -256,8 +266,8 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `POST /api/templates/<service>/<template_id>/link/reject` | — | `{source}` | 404, 409 | `reload_links` |
 | `GET /api/templates/<service>/<template_id>/similar` | — | `{embedded, items}` | 404 | — |
 | `GET /api/documents` | query `status` (`active` default, `draft`, `rejected`) | `[document]` | 400 | — |
-| `POST /api/documents` | `{title, error?, handling?, error_code?, verdict?}` | `201 {doc_id, revision}` | 400 | — |
-| `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, verdict?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
+| `POST /api/documents` | `{title, error?, handling?, error_code?, verdict?, service?}` | `201 {doc_id, revision}` | 400 | — |
+| `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, verdict?, service?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
 | `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
 | `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, profiles, warnings}` | — | — |
@@ -406,7 +416,7 @@ template has no vector (then the list is empty).
 
 ### Documents
 
-- `GET /api/documents?status=active`: `[{doc_id, title, error_code, error,
+- `GET /api/documents?status=active`: `[{doc_id, service, based_on, title, error_code, error,
   handling, status, source, verdict, confidence, revision, embedded,
   error_lines, linked_templates}]` sorted by `doc_id`. `error_lines` = the
   ERROR field normalized as the linker embeds it; `embedded` = the linker
@@ -415,13 +425,15 @@ template has no vector (then the list is empty).
 - `POST`: `title` (≤ 200) required, and `error` (≤ 5000, ≤ 50 lines) or
   `handling` (≤ 20000) non-empty after trimming; `error_code` optional (≤
   100); `verdict` `action` (ERROR, the default) or `safe` (SAFE), else 400
-  `"verdict must be action or safe"`. The id is `DOC-` + the next number
+  `"verdict must be action or safe"`; `service` a known service, or `""` /
+  null for shared (the default), else 400 `"service must be a known
+  service, or empty for shared"`. The id is `DOC-` + the next number
   after the highest `DOC-<digits>` id, zero-padded to 3 (`DOC-013`); the
   table is locked during the insert so two creates never collide. 400
   `"<field> must be text of at most N characters"`, `"title and an ERROR or
   Handling text are required"` or `"error must have at most 50 lines"`.
-- `PUT`: same fields plus `revision`; a missing `verdict` keeps the
-  current kind; 404 `"Unknown document"`; 409 stale.
+- `PUT`: same fields plus `revision`; a missing `verdict` or `service`
+  keeps the current one; 404 `"Unknown document"`; 409 stale.
 - `DELETE`: 409 `linked` with the number of linked templates (the foreign
   key decides, so a link created concurrently is caught); 404.
 

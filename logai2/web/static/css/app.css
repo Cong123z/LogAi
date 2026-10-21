@@ -977,3 +977,7 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 #template-tbody .tmpl-text { min-width:34ch; }
 .kind-count { font-size:11px; opacity:.8; margin-left:2px; }
 .kind-count:empty { display:none; }
+.svc-chip { display:inline-block; padding:1px 8px; border-radius:999px; border:1px solid var(--border); font-size:11px; font-family:var(--font-mono); color:var(--text-dim); }
+.svc-chip.shared { border-style:dashed; }
+.versions { display:flex; flex-wrap:wrap; gap:6px; align-items:center; font-size:12px; color:var(--text-dim); }
+.versions .toggle-btn { padding:4px 10px; font-size:12px; border:1px solid var(--border); border-radius:var(--radius-sm); }

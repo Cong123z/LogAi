@@ -179,7 +179,16 @@ field (incident runbooks such as DOC-016/017/018) is never auto-matched.
 | 4 | `draft` | the LLM writes a suggested document, action or SAFE (section 4a) | no, until approved |
 
 The operator can confirm any automatic link (it becomes manual) or reject
-it. Same level class only: an ERROR line must not inherit a document from an
+it.
+
+**Documents per service** (decided 2026-10-21): a document belongs to one
+service, or is shared by all. One shared document stretched across services
+would turn vague over time, so each service gets its own specific runbook:
+layers 2–3 only use the template's service's and shared documents, and when
+another service already documents a similar error, the LLM adapts that
+document into a draft for this service. The All-services view groups
+documents with the same ERROR line into one row, so the same error is not
+listed once per service. Same level class only: an ERROR line must not inherit a document from an
 INFO "success" line, however similar the wording.
 
 **Thresholds per level class** (defaults are guesses; tune on real data):

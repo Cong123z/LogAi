@@ -147,3 +147,16 @@ def test_links_are_kept_while_a_template_or_its_source_waits_for_a_new_vector(co
     assert links(conn) == {"C": ("corpus", "D1"), "X": ("inherited", "D1")}
     conn.execute("DELETE FROM template_doc_links WHERE template_id = 'M'")   # the source is gone for good
     assert apply_links(conn, docs) is True and links(conn) == {"C": ("corpus", "D1")}
+
+
+def test_corpus_matching_stays_within_the_service_plus_shared(conn, docs):
+    doc(conn, "SHARED", vec((0, 1.0)))
+    doc(conn, "A_DOC", vec((5, 1.0)))
+    conn.execute("UPDATE documents SET service = 'a' WHERE doc_id = 'A_DOC'")
+    tmpl(conn, "B1", v=vec((5, 1.0)), service="b")      # same error as A_DOC, other service: not linked
+    tmpl(conn, "B2", v=vec((0, 1.0)), service="b")      # shared document: linked
+    tmpl(conn, "A1", v=vec((5, 1.0)), service="a")
+    apply_links(conn, docs)
+    assert links(conn) == {"A1": ("corpus", "A_DOC"), "B2": ("corpus", "SHARED")}
+    assert [c["doc_id"] for c in candidates(conn, "b", "B1", 3, 0.5)] == []
+    assert [(c["doc_id"], c["service"]) for c in candidates(conn, "b", "B1", 3, 0.5, other_services=True)] == [("A_DOC", "a")]

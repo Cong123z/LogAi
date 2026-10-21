@@ -128,6 +128,7 @@
             <button class="toggle-btn active" role="tab" aria-selected="true" data-doc-mode="active">Documents</button>
             <button class="toggle-btn" role="tab" aria-selected="false" data-doc-mode="draft">AI suggestions<span class="count-pill" id="doc-draft-count" hidden></span></button>
           </div>
+          <select class="filter-select" id="doc-service" aria-label="Service"><option value="">All services</option></select>
           <div class="toggle-group" id="doc-kind-toggle" role="group" aria-label="Filter by kind">
             <button class="toggle-btn active" data-doc-kind="" aria-pressed="true">All <span class="kind-count" data-count=""></span></button>
             <button class="toggle-btn" data-doc-kind="action" aria-pressed="false" title="Documents for errors: something to fix">ERROR <span class="kind-count" data-count="action"></span></button>

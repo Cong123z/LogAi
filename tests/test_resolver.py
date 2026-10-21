@@ -169,3 +169,16 @@ def test_all_profiles_down_stops_the_cycle_without_blaming_templates(conn, cfg, 
     resolver.run(status)
     assert status["warnings"] == ["LLM unavailable: no active LLM profile answered"]
     assert resolver._failed == {} and resolver._spent == []
+
+
+def test_a_draft_is_written_for_the_templates_service_from_other_services_documents(conn, cfg, profile):
+    doc(conn, "A_DOC", vec((0, 1.0)))
+    conn.execute("UPDATE documents SET service = 'a', handling = 'restart the a pool' WHERE doc_id = 'A_DOC'")
+    tmpl(conn, "B1", v=at(0.9, 5), service="b"), alerting(conn, "B1", "b")
+    chat = Chat({"title": "Pool timeout on b", "handling": "restart the b pool"})
+    run(conn, cfg, chat)
+    asked = chat.seen[0]                                    # no own-service candidate: straight to the suggestion
+    assert "documents" not in asked and [r["doc_id"] for r in asked["references"]] == ["A_DOC"]
+    assert asked["references"][0]["service"] == "a" and "adapt" in asked["task"]
+    d = conn.execute("SELECT service, based_on, status FROM documents WHERE title = 'Pool timeout on b'").fetchone()
+    assert d == {"service": "b", "based_on": ["A_DOC"], "status": "draft"}
