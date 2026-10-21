@@ -11,6 +11,9 @@ The code and tests are the source of truth; fix a doc that disagrees.
   (`docker compose up -d postgres`).
 - Stage by explicit path; no `Co-Authored-By` / AI attribution in commits.
 - `agents.md` is the local, git-ignored work log; add an entry per task.
+- After a build is done (every task reviewed and merged into `master`), run
+  `graphify update .` in the main checkout (`~/Documents/logai2`). The graph
+  (`graphify-out/`, untracked) lives only there, not in worktrees.
 
 ## Team workflow (when the user says to use it)
 Planned in docs/TEAM_WORKFLOW.md — read it before starting. In short:

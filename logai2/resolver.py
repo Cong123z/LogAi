@@ -167,6 +167,7 @@ class Resolver:
             status["llm"] = done
             progress()
         status["llm"] = done
+        status["llm_today"] = day
         status["llm_profiles"] = {p["name"]: {"down_until": self._down.get(p["name"], (None, None))[0],
                                               "error": self._down.get(p["name"], (None, None))[1],
                                               "answers": self.answers.get(p["name"], 0)}

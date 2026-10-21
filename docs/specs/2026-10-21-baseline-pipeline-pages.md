@@ -1,7 +1,7 @@
 # Baseline, Review and Pipeline pages: what they show (sub-project 9, phases 1–2)
 
-Date: 2026-10-21. Status: **approved direction, detail for review**. Not
-built. Design: [`per-service-baseline.md` section 9](../design/per-service-baseline.md)
+Date: 2026-10-21. Status: **built** on branch `console-watchdog`
+(2026-10-22; see "Where the code differs from this spec" at the end). Design: [`per-service-baseline.md` section 9](../design/per-service-baseline.md)
 (adopted from Antigravity's
 [`AGY-PROP-2026-002`](../design/antigravity-proposal-datadog-visual-watchdog.md)).
 Phase 3 (Watchdog tags on Alerting and Templates) is specified in the
@@ -117,8 +117,8 @@ Layout, top to bottom:
   - **Fill** (`visualMap` piecewise, diverging, 9 steps): gray for
     `|z| ≤ k` (inside the band; k = 3 full, 4 young), then three warm
     steps above (k..6, 6..10, > 10) and three cool steps below. Below the
-    band only colors for `*total` and `*error` (drops); for templates and
-    documents it stays gray (they never alert low).
+    band only colors where the detector raises a drop: `*total`, full
+    profile, mean ≥ `drop.min_mean`; everywhere else it stays gray.
   - **No baseline** for that hour (no committed day, or mean = std = 0):
     a neutral outline cell; with events against a zero baseline, the top
     warm step and "no normal traffic at this hour" in the tooltip.
@@ -282,7 +282,7 @@ baseline shows its line and "no baseline yet (floor only)".
 ### 3B.3 Possible incidents
 
 A **possible incident** = consecutive hours whose hourly rate is above the
-band (or, for `*total` / `*error` on a profile that alerts low, below it).
+band (or, where the detector raises a drop, below it: `*total` on a full profile with mean ≥ `drop.min_mean`).
 It is an hourly view: detection judges minutes, so an hour can alert while
 its average stays inside the band (Review lists those). Table, newest
 first: when (`Tue 20 Oct 02:00–04:00`, or `13:00–now`), **state** (`●
@@ -488,3 +488,27 @@ retention), so a resolved incident still shows its evidence on Baseline.
    event for 5 min while ES has newer docs)?
 2. Small multiples: cap at 6 services, sorted by deviation?
 3. Matrix z steps (k, 6, 10) fine, or tune on the live data first?
+
+## Where the code differs from this spec
+
+The code and tests are the source of truth; the pages as built are in
+[`docs/WEB_UI.md`](../WEB_UI.md). Intentional differences:
+
+- Linker is Degraded only when `last_error` is set; "pending growing" is
+  dropped because the status keeps no pending history.
+- The Prometheus headline is "metrics export".
+- The Templates headline counts templates first seen in the last 24 h.
+- The matrix tooltip has no key count (the API gives only
+  `not_normal_minutes`).
+- The Postgres flush detail has no next commit time.
+- A zero baseline (mean 0, σ 0) with events is the darkest warm step (`up3`);
+  no baseline row or no committed days is `none`.
+- A template first seen in the selection is listed under "New templates"
+  only, not also under "Increased".
+- After a decision leaves nothing to review, the inspector closes and the
+  "takes effect" note stays in the status line.
+- A Pipeline small multiple opens `#baseline/<service>/*total/1` (today).
+- `main.js` keeps everything after the first `/` of the hash in
+  `state.subView`, for the multi-segment Review and Baseline routes.
+- ECharts 5.5.1 is vendored from the jsDelivr npm build (same official
+  build).

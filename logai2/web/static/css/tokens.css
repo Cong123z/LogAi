@@ -31,6 +31,21 @@
   --gray-bg: rgba(148, 163, 184, 0.12);
   --overlay: rgba(2, 6, 23, 0.65);
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --chart-down3: #93c5fd;
+  --chart-down2: #3b82f6;
+  --chart-down1: #1e3a8a;
+  --chart-in: #2a3550;
+  --chart-up1: #7c2d12;
+  --chart-up2: #ea580c;
+  --chart-up3: #fdba74;
+  --chart-seq1: #312e81;
+  --chart-seq2: #4338ca;
+  --chart-seq3: #6366f1;
+  --chart-seq4: #a5b4fc;
+  --chart-band: rgba(148, 163, 184, 0.22);
+  --chart-line: #e2e8f0;
+  --chart-lastweek: #94a3b8;
+  --chart-grid: #26324a;
   --radius: 6px;
   --radius-sm: 4px;
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -70,6 +85,21 @@
     --gray-bg: rgba(100, 116, 139, 0.12);
     --overlay: rgba(15, 23, 42, 0.45);
     --shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+    --chart-down3: #1d4ed8;
+    --chart-down2: #60a5fa;
+    --chart-down1: #bfdbfe;
+    --chart-in: #e5e9f0;
+    --chart-up1: #fed7aa;
+    --chart-up2: #fb923c;
+    --chart-up3: #c2410c;
+    --chart-seq1: #e0e7ff;
+    --chart-seq2: #a5b4fc;
+    --chart-seq3: #6366f1;
+    --chart-seq4: #3730a3;
+    --chart-band: rgba(100, 116, 139, 0.18);
+    --chart-line: #0f172a;
+    --chart-lastweek: #64748b;
+    --chart-grid: #e8edf3;
   }
 }
 :root[data-theme="light"] {
@@ -103,4 +133,19 @@
   --gray-bg: rgba(100, 116, 139, 0.12);
   --overlay: rgba(15, 23, 42, 0.45);
   --shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+  --chart-down3: #1d4ed8;
+  --chart-down2: #60a5fa;
+  --chart-down1: #bfdbfe;
+  --chart-in: #e5e9f0;
+  --chart-up1: #fed7aa;
+  --chart-up2: #fb923c;
+  --chart-up3: #c2410c;
+  --chart-seq1: #e0e7ff;
+  --chart-seq2: #a5b4fc;
+  --chart-seq3: #6366f1;
+  --chart-seq4: #3730a3;
+  --chart-band: rgba(100, 116, 139, 0.18);
+  --chart-line: #0f172a;
+  --chart-lastweek: #64748b;
+  --chart-grid: #e8edf3;
 }

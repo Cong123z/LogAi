@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **not built**.
+Status: **built** (branch `console-watchdog`).
 
 **Goal:** A chart-only Baseline page (a service or one template against its baseline, with the period's possible incidents), a new Review page for every exclude/keep decision, and a rebuilt Pipeline page (sub-project 9, phases 1–2), all drawn with Apache ECharts.
 

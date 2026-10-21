@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
@@ -20,7 +20,10 @@ from logai2.config import AppConfig
 from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
-from logai2.timeutil import day_hour, daytype, minute_of
+from logai2.timeutil import TZ, day_hour, minute_of
+from logai2.web.baseline_view import UnknownKey, incident, inspect, left_days, matrix, series
+from logai2.web.pipeline_view import service_data, stage_states, volume
+from logai2.web.pipeline_view import services as service_rows
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
@@ -182,8 +185,18 @@ def create_app(cfg: AppConfig) -> Flask:
         row = conn().execute("SELECT status FROM worker_status WHERE worker = 'linker'").fetchone()
         linker = row["status"] if row else None
         linker_stale = linker is None or time.time() - (linker.get("heartbeat") or 0) > LINKER_STALE_SECONDS
-        return jsonify({"status": status or None, "cursors": cursors, "stale": stale,
-                        "linker": linker, "linker_stale": linker_stale})
+        light = {"status": status or None, "cursors": cursors, "stale": stale,
+                 "linker": linker, "linker_stale": linker_stale}
+        if request.args.get("lite"):      # the header pill polls this on every page: skip the per-service queries
+            return jsonify(light)
+        now = time.time()
+        day, hour = day_hour(minute_of(now))
+        data = service_data(conn(), cfg, day)
+        rows = service_rows(conn(), cfg, status, day, hour, data)
+        return jsonify({**light, "services": rows, "llm_daily_max": cfg.llm.daily_max,
+                        "volume": volume(conn(), cfg, day, hour, data),
+                        "stages": stage_states(status, stale, linker, linker_stale,
+                                               sum(r["unparsed_1h"] for r in rows), now)})
 
     @app.get("/api/sources")
     def sources():
@@ -394,10 +407,72 @@ def create_app(cfg: AppConfig) -> Flask:
         c.commit()
         return jsonify({"doc_id": doc_id})
 
+    def parse_range(args, strict: bool = False) -> tuple[date, int, int]:
+        """day, hour_from, hour_to of a query string, or of a JSON body with strict=True (hours must be real ints)."""
+        try:
+            day = date.fromisoformat(args.get("day"))
+        except (TypeError, ValueError):
+            raise BadRequest("day must be an ISO date (YYYY-MM-DD)") from None
+        try:
+            hour_from, hour_to = args.get("hour_from"), args.get("hour_to")
+            if not strict:
+                hour_from, hour_to = int(hour_from), int(hour_to)
+            if not (type(hour_from) is int and type(hour_to) is int and 0 <= hour_from < hour_to <= 24):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise BadRequest("hours must be whole numbers with 0 <= hour_from < hour_to <= 24") from None
+        return day, hour_from, hour_to
+
     def known_service(service: str | None) -> str:
         if not service or not conn().execute("SELECT 1 FROM services WHERE service = %s", (service,)).fetchone():
             abort(404, "Unknown service")
         return service
+
+    @app.get("/api/baseline/matrix")
+    def baseline_matrix():
+        service = known_service(request.args.get("service"))
+        try:
+            ndays = int(request.args.get("days", "14"))
+            if not 1 <= ndays <= 28:
+                raise ValueError
+        except ValueError:
+            raise BadRequest("days must be an integer from 1 to 28") from None
+        try:
+            return jsonify(matrix(conn(), cfg, service, request.args.get("key", "*total"), ndays,
+                                  datetime.now(TZ).date(), time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
+
+    @app.get("/api/baseline/inspect")
+    def baseline_inspect():
+        service = known_service(request.args.get("service"))
+        day, hour_from, hour_to = parse_range(request.args)
+        try:
+            return jsonify(inspect(conn(), cfg, service, request.args.get("key", "*total"), day,
+                                   hour_from, hour_to, time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
+
+    @app.get("/api/baseline/series")
+    def baseline_series():
+        service = known_service(request.args.get("service"))
+        if request.args.get("days", "14") not in ("1", "7", "14"):
+            raise BadRequest("days must be 1, 7 or 14")
+        try:
+            return jsonify(series(conn(), cfg, service, request.args.get("key", "*total"),
+                                  int(request.args.get("days", "14")), datetime.now(TZ).date(), time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
+
+    @app.get("/api/baseline/incident")
+    def baseline_incident():
+        service = known_service(request.args.get("service"))
+        day, hour_from, hour_to = parse_range(request.args)
+        try:
+            return jsonify(incident(conn(), service, request.args.get("key", "*total"), day,
+                                    hour_from, hour_to, time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
 
     @app.get("/api/baseline")
     def baseline_review():
@@ -417,19 +492,14 @@ def create_app(cfg: AppConfig) -> Flask:
             d["created_at"] = d["created_at"].timestamp()
         last_commit, _ = setting("last_commit")
         return jsonify({"days": days, "suggestions": suggestions, "decisions": decisions,
-                        "last_commit": last_commit,
+                        "last_commit": last_commit, "commit_time": cfg.baseline.commit_time,
                         "full_after_days": {dt: full_after(cfg, dt) for dt in DAY_CAP}})
 
     @app.post("/api/baseline/decisions")
     def add_decision():
         payload = body()
-        try:
-            day = date.fromisoformat(payload.get("day"))
-        except (TypeError, ValueError):
-            raise BadRequest("day must be an ISO date (YYYY-MM-DD)") from None
-        hour_from, hour_to, decision = payload.get("hour_from"), payload.get("hour_to"), payload.get("decision")
-        if not (type(hour_from) is int and type(hour_to) is int and 0 <= hour_from < hour_to <= 24):
-            raise BadRequest("hours must be whole numbers with 0 <= hour_from < hour_to <= 24")
+        day, hour_from, hour_to = parse_range(payload, strict=True)
+        decision = payload.get("decision")
         if decision not in ("exclude", "keep"):
             raise BadRequest("decision must be 'exclude' or 'keep'")
         service = known_service(payload.get("service"))
@@ -440,17 +510,9 @@ def create_app(cfg: AppConfig) -> Flask:
         new_id = c.execute("INSERT INTO review_exclusions (service, day, hour_from, hour_to, decision) "
                            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
                            (service, day, hour_from, hour_to, decision)).fetchone()["id"]
-        # Hours of this range left with < 3 of the days the rebuild uses (jobs/commit.py: last 5
-        # committed weekdays / last 4 weekend days): their baseline comes from only those few days.
-        kind = daytype(day)
-        short = [r["h"] for r in c.execute(
-            "WITH picked AS (SELECT day FROM day_status WHERE service = %s AND committed AND daytype = %s "
-            "                ORDER BY day DESC LIMIT %s) "
-            "SELECT h FROM generate_series(%s::int, %s::int - 1) h WHERE ("
-            "  SELECT count(*) FROM picked p WHERE NOT EXISTS (SELECT 1 FROM review_exclusions x "
-            "    WHERE x.service = %s AND x.day = p.day AND x.decision = 'exclude' "
-            "    AND h >= x.hour_from AND h < x.hour_to)) < 3 ORDER BY h",
-            (service, kind, DAY_CAP[kind], hour_from, hour_to, service))] if decision == "exclude" else []
+        # Hours of this range left with < 3 of the days the rebuild uses: their baseline comes from only those few.
+        short = [d["hour"] for d in left_days(c, service, day, hour_from, hour_to, True) if d["days"] < 3] \
+            if decision == "exclude" else []
         c.commit()
         out = {"id": new_id}
         if short:

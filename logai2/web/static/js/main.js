@@ -8,21 +8,26 @@ const viewTitles = {
   sources: 'Data sources',
   llm: 'LLM profiles',
   baseline: 'Baseline',
+  review: 'Review',
 };
-// Templates polls only through its Auto-refresh toggle; Documentation and
-// Baseline load on entry and after each change (Baseline polls a running recompute).
+// Templates polls only through its Auto-refresh toggle; Documentation, Baseline and
+// Review load on entry and after each change (Review polls a running recompute).
 const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000};
 const viewOrder = Object.keys(viewTitles);
 
-// A route may carry a sub-view after a slash (#documentation/suggestions); the view reads state.subView.
+// A route may carry a sub-view after the first slash (#documentation/suggestions, #review/svc/key/14); the view reads state.subView.
 function setView(route, updateHash = true) {
-  let [view, sub] = String(route).split('/');
+  route = String(route);
+  const slash = route.indexOf('/');
+  let view = slash < 0 ? route : route.slice(0, slash);
+  const sub = slash < 0 ? '' : route.slice(slash + 1);
   if (!viewTitles[view]) view = 'pipeline';
   state.subView = sub || '';
   const previousView = state.activeView;
   const previousIndex = viewOrder.indexOf(previousView);
   const nextIndex = viewOrder.indexOf(view);
   const direction = nextIndex > previousIndex ? 'slide-from-right' : 'slide-from-left';
+  if (previousView !== view) disposeCharts();
   state.activeView = view;
   document.querySelectorAll('.view').forEach(section => {
     const active = section.id === `view-${view}`;
@@ -103,8 +108,12 @@ document.getElementById('theme-toggle').addEventListener('click', () => {
   document.documentElement.dataset.theme = next;
   try { localStorage.setItem('logai.theme', next); } catch (e) { /* storage unavailable */ }
   updateThemeToggle();
+  disposeCharts(); loadData();
 });
 updateThemeToggle();
+window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+  updateThemeToggle(); disposeCharts(); loadData();
+});
 
 // ── Sidebar: collapse to an icon rail on desktop (remembered per browser) ──
 const $sidebar = document.querySelector('.sidebar');
@@ -127,7 +136,7 @@ async function refreshHealth() {
   const text = document.getElementById('engine-health-text');
   let label = 'Web unreachable', cls = 'unavailable', since = null;
   try {
-    const data = await getJson('/api/pipeline', 'Unable to load pipeline');
+    const data = await getJson('/api/pipeline?lite=1', 'Unable to load pipeline');
     since = data.status && data.status.heartbeat;
     cls = data.stale ? 'unavailable' : ((data.status.warnings || []).length ? 'degraded' : 'healthy');
     label = {healthy: 'Engine healthy', degraded: 'Engine degraded', unavailable: 'Engine unavailable'}[cls];
@@ -158,6 +167,8 @@ async function loadData() {
       await loadLlmPage();
     } else if (state.activeView === 'baseline') {
       await loadBaseline();
+    } else if (state.activeView === 'review') {
+      await loadReview();
     }
     document.getElementById('connection-status').hidden = true;
     if (state.reconnectTimer) {

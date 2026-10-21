@@ -38,10 +38,11 @@ theme).
 | Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
 | LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
-| Baseline | `/#baseline` | on entry, after each change, and every 1 s while a recompute runs | `GET /api/services`, `/api/baseline` |
+| Baseline | `/#baseline/<service>/<key>/<days>` | on entry and after each change; no timers | `GET /api/services`, `/api/templates`, `/api/baseline/series`, `/api/baseline/matrix`, `/api/baseline/incident` |
+| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
-(Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline). The top
+(Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline, Review). The top
 bar has an **engine health pill**, refreshed every 5 s from `/api/pipeline`:
 red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 (degraded) when the engine reports warnings, green otherwise.
@@ -75,22 +76,101 @@ without a successful poll.
 
 ## Pipeline
 
-Live engine status from `worker_status`, written at every flush:
+Live status from `worker_status` (engine and linker) and the database,
+refreshed by polling `/api/pipeline`. All charts are ECharts; every poll
+updates the existing chart instances.
 
-- status line (running / not running with the last heartbeat / never
-  reported) and the engine's warnings (ES unreachable, high miss ratio);
-- **Lag** (amber above 5 min), **Events/s** since the last flush, **Cache
-  hit ratio**, and a sparkline of events/s over the last 60 heartbeats (kept
-  only in the browser tab);
-- **Detection** On/Off ("catching up; counts only" until the first
-  catch-up commit), **Bootstrap** (`since`, `until`), **Last commit**
-  (time and baseline day);
-- **Linker**: Running / Stale (no report for 90 s) / Not running, with its
-  pending counts (templates and documents waiting for a vector) or its last
-  error;
+- status line (engine running with its heartbeat / not running with the last
+  heartbeat and "Showing its last numbers" / never reported) and the engine's
+  warnings;
+- **Topology**: eight stage nodes (Elasticsearch, Reader, Templates, Minutes
+  & detection, Postgres flush, Prometheus on the main row; Linker and LLM
+  resolver above, with Linker to Postgres flush dashed "via Postgres"). Each
+  node's border and word show OK / Degraded / Down as the server reports it
+  (`stages`; the page never recomputes a status). Headline and second line
+  per stage:
+
+  | Stage | Headline | Second line |
+  |---|---|---|
+  | Elasticsearch | `N / M indices` not failing | oldest position age |
+  | Reader | events/s (15-min average) | cache hit ratio |
+  | Templates | templates in all services | new in 24 h, unparsed lines in the last hour |
+  | Minutes & detection | lag | detection On/Off, keys not NORMAL |
+  | Postgres flush | last flush time | slowest flush of the last 15 min |
+  | Prometheus | "metrics export" | "scraped by Prometheus" |
+  | Linker | pending templates + documents | links changed last cycle or not |
+  | LLM resolver | "N / M in 24 h" (`llm_today` of `llm_daily_max`: rolling 24 h LLM calls counted against `llm.daily_max`, including calls that wrote nothing) | profiles up / down |
+
+  Particles move along the main row at a speed stepped by events/s; they stop
+  under reduced motion or when the engine is not running. Click a stage for
+  its details under the chart (index table, per-service table, flush and
+  commit times with late counts, linker pending and last error, LLM profiles
+  with state and answers);
+- six tiles: **Lag now** (amber above 5 min), **Events/s** (15-min average),
+  **Cache hit ratio**, **Late counts** (since start; should stay 0),
+  **Detection**, **Bootstrap**;
+- **Lag, last 60 min** and **Events/s, last 60 min**: one point per minute
+  from the engine's `history`; a dashed line at 5 min marks where lag turns
+  Degraded;
+- **Volume vs expected, today**: small multiples per service (worst first, 6
+  shown, "Show all N" for the rest): today's hourly rate, the `*total`
+  expected band, the same hour last week (dashed), out-of-band hours as dots.
+  Click one to open Baseline for that service, today;
+- **Services** table (sortable): events/min this hour, change vs last week,
+  z against the expected band (a badge beyond 3), 5-min miss ratio,
+  templates, new in 24 h, unparsed in 1 h, keys not NORMAL. A row click
+  filters the Reader and Templates details to that service;
 - a table of indices: position, floor, and `failing` / `caught up` /
   `catching up` / `not reading` (an `es_cursors` row the engine no longer
   reports).
+
+Stage rules (constants in `logai2/web/pipeline_view.py`):
+
+| Stage | Degraded | Down |
+|---|---|---|
+| Elasticsearch | an index failing, one more than 5 min behind, or engine stale (position unknown) | all indices failing |
+| Reader | a high-miss-ratio warning | engine stale, or 5 minutes of history at 0 events/s while an index is not caught up |
+| Templates | any unparsed line in the last hour | — |
+| Minutes & detection | lag over 5 min, or detection off | engine stale |
+| Postgres flush | slowest flush of the last 15 min over 10 s, or last commit older than 26 h | engine stale |
+| Prometheus | — | — (always OK) |
+| Linker | `last_error` set | no linker status, or stale |
+| LLM resolver | a profile down | no linker, no active profile, or all profiles down |
+
+## Review
+
+Route `#review/<service>/<key>/<days>[/<day>/<hour_from>/<hour_to>]` (the
+selection part is optional; `main.js` keeps everything after the first `/`
+in `state.subView`). This is the only page that records decisions.
+
+- header: a service select, **Show** (All events, Errors, a document, or a
+  template id), 14 / 28 days, **Recompute baseline** (queues
+  `recompute_baseline` and polls the command every second until it reports
+  `days_committed` and `baseline_rows`, or an error);
+- cards: **weekday profile** and **weekend profile** (none, young, full,
+  borrowed; with the days counted and the multiplier k), **To review**
+  (opens the first one), **Last commit**;
+- **Days x hours**: an ECharts heatmap (or a table, by the Chart / Table
+  toggle). One cell per hour, coloured by how far the rate was from the
+  baseline (`z = (rate - mean) / sigma`): seven steps, neutral for no
+  baseline. Marks: a triangle needs review, a cross excluded, a tick kept,
+  a dot a day the next rebuild uses. Click selects, shift+click extends
+  within the day, arrow keys move, Enter selects. The side lists show **To
+  review** (periods in which any key of the service was not NORMAL and that
+  have no decision) and **Decisions** with **Undo**;
+- **Inspector** for the selection: a sentence (peak rate and z, expected
+  mean and sigma, minutes not NORMAL, keys that left NORMAL, whether the day
+  is in the baseline, an earlier decision), the whole day against the
+  expected band, **Increased** templates (bar chart and table: rate,
+  expected, times normal, minutes not NORMAL, document), **New templates**,
+  **Keys that left NORMAL** with their periods, and the buttons **Exclude:
+  real incident** / **Keep: normal** (a note says what the days left would be
+  and warns below 3; decisions take effect at the next commit or Recompute);
+- **Coverage**: usable days per hour for weekday and weekend, out of the
+  days the rebuild picks (5 weekdays, 4 weekend days); an hour with fewer than
+  3 has an orange outline and falls back to floor-only alerts.
+
+Unreviewed hours are kept in the baseline.
 
 ## Templates
 
@@ -240,28 +320,28 @@ empty key keeps the saved one.
 
 ## Baseline
 
-Per service (a select lists every service the engine has seen):
+Route `#baseline/<service>/<key>/<days>` (days 1, 7 or 14). Read-only: it
+shows how one key behaved against its baseline; decisions are made on the
+Review page.
 
-- cards: committed **weekday** and **weekend** days with the profile in use
-  ("No days yet: floor-only alerts" / "weekday profile, upper alerts only",
-  "Young: mean ± 4σ until N days", "Full: mean ± 3σ"; N is 5 for weekdays
-  and 4 for weekends), open suggestions, last commit (time and owner day);
-- **Suggestions**: periods in which any key of the service was not NORMAL,
-  as whole local hours per day, with the keys involved, and two buttons:
-  **Exclude: real incident** and **Keep: normal**. Unreviewed hours are
-  kept in the baseline;
-- **Add a range**: day, from, to, decision, for hours the engine did not
-  suggest;
-- **Decisions** with **Undo** (the hours are suggested again);
-- **Days**: every day in `day_status`, weekday/weekend, committed;
-- **Recompute baseline now**: queues `recompute_baseline` and polls the
-  command every second until it reports `days_committed` and
-  `baseline_rows` (or an error).
-
-An exclusion that leaves an hour with fewer than 3 of the days the rebuild
-uses (last 5 weekdays / 4 weekend days of that day type) shows a "Few
-baseline days left" warning. Decisions take effect at the next commit or
-recompute.
+- header: a service select, **Show** (All events, Errors, a document, or a
+  template) and Today / 7 days / 14 days;
+- cards: **Now** (rate and its distance from the band), **Possible
+  incidents** (count and hours outside the band), **Needs review** (links to
+  Review), **Baseline** (Full, Young, Borrowed or None yet);
+- **Actual vs expected**: an ECharts line of the hourly rate against the
+  expected band and the same hour last week, with out-of-band stretches
+  shaded as possible incidents and a cross / tick where Review excluded /
+  kept the period; zoom by scroll or drag;
+- **Possible incidents**: runs of consecutive hours outside the band (an
+  hourly view; detection judges minutes), with when, state (ongoing /
+  resolved), duration, peak, expected, times normal and decision (excluded, kept, or
+  "review" when the keys left NORMAL and nothing is decided). A row zooms the
+  chart and loads the **Incident** detail: modules the lines came from and,
+  for an ongoing incident, the newest sample lines;
+- **Days x hours**: the same grid as Review, read-only;
+- **The baseline itself**: weekday band and mean, weekend mean (dashed), and
+  today so far.
 
 ## HTTP API
 
@@ -272,7 +352,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 |---|---|---|---|---|
 | `GET /` | — | `index.html` | — | — |
 | `GET /static/<path>` | — | static file | 404 | — |
-| `GET /api/pipeline` | — | `{status, cursors, stale, linker, linker_stale}` | — | — |
+| `GET /api/pipeline` | query `lite=1` (only `status, cursors, stale, linker, linker_stale`: the header pill's poll) | `{status, cursors, stale, linker, linker_stale, services, llm_daily_max, volume, stages}` | — | — |
 | `GET /api/sources` | — | `{selection, connection, available_indices, resolution, indices}` | — | — |
 | `PUT /api/sources/selection` | `{patterns: [str], revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
@@ -293,7 +373,11 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` | `{name, revision}` | 400, 409 | — |
 | `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
 | `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
-| `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, full_after_days}` | 404 | — |
+| `GET /api/baseline/matrix` | query `service`, `key` (default `*total`), `days` (1–28, default 14) | `{service, key, k, days, coverage, profiles}` | 400, 404 | — |
+| `GET /api/baseline/inspect` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{sentence, day, increased, new, keys, left_days}` | 400, 404 | — |
+| `GET /api/baseline/series` | query `service`, `key`, `days` (1, 7 or 14, default 14) | `{key, baseline_state, points, incidents, profile}` | 400, 404 | — |
+| `GET /api/baseline/incident` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{ongoing, modules, samples}` | 400, 404 | — |
+| `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, commit_time, full_after_days}` | 404 | — |
 | `POST /api/baseline/decisions` | `{service, day, hour_from, hour_to, decision}` | `201 {id, warning?}` | 400, 404 | — |
 | `DELETE /api/baseline/decisions/<id>` | — | `{id}` | 404 | — |
 | `POST /api/baseline/recompute` | — | `202 {id}` | — | `recompute_baseline` |
@@ -322,8 +406,38 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 heartbeat is missing or older than 30 s. `linker` is
 `worker_status['linker']` (`heartbeat`, `embedded_templates`,
 `embedded_documents`, `links_changed`, `pending {templates, documents}`,
-`warnings`, `last_error`) or null; `linker_stale` is true when it is missing
-or older than 90 s.
+`warnings`, `last_error`, `llm`, `llm_today`, `llm_profiles`) or null;
+`linker_stale` is true when it is missing or older than 90 s.
+
+`services` has one row per service, worst `|z|` first and services without a
+baseline last; `volume` and `stages` follow. `rate` and `last_week` are
+events per minute in the current hour and the same hour a week earlier,
+`z` is against the `*total` expected band (null without a baseline),
+`unparsed_1h` is the `<service>:unparsed` count of the current hour:
+
+```json
+{"services": [{"service": "recharge", "rate": 412.0, "last_week": 380.5, "z": 1.4,
+               "miss_ratio": 0.02, "templates": 87, "new_24h": 3,
+               "unparsed_1h": 0, "not_normal": 1}],
+ "volume": [{"service": "recharge",
+             "hours": [{"hour": 0, "rate": 120.0, "band_low": 80.0, "band_high": 170.0, "last_week": 118.2, "out": false}]}],
+ "stages": {"elasticsearch": {"status": "ok", "reason": null},
+            "reader": {"status": "ok", "reason": null},
+            "templates": {"status": "warn", "reason": "4 unparsed lines in the last hour"},
+            "detection": {"status": "ok", "reason": null},
+            "flush": {"status": "ok", "reason": null},
+            "prometheus": {"status": "ok", "reason": null},
+            "linker": {"status": "ok", "reason": null},
+            "llm": {"status": "bad", "reason": "no active LLM profile"}}}
+```
+
+`volume[].hours` runs from hour 0 to the current hour; `rate` is null for
+an hour with no `service_hours` row, whose band is still given. `stages`
+status is `ok`, `warn` (Degraded) or `bad` (Down); the rules are in the
+Pipeline section. The `status` object also carries `flush_seconds`,
+`flush_seconds_max`, `late_counts`, `events_per_second_15m` and `history`
+(`[{t, lag, eps}]`, one point per wall minute, 60 kept); see ARCHITECTURE
+§10.5.
 
 ### `GET /api/sources`
 
@@ -501,11 +615,107 @@ template has no vector (then the list is empty).
 404 `"Unknown service"` for a missing or unknown `service`. Days and
 decisions are newest first. Not paginated.
 
+### `GET /api/baseline/matrix`
+
+`service` (404 `"Unknown service"`), `key` is `*total` (default), `*error`,
+`doc:<doc_id>` (the document's alerting templates) or a template id (404
+`"Unknown key"`), `days` is an integer 1–28 (400 `"days must be an integer
+from 1 to 28"`). `days` are newest first and hold only hours with minutes
+read:
+
+```json
+{"service": "recharge", "key": "*total", "k": {"weekday": 3.0, "weekend": 4.0},
+ "days": [{"day": "2026-10-21", "daytype": "weekday", "in_baseline": true,
+           "hours": [{"hour": 9, "rate": 412.0, "mean": 120.5, "std": 30.1,
+                      "band_low": 30.2, "band_high": 210.8, "z": 9.7, "no_baseline": false,
+                      "cls": "up2", "upper_only": false, "not_normal_minutes": 12,
+                      "suggested": true, "decision": null}]}],
+ "coverage": {"weekday": [{"hour": 9, "days": 5, "of": 5, "idle": false,
+                           "used": ["2026-10-20"], "excluded": []}], "weekend": ["..."]},
+ "profiles": {"weekday": "full", "weekend": "young"}}
+```
+
+`cls` is the colour step: `in`, `up1`–`up3`, `down1`–`down3` (|z| up to 6,
+up to 10, beyond; "down" only where the detector raises a drop: `*total`, full profile, mean ≥ `drop.min_mean`) or `none` (no baseline). A baseline of mean 0 and σ 0 gives
+`up3` for any event and `in` otherwise. `rate` is events per minute,
+`z = (rate - mean) / max(σ, 1)` when mean > 0, else `(rate - mean) / σ`. `suggested` means keys of the service left
+NORMAL in that hour and no decision covers it; `decision` is the latest
+`exclude` / `keep` covering it. `coverage` lists 24 hours per day type;
+`profiles` is `none`, `young`, `full` or `borrowed` (a weekend with fewer
+than 2 days that borrows the weekday profile).
+
+### `GET /api/baseline/inspect`
+
+`day` and `hour_from` / `hour_to` are validated like the decisions (400 with
+the same messages; `hour_to` exclusive).
+
+```json
+{"sentence": {"keys": 2, "not_normal_minutes": 35,
+              "peak": {"hour": 10, "rate": 412.0, "z": 9.7},
+              "expected": {"mean": 120.5, "std": 30.1}, "in_baseline": true, "decision": null},
+ "day": [{"hour": 0, "rate": 118.0, "band_low": 30.2, "band_high": 210.8,
+          "last_week": 112.0, "not_normal_minutes": 0}],
+ "increased": [{"template_id": "recharge:T00032", "text": "...", "level": "ERROR", "rate": 90.0,
+                "mean": 4.0, "excess": 86.0, "times_normal": 22.5, "not_normal_minutes": 35,
+                "doc_id": "d1", "doc_title": "Runbook"}],
+ "new": [{"template_id": "recharge:T00099", "text": "...", "level": "ERROR",
+          "first_seen": 1792400000.0, "rate": 2.0, "doc_id": null}],
+ "keys": [{"key": "recharge:T00032",
+           "periods": [{"from": 1792400000.0, "to": 1792402100.0, "state": "ALERTING"}]}],
+ "left_days": [{"hour": 10, "of": 5, "days": 4}]}
+```
+
+`peak` and `expected` are null when no hour of the range has minutes read;
+in `day` (the whole day, 24 rows, with the same hour a week earlier) `rate`
+is null for an hour with no data. `increased` is the 10 templates whose rate rose most over their
+baseline (a template in `new` is left out); `new` are templates first seen
+from one hour before the range to its end. `left_days` is what the rebuild
+would have per hour of the range if this range were excluded.
+
+### `GET /api/baseline/series`
+
+`days` is 1, 7 or 14 (400 `"days must be 1, 7 or 14"`); `1` is today.
+`points` run oldest first, one per hour (today up to the current hour):
+
+```json
+{"key": "*total", "baseline_state": "full",
+ "points": [{"day": "2026-10-21", "hour": 9, "rate": 412.0, "mean": 120.5, "std": 30.1,
+             "band_low": 30.2, "band_high": 210.8, "last_week": 380.0, "z": 9.7, "out": true}],
+ "incidents": [{"day": "2026-10-21", "hour_from": 9, "hour_to": 11, "hours": 2, "ongoing": true,
+                "peak": {"hour": 10, "rate": 412.0, "mean": 120.5, "band_low": 30.2,
+                         "band_high": 210.8, "z": 9.7},
+                "times_normal": 3.4, "decision": "review"}],
+ "profile": {"weekday": [{"hour": 0, "mean": 118.0, "band_low": 30.0, "band_high": 206.0}],
+             "weekend": [], "today": [{"hour": 0, "rate": 120.0}]}}
+```
+
+`baseline_state` is `none`, `young`, `full` or `borrowed`. A point is `out`
+when its rate is above the band (or below it, where the detector raises a drop: `*total`, full profile, mean ≥ `drop.min_mean`); an incident is a run of consecutive `out` hours.
+`decision` is `exclude`, `keep`, `"review"` (keys left NORMAL in the run and
+nothing decided) or null. `rate` is null for an hour with no `service_hours`
+row (its band is still given). For a `doc:` key `profile.weekday` and `profile.weekend` are empty; `today` is still filled.
+
+### `GET /api/baseline/incident`
+
+Same `day` / hour validation as `inspect`.
+
+```json
+{"ongoing": true, "modules": [{"module": "RechargeService", "lines": 340}],
+ "samples": [{"at": 1792402000.0, "template_id": "recharge:T00032", "line": "ERROR ..."}]}
+```
+
+`modules` are the modules of the `alert_minutes` counts in the range, most
+lines first. `samples` are empty unless the range includes the newest hour
+read (`ongoing`): then the 10 newest `error_samples` lines of the key's
+templates (for `*total` and `*error`, of the 3 ERROR+ templates that rose
+most over their baseline).
+
 ### `POST /api/baseline/decisions`
 
 `{"service", "day": "YYYY-MM-DD", "hour_from": int, "hour_to": int,
 "decision": "exclude" | "keep"}` with `0 <= hour_from < hour_to <= 24`
-(`hour_to` exclusive). Validation order: day (400 `"day must be an ISO date
+(`hour_to` exclusive; the hours must be real integers in the body, not
+strings). Validation order: day (400 `"day must be an ISO date
 (YYYY-MM-DD)"`), hours (400 `"hours must be whole numbers with 0 <=
 hour_from < hour_to <= 24"`), decision (400 `"decision must be 'exclude' or
 'keep'"`), service (404). Overlapping rows of the opposite decision on that
@@ -533,7 +743,9 @@ returned.
 |---|---|
 | Routes, validation | `logai2/web/app.py` |
 | Shell, routing, polling, health pill | `static/index.html`, `static/js/main.js`, `core.js`, `ui.js` |
-| Views | `static/js/views/{alerting,pipeline,templates,documentation,sources,baseline}.js` |
+| Views | `static/js/views/{alerting,pipeline,templates,documentation,sources,baseline,review,llm}.js` |
+| Charts | `static/js/charts.js` (ECharts helpers, colour tokens); `static/vendor/echarts.min.js` (ECharts 5.5.1, Apache-2.0, `ECHARTS-LICENSE`, self-hosted) |
+| Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, volume, stage states) |
 | Styles | `static/css/tokens.css`, `app.css` (copied from logai-engine) |
-| Shared with the engine | `logai2/alerts.py` (alert rows), `logai2/owner/baseline.py` (bands), `logai2/review.py` (suggestions), `logai2/commands.py` |
+| Shared with the engine | `logai2/alerts.py` (alert rows), `logai2/owner/baseline.py` (bands), `logai2/review.py` (suggestions; minutes and keys per hour), `logai2/commands.py` |
 | Tests | `tests/test_web_sources.py`, `test_web_alerts_templates.py`, `test_web_docs_baseline.py` |

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from logai2.review import suggest
+from logai2.review import keys_by_hour, minutes_by_hour, periods, suggest
 from logai2.timeutil import TZ
 
 
@@ -41,3 +41,17 @@ def test_suggest_merges_overlaps_and_keeps_open_period_to_now():
     out = suggest(ch, set(), now=local(2026, 10, 14, 13, 15))
     assert [(s["hour_from"], s["hour_to"], s["keys"]) for s in out] == [
         (9, 11, ["s:T1", "s:T2"]), (12, 14, ["s:T3"])]
+
+
+def test_minutes_by_hour_is_a_union_across_keys():
+    t0 = datetime(2026, 10, 20, 2, 10, tzinfo=TZ).timestamp()
+    ps = [("*total", t0, t0 + 30 * 60), ("k1", t0 + 20 * 60, t0 + 70 * 60)]
+    m = minutes_by_hour(ps)
+    assert m[(date(2026, 10, 20), 2)] == 50 and m[(date(2026, 10, 20), 3)] == 20
+    assert keys_by_hour(ps)[(date(2026, 10, 20), 3)] == {"k1"}
+
+
+def test_periods_close_open_ones_at_now():
+    at = datetime(2026, 10, 20, 2, 0, tzinfo=TZ)
+    changes = [{"service": "s", "key": "k", "at": at, "from_state": "NORMAL", "to_state": "WARMING"}]
+    assert periods(changes, at.timestamp() + 600) == [("k", at.timestamp(), at.timestamp() + 600)]

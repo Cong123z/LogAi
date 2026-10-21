@@ -795,6 +795,10 @@ sequential hue for coverage, status colors only for states, palettes checked
 for color blindness and contrast. The matrix defaults to all events
 (`*total`, user ruling 2026-10-21).
 
+**Status (2026-10-22).** Phases 1 and 2 are built on branch `console-watchdog` (plan
+[`2026-10-21-console-watchdog-pages.md`](../plans/2026-10-21-console-watchdog-pages.md); where the code
+differs from the spec, see the spec's last section). Phase 3 is not built.
+
 **Order.** Phase 1, then 2, then 3; 1 and 2 are independent. Each phase is
 one branch with tests, and WEB_UI.md / ARCHITECTURE updated with the code.
 

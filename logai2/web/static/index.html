@@ -13,12 +13,15 @@
   <link rel="stylesheet" href="/static/css/app.css">
   <script defer src="/static/js/core.js"></script>
   <script defer src="/static/js/ui.js"></script>
+  <script defer src="/static/vendor/echarts.min.js"></script>
+  <script defer src="/static/js/charts.js"></script>
   <script defer src="/static/js/views/alerting.js"></script>
   <script defer src="/static/js/views/templates.js"></script>
   <script defer src="/static/js/views/sources.js"></script>
   <script defer src="/static/js/views/pipeline.js"></script>
   <script defer src="/static/js/views/documentation.js"></script>
   <script defer src="/static/js/views/baseline.js"></script>
+  <script defer src="/static/js/views/review.js"></script>
   <script defer src="/static/js/views/llm.js"></script>
   <script defer src="/static/js/main.js"></script>
 </head>
@@ -43,6 +46,7 @@
           <a href="#sources" data-view="sources" title="Data sources"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg><span class="nav-label">Data sources</span></a>
           <a href="#llm" data-view="llm" title="LLM profiles"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg><span class="nav-label">LLM profiles</span></a>
           <a href="#baseline" data-view="baseline" title="Baseline"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5"/><path d="M9 2h6"/></svg><span class="nav-label">Baseline</span></a>
+          <a href="#review" data-view="review" title="Review"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/></svg><span class="nav-label">Review</span></a>
         </div>
       </nav>
       <button type="button" class="sidebar-collapse" id="sidebar-collapse" aria-expanded="true" aria-controls="sidebar-nav" title="Collapse sidebar">
@@ -156,14 +160,48 @@
           <div class="sync-status" id="pl-status" aria-live="polite">Loading pipeline stats...</div>
         </div>
         <div id="pl-warnings"></div>
-        <h3>Throughput</h3>
-        <div class="stats-row" id="pl-throughput"></div>
-        <figure class="stat-card pl-chart">
-          <svg id="pl-spark" viewBox="0 0 100 40" preserveAspectRatio="none" role="img" aria-label="Events per second"></svg>
-          <figcaption class="pl-sub" id="pl-spark-caption">Collecting samples…</figcaption>
-        </figure>
-        <h3>Detection and baseline</h3>
-        <div class="stats-row" id="pl-engine"></div>
+        <div class="rv-panel">
+          <div class="rv-head"><h3>Topology</h3><span class="sync-status">Click a stage for its details.</span></div>
+          <p class="sync-status">The stages in the order data flows. Each shows OK, Degraded or Down as the server reports it. Particles move with events/s and stop under reduced motion or when the engine is not running.</p>
+          <div class="pl-scroll"><div id="pl-topology" class="rv-chart pl-topology" role="img" aria-label="Pipeline topology with stage health"></div></div>
+          <div id="pl-stage" class="pl-stage" aria-live="polite"></div>
+        </div>
+        <div class="bl-two pl-charts">
+          <div class="rv-panel">
+            <div class="rv-head"><h3>Lag, last 60 min</h3></div>
+            <p class="sync-status" id="pl-lag-note">One point per minute from the engine. Dashed line: 5 min, where lag turns Degraded.</p>
+            <div id="pl-lag" class="rv-chart pl-chart-sm" role="img" aria-label="Lag in seconds, last 60 minutes"></div>
+          </div>
+          <div class="rv-panel">
+            <div class="rv-head"><h3>Events/s, last 60 min</h3></div>
+            <p class="sync-status">Read throughput per minute, on its own axis.</p>
+            <div id="pl-eps" class="rv-chart pl-chart-sm" role="img" aria-label="Events per second, last 60 minutes"></div>
+          </div>
+        </div>
+        <div class="stats-row" id="pl-tiles"></div>
+        <div class="rv-panel">
+          <div class="rv-head"><h3>Volume vs expected, today</h3><button type="button" class="btn" id="pl-multiples-more" hidden></button></div>
+          <p class="sync-status">Per service, today's hourly rate (line) against its expected band (gray) and the same hour last week (dashed). Worst first; click one to open Baseline.</p>
+          <div class="pl-multiples" id="pl-multiples"></div>
+          <p class="empty-state" id="pl-multiples-empty" hidden>No service has reported volume yet.</p>
+        </div>
+        <h3>Services</h3>
+        <div class="table-wrap">
+          <table id="pl-services">
+            <thead><tr>
+              <th aria-sort="none"><button type="button" class="pl-sort" data-sort="service">Service</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="rate">Events/min (this hour)</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="vs_week">vs last week</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="z">vs expected (z)</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="miss_ratio">Miss ratio 5 min</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="templates">Templates</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="new_24h">New 24 h</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="unparsed_1h">Unparsed 1 h</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="not_normal">Keys not NORMAL</button></th>
+            </tr></thead>
+            <tbody id="pl-services-tbody"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody>
+          </table>
+        </div>
         <h3>Indices being read</h3>
         <div class="table-wrap">
           <table>
@@ -243,52 +281,125 @@
           </table>
         </div>
       </section>
-      <section class="view groups-section" id="view-baseline" aria-label="Baseline review">
+      <section class="view groups-section" id="view-baseline" aria-label="Baseline">
         <div class="section-heading">
           <div class="filter-bar">
             <label for="bl-service" class="filter-label">Service</label>
             <select class="filter-select" id="bl-service"></select>
+            <label for="bl-key" class="filter-label">Show</label>
+            <select class="filter-select" id="bl-key"></select>
+            <div class="toggle-group" id="bl-days" role="group" aria-label="Period">
+              <button type="button" class="toggle-btn" data-days="1" aria-pressed="false">Today</button>
+              <button type="button" class="toggle-btn" data-days="7" aria-pressed="false">7 days</button>
+              <button type="button" class="toggle-btn" data-days="14" aria-pressed="false">14 days</button>
+            </div>
           </div>
-          <button type="button" class="btn btn-primary" id="bl-recompute">Recompute baseline now</button>
+          <span class="sync-status">Read-only. Decide on the <a href="#review">Review</a> page.</span>
         </div>
         <p class="ins-toast" id="bl-status" role="status" aria-live="polite"></p>
-        <div class="stats-row" id="bl-stats"></div>
-        <p class="sync-status">Decisions take effect at the next daily commit or after <strong>Recompute baseline now</strong>. Unreviewed hours are kept in the baseline.</p>
-        <h3>Suggested periods</h3>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Day</th><th>Hours</th><th>Keys not NORMAL</th><th>Decision</th></tr></thead>
-            <tbody id="bl-suggest-tbody"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody>
-          </table>
+        <div class="stats-row" id="bl-cards"></div>
+        <div class="rv-panel">
+          <div class="rv-head"><h3 id="bl-title">Actual vs expected</h3></div>
+          <p class="sync-status">One point per hour. Gray is the expected band; red areas are possible incidents (outside the band); a &#10005; / &#10003; label means Review excluded / kept that period. Scroll or drag the slider to zoom.</p>
+          <div id="bl-main" class="rv-chart bl-chart-main" tabindex="0" role="img" aria-label="Hourly rate against the expected band, with possible incidents shaded"></div>
         </div>
-        <h3>Add range</h3>
-        <form class="btn-row" id="bl-add-form">
-          <label for="bl-add-day" class="filter-label">Day</label>
-          <input type="date" id="bl-add-day" class="filter-select" required>
-          <label for="bl-add-from" class="filter-label">From</label>
-          <select id="bl-add-from" class="filter-select"></select>
-          <label for="bl-add-to" class="filter-label">To</label>
-          <select id="bl-add-to" class="filter-select"></select>
-          <select id="bl-add-decision" class="filter-select" aria-label="Decision">
-            <option value="exclude">Exclude: real incident</option>
-            <option value="keep">Keep: normal</option>
-          </select>
-          <button type="submit" class="btn">Add range</button>
-        </form>
-        <p class="sync-status">For a maintenance window, load test or missed incident.</p>
-        <h3>Decisions</h3>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Day</th><th>Hours</th><th>Decision</th><th>Decided</th><th></th></tr></thead>
-            <tbody id="bl-decisions-tbody"><tr><td colspan="5" class="loading">Loading...</td></tr></tbody>
-          </table>
+        <div class="rv-panel">
+          <div class="rv-head"><h3>Possible incidents <span class="sync-status" id="bl-inc-count"></span></h3></div>
+          <p class="sync-status">Hours outside the band, grouped. It is an hourly view: detection judges minutes. Click a row to zoom and see where the lines came from.</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>When</th><th>State</th><th class="r">Duration</th><th class="r">Peak</th><th class="r">Expected</th><th class="r">&times; normal</th><th>Decision</th><th></th></tr></thead>
+            <tbody id="bl-inc"></tbody></table></div>
+          <div id="bl-detail" hidden>
+            <h4 id="bl-detail-title" tabindex="-1">Incident</h4>
+            <div id="bl-modules" class="rv-chart rv-chart-xs" role="img" aria-label="Share of lines by module"></div>
+            <div id="bl-samples"></div>
+          </div>
         </div>
-        <h3>Committed days</h3>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Day</th><th>Day type</th><th>Status</th></tr></thead>
-            <tbody id="bl-days-tbody"><tr><td colspan="3" class="loading">Loading...</td></tr></tbody>
-          </table>
+        <div class="bl-two">
+          <div class="rv-panel">
+            <div class="rv-head"><h3>Days &times; hours</h3></div>
+            <p class="sync-status">The same data as a grid, coloured by distance from the band. &#10005; excluded, &#10003; kept.</p>
+            <div class="rv-legend" id="bl-legend"></div>
+            <div class="rv-scroll"><div id="bl-matrix" class="rv-chart" role="img" aria-label="Heatmap of hourly rate against the baseline, days by hours"></div></div>
+          </div>
+          <div class="rv-panel">
+            <div class="rv-head"><h3>The baseline itself</h3></div>
+            <p class="sync-status">What normal is for each hour: weekday band and mean (solid), weekend mean (dashed), today so far.</p>
+            <div id="bl-profile" class="rv-chart" role="img" aria-label="Expected rate per hour of the day"></div>
+            <p class="sync-status" id="bl-profile-note"></p>
+          </div>
+        </div>
+      </section>
+      <section class="view groups-section" id="view-review" aria-label="Review">
+        <div class="section-heading">
+          <div class="filter-bar">
+            <label for="rv-service" class="filter-label">Service</label>
+            <select class="filter-select" id="rv-service"></select>
+            <label for="rv-key" class="filter-label">Show</label>
+            <select class="filter-select" id="rv-key"></select>
+            <input type="text" class="filter-select" id="rv-tpl" list="rv-tpl-list" placeholder="Template id…" aria-label="Template id" autocomplete="off" spellcheck="false" hidden>
+            <datalist id="rv-tpl-list"></datalist>
+            <div class="toggle-group" id="rv-days" role="group" aria-label="Days shown">
+              <button type="button" class="toggle-btn" data-days="14" aria-pressed="false">14 days</button>
+              <button type="button" class="toggle-btn" data-days="28" aria-pressed="false">28 days</button>
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary" id="rv-recompute">Recompute baseline</button>
+        </div>
+        <p class="ins-toast" id="rv-status" role="status" aria-live="polite"></p>
+        <div class="stats-row" id="rv-cards"></div>
+        <div class="rv-panel">
+          <div class="rv-head"><h3>Days &times; hours</h3>
+            <div class="toggle-group" id="rv-view" role="group" aria-label="Matrix view">
+              <button type="button" class="toggle-btn active" data-v="chart" aria-pressed="true">Chart</button>
+              <button type="button" class="toggle-btn" data-v="table" aria-pressed="false">Table</button>
+            </div></div>
+          <p class="sync-status">Each cell is one hour: its colour is how far the rate was from what the baseline expects (z = (rate &minus; mean) / &sigma;). &#9650; needs review, &#10005; excluded, &#10003; kept, &#9679; before a date: the next rebuild uses that day. Click a cell; shift+click extends within the day. Arrow keys move, Enter selects.</p>
+          <div class="rv-legend" id="rv-legend"></div>
+          <div class="rv-split">
+            <div class="rv-main">
+              <div class="rv-scroll" id="rv-matrix-wrap"><div id="rv-matrix" class="rv-chart" tabindex="0" role="application" aria-label="Heatmap of hourly rate against the baseline, days by hours"></div></div>
+              <div class="table-wrap" id="rv-matrix-table" hidden></div>
+            </div>
+            <div class="rv-side">
+              <h3>To review <span class="sync-status" id="rv-review-count"></span></h3>
+              <div class="rv-list" id="rv-review-list"></div>
+              <h3>Decisions</h3>
+              <div class="rv-list" id="rv-decision-list"></div>
+            </div>
+          </div>
+        </div>
+        <div class="rv-panel" id="rv-inspector" hidden>
+          <div class="rv-head"><h3 id="rv-insp-title" tabindex="-1">Selection</h3>
+            <button type="button" class="btn" id="rv-insp-close">Close</button></div>
+          <p class="rv-sentence" id="rv-sentence"></p>
+          <h4>Expected range, whole day</h4>
+          <div id="rv-bounds" class="rv-chart rv-chart-sm" role="img" aria-label="Events per minute over the day against the expected band"></div>
+          <h4>Increased</h4>
+          <div id="rv-increased" class="rv-chart" role="img" aria-label="Templates with the largest increase over normal"></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Template</th><th>Level</th><th>Rate</th><th>Expected</th><th>&times; normal</th><th>Min not NORMAL</th><th>Document</th></tr></thead>
+            <tbody id="rv-increased-tbody"></tbody></table></div>
+          <h4>New templates</h4>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Template</th><th>Level</th><th>First seen</th><th>Rate</th><th>Document</th></tr></thead>
+            <tbody id="rv-new-tbody"></tbody></table></div>
+          <h4>Keys that left NORMAL</h4>
+          <div class="rv-chips" id="rv-chips"></div>
+          <h4>Decision</h4>
+          <p class="rv-effect" id="rv-effect"></p>
+          <p class="ins-toast" id="rv-note" role="status" aria-live="polite" hidden></p>
+          <div class="btn-row">
+            <button type="button" class="btn btn-danger" id="rv-exclude">Exclude: real incident</button>
+            <button type="button" class="btn" id="rv-keep">Keep: normal</button>
+            <button type="button" class="btn" id="rv-undo" hidden>Undo</button>
+          </div>
+        </div>
+        <div class="rv-panel">
+          <div class="rv-head"><h3>Coverage: what the baseline is built from</h3></div>
+          <p class="sync-status">Usable days per hour out of the days the rebuild picks; fewer than 3 (orange outline) falls back to floor-only alerts.</p>
+          <div class="rv-scroll"><div id="rv-coverage" class="rv-chart rv-chart-xs" role="img" aria-label="Usable baseline days per hour, weekday and weekend"></div></div>
+          <p class="sync-status" id="rv-cov-summary"></p>
         </div>
       </section>
     </main>

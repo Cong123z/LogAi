@@ -54,7 +54,7 @@ Out of scope (later sub-projects):
 | 5 | Sampled catch-up on first start |
 | 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents) (LLM profiles were built with 2/3) |
 | 7 | v2: Kafka, many readers and owners |
-| 9 | Operator console, Datadog Watchdog style: Baseline matrix + expected-bounds inspector + coverage, Pipeline topology + volume vs expected, Watchdog tags on Alerting/Templates (design [section 9](docs/design/per-service-baseline.md), from AGY-PROP-2026-002) |
+| 9 | Operator console, Datadog Watchdog style: Baseline charts, Review matrix + expected-bounds inspector + coverage, Pipeline topology + volume vs expected (phases 1-2 built); Watchdog tags on Alerting/Templates (phase 3, not built) (design [section 9](docs/design/per-service-baseline.md), from AGY-PROP-2026-002) |
 
 Also out of scope: notifications (state is only exported), authentication on
 the web API, log sources other than Elasticsearch, and more than one engine
@@ -703,6 +703,11 @@ The engine writes `worker_status['engine'].status` at every flush:
 |---|---|
 | `heartbeat` | epoch s of the flush |
 | `lag_seconds` | now − watermark (≥ 30 s by the upper bound) |
+| `flush_seconds` | duration of the last completed flush (0 before the first) |
+| `flush_seconds_max` | slowest flush of the last 15 min |
+| `late_counts` | events for an already-closed minute since start (should stay 0) |
+| `events_per_second_15m` | events / seconds covered, over the last 15 min (at least 1 s covered) |
+| `history` | `[{t, lag, eps}]`, one point per wall minute, last 60 kept in memory (lost on restart) |
 | `events_per_second` | pending events / time since the last flush |
 | `cache_hit_ratio` | lifetime known-line hits / lookups |
 | `miss_ratio` | per service, misses / events over the last 5 min |
@@ -714,7 +719,13 @@ The engine writes `worker_status['engine'].status` at every flush:
 | `resolution` | `{pattern: [index, ...]}` |
 | `warnings` | `"high miss ratio: <service> NN%"` when a service's 5-min miss ratio > 50% on ≥ 100 events, once 5 min of data exist; or the ES-unreachable warning at start |
 
-The web treats a heartbeat older than 30 s as stale (engine not running).
+The status is built before a flush runs, so it reports the previous completed
+flush. The web treats a heartbeat older than 30 s as stale (engine not running).
+
+The linker's status (`worker_status['linker']`) also carries `llm_today`, the
+number counted against `llm.daily_max`: `llm` / `draft` / `rejected` link rows of the last 24 h (rolling) plus calls that wrote nothing. `llm_profiles[name].answers` is per profile since the linker started.
+The Pipeline page reads both rows; its stage states are derived in
+`logai2/web/pipeline_view.py` (rules in [`docs/WEB_UI.md`](docs/WEB_UI.md)).
 
 ### 10.6 Prometheus metrics (`logai2/metrics.py`, port 9108)
 
@@ -851,7 +862,6 @@ No DLQ.
 | Detection | `alert_state` rows are never evicted; the detector scans all states per minute | grows with every key that was ever high |
 | Detection | Score is `count / band_high`, not logai-engine's 0..1 scale | dashboards reading `score` need rescaling |
 | Baseline | Silent minutes count as zeros from a service's first minute | a replayer that only runs some hours gives mean = σ = 0 for the idle hours, so every ERROR/WARN template at its floor alerts there (seen in the 2026-10-20 deploy) |
-| Baseline | The Baseline page shows "Young" for a weekend with < 2 days, while detection borrows the weekday profile with upper alerts only | display only |
 | Baseline | Review suggestions step hours in epoch seconds | correct only for a whole-hour offset without DST (`Asia/Ho_Chi_Minh` is +07) |
 | Config | `baseline.timezone` and `metrics.host` are unused | the zone is fixed in `timeutil.py`; metrics bind all interfaces |
 | Drain3 | A plain match (cluster size only) does not mark the tree dirty | persisted cluster sizes lag; template ids and texts are exact |
@@ -893,7 +903,7 @@ No DLQ.
 6. `logai2/jobs/commit.py`, `logai2/review.py`: the daily commit and suggestions.
 7. `logai2/engine.py`, `logai2/commands.py`, `logai2/metrics.py`: the loop.
 8. `logai2/links.py`, `logai2/embed.py`, `logai2/linker.py`, `logai2/llm.py`, `logai2/resolver.py`: document links (§5.1).
-9. `logai2/web/app.py` and [`docs/WEB_UI.md`](docs/WEB_UI.md).
+9. `logai2/web/app.py`, `logai2/web/baseline_view.py` (Review matrix, inspector, Baseline series and incidents), `logai2/web/pipeline_view.py` (services, volume, stage states) and [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
 Tests under `tests/` are executable examples of these contracts. Good starting
 points: `test_owner.py` (exact counts across a crash), `test_reader.py`
