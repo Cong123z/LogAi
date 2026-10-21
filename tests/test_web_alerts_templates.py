@@ -110,6 +110,41 @@ def test_templates_paginated_and_filtered(client, conn):
     assert client.get("/api/services").get_json() == ["pay", "web"]
 
 
+def _review_fixture(conn):
+    # (template, level, last_seen minute, link source or None)
+    rows = [("pay:T00001", "INFO", 5, "corpus"), ("pay:T00002", "ERROR", 3, "llm"),
+            ("pay:T00003", "WARN", 0, "inherited"), ("pay:T00004", "ERROR", 1, "draft"),
+            ("pay:T00005", "ERROR", 9, "manual"), ("pay:T00006", "ERROR", 8, None),
+            ("web:T00001", "ERROR", 7, "corpus")]
+    add_doc(conn, "D1")
+    for tid, level, m, source in rows:
+        svc = tid.split(":")[0]
+        add_template(conn, tid, level=level, service=svc, last_seen=f"2026-10-20 10:0{m}Z")
+        if source:
+            conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) "
+                         "VALUES (%s, %s, 'D1', %s)", (svc, tid, source))
+    add_state(conn, "pay:T00003", "ALERTING", 20)
+    conn.commit()
+
+
+def test_review_filter_and_order(client, conn):
+    _review_fixture(conn)
+    body = client.get("/api/templates?link_source=review&service=pay").get_json()
+    assert [i["template_id"] for i in body["items"]] == ["pay:T00003", "pay:T00002", "pay:T00004", "pay:T00001"]
+    assert body["total"] == 4
+    assert client.get("/api/templates?link_source=bogus").status_code == 400
+
+
+def test_review_total_follows_filters(client, conn):
+    _review_fixture(conn)
+    get = lambda q: client.get(f"/api/templates?{q}").get_json()["review_total"]
+    assert get("") == 5
+    assert get("service=pay") == 4
+    assert get("service=pay&level=ERROR") == 2
+    assert get("link_source=manual") == 5     # link_source does not narrow the count
+    assert get("q=nothing-matches") == 0
+
+
 def test_link_unknown_doc_404_and_link_enqueues_reload(client, conn):
     add_template(conn, "pay:T00001")
     add_doc(conn, "D1")
