@@ -169,3 +169,12 @@ def cluster_edges(conn, keys: list[tuple[str, str]], min_sim: float) -> list[tup
         WHERE a.embedding IS NOT NULL AND b.embedding IS NOT NULL AND 1 - (a.embedding <=> b.embedding) >= %s""",
         ([s for s, _ in keys], [t for _, t in keys], min_sim)).fetchall()
     return [(r["service"], r["a"], r["b"]) for r in rows]
+
+
+def next_doc_id(conn) -> str:
+    """DOC- + the next number after the highest DOC-<digits> id. Locks documents until the transaction ends,
+    so two creators (web, resolver) never pick the same id."""
+    conn.execute("LOCK TABLE documents IN EXCLUSIVE MODE")
+    top = conn.execute("SELECT max(substring(doc_id FROM 5)::int) AS n FROM documents "
+                       "WHERE doc_id ~ '^DOC-[0-9]{1,9}$'").fetchone()["n"] or 0
+    return f"DOC-{top + 1:03d}"

@@ -1,6 +1,7 @@
 """Run the logai2 linker: python scripts/run_linker.py [config.yaml]
 
-Embeds templates and documents' ERROR lines (bge-m3), keeps inherited and corpus links current.
+Embeds templates and documents' ERROR lines (bge-m3), keeps inherited and corpus links current,
+and sends the rest to the LLM of the active profile (confirm a candidate, or suggest a document).
 The engine creates the schema; the linker waits for it.
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from logai2.config import load_config  # noqa: E402
 from logai2.db import connect  # noqa: E402
 from logai2.linker import Linker  # noqa: E402
+from logai2.resolver import Resolver  # noqa: E402
 
 logger = logging.getLogger("logai2.linker")
 
@@ -34,7 +36,7 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("database unreachable: %s", exc)
         time.sleep(10)
-    Linker(cfg, conn).run_forever()
+    Linker(cfg, conn, resolver=Resolver(cfg, conn)).run_forever()
 
 
 if __name__ == "__main__":

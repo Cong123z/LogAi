@@ -17,7 +17,7 @@ from logai2 import db
 from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
-from logai2.links import ALERTING_SOURCES, cluster_edges, error_lines, level_class, similar
+from logai2.links import ALERTING_SOURCES, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import day_hour, daytype, minute_of
@@ -330,10 +330,7 @@ def create_app(cfg: AppConfig) -> Flask:
     def create_document():
         fields = document_fields()
         c = conn()
-        c.execute("LOCK TABLE documents IN EXCLUSIVE MODE")   # two creates must not pick the same number
-        top = c.execute("SELECT max(substring(doc_id FROM 5)::int) AS n FROM documents "
-                        "WHERE doc_id ~ '^DOC-[0-9]{1,9}$'").fetchone()["n"] or 0
-        doc_id, revision = f"DOC-{top + 1:03d}", uuid.uuid4().hex
+        doc_id, revision = next_doc_id(c), uuid.uuid4().hex
         c.execute("INSERT INTO documents (doc_id, title, error_code, error, handling, revision) "
                   "VALUES (%s, %s, %s, %s, %s, %s)",
                   (doc_id, fields["title"], fields["error_code"], fields["error"], fields["handling"], revision))
@@ -579,7 +576,8 @@ def create_app(cfg: AppConfig) -> Flask:
         if row["source"] in ("inherited", "corpus"):
             set_manual(c, service, template_id, None)
         else:
-            c.execute("UPDATE template_doc_links SET source = 'rejected', linked_at = now() "
+            # linked_at stays: it dates the LLM call, which the resolver's rate limits count
+            c.execute("UPDATE template_doc_links SET source = 'rejected' "
                       "WHERE service = %s AND template_id = %s", (service, template_id))
             if row["source"] == "draft":
                 c.execute("UPDATE documents SET status = 'rejected', updated_at = now() "
