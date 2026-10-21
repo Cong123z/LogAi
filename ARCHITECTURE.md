@@ -317,6 +317,17 @@ and shared ones, so each service's links point to its own, specific
 runbook. Migration 004 gave each existing document the one service whose
 templates use it, else shared. A manual link may still point anywhere.
 
+**A document's ERROR line has a level class** (`documents.level`: ERROR /
+WARN / INFO; NULL = any). Layer 2 links only templates of that class, for
+the same reason inheritance stays within a class: a success line and an
+error line can share most of their words (`DBAdapter: Log success request
+his TransactionInfo …` scored 0.95 against `DBAdapter: Error when log
+request his TransactionInfo …`). Such a cross-class match is left to the
+LLM, which is shown both levels. Migration 005 set each existing
+document's level from the templates linked to it by hand or that it was
+written for, when they agree on one class; LLM drafts take their
+template's class.
+
 One `template_doc_links` row per template; its `source` is the layer
 (`logai2/links.py`, design section 3):
 
