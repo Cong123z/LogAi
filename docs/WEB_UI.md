@@ -94,40 +94,55 @@ Live engine status from `worker_status`, written at every flush:
 
 ## Templates
 
-A paginated table of templates (100 per page by default; 50, 100 or 200
-selectable in the page, server cap 500), newest `last_seen` first. Filters:
-service, level, **link** (not linked, or one link source), and a text
-search (case-insensitive substring of the template text, debounced 300 ms).
+Two modes, a toggle at the left of the filter bar:
 
-Columns: alert state, template id, text (`<*>` highlighted), level, **rate**
-(average per minute in the current local hour = this hour's count /
-counted minutes; red when above the band), **band** (`mean ± kσ` for this
-hour, judged exactly as detection does; "—" without a baseline), the
-**document** select, first seen, last seen.
+- **To review (N)**: templates whose link is automatic (`inherited`,
+  `corpus`, `llm`, `draft`) and waits for a person: ALERTING first, then
+  ERROR > WARN > INFO, then newest `last_seen`. N follows the service,
+  level and search filters. The page opens here when N > 0, else on All
+  templates (the choice is not kept across reloads).
+- **All templates**: every template, newest `last_seen` first, with a
+  **link** filter (not linked, or one link source); hidden and cleared in
+  To review.
 
-The **Document** column shows the linked document (id and title, wrapped)
-and a badge for how it was linked: `manual`, `no document (set by hand)`,
-`inherited 0.91`, `auto-matched 0.87`, `AI-confirmed`, `AI suggestion ·
-unverified`, `AI result rejected`; or "Not linked". Its button (**Review**
-for automatic links, else **Link…** / **Change**) opens a side drawer with
-everything needed to decide (ARCHITECTURE §5.1 for the layers):
+Both modes: service, level and a text search (case-insensitive substring,
+debounced 300 ms); 100 per page by default (50, 100 or 200; server cap
+500). To review with nothing left says so and offers All templates.
 
-- the full template text, level, state, rate and band;
-- how it got its document, in words (inherited from which template and at
-  what similarity, matched on ERROR, confirmed by the LLM) and the LLM's
+Columns: **state** (WARMING / ALERTING / COOLING badge; NORMAL as muted
+text), **template** (id and level, then the full text, `<*>`
+highlighted), **rate** (average per minute this local hour; above the band
+in red with "▲ above normal"; under it the band as `normal ≤ X/min` or
+`normal A–B/min`, judged exactly as detection does; "—" without data),
+**document** (`DOC-007 · title`, or "Not linked" / "No document (set by
+hand)"; under it how it was linked: `manual`, `inherited 0.91`,
+`auto-matched 0.87`, `AI-confirmed`, `AI suggestion · unverified`, `AI
+result rejected`, and SAFE), **last seen** (relative, full time on
+hover), and a button: **Review** for an automatic link, else **Link…** /
+**Change**. A click anywhere on the row opens the same drawer.
+
+The drawer puts the decision first (ARCHITECTURE §5.1 for the layers):
+
+- service, level, state, rate against normal, first and last seen;
+- **Proposed document** (automatic link) or **Document**: the template
+  text with the document's ERROR line directly under it, Handling
+  collapsed under them, then how it was linked in words and the LLM's
   reason in full;
-- the linked document's ERROR and Handling;
-- **Confirm** (→ manual; for a draft, approve) and **Reject** for an
-  automatic link;
+- **Confirm link** (→ manual) / **Approve suggestion** (draft → active)
+  and **Reject**, pinned to the drawer's bottom edge while it scrolls. In
+  To review, a successful decision opens the **next row** of the page
+  (the drawer closes after the page's last row); in All templates it
+  closes. A link decided elsewhere meanwhile shows the API's 409 message
+  in the drawer;
 - **Link by hand**: a document (a manual link, then the **Apply to
   similar** dialog when similar templates of the same service and level
   exist, pre-ticked at the inherit threshold), **No document** (a sticky
   manual "no document"), or **Automatic** (removes the row; the linker may
-  link it again).
+  link it again). Always closes the drawer.
 
-Template text wraps everywhere (never cut off). Each change enqueues
-`reload_links`, so the engine's doc keys and alert rows follow within a
-tick. A short confirmation appears bottom right (a polite live region).
+Each change enqueues `reload_links`, so the engine's doc keys and alert
+rows follow within a tick. A short confirmation appears bottom right (a
+polite live region).
 
 ## Documentation
 
@@ -262,7 +277,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `GET /api/alerts` | — | `[alert row]` | — | — |
 | `GET /api/services` | — | `[service]` sorted | — | — |
-| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `link_source`, `q` | `{total, items}` | 400 | — |
+| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `link_source`, `q` | `{total, review_total, items}` | 400 | — |
 | `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null, also?: [template_id]}` | `{doc_id, linked}` | 400, 404 | `reload_links` |
 | `DELETE /api/templates/<service>/<template_id>/link` | — | `{doc_id: null}` | 404 | `reload_links` |
 | `POST /api/templates/<service>/<template_id>/link/confirm` | — | `{doc_id, source}` | 404, 409 | `reload_links` |
@@ -374,11 +389,17 @@ without one; for a doc key, the sums over its linked templates).
 - `page` (default 1) and `size` (default 100) are clamped to 1..10⁶ and
   1..500; a non-integer is 400 `"<name> must be an integer"`.
 - `service`, `level`, `doc_id`: exact match; `q`: case-insensitive
-  substring of the text; `link_source`: `none` (no row) or one of
+  substring of the text; `link_source`: `none` (no row), `review` (an
+  automatic link: `inherited`, `corpus`, `llm`, `draft`) or one of
   `manual`, `inherited`, `corpus`, `llm`, `draft`, `rejected` (else 400).
+- Order: newest `last_seen` first, then `template_id`; with
+  `link_source=review`, ALERTING first, then level class ERROR > WARN >
+  INFO, then the same.
+- `review_total`: templates with an automatic link that match `service`,
+  `level`, `doc_id` and `q` (never narrowed by `link_source`).
 
 ```json
-{"total": 308,
+{"total": 308, "review_total": 7,
  "items": [{"service": "recharge", "template_id": "recharge:T00032",
             "text": "LixiHandler: <*> enterd Receiving subscriber incorrect: <*>",
             "level": "ERROR", "first_seen": 1792207560.0, "last_seen": 1792381140.0,
