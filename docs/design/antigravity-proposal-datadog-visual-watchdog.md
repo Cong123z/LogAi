@@ -3,7 +3,7 @@
 **Document ID:** AGY-PROP-2026-002  
 **Author:** Antigravity (AI Tech Lead / Architecture Pair)  
 **Target Repository:** `logai2`  
-**Status:** PROPOSED (2026-10-21), not adopted. Reviewed against `master` on 2026-10-21: see [Review against the code](#review-against-the-code-2026-10-21).  
+**Status:** PROPOSED (2026-10-21), not adopted. Reviewed against `master` on 2026-10-21: see [Review against the code](#review-against-the-code-2026-10-21). Its Baseline and Pipeline parts (§5.1, §5.2) are taken up, adapted, in spec [`2026-10-21-baseline-pipeline-pages.md`](../specs/2026-10-21-baseline-pipeline-pages.md).  
 **Selected Strategy:** Strategy A — Unified Apache ECharts Visualization Engine  
 **Related Documents:**
 - [`docs/design/antigravity-proposed-additions.md`](antigravity-proposed-additions.md) (AGY-PROP-2026-001)
