@@ -77,9 +77,9 @@ def _lookup(bl: Baseline, cfg: AppConfig, service: str, template_ids: list[str],
 
 
 def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: str,
-           days: list[date]) -> dict[tuple[date, int], dict]:
+           days: list[date], bl: Baseline | None = None) -> dict[tuple[date, int], dict]:
     """Per (day, hour) with minutes read: rate, mean, std, band_low, band_high, z, no_baseline, cls."""
-    bl = Baseline.load(conn, [(service, t) for t in template_ids])
+    bl = bl or Baseline.load(conn, [(service, t) for t in template_ids])
     minutes = {(r["day"], r["hour"]): r["n_minutes"] for r in conn.execute(
         "SELECT day, hour, n_minutes FROM service_hours WHERE service = %s AND day = ANY(%s) AND n_minutes > 0",
         (service, days))}

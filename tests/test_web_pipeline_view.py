@@ -89,3 +89,8 @@ def test_volume_today_hours_with_band(conn, cfg):
 def test_pipeline_route_has_new_fields(client):
     body = client.get("/api/pipeline").get_json()
     assert {"services", "volume", "stages", "status", "cursors", "stale", "linker", "linker_stale"} <= set(body)
+
+
+def test_malformed_last_commit_is_not_overdue():
+    engine = {**ENGINE_OK, "last_commit": {"at": "garbage", "today": "2026-10-21"}}
+    assert stage_states(engine, False, LINKER_OK, False, 0, NOW)["flush"]["status"] == "ok"
