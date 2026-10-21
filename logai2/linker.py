@@ -49,16 +49,22 @@ class Linker:
                 enqueue(self.conn, "reload_links")   # same transaction as the link change
                 status["links_changed"] = True
         if self.resolver:
-            self.resolver.run(status)
+            # LLM calls take up to minutes: report after each one so the web does not see a stale linker
+            self.resolver.run(status, progress=lambda: self._write_status(status))
         with self.conn.transaction():
             status["pending"] = self.conn.execute(
                 "SELECT (SELECT count(*) FROM templates WHERE embedding IS NULL) AS templates, "
                 "(SELECT count(*) FROM documents WHERE status <> 'rejected' "
                 "AND embedded_revision IS DISTINCT FROM revision) AS documents").fetchone()
+        self._write_status(status)
+        return status
+
+    def _write_status(self, status: dict) -> None:
+        status["heartbeat"] = self.now()
+        with self.conn.transaction():
             self.conn.execute(
                 "INSERT INTO worker_status (worker, status) VALUES ('linker', %s) ON CONFLICT (worker) "
                 "DO UPDATE SET status = EXCLUDED.status, updated_at = now()", (Jsonb(status),))
-        return status
 
     def _embed_templates(self, status: dict) -> None:
         batch = self.cfg.embedding.batch

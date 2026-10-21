@@ -39,6 +39,14 @@ def parse_json_reply(content: str) -> dict:
     return value
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None   # urllib would re-send the Authorization header (the API key) to the new location
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def _timed_out(exc: Exception) -> bool:
     return isinstance(exc, (TimeoutError, socket.timeout)) or (
         isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout)))
@@ -56,7 +64,7 @@ def chat_json(profile: dict, system: str, user: str) -> dict:
     for attempt in (1, 2):
         request = urllib.request.Request(url, data=body.encode(), headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=profile.get("timeout_seconds") or 120) as response:
+            with _OPENER.open(request, timeout=profile.get("timeout_seconds") or 120) as response:
                 content = json.load(response)["choices"][0]["message"]["content"]
             return parse_json_reply(content)
         except LlmError:

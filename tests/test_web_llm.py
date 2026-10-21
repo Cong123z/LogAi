@@ -38,3 +38,10 @@ def test_profiles_crud_key_is_write_only_and_one_active(client, conn):
     assert put("bad name!", base_url="https://x", model="m", revision=None).status_code == 400
     assert client.delete("/api/llm/profiles/deep").status_code == 200
     assert client.delete("/api/llm/profiles/deep").status_code == 404
+
+
+def test_profile_key_must_be_ascii_and_name_has_no_newline(client):
+    assert client.put("/api/llm/profiles/p", json={"base_url": "https://x", "model": "m", "api_key": "kéy",
+                                                   "revision": None}).status_code == 400
+    assert client.put("/api/llm/profiles/p%0A", json={"base_url": "https://x", "model": "m",
+                                                      "revision": None}).status_code == 400

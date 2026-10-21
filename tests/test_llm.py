@@ -53,3 +53,26 @@ def test_errors_raise_without_the_key_and_a_timeout_is_retried_once(server):
         return reply('{"ok": true}')
     assert chat_json(profile(server(slow_then_ok).url, timeout_seconds=1), "s", "u") == {"ok": True}
     assert len(calls) == 2
+
+
+def test_redirects_are_not_followed(server):
+    import http.server
+    import threading
+    target = server(lambda p, b: reply('{"stolen": true}'))
+
+    class Redirect(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(307)
+            self.send_header("Location", target.url + "/v1/chat/completions")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        pytest.raises(LlmError, chat_json, profile(f"http://127.0.0.1:{srv.server_port}"), "s", "u")
+        assert target.calls == []
+    finally:
+        srv.shutdown()
+        srv.server_close()

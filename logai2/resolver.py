@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import uuid
 from typing import Callable
@@ -22,7 +23,7 @@ from logai2.llm import LlmError, active_profile, chat_json
 
 logger = logging.getLogger("logai2.resolver")
 
-PER_CYCLE = 3                 # LLM calls are slow (6-60 s); the linker cycle stays responsive
+PER_CYCLE = 3                 # LLM calls per cycle (slow, 6-60 s); a template's second call may exceed it by one
 FAILURE_BACKOFF_SECONDS = 1800
 
 SYSTEM = ("You link log templates of a telecom platform to operational runbooks. Answer only from the "
@@ -46,29 +47,53 @@ def _template(t: dict) -> dict:
 
 
 def _text(value, limit: int) -> str:
-    return value.strip()[:limit] if isinstance(value, str) else ""
+    """LLM text made storable: no NUL (Postgres refuses it), no lone surrogates."""
+    if not isinstance(value, str):
+        return ""
+    return value.replace("\x00", "").encode("utf-8", "ignore").decode("utf-8").strip()[:limit]
 
 
 class Resolver:
     def __init__(self, cfg: AppConfig, conn, chat: Callable = chat_json, now: Callable[[], float] = time.time):
         self.cfg = cfg
         self.conn = conn
-        self.chat = chat
+        self.chat = self._counted(chat)
         self.now = now
-        self._failed: dict[tuple[str, str], float] = {}   # template -> retry after (in memory: a restart retries)
+        # in memory (a restart retries): template -> retry after; (service, time) of calls that wrote nothing
+        self._failed: dict[tuple[str, str], float] = {}
+        self._spent: list[tuple[str, float]] = []
+        self._calls = 0
 
-    def run(self, status: dict) -> None:
+    def _counted(self, chat: Callable) -> Callable:
+        def call(*args):
+            self._calls += 1
+            return chat(*args)
+        return call
+
+    def run(self, status: dict, progress: Callable[[], None] = lambda: None) -> None:
+        """At most PER_CYCLE calls (a template can need 2: confirm, then suggest); progress() after each
+        template, so a slow model does not leave the linker's heartbeat stale."""
         lc = self.cfg.llm
+        now = self.now()
+        self._failed = {k: t for k, t in self._failed.items() if t > now}
+        self._spent = [(svc, t) for svc, t in self._spent if t > now - 86400]
         with self.conn.transaction():
             profile = active_profile(self.conn)
             if not profile:
                 status["warnings"].append("no active LLM profile: templates are not sent to the LLM")
                 return
-            # what the LLM produced in the last day / hour (rejected rows came from it too)
+            # results in the last day / hour (rejected rows came from the LLM too), plus calls that failed
             used = self.conn.execute(
                 "SELECT service, count(*) FILTER (WHERE linked_at > now() - interval '1 hour') AS hour, "
                 "count(*) AS day FROM template_doc_links WHERE source IN ('llm', 'draft', 'rejected') "
                 "AND linked_at > now() - interval '1 day' GROUP BY service").fetchall()
+            per_service = {r["service"]: r["hour"] for r in used}
+            day = sum(r["day"] for r in used) + len(self._spent)
+            for svc, t in self._spent:
+                if t > now - 3600:
+                    per_service[svc] = per_service.get(svc, 0) + 1
+            capped = [svc for svc, n in per_service.items() if n >= lc.per_service_hour]
+            # capped services and backed-off templates are left out here, so they never fill the LIMIT
             todo = self.conn.execute(f"""
                 SELECT t.service, t.template_id, t.level, t.text FROM templates t
                 LEFT JOIN alert_state a ON a.service = t.service AND a.key = t.template_id
@@ -76,33 +101,35 @@ class Resolver:
                   AND NOT EXISTS (SELECT 1 FROM template_doc_links l
                                   WHERE l.service = t.service AND l.template_id = t.template_id)
                   AND (a.state = 'ALERTING' OR t.first_seen > now() - make_interval(hours => %s))
+                  AND NOT t.service = ANY(%s)
+                  AND (t.service, t.template_id) NOT IN (SELECT * FROM unnest(%s::text[], %s::text[]))
                 ORDER BY (a.state = 'ALERTING') IS TRUE DESC,
                          CASE {class_sql('t.level')} WHEN 'ERROR' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END,
                          t.last_seen DESC
-                LIMIT 50""", (lc.new_hours,)).fetchall()
-        per_service = {r["service"]: r["hour"] for r in used}
-        day = sum(r["day"] for r in used)
+                LIMIT 50""", (lc.new_hours, capped, [k[0] for k in self._failed],
+                              [k[1] for k in self._failed])).fetchall()
         done = {"confirmed": 0, "suggested": 0, "none": 0, "failed": 0}
-        calls = 0
+        self._calls = 0
         for t in todo:
             key = (t["service"], t["template_id"])
-            if calls >= PER_CYCLE or day >= lc.daily_max:
+            if self._calls >= PER_CYCLE or day >= lc.daily_max:
                 break
-            if per_service.get(t["service"], 0) >= lc.per_service_hour or self._failed.get(key, 0) > self.now():
+            if per_service.get(t["service"], 0) >= lc.per_service_hour:
                 continue
-            calls += 1
             try:
                 outcome = self._resolve(profile, t)
-            except LlmError as exc:
+            except (LlmError, psycopg.Error, ValueError) as exc:   # a bad answer must not stop the linker
                 self._failed[key] = self.now() + FAILURE_BACKOFF_SECONDS
+                outcome = "failed"
                 status["last_error"] = f"llm: {exc}"
-                logger.warning("LLM failed for %s %s: %s", *key, exc)
-                done["failed"] += 1
-                continue
+                logger.warning("LLM resolution failed for %s %s: %s", *key, exc)
             done[outcome] += 1
-            if outcome != "none":
-                day += 1
-                per_service[t["service"]] = per_service.get(t["service"], 0) + 1
+            if outcome in ("failed", "none"):   # a call that wrote nothing still costs budget
+                self._spent.append((t["service"], self.now()))
+            day += 1
+            per_service[t["service"]] = per_service.get(t["service"], 0) + 1
+            status["llm"] = done
+            progress()
         status["llm"] = done
         if day >= lc.daily_max:
             status["warnings"].append(f"LLM daily limit reached ({lc.daily_max})")
@@ -149,6 +176,8 @@ class Resolver:
         try:
             confidence = min(max(float(reply.get("confidence")), 0.0), 1.0)
         except (TypeError, ValueError):
+            confidence = None
+        if confidence is not None and not math.isfinite(confidence):   # json accepts NaN; JSON output does not
             confidence = None
         written = False
         with self.conn.transaction():

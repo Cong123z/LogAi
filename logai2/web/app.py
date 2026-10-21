@@ -509,6 +509,10 @@ def create_app(cfg: AppConfig) -> Flask:
             abort(404, "Unknown template")
 
     def set_manual(c, service: str, template_id: str, doc_id: str | None) -> None:
+        # a draft this replaces leaves the AI suggestions queue (its template is decided)
+        c.execute("UPDATE documents SET status = 'rejected', updated_at = now() WHERE status = 'draft' "
+                  "AND doc_id IS DISTINCT FROM %s AND doc_id = (SELECT doc_id FROM template_doc_links "
+                  "WHERE service = %s AND template_id = %s AND source = 'draft')", (doc_id, service, template_id))
         c.execute("INSERT INTO template_doc_links (service, template_id, doc_id) VALUES (%s, %s, %s) "
                   "ON CONFLICT (service, template_id) DO UPDATE SET doc_id = EXCLUDED.doc_id, source = 'manual', "
                   "similarity = NULL, inherited_from = NULL, note = NULL, linked_at = now()",
@@ -619,7 +623,7 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.put("/api/llm/profiles/<name>")
     def put_llm_profile(name: str):
         payload = body()
-        if not PROFILE_NAME_RE.match(name):
+        if not PROFILE_NAME_RE.fullmatch(name):
             raise BadRequest("name must be 1-64 letters, digits, '.', '_' or '-'")
         base_url, model = _text(payload.get("base_url"), "base_url"), _text(payload.get("model"), "model")
         url = urlparse(base_url)
@@ -631,16 +635,25 @@ def create_app(cfg: AppConfig) -> Flask:
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
             raise BadRequest("timeout_seconds must be an integer from 5 to 600")
         api_key = _text(payload.get("api_key"), "api_key")   # no control characters: it goes into a header
+        if not api_key.isascii():
+            raise BadRequest("api_key must be ASCII")
         c = conn()
         row = c.execute("SELECT revision, api_key FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
         if (row["revision"] if row else None) != payload.get("revision"):
             raise db.StaleRevision(row["revision"] if row else None)
         revision = uuid.uuid4().hex
-        c.execute("INSERT INTO llm_profiles (name, base_url, model, api_key, timeout_seconds, revision) "
-                  "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url, "
-                  "model = EXCLUDED.model, api_key = EXCLUDED.api_key, timeout_seconds = EXCLUDED.timeout_seconds, "
-                  "revision = EXCLUDED.revision, updated_at = now()",
-                  (name, base_url.rstrip("/"), model, api_key or (row["api_key"] if row else ""), timeout, revision))
+        # a create (no row read) must not overwrite one created meanwhile: DO UPDATE only on an update
+        written = c.execute(
+            "INSERT INTO llm_profiles (name, base_url, model, api_key, timeout_seconds, revision) "
+            "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url, "
+            "model = EXCLUDED.model, api_key = EXCLUDED.api_key, timeout_seconds = EXCLUDED.timeout_seconds, "
+            "revision = EXCLUDED.revision, updated_at = now() WHERE %s",
+            (name, base_url.rstrip("/"), model, api_key or (row["api_key"] if row else ""), timeout, revision,
+             row is not None)).rowcount
+        if not written:
+            c.rollback()
+            current = c.execute("SELECT revision FROM llm_profiles WHERE name = %s", (name,)).fetchone()
+            raise db.StaleRevision(current["revision"] if current else None)
         c.commit()
         return jsonify({"name": name, "revision": revision})
 

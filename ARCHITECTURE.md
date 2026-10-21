@@ -341,10 +341,15 @@ changes.
 **LLM resolver** (`logai2/resolver.py`, layers 3–4, run by the linker after
 `apply_links`). With an active `llm_profiles` row, it takes templates that
 have a vector and no link row at all, that are ALERTING or first seen within
-`llm.new_hours` (24), ALERTING first then ERROR > WARN > INFO, at most 3 LLM
-calls per cycle, `llm.per_service_hour` (5) per service and `llm.daily_max`
-(50) in all (counted from `llm` / `draft` / `rejected` rows by `linked_at`;
-a rejection keeps it). For each:
+`llm.new_hours` (24), ALERTING first then ERROR > WARN > INFO, about 3 LLM
+calls per cycle (a template's second call may exceed it by one),
+`llm.per_service_hour` (5) per service and `llm.daily_max` (50) in all.
+Templates resolved count, from `llm` / `draft` / `rejected` rows by
+`linked_at` (a rejection keeps it), and so do calls that wrote nothing
+(failed or junk answers, kept in memory). Capped services and templates in
+back-off are left out of the query, so they never block the others. The
+linker writes its status after each template, so a slow model does not
+look stale. For each:
 
 1. candidates = active documents whose best ERROR line is ≥
    `llm.candidate_similarity` (0.60), top `llm.candidates` (3). If any, the
@@ -358,9 +363,11 @@ The LLM sees only service, level and the normalized template text, plus the
 candidates' title, ERROR and Handling (≤ `llm.max_input_chars`); never raw
 log lines. Any link written meanwhile wins (`ON CONFLICT DO NOTHING`; a
 draft is rolled back). A failed call backs the template off for 30 min (in
-memory). The client (`logai2/llm.py`) sends JSON mode, strips `<think>`
-blocks, takes the first JSON object of the reply, and retries once on a
-timeout only.
+memory); so does an answer Postgres cannot store (NUL characters are
+stripped first) or any other database error on its write. The client
+(`logai2/llm.py`) sends JSON mode, strips `<think>` blocks, takes the first
+JSON object of the reply, retries once on a timeout only, and never follows
+a redirect (it would carry the API key elsewhere).
 
 ## 6. Reader
 

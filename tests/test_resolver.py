@@ -103,3 +103,35 @@ def test_failures_back_off_and_bad_suggestions_fail(conn, cfg, profile):
     status = run(conn, cfg, chat)
     assert status["llm"]["failed"] == 1 and "without title" in status["last_error"]
     assert conn.execute("SELECT count(*) AS n FROM documents").fetchone()["n"] == 0
+
+
+def test_bad_answers_are_stored_cleanly_or_fail_without_stopping(conn, cfg, profile):
+    tmpl(conn, "A", v=vec((0, 1.0))), alerting(conn, "A")
+    tmpl(conn, "B", v=vec((1, 1.0))), alerting(conn, "B")
+    chat = Chat({"title": "t\x00x", "handling": "h\ud800", "confidence": float("nan")},
+                {"title": "ok", "handling": "h", "error_code": 7})
+    status = run(conn, cfg, chat)
+    assert status["llm"]["suggested"] == 2
+    docs = {r["title"]: r for r in conn.execute("SELECT title, handling, confidence, error_code FROM documents")}
+    assert docs["tx"]["handling"] == "h" and docs["tx"]["confidence"] is None and docs["ok"]["error_code"] == ""
+
+
+def test_failed_calls_count_against_the_budget_and_capped_services_do_not_block(conn, cfg, profile):
+    cfg.llm.per_service_hour = 2
+    for n in range(4):
+        tmpl(conn, f"S{n}", v=vec((n, 1.0))), alerting(conn, f"S{n}")
+    tmpl(conn, "O", "INFO", v=vec((9, 1.0)), service="o"), alerting(conn, "O", "o")   # ordered last
+    chat = Chat(LlmError("junk"), LlmError("junk"), {"title": "t", "handling": "h"})
+    status = run(conn, cfg, chat)
+    # two failures use up s's hour; the third call goes to service o instead of a third s template
+    assert status["llm"] == {"confirmed": 0, "suggested": 1, "none": 0, "failed": 2}
+    assert [r["template_id"] for r in conn.execute("SELECT template_id FROM template_doc_links")] == ["O"]
+
+
+def test_progress_is_reported_after_each_template(conn, cfg, profile):
+    tmpl(conn, "A", v=vec((0, 1.0))), alerting(conn, "A")
+    conn.commit()
+    beats = []
+    Resolver(cfg, conn, chat=Chat({"title": "t", "handling": "h"})).run(
+        {"warnings": [], "last_error": None}, progress=lambda: beats.append(1))
+    assert beats == [1]

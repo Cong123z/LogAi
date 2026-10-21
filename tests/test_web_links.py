@@ -109,3 +109,12 @@ def test_delete_on_a_draft_link_rejects_its_document(client, conn):
     conn.commit()
     assert client.delete(url("A")).status_code == 200 and source(conn, "A") is None
     assert conn.execute("SELECT status FROM documents WHERE doc_id = 'DR'").fetchone()["status"] == "rejected"
+
+
+def test_a_manual_link_over_a_draft_rejects_the_draft(client, conn):
+    doc(conn, "D1"), doc(conn, "DR", status="draft")
+    tmpl(conn, "A")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('s', 'A', 'DR', 'draft')")
+    conn.commit()
+    assert client.put(url("A"), json={"doc_id": "D1"}).status_code == 200
+    assert conn.execute("SELECT status FROM documents WHERE doc_id = 'DR'").fetchone()["status"] == "rejected"
