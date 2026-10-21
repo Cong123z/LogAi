@@ -322,8 +322,8 @@ trivially):
   eps}]` (a ring buffer in the engine, 60 × 3 numbers).
 
 **`worker_status['linker']`** gains `llm_today` (answers counted toward
-`daily_max`) and `profiles_up` / `profiles_down` (already tracked per
-profile).
+`daily_max`). Profiles up / down are derived on the web from the existing
+`llm_profiles` (`down_until`).
 
 **`GET /api/pipeline`** keeps its fields and adds:
 
