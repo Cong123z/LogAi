@@ -1,10 +1,15 @@
 // ── Templates (adapted from logai-engine views/templates.js) ──
 // A service's templates with this hour's rate against its normal band, and
-// the document each one is linked to (a select links or unlinks by hand).
-const tpl = {search: '', service: '', level: '', page: 1, size: 100, refreshTimer: null};
+// the document each one is linked to: by hand (the select), inherited, auto-matched on a
+// document's ERROR lines, or by the LLM; automatic links can be confirmed or rejected.
+const tpl = {search: '', service: '', level: '', link: '', page: 1, size: 100, refreshTimer: null};
 const $tplTbody = document.getElementById('template-tbody');
 const $tplService = document.getElementById('filter-service');
 const $tplLevel = document.getElementById('filter-level');
+const $tplLink = document.getElementById('filter-link');
+const $similarModal = document.getElementById('similar-modal');
+const NO_DOCUMENT = '__none__';
+const AUTOMATIC_SOURCES = ['inherited', 'corpus', 'llm', 'draft'];
 const $tplSearch = document.getElementById('search-input');
 const $tplPageInfo = document.getElementById('page-info');
 const $tplPageBtns = document.getElementById('page-btns');
@@ -15,6 +20,7 @@ function fetchTemplates() {
   if (tpl.search) params.set('q', tpl.search);
   if (tpl.service) params.set('service', tpl.service);
   if (tpl.level) params.set('level', tpl.level);
+  if (tpl.link) params.set('link_source', tpl.link);
   return getJson(`/api/templates?${params}`, 'Unable to load templates');
 }
 function fetchServices() { return getJson('/api/services', 'Unable to load services'); }
@@ -45,10 +51,33 @@ function tplBand(t) {
   return `<span title="Normal band for this hour (mean ± kσ)">${tplNum(Math.max(t.band_low, 0))}–${tplNum(t.band_high)}/min</span>`;
 }
 
+const tplSim = x => (x == null ? '' : x.toFixed(2));
+
 function tplDocSelect(t, docs) {
-  const options = [`<option value="">— None —</option>`].concat(docs.map(d =>
+  const none = t.link_source === 'manual' && !t.doc_id;
+  const options = [`<option value="">Automatic</option>`,
+    `<option value="${NO_DOCUMENT}"${none ? ' selected' : ''}>No document</option>`].concat(docs.map(d =>
     `<option value="${escapeHtml(d.doc_id)}"${d.doc_id === t.doc_id ? ' selected' : ''}>${escapeHtml(d.doc_id)} · ${escapeHtml(d.title)}</option>`));
   return `<select class="filter-select doc-select" data-service="${escapeHtml(t.service)}" data-template="${escapeHtml(t.template_id)}" aria-label="Document for ${escapeHtml(t.template_id)}">${options.join('')}</select>`;
+}
+
+// What linked it, and Confirm / Reject for the automatic sources.
+function tplLinkMeta(t) {
+  const src = t.link_source;
+  if (!src) return t.embedded ? '' : '<span class="link-meta" title="The linker has not embedded this template yet">not embedded yet</span>';
+  const doc = t.doc_id ? escapeHtml(t.doc_id) : '';
+  const label = {
+    manual: t.doc_id ? '<span class="badge badge-gray">manual</span>' : '<span class="badge badge-gray" title="Never linked automatically">no document</span>',
+    inherited: `<span class="badge badge-blue" title="Nearest manually linked template of this service and level">inherited ${tplSim(t.similarity)}</span> from <span class="tmpl-id">${escapeHtml(t.inherited_from || '')}</span>`,
+    corpus: `<span class="badge badge-yellow" title="Matched on ${doc}'s ERROR lines">auto ${tplSim(t.similarity)}</span>`,
+    llm: `<span class="badge badge-yellow" title="${escapeHtml(t.note || '')}">AI-confirmed</span>`,
+    draft: `<span class="badge badge-yellow" title="Unverified: check commands before running them">AI suggestion ${doc}</span>`,
+    rejected: `<span class="badge badge-gray" title="Rejected ${doc}; not sent to the LLM again">rejected</span>`,
+  }[src] || escapeHtml(src);
+  const safe = t.doc_verdict === 'safe' ? ' <span class="badge badge-green" title="Normal operation, no action">SAFE</span>' : '';
+  const actions = AUTOMATIC_SOURCES.includes(src)
+    ? ` <button type="button" class="btn link-confirm">Confirm</button><button type="button" class="btn btn-danger link-reject">Reject</button>` : '';
+  return `<span class="link-meta" data-service="${escapeHtml(t.service)}" data-template="${escapeHtml(t.template_id)}">${label}${safe}${actions}</span>`;
 }
 
 function renderServiceFilter(services) {
@@ -83,7 +112,7 @@ function renderTemplates(data, docs) {
         <td><span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span></td>
         <td class="tpl-num">${tplRate(t)}</td>
         <td class="tpl-num">${tplBand(t)}</td>
-        <td>${tplDocSelect(t, docs)}</td>
+        <td><div class="link-cell">${tplDocSelect(t, docs)}${tplLinkMeta(t)}</div></td>
         <td title="${escapeHtml(formatFullTs(t.first_seen))}">${escapeHtml(formatTs(t.first_seen))}</td>
         <td title="${escapeHtml(formatFullTs(t.last_seen))}">${escapeHtml(formatTs(t.last_seen))}</td>
       </tr>`).join('');
@@ -141,20 +170,68 @@ $tplPageBtns.addEventListener('click', event => {
   loadData();
 });
 
+const linkUrl = (service, template, suffix = '') =>
+  `/api/templates/${encodeURIComponent(service)}/${encodeURIComponent(template)}/link${suffix}`;
+
 $tplTbody.addEventListener('change', async event => {
   const select = event.target.closest('.doc-select');
   if (!select) return;
   const {service, template} = select.dataset;
+  const value = select.value;
   select.disabled = true;
   try {
-    await apiMutation(`/api/templates/${encodeURIComponent(service)}/${encodeURIComponent(template)}/link`, 'PUT',
-      {doc_id: select.value || null});
+    if (!value) await apiMutation(linkUrl(service, template), 'DELETE', {});
+    else await apiMutation(linkUrl(service, template), 'PUT', {doc_id: value === NO_DOCUMENT ? null : value});
+    if (value && value !== NO_DOCUMENT) await offerSimilar(service, template, value);
   } catch (error) {
     notifyDialog(`Could not link ${template}: ${error.message}`);
   }
   select.blur();
   loadData();
 });
+
+$tplTbody.addEventListener('click', async event => {
+  const button = event.target.closest('.link-confirm, .link-reject');
+  if (!button) return;
+  const {service, template} = button.closest('.link-meta').dataset;
+  button.disabled = true;
+  try {
+    await apiMutation(linkUrl(service, template, button.classList.contains('link-confirm') ? '/confirm' : '/reject'), 'POST', {});
+  } catch (error) {
+    notifyDialog(`Could not update ${template}: ${error.message}`);
+  }
+  loadData();
+});
+
+// "Apply to similar": same service and level, pre-ticked at the inherit threshold; ticked ones become manual links.
+async function offerSimilar(service, template, docId) {
+  const data = await getJson(`/api/templates/${encodeURIComponent(service)}/${encodeURIComponent(template)}/similar`,
+    'Unable to load similar templates');
+  const items = data.items.filter(i => !(i.current_source === 'manual' && i.current_doc_id === docId));
+  if (!items.length) return;
+  document.getElementById('similar-modal-intro').textContent =
+    `${template} is now linked to ${docId}. Link these similar ${service} templates too?`;
+  document.getElementById('similar-error').textContent = '';
+  document.getElementById('similar-list').innerHTML = items.map(i => `
+    <label class="similar-item">
+      <input type="checkbox" value="${escapeHtml(i.template_id)}"${i.pre_ticked ? ' checked' : ''}>
+      <span><span class="tmpl-id">${escapeHtml(i.template_id)}</span> <span class="tmpl-text">${highlightWildcards(escapeHtml(i.text))}</span></span>
+      <span class="link-meta">${i.similarity.toFixed(2)}${i.current_doc_id ? ` · now ${escapeHtml(i.current_doc_id)} (${escapeHtml(i.current_source)})` : ''}</span>
+    </label>`).join('');
+  const apply = document.getElementById('similar-apply');
+  apply.onclick = async () => {
+    const also = [...document.querySelectorAll('#similar-list input:checked')].map(i => i.value);
+    apply.disabled = true;
+    try {
+      if (also.length) await apiMutation(linkUrl(service, template), 'PUT', {doc_id: docId, also});
+      $similarModal.classList.remove('open');
+      loadData();
+    } catch (error) {
+      document.getElementById('similar-error').textContent = error.message;
+    } finally { apply.disabled = false; }
+  };
+  $similarModal.classList.add('open');
+}
 
 let tplSearchTimeout;
 $tplSearch.addEventListener('input', () => {
@@ -168,6 +245,7 @@ $tplSearch.addEventListener('input', () => {
 
 $tplService.addEventListener('change', () => { tpl.service = $tplService.value; tpl.page = 1; loadData(); });
 $tplLevel.addEventListener('change', () => { tpl.level = $tplLevel.value; tpl.page = 1; loadData(); });
+$tplLink.addEventListener('change', () => { tpl.link = $tplLink.value; tpl.page = 1; loadData(); });
 document.getElementById('page-size').addEventListener('change', event => {
   tpl.size = Number(event.target.value);
   tpl.page = 1;

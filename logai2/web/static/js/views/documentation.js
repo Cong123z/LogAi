@@ -1,6 +1,8 @@
 // ── Documentation (adapted from logai-engine views/documentation.js) ──
 // The runbook corpus: list, editor with a revision check, delete (blocked
 // while templates link to it) and, per document, the templates linked to it.
+// A document is ERROR (the log lines it is for: the only part matched against
+// templates) plus Handling (what to do).
 const docs = {items: [], sort: 'doc_id', order: 'asc', expanded: new Set()};
 const $docTbody = document.getElementById('documentation-tbody');
 const $documentModal = document.getElementById('document-modal');
@@ -35,7 +37,7 @@ function renderDocumentation() {
     <tr data-doc-id="${id}">
       <td><span class="tmpl-id">${id}</span></td>
       <td>${escapeHtml(doc.title || 'Untitled')}</td>
-      <td><div class="doc-text" title="${escapeHtml(doc.body)}">${escapeHtml(doc.body)}</div></td>
+      <td>${docErrorCell(doc)}</td>
       <td><span class="tmpl-id">${escapeHtml(doc.error_code || '—')}</span></td>
       <td>${doc.linked_templates
         ? `<button type="button" class="group-expand doc-links-toggle${open ? ' expanded' : ''}" aria-expanded="${open}"><span class="group-expand-icon" aria-hidden="true">›</span>${doc.linked_templates}</button>`
@@ -45,6 +47,16 @@ function renderDocumentation() {
     <tr class="group-members-row" data-links-for="${id}"${open ? '' : ' hidden'}><td colspan="6"><div class="group-members-panel"><p class="loading">Loading linked templates...</p></div></td></tr>`;
   }).join('');
   docs.expanded.forEach(docId => { if (docs.items.some(d => d.doc_id === docId)) loadDocLinks(docId); });
+}
+
+function docErrorCell(doc) {
+  const lines = doc.error_lines.length
+    ? `<div class="doc-error-lines" title="As matched against templates">${highlightWildcards(escapeHtml(doc.error_lines.join('\n')))}</div>`
+    : '<span class="badge badge-gray" title="Never matched automatically: manual and inherited links only">no ERROR line</span>';
+  const pending = doc.error_lines.length && !doc.embedded ? ' <span class="link-meta">embedding…</span>' : '';
+  const badges = (doc.source === 'llm' ? ' <span class="badge badge-yellow">AI-written</span>' : '')
+    + (doc.verdict === 'safe' ? ' <span class="badge badge-green">SAFE</span>' : '');
+  return `${lines}${pending}${badges}<div class="doc-text" title="${escapeHtml(doc.handling)}">${escapeHtml(doc.handling)}</div>`;
 }
 
 async function loadDocLinks(docId) {
@@ -72,7 +84,8 @@ function openDocumentEditor(docId = null) {
   document.getElementById('document-modal-title').textContent = doc ? `Edit ${doc.doc_id}` : 'Add document';
   document.getElementById('document-id').value = doc ? doc.doc_id : '';
   document.getElementById('document-title').value = doc ? doc.title : '';
-  document.getElementById('document-text').value = doc ? doc.body : '';
+  document.getElementById('document-error-lines').value = doc ? doc.error : '';
+  document.getElementById('document-text').value = doc ? doc.handling : '';
   document.getElementById('document-error-code').value = doc ? doc.error_code : '';
   document.getElementById('document-error').textContent = '';
   docs.editingRevision = doc ? doc.revision : null;
@@ -138,7 +151,8 @@ document.getElementById('document-form').addEventListener('submit', async event 
   const payload = {
     revision: docs.editingRevision,
     title: document.getElementById('document-title').value,
-    body: document.getElementById('document-text').value,
+    error: document.getElementById('document-error-lines').value,
+    handling: document.getElementById('document-text').value,
     error_code: document.getElementById('document-error-code').value,
   };
   const submit = event.submitter;

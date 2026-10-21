@@ -48,7 +48,17 @@ function plSparkline() {
   $caption.textContent = `Events/s, last ${rates.length} heartbeats · peak ${max.toFixed(1)}/s`;
 }
 
-function renderPipeline({status, cursors, stale}) {
+// The linker (embeddings, automatic links, LLM) reports once per cycle.
+function plLinkerCard(linker, linkerStale) {
+  if (!linker) return plCard('Linker', 'Not running', 'no report yet: automatic links are off', 'warn');
+  const pending = linker.pending || {};
+  const problem = linker.last_error || (linker.warnings || [])[0];
+  const sub = linkerStale ? `last report ${formatTs(linker.heartbeat)}`
+    : problem || `pending: ${pending.templates || 0} templates, ${pending.documents || 0} documents`;
+  return plCard('Linker', linkerStale ? 'Stale' : 'Running', sub, linkerStale || problem ? 'warn' : '');
+}
+
+function renderPipeline({status, cursors, stale, linker, linker_stale: linkerStale}) {
   const $status = document.getElementById('pl-status');
   $status.className = 'sync-status' + (stale ? ' llm-status-error' : '');
   if (!status) {
@@ -78,6 +88,7 @@ function renderPipeline({status, cursors, stale}) {
       status.detection_enabled ? 'alerts are raised' : 'catching up; counts only', status.detection_enabled ? '' : 'warn'),
     plCard('Bootstrap', boot.since ? formatFullTs(boot.since) : '—', boot.until ? `first start read until ${formatFullTs(boot.until)}` : ''),
     plCard('Last commit', commit ? formatFullTs(Date.parse(commit.at) / 1000) : 'never', commit ? `baseline day ${commit.today}` : 'daily baseline commit'),
+    plLinkerCard(linker, linkerStale),
   ].join('');
 
   // Position per index from the engine's live status; es_cursors fills in indices it is not reporting.

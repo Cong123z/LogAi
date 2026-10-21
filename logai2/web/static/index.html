@@ -90,6 +90,12 @@
           </div>
           <select class="filter-select" id="filter-service" aria-label="Service"><option value="">All services</option></select>
           <select class="filter-select" id="filter-level" aria-label="Level"></select>
+          <select class="filter-select" id="filter-link" aria-label="Link">
+            <option value="">All links</option><option value="none">Not linked</option>
+            <option value="manual">Manual</option><option value="inherited">Inherited</option>
+            <option value="corpus">Auto-matched</option><option value="llm">AI-confirmed</option>
+            <option value="draft">AI suggestion</option><option value="rejected">Rejected</option>
+          </select>
           <label class="chip-toggle chip-push"><input type="checkbox" id="auto-refresh"><span>Auto-refresh</span></label>
         </div>
         <div class="table-wrap">
@@ -121,7 +127,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th data-document-sort="doc_id" class="sorted">ID <span class="sort-arrow">▲</span></th><th data-document-sort="title">Title <span class="sort-arrow"></span></th><th>Documentation text</th><th data-document-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-document-sort="linked_templates">Linked templates <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
+            <thead><tr><th data-document-sort="doc_id" class="sorted">ID <span class="sort-arrow">▲</span></th><th data-document-sort="title">Title <span class="sort-arrow"></span></th><th title="Only the ERROR lines are matched against templates">ERROR / Handling</th><th data-document-sort="error_code">Error code <span class="sort-arrow"></span></th><th data-document-sort="linked_templates">Linked templates <span class="sort-arrow"></span></th><th>Actions</th></tr></thead>
             <tbody id="documentation-tbody"><tr><td colspan="6" class="loading">Loading documentation...</td></tr></tbody>
           </table>
         </div>
@@ -258,11 +264,23 @@
       <form id="document-form">
         <input type="hidden" id="document-id">
         <div class="form-field"><label for="document-title">Title</label><input id="document-title" maxlength="200" required></div>
-        <div class="form-field"><label for="document-text">Documentation text</label><textarea id="document-text" maxlength="20000" required></textarea></div>
         <div class="form-field"><label for="document-error-code">Error code</label><input id="document-error-code" maxlength="100"></div>
+        <div class="form-field"><label for="document-error-lines">ERROR: the log line(s) this document is for, one per line</label><textarea id="document-error-lines" class="mono-input" maxlength="5000" rows="3" placeholder="TransactionManager Transaction timeout reqID 123 msisdn 84912345678"></textarea>
+          <p class="field-hint" id="document-error-hint">Only these lines are matched against templates. Empty: the document is never matched automatically.</p></div>
+        <div class="form-field"><label for="document-text">Handling: what to do</label><textarea id="document-text" maxlength="20000"></textarea></div>
         <div class="form-error" id="document-error" aria-live="polite"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="document-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
       </form>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="similar-modal" role="dialog" aria-modal="true" aria-labelledby="similar-modal-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="similar-modal-title">Apply to similar templates</h2><button type="button" class="modal-close" data-close="similar-modal" aria-label="Close">&times;</button></div>
+      <p class="sync-status" id="similar-modal-intro"></p>
+      <div class="similar-list" id="similar-list"></div>
+      <div class="form-error" id="similar-error" aria-live="polite"></div>
+      <div class="form-actions"><button type="button" class="btn" data-close="similar-modal">Skip</button><button type="button" class="btn btn-primary" id="similar-apply">Link ticked templates</button></div>
     </div>
   </div>
 

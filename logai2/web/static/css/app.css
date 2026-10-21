@@ -898,3 +898,13 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 #view-baseline > .section-heading { flex-wrap: wrap; }
 #view-baseline > .section-heading .filter-bar { margin: 0; }
 #view-documentation td:first-child .tmpl-id { white-space: nowrap; }
+
+/* Layered document links */
+.mono-input { font-family: var(--font-mono); font-size: 13px; }
+.link-cell { display:flex; flex-direction:column; gap:4px; align-items:flex-start; }
+.link-meta { display:flex; flex-wrap:wrap; gap:4px; align-items:center; font-size:12px; color:var(--text-muted); }
+.link-meta .btn { padding:2px 8px; font-size:12px; }
+.doc-error-lines { font-family: var(--font-mono); font-size: 12px; white-space: pre-wrap; }
+.similar-list { max-height:50vh; overflow:auto; display:flex; flex-direction:column; gap:6px; margin:8px 0; }
+.similar-item { display:grid; grid-template-columns:auto 1fr auto; gap:8px; align-items:start; }
+.similar-item .tmpl-text { white-space:normal; }
