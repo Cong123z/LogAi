@@ -2,8 +2,25 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **implemented** on branch `embeddings-doc-links` (2026-10-21),
-Phases A and B; all decisions confirmed by the user on 2026-10-21.
+Status: **implemented and merged into `master`** (2026-10-21), Phases A
+and B; all decisions confirmed by the user on 2026-10-21. ARCHITECTURE §5.1
+and docs/WEB_UI.md describe the result; where this plan differs, they win.
+
+**Added after the plan, at the user's request (2026-10-21):**
+- LLM failover: every active profile is used in priority order; a failing
+  one is skipped for 5 min (migration 003); a bare-host base URL gets `/v1`.
+- An LLM profiles page of its own, with status banner, usage and answers
+  per profile.
+- Documents per service (migration 004): matching and LLM candidates stay
+  within the template's service; other services' documents are sent to the
+  LLM as references to adapt; the All-services view groups the same ERROR
+  line into one row.
+- A document kind, ERROR or SAFE (the `verdict`), with a filter and a
+  one-click switch.
+- The level class of a document's ERROR line (migration 005): corpus
+  matching stays within the class; the LLM is shown both levels.
+- The Documentation and Templates pages redesigned for reading in full
+  (list + reading pane, review drawer, no truncated text).
 Departures: no `corpus_mode` switch (a `corpus_similarity` above 1 turns
 layer 2 off); no hint layer; no "test" button on LLM profiles (the web
 never calls the LLM; the linker reports LLM errors on the Pipeline page);

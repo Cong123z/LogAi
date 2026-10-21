@@ -3,7 +3,7 @@
 Status: **sub-project 1 built** (2026-10-20, branch `core-engine-v1`): spec
 [`docs/specs/2026-10-20-core-engine-design.md`](../specs/2026-10-20-core-engine-design.md),
 as implemented in [`ARCHITECTURE.md`](../../ARCHITECTURE.md). Sub-project 2/3
-(document links, sections 3 and 4a) built on branch `embeddings-doc-links`
+(document links, sections 3 and 4a) built and merged into `master`
 (2026-10-21). Sub-projects 0 and 4–7 are not built yet. Drafted 2026-10-19. On
 2026-10-21 sections 3, 4a and 6 were revised for the layered document
 matching (ERROR field, automatic corpus links, LLM confirm or suggest):

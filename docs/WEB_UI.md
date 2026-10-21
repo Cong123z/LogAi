@@ -35,12 +35,13 @@ theme).
 | Alerting | `/#alerting` | every 5 s | `GET /api/alerts` |
 | Pipeline | `/#pipeline` (also the fallback for unknown hashes) | every 2 s | `GET /api/pipeline` |
 | Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/services`, `/api/documents` |
-| Documentation | `/#documentation` | on entry and after each change | `GET /api/documents` |
+| Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
+| LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
 | Baseline | `/#baseline` | on entry, after each change, and every 1 s while a recompute runs | `GET /api/services`, `/api/baseline` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
-(Templates, Documentation) and Settings (Data sources, Baseline). The top
+(Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline). The top
 bar has an **engine health pill**, refreshed every 5 s from `/api/pipeline`:
 red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 (degraded) when the engine reports warnings, green otherwise.

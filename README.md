@@ -190,7 +190,7 @@ baseline.
 ```
 logai2/
   config.py, timeutil.py, db.py      config layers, local time, Postgres (migrate, partitions, settings)
-  migrations/                        001_init.sql (core), 002_doc_links.sql (vectors, ERROR/Handling, link sources)
+  migrations/                        001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level
   reader/                            es_source.py (ES query, hit → Line), normalize.py, cache.py, reader.py (watermark)
   owner/                             miners.py (Drain3 per service), counts.py (open minutes), baseline.py (bands),
                                      detect.py (hysteresis), owner.py (flush transaction)
@@ -199,7 +199,7 @@ logai2/
   commands.py, metrics.py, engine.py the engine loop
   embed.py, links.py, linker.py      embeddings client, layered links (SQL), the linker loop
   llm.py, resolver.py                LLM client (active profile), confirm-or-suggest resolver
-  web/app.py, web/static/            Flask API and the six pages
+  web/app.py, web/static/            Flask API and the seven pages
 scripts/run_engine.py, run_web.py, run_linker.py, incident_test.py,
         split_doc_errors.py (seeded ERROR/Handling split), link_eval.py (measure link thresholds and the LLM)
 tests/                               pytest (Postgres on 5433)
@@ -210,3 +210,6 @@ ARCHITECTURE.md, config.yaml, docker-compose.yml, Dockerfile
 ## Validation
 
 2026-10-20 smoke test (one partial baseline day, not an acceptance run): [docs/validation/2026-10-20-incident-smoke-test.md](docs/validation/2026-10-20-incident-smoke-test.md).
+
+2026-10-21 document links on real data (316 templates, the stack's bge-m3;
+before the level-class rule): [docs/validation/2026-10-21-doc-links-smoke.md](docs/validation/2026-10-21-doc-links-smoke.md).
