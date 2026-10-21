@@ -22,6 +22,7 @@ from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
 from logai2.web.baseline_view import UnknownKey, incident, inspect, left_days, matrix, series
+from logai2.web.pipeline_view import services as service_rows, stage_states, volume
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
@@ -183,8 +184,14 @@ def create_app(cfg: AppConfig) -> Flask:
         row = conn().execute("SELECT status FROM worker_status WHERE worker = 'linker'").fetchone()
         linker = row["status"] if row else None
         linker_stale = linker is None or time.time() - (linker.get("heartbeat") or 0) > LINKER_STALE_SECONDS
+        now = time.time()
+        day, hour = day_hour(minute_of(now))
+        rows = service_rows(conn(), cfg, status, day, hour)
         return jsonify({"status": status or None, "cursors": cursors, "stale": stale,
-                        "linker": linker, "linker_stale": linker_stale})
+                        "linker": linker, "linker_stale": linker_stale, "services": rows,
+                        "volume": volume(conn(), cfg, day, hour),
+                        "stages": stage_states(status, stale, linker, linker_stale,
+                                               sum(r["unparsed_1h"] for r in rows), now)})
 
     @app.get("/api/sources")
     def sources():
