@@ -723,7 +723,7 @@ The status is built before a flush runs, so it reports the previous completed
 flush. The web treats a heartbeat older than 30 s as stale (engine not running).
 
 The linker's status (`worker_status['linker']`) also carries `llm_today`, the
-number of LLM answers given today (`llm_profiles[name].answers` per profile).
+number counted against `llm.daily_max`: `llm` / `draft` / `rejected` link rows of the last 24 h (rolling) plus calls that wrote nothing. `llm_profiles[name].answers` is per profile since the linker started.
 The Pipeline page reads both rows; its stage states are derived in
 `logai2/web/pipeline_view.py` (rules in [`docs/WEB_UI.md`](docs/WEB_UI.md)).
 

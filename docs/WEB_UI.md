@@ -38,10 +38,11 @@ theme).
 | Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
 | LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
-| Baseline | `/#baseline` | on entry, after each change, and every 1 s while a recompute runs | `GET /api/services`, `/api/baseline` |
+| Baseline | `/#baseline/<service>/<key>/<days>` | on entry and after each change; no timers | `GET /api/services`, `/api/templates`, `/api/baseline/series`, `/api/baseline/matrix`, `/api/baseline/incident` |
+| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
-(Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline). The top
+(Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline, Review). The top
 bar has an **engine health pill**, refreshed every 5 s from `/api/pipeline`:
 red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 (degraded) when the engine reports warnings, green otherwise.
@@ -98,7 +99,7 @@ updates the existing chart instances.
   | Postgres flush | last flush time | slowest flush of the last 15 min |
   | Prometheus | "metrics export" | "scraped by Prometheus" |
   | Linker | pending templates + documents | links changed last cycle or not |
-  | LLM resolver | "N today" (answers today) | profiles up / down |
+  | LLM resolver | "N today" (`llm_today`: LLM calls counted against `llm.daily_max`) | profiles up / down |
 
   Particles move along the main row at a speed stepped by events/s; they stop
   under reduced motion or when the engine is not running. Click a stage for
@@ -638,7 +639,7 @@ read:
 up to 10, beyond; "down" only for `*total` and `*error` when the profile
 alerts low) or `none` (no baseline). A baseline of mean 0 and σ 0 gives
 `up3` for any event and `in` otherwise. `rate` is events per minute,
-`z = (rate - mean) / max(σ, 1)`. `suggested` means keys of the service left
+`z = (rate - mean) / max(σ, 1)` when mean > 0, else `(rate - mean) / σ`. `suggested` means keys of the service left
 NORMAL in that hour and no decision covers it; `decision` is the latest
 `exclude` / `keep` covering it. `coverage` lists 24 hours per day type;
 `profiles` is `none`, `young`, `full` or `borrowed` (a weekend with fewer
@@ -665,9 +666,9 @@ the same messages; `hour_to` exclusive).
  "left_days": [{"hour": 10, "of": 5, "days": 4}]}
 ```
 
-`peak`, `expected` and `rate` are null when no hour of the range has
-minutes read. `day` is the whole day (24 rows) with the same hour a week
-earlier. `increased` is the 10 templates whose rate rose most over their
+`peak` and `expected` are null when no hour of the range has minutes read;
+in `day` (the whole day, 24 rows, with the same hour a week earlier) `rate`
+is null for an hour with no data. `increased` is the 10 templates whose rate rose most over their
 baseline (a template in `new` is left out); `new` are templates first seen
 from one hour before the range to its end. `left_days` is what the rebuild
 would have per hour of the range if this range were excluded.
@@ -694,7 +695,7 @@ when its rate is above the band (or below it, for `*total` / `*error` when
 the profile alerts low); an incident is a run of consecutive `out` hours.
 `decision` is `exclude`, `keep`, `"review"` (keys left NORMAL in the run and
 nothing decided) or null. `rate` is null for an hour with no `service_hours`
-row (its band is still given). `profile` is empty for a `doc:` key.
+row (its band is still given). For a `doc:` key `profile.weekday` and `profile.weekend` are empty; `today` is still filled.
 
 ### `GET /api/baseline/incident`
 
