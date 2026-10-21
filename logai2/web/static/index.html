@@ -248,7 +248,53 @@
         </div>
       </section>
       <section class="view groups-section" id="view-baseline" aria-label="Baseline">
-        <p class="empty-state">Baseline charts are being rebuilt. Decisions moved to <a href="#review">Review</a>.</p>
+        <div class="section-heading">
+          <div class="filter-bar">
+            <label for="bl-service" class="filter-label">Service</label>
+            <select class="filter-select" id="bl-service"></select>
+            <label for="bl-key" class="filter-label">Show</label>
+            <select class="filter-select" id="bl-key"></select>
+            <div class="toggle-group" id="bl-days" role="group" aria-label="Period">
+              <button type="button" class="toggle-btn" data-days="1" aria-pressed="false">Today</button>
+              <button type="button" class="toggle-btn" data-days="7" aria-pressed="false">7 days</button>
+              <button type="button" class="toggle-btn" data-days="14" aria-pressed="false">14 days</button>
+            </div>
+          </div>
+          <span class="sync-status">Read-only. Decide on the <a href="#review">Review</a> page.</span>
+        </div>
+        <p class="ins-toast" id="bl-status" role="status" aria-live="polite"></p>
+        <div class="stats-row" id="bl-cards"></div>
+        <div class="rv-panel">
+          <div class="rv-head"><h3 id="bl-title">Actual vs expected</h3></div>
+          <p class="sync-status">One point per hour. Gray is the expected band; red areas are possible incidents (outside the band); a &#10005; / &#10003; label means Review excluded / kept that period. Scroll or drag the slider to zoom.</p>
+          <div id="bl-main" class="rv-chart bl-chart-main" tabindex="0" role="img" aria-label="Hourly rate against the expected band, with possible incidents shaded"></div>
+        </div>
+        <div class="rv-panel">
+          <div class="rv-head"><h3>Possible incidents <span class="sync-status" id="bl-inc-count"></span></h3></div>
+          <p class="sync-status">Hours outside the band, grouped. It is an hourly view: detection judges minutes. Click a row to zoom and see where the lines came from.</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>When</th><th>State</th><th class="r">Duration</th><th class="r">Peak</th><th class="r">Expected</th><th class="r">&times; normal</th><th>Decision</th><th></th></tr></thead>
+            <tbody id="bl-inc"></tbody></table></div>
+          <div id="bl-detail" hidden>
+            <h4 id="bl-detail-title" tabindex="-1">Incident</h4>
+            <div id="bl-modules" class="rv-chart rv-chart-xs" role="img" aria-label="Share of lines by module"></div>
+            <div id="bl-samples"></div>
+          </div>
+        </div>
+        <div class="bl-two">
+          <div class="rv-panel">
+            <div class="rv-head"><h3>Days &times; hours</h3></div>
+            <p class="sync-status">The same data as a grid, coloured by distance from the band. &#10005; excluded, &#10003; kept.</p>
+            <div class="rv-legend" id="bl-legend"></div>
+            <div class="rv-scroll"><div id="bl-matrix" class="rv-chart" role="img" aria-label="Heatmap of hourly rate against the baseline, days by hours"></div></div>
+          </div>
+          <div class="rv-panel">
+            <div class="rv-head"><h3>The baseline itself</h3></div>
+            <p class="sync-status">What normal is for each hour: weekday band and mean (solid), weekend mean (dashed), today so far.</p>
+            <div id="bl-profile" class="rv-chart" role="img" aria-label="Expected rate per hour of the day"></div>
+            <p class="sync-status" id="bl-profile-note"></p>
+          </div>
+        </div>
       </section>
       <section class="view groups-section" id="view-review" aria-label="Review">
         <div class="section-heading">

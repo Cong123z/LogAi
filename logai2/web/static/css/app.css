@@ -1027,3 +1027,13 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 @media (max-width: 900px) { .rv-split { grid-template-columns: minmax(0, 1fr); } }
 button.stat-card { text-align: left; color: inherit; font: inherit; cursor: pointer; }
 button.stat-card:disabled { cursor: default; }
+
+/* Baseline page */
+.bl-chart-main { height: 340px; }
+.bl-two { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 16px; }
+.bl-two .rv-panel { margin-bottom: 0; }
+#view-baseline th.r, #view-baseline td.r { text-align: right; }
+#bl-inc tr[data-i] { cursor: pointer; }
+#bl-inc tr[data-i]:focus-visible, #bl-inc tr[aria-current="true"] { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+@media (max-width: 900px) { .bl-two { grid-template-columns: minmax(0, 1fr); } }
+#bl-key { max-width: min(360px, 100%); }
