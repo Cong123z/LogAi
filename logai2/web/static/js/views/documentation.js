@@ -5,9 +5,8 @@
 // written for: Approve (link becomes manual, document active), Edit (saving approves), Reject.
 // Every document is of one kind: ERROR (verdict "action": something to fix) or SAFE (normal operation);
 // the All / ERROR / SAFE buttons filter the list.
-// Documents belong to a service (or are shared). One service shows its own and the shared ones; "All
+// Documents belong to a service. The filter shows one service's documents, or all of them; "All
 // services" groups documents with the same ERROR line into one row, with a version per service.
-const SHARED = '__shared__';
 const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: '',
               service: '', services: []};
 const $docService = document.getElementById('doc-service');
@@ -63,15 +62,14 @@ async function loadDocumentation() {
 
 function renderServiceOptions() {
   const current = docs.service;
-  $docService.innerHTML = '<option value="">All services</option><option value="__shared__">Shared only</option>'
-    + docs.services.map(svc => `<option value="${escapeHtml(svc)}">${escapeHtml(svc)} (+ shared)</option>`).join('');
+  $docService.innerHTML = '<option value="">All services</option>'
+    + docs.services.map(svc => `<option value="${escapeHtml(svc)}">${escapeHtml(svc)}</option>`).join('');
   $docService.value = current;
 }
 
 function docMatches(doc) {
   if (docs.kind && doc.verdict !== docs.kind) return false;
-  if (docs.service === SHARED && doc.service) return false;
-  if (docs.service && docs.service !== SHARED && doc.service && doc.service !== docs.service) return false;
+  if (docs.service && doc.service !== docs.service) return false;
   const q = docs.query.toLowerCase();
   if (!q) return true;
   const t = docs.drafts.get(doc.doc_id);
@@ -93,8 +91,7 @@ function verdictBadge(doc) {
 }
 
 function renderKindCounts() {
-  const inService = d => !(docs.service === SHARED && d.service)
-    && !(docs.service && docs.service !== SHARED && d.service && d.service !== docs.service);
+  const inService = d => !docs.service || d.service === docs.service;
   const n = kind => docs.items.filter(d => inService(d) && (!kind || d.verdict === kind)).length;
   document.querySelectorAll('#doc-kind-toggle .kind-count').forEach(el => { el.textContent = n(el.dataset.count); });
 }
@@ -104,10 +101,11 @@ function renderDocumentation() {
   document.getElementById('add-document-btn').hidden = drafting;
   document.getElementById('approve-safe-btn').hidden =
     !drafting || !docs.items.some(d => d.verdict === 'safe' && docs.drafts.has(d.doc_id));
-  const linked = docs.items.filter(d => d.linked_templates > 0).length;
+  const inService = docs.items.filter(d => !docs.service || d.service === docs.service);
+  const linked = inService.filter(d => d.linked_templates > 0).length;
   document.getElementById('doc-sync-status').textContent = drafting
-    ? `${plural(docs.items.length, 'suggestion')} to review. Unverified: check commands before running them.`
-    : `${plural(docs.items.length, 'document')} · ${linked} linked to templates`;
+    ? `${plural(inService.length, 'suggestion')} to review. Unverified: check commands before running them.`
+    : `${plural(inService.length, 'document')} · ${linked} linked to templates`;
   renderKindCounts();
   renderDocList();
   renderDocPane();
@@ -421,9 +419,7 @@ $docService.addEventListener('change', () => {
   docs.service = $docService.value;
   const shown = docs.items.filter(docMatches);
   if (!shown.some(d => d.doc_id === docs.selected)) { docs.selected = shown.length ? shown[0].doc_id : null; docs.editing = false; }
-  renderKindCounts();
-  renderDocList();
-  renderDocPane();
+  renderDocumentation();
 });
 
 document.querySelectorAll('#doc-kind-toggle .toggle-btn').forEach(button => button.addEventListener('click', () => {

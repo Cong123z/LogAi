@@ -137,8 +137,9 @@ two stack. Two tabs (deep links `#documentation` and
 `#documentation/suggestions`):
 
 Every document belongs to a **service**, or is **shared** (applies to
-every service). The service filter shows one service's documents plus the
-shared ones, or "Shared only". With **All services**, documents whose ERROR
+every service). The service filter shows **All services** or one
+service's documents only (shared ones appear under All services). With
+**All services**, documents whose ERROR
 lines are the same (after normalizing) form one row with a chip per
 service ("same ERROR in 3: recharge · topup · payment"), so one error is
 never listed three times; the pane has a switch between the services'
