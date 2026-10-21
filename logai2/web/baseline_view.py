@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 from logai2.config import AppConfig
 from logai2.links import ALERTING_SOURCES
 from logai2.owner.baseline import DAY_CAP, Baseline, Stat, full_after, judge
+from logai2.owner.counts import ERROR_LEVELS
 from logai2.review import keys_by_hour, minutes_by_hour, periods
 from logai2.timeutil import TZ, daytype
 
@@ -101,7 +102,8 @@ def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: st
             k = cfg.baseline.sigma_multiplier if full else cfg.baseline.young_sigma_multiplier
             cls = _cls(z, k, key in DROP_KEYS and not lk.upper_only)
         out[(day, hour)] = {"rate": rate, "mean": mean, "std": std, "band_low": v.band_low,
-                            "band_high": v.band_high, "z": z, "no_baseline": none, "cls": cls}
+                            "band_high": v.band_high, "z": z, "no_baseline": none, "cls": cls,
+                            "upper_only": lk.upper_only}
     return out
 
 
@@ -231,3 +233,110 @@ def inspect(conn, cfg: AppConfig, service: str, key: str, day: date, hour_from: 
     return {"sentence": sentence, "day": series, "increased": increased, "new": new,
             "keys": [{"key": k, "periods": v} for k, v in sorted(by_key.items())],
             "left_days": left_days(conn, service, day, hour_from, hour_to, True)}
+
+
+def series(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date, now: float) -> dict:
+    """The key's hourly rate against its band over ndays, with its possible incidents (runs of hours outside the band)."""
+    kind, ids = resolve_key(conn, service, key)
+    days = [today - timedelta(days=i) for i in range(ndays - 1, -1, -1)]
+    cells = _cells(conn, cfg, service, ids, kind, days + [d - timedelta(days=7) for d in days])
+    bl = Baseline.load(conn, [(service, t) for t in ids])
+    last_hour = datetime.fromtimestamp(now, TZ).hour
+    pts = []
+    for d in days:
+        for h in range(last_hour + 1 if d == today else 24):
+            c, lw = cells.get((d, h)), cells.get((d - timedelta(days=7), h))
+            if c is None:       # no service_hours row: no rate, but the hour still has its band
+                lk, v = _lookup(bl, cfg, service, ids, kind, d, h)
+                c = {"rate": None, "mean": lk.this and lk.this.mean, "std": lk.this and lk.this.std,
+                     "band_low": v.band_low, "band_high": v.band_high, "z": None, "upper_only": lk.upper_only}
+            rate, lo, hi = c["rate"], c["band_low"], c["band_high"]
+            down = key in DROP_KEYS and not c["upper_only"]
+            out = rate is not None and hi is not None and (rate > hi or (down and rate < lo))
+            pts.append({"day": d.isoformat(), "hour": h, "rate": rate, "mean": c["mean"], "std": c["std"],
+                        "band_low": lo, "band_high": hi, "last_week": lw and lw["rate"], "z": c["z"], "out": out})
+
+    changes = conn.execute("SELECT key, at, to_state FROM alert_changes WHERE service = %s ORDER BY at",
+                           (service,)).fetchall()
+    not_normal = minutes_by_hour(periods(changes, now))
+    decisions = conn.execute("SELECT day, hour_from, hour_to, decision FROM review_exclusions "
+                             "WHERE service = %s AND day = ANY(%s) ORDER BY id DESC", (service, days)).fetchall()
+    newest = max(((p["day"], p["hour"]) for p in pts if p["rate"] is not None), default=None)
+    runs: list[list[dict]] = []
+    for p in pts:
+        if not p["out"]:
+            continue
+        if runs and runs[-1][-1]["day"] == p["day"] and runs[-1][-1]["hour"] == p["hour"] - 1:
+            runs[-1].append(p)
+        else:
+            runs.append([p])
+    incidents = []
+    for run in runs:
+        d, a, b = date.fromisoformat(run[0]["day"]), run[0]["hour"], run[-1]["hour"] + 1
+        pk = max(run, key=lambda p: abs(p["rate"] - (p["mean"] or 0)))
+        decided = next((r["decision"] for r in decisions if r["day"] == d and r["hour_from"] < b and r["hour_to"] > a), None)
+        suggested = any(not_normal.get((d, h), 0) for h in range(a, b))
+        incidents.append({
+            "day": run[0]["day"], "hour_from": a, "hour_to": b, "hours": b - a,
+            "ongoing": newest is not None and (run[0]["day"], run[-1]["hour"]) == newest,
+            "peak": {k: pk[k] for k in ("hour", "rate", "mean", "band_low", "band_high", "z")},
+            "times_normal": round(pk["rate"] / pk["mean"], 1) if pk["mean"] else None,
+            "decision": decided or ("review" if suggested else None)})
+
+    prof: dict[str, list[dict]] = {"weekday": [], "weekend": []}
+    if kind != "doc":
+        for dt in prof:
+            k = cfg.baseline.sigma_multiplier if bl.days.get((service, dt), 0) >= full_after(cfg, dt) \
+                else cfg.baseline.young_sigma_multiplier
+            prof[dt] = [{"hour": h, "mean": s.mean, "band_low": s.mean - k * s.std, "band_high": s.mean + k * s.std}
+                        for h in range(24) if (s := bl.stats.get((service, ids[0], dt, h)))]
+    lk = bl.lookup_doc(service, ids, today, last_hour) if kind == "doc" else bl.lookup(service, ids[0], today, last_hour)
+    state = ("none" if not any(k[:2] == (service, t) for k in bl.stats for t in ids) else
+             "borrowed" if lk.upper_only else "full" if lk.days >= full_after(cfg, lk.daytype) else "young")
+    return {"key": key, "baseline_state": state, "points": pts, "incidents": incidents,
+            "profile": {**prof, "today": [{"hour": p["hour"], "rate": p["rate"]} for p in pts
+                                          if p["day"] == today.isoformat() and p["rate"] is not None]}}
+
+
+def incident(conn, service: str, key: str, day: date, hour_from: int, hour_to: int, now: float) -> dict:
+    """Modules the lines came from, and (ongoing only) the newest sample lines."""
+    kind, ids = resolve_key(conn, service, key)
+    if key in DROP_KEYS:
+        ids = [r["template_id"] for r in conn.execute("SELECT template_id FROM templates WHERE service = %s", (service,))]
+    start = datetime(day.year, day.month, day.day, tzinfo=TZ)
+    t0, t1 = start + timedelta(hours=hour_from), start + timedelta(hours=hour_to)
+    modules = [{"module": r["module_code"], "lines": r["n"]} for r in conn.execute(
+        "SELECT module_code, sum(count)::int AS n FROM alert_minutes WHERE service = %s AND key = ANY(%s) "
+        "AND day = %s AND minute >= %s AND minute < %s GROUP BY module_code ORDER BY n DESC, module_code",
+        (service, ids, day, t0, t1))]
+    newest = conn.execute("SELECT day, hour FROM service_hours WHERE service = %s AND n_minutes > 0 "
+                          "ORDER BY day DESC, hour DESC LIMIT 1", (service,)).fetchone()
+    ongoing = bool(newest and newest["day"] == day and hour_from <= newest["hour"] < hour_to)
+    samples: list[dict] = []
+    if ongoing:
+        tids = ids
+        if key in DROP_KEYS:        # the 3 ERROR+ templates that rose most over their baseline
+            tids = _top_excess(conn, service, day, hour_from, hour_to)
+        samples = [{"at": r["at"].timestamp(), "template_id": r["template_id"], "line": r["line"]} for r in conn.execute(
+            "SELECT template_id, at, line FROM error_samples WHERE service = %s AND template_id = ANY(%s) "
+            "ORDER BY at DESC LIMIT 10", (service, tids))]
+    return {"ongoing": ongoing, "modules": modules, "samples": samples}
+
+
+def _top_excess(conn, service: str, day: date, hour_from: int, hour_to: int) -> list[str]:
+    mins = {r["hour"]: r["n_minutes"] for r in conn.execute(
+        "SELECT hour, n_minutes FROM service_hours WHERE service = %s AND day = %s AND hour >= %s AND hour < %s "
+        "AND n_minutes > 0", (service, day, hour_from, hour_to))}
+    if not mins:
+        return []
+    sums: dict[str, int] = {}
+    for r in conn.execute("SELECT c.key, sum(c.sum)::float AS s FROM hourly_counts c JOIN templates t "
+                          "ON t.service = c.service AND t.template_id = c.key WHERE c.service = %s AND c.day = %s "
+                          "AND c.hour = ANY(%s) AND t.level = ANY(%s) GROUP BY c.key",
+                          (service, day, list(mins), list(ERROR_LEVELS))):
+        sums[r["key"]] = r["s"]
+    bl = Baseline.load(conn, [(service, t) for t in sums])
+    n = sum(mins.values())
+    excess = {t: s / n - sum((bl.lookup(service, t, day, h).this or Stat(0, 0)).mean for h in mins) / len(mins)
+              for t, s in sums.items()}
+    return sorted(excess, key=lambda t: -excess[t])[:3]

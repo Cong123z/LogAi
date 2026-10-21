@@ -21,7 +21,7 @@ from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
-from logai2.web.baseline_view import UnknownKey, inspect, left_days, matrix
+from logai2.web.baseline_view import UnknownKey, incident, inspect, left_days, matrix, series
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
@@ -438,6 +438,27 @@ def create_app(cfg: AppConfig) -> Flask:
         try:
             return jsonify(inspect(conn(), cfg, service, request.args.get("key", "*total"), day,
                                    hour_from, hour_to, time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
+
+    @app.get("/api/baseline/series")
+    def baseline_series():
+        service = known_service(request.args.get("service"))
+        if request.args.get("days", "14") not in ("1", "7", "14"):
+            raise BadRequest("days must be 1, 7 or 14")
+        try:
+            return jsonify(series(conn(), cfg, service, request.args.get("key", "*total"),
+                                  int(request.args.get("days", "14")), datetime.now(TZ).date(), time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
+
+    @app.get("/api/baseline/incident")
+    def baseline_incident():
+        service = known_service(request.args.get("service"))
+        day, hour_from, hour_to = parse_range(request.args)
+        try:
+            return jsonify(incident(conn(), service, request.args.get("key", "*total"), day,
+                                    hour_from, hour_to, time.time()))
         except UnknownKey:
             abort(404, "Unknown key")
 

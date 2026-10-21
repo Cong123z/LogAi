@@ -4,7 +4,7 @@ import pytest
 
 from logai2.timeutil import TZ
 from logai2.web.app import create_app
-from logai2.web.baseline_view import inspect, left_days, matrix
+from logai2.web.baseline_view import incident, inspect, left_days, matrix, series
 from tests.conftest import TEST_DSN
 
 TODAY = date(2026, 10, 21)
@@ -237,3 +237,89 @@ def test_inspect_band_for_hour_without_service_hours_row(conn, cfg):
     base(conn, "pay", "*total", "weekday", 6, 100, 10)
     h5 = inspect(conn, cfg, "pay", "*total", date(2026, 10, 20), 2, 4, NOW)["day"][5]
     assert (h5["rate"], h5["band_low"], h5["band_high"]) == (None, 70.0, 130.0)
+
+
+def seed_series(conn):
+    service(conn, "pay")
+    committed(conn, "pay", WEEKDAYS)
+    for tid, level in (("T00032", "ERROR"), ("T00011", "INFO"), ("T00309", "ERROR")):
+        conn.execute("INSERT INTO templates VALUES ('pay', %s, %s, 'boom', now(), now())", (f"pay:{tid}", level))
+    conn.commit()
+    for h in (2, 3, 10, 13, 14, 15, 18):
+        base(conn, "pay", "pay:T00032", "weekday", h, 36, 6.5)
+    base(conn, "pay", "*total", "weekday", 16, 500, 50)
+    base(conn, "pay", "pay:T00011", "weekday", 16, 100, 10)
+    t32 = "pay:T00032"
+    hours(conn, "pay", t32, date(2026, 10, 20), {2: (792 * 60, 0, 60), 3: (792 * 60, 0, 60)})     # x22, hour 4 missing
+    hours(conn, "pay", t32, TODAY, {13: (864 * 6, 0, 60), 14: (864 * 6, 0, 60)})                  # x2.4
+    hours(conn, "pay", t32, date(2026, 10, 16), {10: (100 * 60, 0, 60)})
+    hours(conn, "pay", t32, date(2026, 10, 12), {18: (100 * 60, 0, 60)})
+    hours(conn, "pay", "*total", date(2026, 10, 15), {16: (225 * 60, 0, 60)})
+    hours(conn, "pay", "pay:T00011", date(2026, 10, 15), {16: (45 * 60, 0, 60)})
+    hours(conn, "pay", "pay:T00309", TODAY, {14: (600, 0, 60)})
+    exclude(conn, "pay", date(2026, 10, 16), 10, 11)
+    for at, frm, to in (("2026-10-19 19:10+00", "NORMAL", "ALERTING"), ("2026-10-19 19:51+00", "ALERTING", "NORMAL")):
+        conn.execute("INSERT INTO alert_changes VALUES ('pay', %s, %s, %s, %s, 0)", (t32, at, frm, to))
+    # alert minutes: today 13:00-15:00 (= 06:00-08:00 UTC) and Tue 20 Oct 02:10
+    for mod, at, n in (("LIXI_PROMO", "2026-10-21 06:10+00", 3000), ("LIXI_PROMO", "2026-10-21 07:10+00", 2210),
+                       ("API_TOPUP", "2026-10-21 06:11+00", 1180), ("API_TOPUP", "2026-10-19 19:10+00", 40)):
+        conn.execute("INSERT INTO alert_minutes VALUES ('pay', %s, %s, %s, %s, %s)",
+                     (t32, mod, TODAY if "10-21" in at else date(2026, 10, 20), at, n))
+    for i in range(12):
+        conn.execute("INSERT INTO error_samples VALUES ('pay', %s, %s, %s)",
+                     (t32, f"2026-10-21 07:{i:02d}+00", f"ERROR LixiHandler {i}"))
+    conn.commit()
+
+
+def test_series_points_and_incidents(conn, cfg):
+    seed_series(conn)
+    r = series(conn, cfg, "pay", "pay:T00032", 14, TODAY, NOW)
+    tue = [i for i in r["incidents"] if i["day"] == "2026-10-20"][0]
+    assert (tue["hour_from"], tue["hour_to"], tue["ongoing"], tue["times_normal"]) == (2, 4, False, 22.0)
+    assert (tue["peak"]["band_low"], tue["peak"]["band_high"], round(tue["peak"]["z"], 1)) == (16.5, 55.5, 116.3)
+    today = [i for i in r["incidents"] if i["day"] == "2026-10-21"][0]
+    assert today["ongoing"] and (today["hour_from"], today["hour_to"]) == (13, 15)
+    assert r["points"][0]["day"] == "2026-10-08" and r["baseline_state"] == "full"
+    assert next(p for p in r["points"] if (p["day"], p["hour"]) == ("2026-10-20", 4))["rate"] is None
+    assert next(p for p in r["points"] if (p["day"], p["hour"]) == ("2026-10-21", 13))["last_week"] is None
+    assert [p["hour"] for p in r["profile"]["today"]] == [13, 14] and r["profile"]["weekend"] == []
+    assert r["profile"]["weekday"][0] == {"hour": 2, "mean": 36.0, "band_low": 16.5, "band_high": 55.5}
+
+
+def test_series_decision_review_and_none(conn, cfg):
+    seed_series(conn)
+    d = {(i["day"], i["hour_from"]): i["decision"]
+         for i in series(conn, cfg, "pay", "pay:T00032", 14, TODAY, NOW)["incidents"]}
+    assert d[("2026-10-16", 10)] == "exclude" and d[("2026-10-20", 2)] == "review" and d[("2026-10-12", 18)] is None
+
+
+def test_series_drops_only_for_service_keys(conn, cfg):
+    seed_series(conn)
+    assert not any(i["day"] == "2026-10-15" for i in series(conn, cfg, "pay", "pay:T00011", 14, TODAY, NOW)["incidents"])
+    assert any(i["day"] == "2026-10-15" for i in series(conn, cfg, "pay", "*total", 14, TODAY, NOW)["incidents"])
+
+
+def test_series_new_template_has_no_band(conn, cfg):
+    seed_series(conn)
+    r = series(conn, cfg, "pay", "pay:T00309", 1, TODAY, NOW)
+    assert r["baseline_state"] == "none" and r["incidents"] == [] and r["profile"]["weekday"] == []
+    assert all(p["band_high"] is None for p in r["points"])
+
+
+def test_incident_modules_and_samples_only_when_ongoing(conn, cfg):
+    seed_series(conn)
+    live = incident(conn, "pay", "pay:T00032", date(2026, 10, 21), 13, 15, NOW)
+    assert live["ongoing"] and live["modules"][0] == {"module": "LIXI_PROMO", "lines": 5210} and len(live["samples"]) == 10
+    live = incident(conn, "pay", "*error", date(2026, 10, 21), 13, 15, NOW)
+    assert live["modules"][1] == {"module": "API_TOPUP", "lines": 1180} and live["samples"][0]["template_id"] == "pay:T00032"
+    old = incident(conn, "pay", "pay:T00032", date(2026, 10, 20), 2, 4, NOW)
+    assert not old["ongoing"] and old["samples"] == [] and old["modules"] == [{"module": "API_TOPUP", "lines": 40}]
+
+
+def test_series_validation(client, conn):
+    service(conn, "pay")
+    assert client.get("/api/baseline/series?service=pay&key=*total&days=5").status_code == 400
+    assert client.get("/api/baseline/series?service=pay&key=pay:T09999").status_code == 404
+    assert client.get("/api/baseline/series?service=pay").status_code == 200
+    assert client.get("/api/baseline/incident?service=pay&key=*total&day=2026-10-21&hour_from=5&hour_to=5").status_code == 400
+    assert client.get("/api/baseline/incident?service=pay&key=nope&day=2026-10-21&hour_from=1&hour_to=2").status_code == 404
