@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+Status: **not built** (the gate is still in `resolver.py`; `llm.new_hours` still in `config.py`).
+
 **Goal:** The LLM resolver takes every template that has a vector and no link row, whatever its level, alert state or age.
 
 **Architecture:** One SQL condition removed from `Resolver.run`'s eligibility query, the config field that fed it removed, ARCHITECTURE brought in line. Order and every rate limit stay as they are.

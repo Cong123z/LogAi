@@ -1,6 +1,6 @@
 # Templates page redesign
 
-Date: 2026-10-21. Status: approved design, not built.
+Date: 2026-10-21. Status: built (branch `templates-redesign`, merged into `master` as `be5d7ee`); docs/WEB_UI.md describes the page as built.
 
 ## Goal
 

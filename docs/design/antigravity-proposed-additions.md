@@ -5,14 +5,14 @@
 **Target Repository:** `logai2`  
 **Status:** SUPERSEDED (2026-10-21) by the layered document matching in [`per-service-baseline.md`](per-service-baseline.md) sections 3 and 4a and plan [`2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md): automatic corpus links on a separate ERROR field, LLM confirm-or-suggest (including SAFE documents) with human review. The design is authoritative where they differ.  
 **Related Documents:**
-- [`docs/design/per-service-baseline.md`](file:///home/cong/Documents/logai2/docs/design/per-service-baseline.md) (Sections 3 & 4: Linking & Writing Documentation)
-- [`docs/specs/2026-10-20-core-engine-design.md`](file:///home/cong/Documents/logai2/docs/specs/2026-10-20-core-engine-design.md) (Data Storage & Pipelines)
+- [`docs/design/per-service-baseline.md`](per-service-baseline.md) (Sections 3 & 4: Linking & Writing Documentation)
+- [`docs/specs/2026-10-20-core-engine-design.md`](../specs/2026-10-20-core-engine-design.md) (Data Storage & Pipelines)
 
 ---
 
 ## 1. Executive Summary & Problem Statement
 
-In the current baseline design ([`per-service-baseline.md`](file:///home/cong/Documents/logai2/docs/design/per-service-baseline.md#L212-L216)), Runbook documentation creation is strictly interactive:
+In the current baseline design ([`per-service-baseline.md`](per-service-baseline.md#L212-L216)), Runbook documentation creation is strictly interactive:
 > *"The document editor gets an AI chat panel. Every LLM call here is started by the operator; nothing is drafted automatically."*
 
 While this conservative policy prevents AI hallucinations, it introduces a significant operational bottleneck:

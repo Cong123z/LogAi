@@ -1,6 +1,8 @@
 # logai2 core engine + web v1: design
 
-Status: **approved in conversation 2026-10-20, spec under review.**
+Status: **built** (branch `core-engine-v1`, merged into `master` as `b1fe4d3`,
+2026-10-21). ARCHITECTURE.md describes the code; its §15 lists where the code
+departs from this spec.
 Source design: [`docs/design/per-service-baseline.md`](../design/per-service-baseline.md)
 (copied from logai-engine, branch `design/per-service-baseline`). This spec
 is sub-project 1 of that design; where the two disagree, this spec wins for

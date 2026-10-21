@@ -10,6 +10,9 @@ matching (ERROR field, automatic corpus links, LLM confirm or suggest):
 plan [`2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md),
 which also absorbs the AI drafts first proposed in
 [`antigravity-proposed-additions.md`](antigravity-proposed-additions.md).
+A second Antigravity proposal (charts, pipeline topology, Watchdog-style
+tags: [`antigravity-proposal-datadog-visual-watchdog.md`](antigravity-proposal-datadog-visual-watchdog.md))
+is under review, not adopted.
 Built as a **new project from scratch**, borrowing modules from logai-engine
 (collector, preprocessor/normalize, Drain3 wrapper, alert state machine, web
 parts). Template and group IDs, manual overrides and the Isolation Forest

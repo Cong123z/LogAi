@@ -735,7 +735,8 @@ hits are counted in the reader but not exported.
 
 ## 11. Postgres schema
 
-`logai2/migrations/001_init.sql`, applied by `db.migrate()` (numbered
+`logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
+document service, 005 document level), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -825,7 +826,7 @@ Any other kind fails with `unknown command kind`.
 | Engine crash or restart | restart reads from `es_cursors` (oldest open minute): open minutes are re-read whole, closed minutes were written once; Drain3 trees, alert states and streaks are restored |
 | Restart after downtime | partitions are created for every day since the cursor; catch-up reads the gap; the minutes it closes more than 15 min late are counted but not detected; a commit runs at start if one is due (§10.3), and again each time the catch-up crosses a local midnight |
 | Web started before the engine | the web does not migrate; it sees missing tables until the engine has started once |
-| Container restart | `logai2-engine` and `logai2-web` use `restart: unless-stopped`; Postgres data lives in the `logai2-pg` volume |
+| Container restart | `logai2-engine`, `logai2-web`, `logai2-linker` (and `logai2-tei`) use `restart: unless-stopped`; Postgres data lives in the `logai2-pg` volume |
 | Bad command | `commands.result.error`; the engine continues |
 | Embeddings service down | the linker logs it, reports `last_error` and pending counts in `worker_status['linker']`, keeps every existing link and retries next cycle |
 | Linker down | no new vectors or automatic links; existing links keep working; the Pipeline page shows the linker stale after 90 s |

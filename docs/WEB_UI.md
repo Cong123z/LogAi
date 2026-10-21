@@ -129,7 +129,8 @@ The drawer puts the decision first (ARCHITECTURE §5.1 for the layers):
   collapsed under them, then how it was linked in words and the LLM's
   reason in full;
 - **Confirm link** (→ manual) / **Approve suggestion** (draft → active)
-  and **Reject**, pinned to the drawer's bottom edge while it scrolls. In
+  and **Reject**, pinned to the drawer's bottom edge while it scrolls and
+  disabled while one is running; they act on the template shown. In
   To review, a successful decision opens the **next row** of the page
   (the drawer closes after the page's last row); in All templates it
   closes. A link decided elsewhere meanwhile shows the API's 409 message

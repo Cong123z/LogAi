@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+Status: **implemented and merged into `master`** (`b1fe4d3`, 2026-10-21). ARCHITECTURE.md describes the result.
+
 **Goal:** A Docker Compose stack (Postgres, engine, web) that reads logs from
 Elasticsearch, builds per-service Drain3 templates, keeps hourly count
 history, commits a daily mean ± kσ baseline, raises alerts per (service,

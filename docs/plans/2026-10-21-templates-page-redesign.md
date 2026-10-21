@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+Status: **implemented and merged into `master`** (`be5d7ee`, 2026-10-21).
+
 **Goal:** Make the Templates page a link-review tool: a To review | All templates mode, a 5-column table, and a decision-first drawer that walks to the next item.
 
 **Architecture:** One small API addition in `GET /api/templates` (`link_source=review`, `review_total`); the rest is the existing vanilla-JS view (`views/templates.js`), its markup in `index.html` and styles in `app.css`. No new files, no schema change.

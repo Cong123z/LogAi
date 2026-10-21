@@ -3,13 +3,78 @@
 **Document ID:** AGY-PROP-2026-002  
 **Author:** Antigravity (AI Tech Lead / Architecture Pair)  
 **Target Repository:** `logai2`  
-**Status:** PROPOSED (2026-10-21)  
+**Status:** PROPOSED (2026-10-21), not adopted. Reviewed against `master` on 2026-10-21: see [Review against the code](#review-against-the-code-2026-10-21).  
 **Selected Strategy:** Strategy A — Unified Apache ECharts Visualization Engine  
 **Related Documents:**
-- [`docs/design/antigravity-proposed-additions.md`](file:///home/cong/Documents/logai2/docs/design/antigravity-proposed-additions.md) (AGY-PROP-2026-001)
-- [`docs/design/per-service-baseline.md`](file:///home/cong/Documents/logai2/docs/design/per-service-baseline.md) (Source design)
-- [`docs/WEB_UI.md`](file:///home/cong/Documents/logai2/docs/WEB_UI.md) (Current Web UI & HTTP API)
-- [`ARCHITECTURE.md`](file:///home/cong/Documents/logai2/ARCHITECTURE.md) (Core System Architecture)
+- [`docs/design/antigravity-proposed-additions.md`](antigravity-proposed-additions.md) (AGY-PROP-2026-001)
+- [`docs/design/per-service-baseline.md`](per-service-baseline.md) (Source design)
+- [`docs/WEB_UI.md`](../WEB_UI.md) (Current Web UI & HTTP API)
+- [`ARCHITECTURE.md`](../../ARCHITECTURE.md) (Core System Architecture)
+
+---
+
+## Review against the code (2026-10-21)
+
+Checked against `master` (`20f4ff6`). Nothing here is built and the user has
+not ruled on it. Where this proposal and [`WEB_UI.md`](../WEB_UI.md) or
+[`ARCHITECTURE.md`](../../ARCHITECTURE.md) disagree, those describe the code.
+
+**Accurate today**
+
+- Baseline page (§1.1): cards, then Suggestions, Add a range (day / from /
+  to `<select>`s), Decisions and Days tables, plus Recompute.
+- Pipeline page (§1.1): scalar cards and a sparkline of the last 60
+  heartbeats kept only in the browser tab.
+- `POST /api/baseline/decisions` body (§5.3 Pillar 3) matches the API;
+  `hour_to` is exclusive, `0 <= hour_from < hour_to <= 24`.
+- `[TRAFFIC DROP]` matches detection: `*total` raises only drops, only on a
+  full profile with mean >= `drop.min_mean` (20).
+- Theme tokens are in `static/css/tokens.css` with `html[data-theme]`; no
+  vendor directory exists yet.
+
+**Out of date or wrong**
+
+1. **Templates page (Pillar 2).** Redesigned since this was written
+   (`be5d7ee`, spec `2026-10-21-templates-page-redesign.md`): five columns,
+   a To review | All templates mode, and the **rate** column already shows
+   the hour's rate against the band (`normal <= X/min`, "▲ above normal").
+   The user ruled no charts on Templates. A delta would be a third line in
+   that column, not a new column. `GET /api/templates` returns `rate`,
+   `band_low`, `band_high` but not `mean`.
+2. **Δ% with mean 0.** `(rate - mean) / mean` is undefined for new
+   templates and for the hours a service is idle (mean = σ = 0, ARCHITECTURE
+   §14). Needs a rule (e.g. show "new" / "no baseline", or use the existing
+   `score = count / band_high`).
+3. **`[VOLUME SURGE]`** "breaches mean + 3σ by >= +200%" mixes two
+   references (band and mean). Detection already stores `score =
+   count / band_high` per key in `alert_state`; a threshold on it is
+   unambiguous.
+4. **`[NEW ERROR PATTERN]`** needs `first_seen` on alert rows;
+   `GET /api/alerts` does not return it (only `/api/templates` does).
+5. **Pipeline topology (§5.2, §6.2).** The order is wrong: detection runs in
+   the engine on each closed minute, **before** the flush, and Prometheus is
+   exported by the engine; the linker talks to the engine only through
+   Postgres (`reload_links` command). `worker_status` has no
+   `flush_duration_ms` (only the Prometheus gauge `logai_flush_seconds`),
+   template count, oldest open minute or active LLM profile: §6.2 needs
+   engine and linker changes, not only `app.py`. LLM profiles fail over
+   (every active profile, by priority), so "active profile" is a list.
+6. **Exclusion timing (Pillar 3, §5.1).** Decisions take effect at the next
+   daily commit **or** a Recompute (`POST /api/baseline/recompute`). An
+   incident that crosses local midnight needs one decision per day.
+7. **"1 click commits" (§2 principle 4, §5.1).** Today's review keeps unreviewed hours
+   in the baseline and warns when an exclusion leaves fewer than 3 usable
+   days; a one-click exclude must keep that warning.
+8. **ECharts size (§3.1).** The full `echarts.min.js` 5.x build is about
+   1 MB minified; the stated ~450 KB needs a custom build. Confirm before
+   vendoring.
+9. **Branch (footer).** `embeddings-doc-links` was merged into `master`
+   (`236c2bb`); new work starts from `master`.
+
+**Schema claim (§2.2).** Holds for §5.1 and Pillars 1–3 (hourly counts,
+baseline, alert state and changes exist). Per-minute history for the
+inspector line exists only in `alert_minutes`, and only for minutes a key was
+not NORMAL; a full minute-by-minute line for normal minutes is not stored.
 
 ---
 
@@ -18,7 +83,7 @@
 ### 1.1 The Current Problem: Visual Disconnect and Operator Friction
 `logai2` successfully replaced the brittle Isolation Forest and unmaintained state-file architecture of `logai-engine` with a robust, deterministic statistical model: **Drain3 per-service** + **Mean ± kσ baseline** + **Layered runbook matching (bge-m3 + LLM)**.
 
-However, the operator-facing console ([`logai2/web/`](file:///home/cong/Documents/logai2/logai2/web/app.py)) presents critical telemetry through fragmented, tabular, and disconnected representations:
+However, the operator-facing console ([`logai2/web/`](../../logai2/web/app.py)) presents critical telemetry through fragmented, tabular, and disconnected representations:
 1. **The Baseline Review Chaos (`/#baseline`):**
    - The current baseline review page renders 4 disconnected text tables (*"Suggested periods"*, *"Add range"*, *"Decisions"*, *"Committed days"*).
    - Operators reviewing an alert suggested between `02:00–04:00` are given **zero visual context**: they cannot see the actual count spike, the historical band width, or whether the peak was a sharp 1-minute burst or sustained saturation.
@@ -192,18 +257,103 @@ The Pipeline page is overhauled into a Datadog Observability Pipeline-style topo
 
 ---
 
-### 5.3 Datadog Watchdog Insights on Alerting & Templates
+### 5.3 Datadog Watchdog Insights on Alerting & Templates (Phase 3 Deep Dive)
 
-1. **Watchdog Insights Banner (`/#alerting`):**
-   - Renders at the top of the Alerting page summarizing current outliers:
-     > 💡 **Watchdog Insight:** *2 active anomalies detected in `recharge`. 1 volume surge (+350% above baseline) on DOC-001, and 1 new unclassified error pattern emerged 12m ago.*
-2. **Contextual Badge Classification:**
-   - 🏷️ `[NEW ERROR PATTERN]`: Template `first_seen < 24h`, alerting without prior baseline history.
-   - 🏷️ `[VOLUME SURGE]`: Known template exceeding `mean + 3σ` by $\ge 200\%$.
-   - 🏷️ `[DROP OUTLIER]`: Total service traffic dropping below `mean - 3σ`.
-3. **Volume Delta Indicator (`/#templates`):**
-   - The Rate column displays relative deviation:
-     `145/min (+380% vs 24h avg)` styled in crimson for immediate visual triage.
+Phase 3 elevates `logai2` from a raw mathematical threshold checker into an **intelligent operational assistant**, replicating Datadog Watchdog's signature root cause analysis, automated triage, and baseline protection workflows. It is built upon **three foundational pillars**:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        PHASE 3: WATCHDOG INTELLIGENCE PILLARS                          │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ 1. Watchdog Insights Banner & Outlier Classification                                  │
+│    • Real-time contextual banner at the top of /#alerting.                             │
+│    • Automated classification: [NEW ERROR PATTERN], [VOLUME SURGE], [TRAFFIC DROP].   │
+│                                                                                        │
+│ 2. Log Pattern Volume Delta (% Change vs. Baseline)                                    │
+│    • Relative deviation Δ% = (Rate_current - Mean_baseline) / Mean_baseline * 100%.    │
+│    • Early-warning indicator on /#templates before 3-minute hysteresis triggers.       │
+│                                                                                        │
+│ 3. 1-Click Incident Marking & Baseline Exclusion Loop                                  │
+│    • Closes the feedback loop between Incident Response and Baseline Purity.           │
+│    • 1-click action directly on Alert Cards to exclude burst hours from next commit.   │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Pillar 1: Watchdog Insights Banner & Outlier Classification
+Rather than forcing on-call SREs to parse through raw lists of alert rows, an **Insights Header** continuously synthesizes the macro state:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ 💡 WATCHDOG INSIGHTS (Active Triage)                                                   │
+│ Detected 2 critical anomalies in service [recharge] over the last 15 minutes:          │
+│ • 🏷️ [NEW ERROR PATTERN] Novel signature first seen 12m ago (180/min on API Topup).    │
+│ • 🏷️ [VOLUME SURGE] Known DB pool timeout spiked +450% above baseline.                 │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Automated Tagging Engine (Powered by Existing Postgres State):**
+Every active alert card is labeled with an unambiguous classification tag:
+
+1. 🏷️ **`[NEW ERROR PATTERN]` (Brand-New Signature):**
+   - **Condition:** Template has `templates.first_seen > now() - interval '24 hours'`, has no committed baseline profile in previous days, and level is `ERROR`, `FATAL`, or `CRITICAL`.
+   - **Operational Significance:** 90% correlation with **new code deployments, unannounced schema changes, or third-party partner API breaking changes**. Alerts SREs immediately to check recent deployment changelogs.
+2. 🏷️ **`[VOLUME SURGE]` (Rate Explosion in Known Pattern):**
+   - **Condition:** Template is established in baseline, but the current minute rate breaches `Mean + 3σ` by a relative surge $\ge +200\%$.
+   - **Operational Significance:** Points to **resource saturation, lock contention, cascading retries, or traffic floods**.
+3. 🏷️ **`[TRAFFIC DROP]` (Silent Failure / Outage):**
+   - **Condition:** Service key `*total` drops below `Mean - 3σ` (where `Mean >= 20.0` events/min).
+   - **Operational Significance:** Points to **upstream gateway outage, DNS failure, or network partition** where client traffic ceases to arrive ("the silence of failure").
+
+---
+
+#### Pillar 2: Log Pattern Volume Delta (% Change vs. Baseline)
+On the Templates management page ([`/#templates`](../../logai2/web/static/js/views/templates.js)), static numbers (`150/min`) fail to convey relative danger. Phase 3 introduces **Dynamic Volume Deltas**:
+
+$$\Delta\% = \frac{\text{Rate}_{\text{actual}} - \text{Mean}_{\text{baseline}}}{\text{Mean}_{\text{baseline}}} \times 100\%$$
+
+```
+Template Text                                     Current Rate        Volume Delta (% vs Baseline)
+──────────────────────────────────────────────────────────────────────────────────────────────────
+[recharge:T00032] LixiHandler timeout error ...   175.0/min           🔴 +385% (Surging)
+[recharge:T00042] DB connection pool slow ...      62.0/min           🟠 +140% (Elevated)
+[recharge:T00001] Success transaction processed 2,420.0/min           🟢   +2% (Normal)
+[recharge:T00015] Kafka consumer heartbeat         11.0/min           🔵  -48% (Depressed)
+```
+
+**Visual Hierarchy & Early Warning:**
+- **Crimson Badge ($\ge +200\%$):** Severe surge.
+- **Amber Badge ($+50\%$ to $+200\%$):** Elevated activity.
+- **Muted Green ($-20\%$ to $+50\%$):** Healthy nominal variance.
+- **Blue Badge ($\le -40\%$):** Significant traffic drop.
+- **SRE Advantage:** Operators can identify an impending incident **minutes before** the strict 3-minute hysteresis threshold fires an alert.
+
+---
+
+#### Pillar 3: 1-Click Incident Marking & Baseline Exclusion Loop
+A primary flaw of self-learning baseline systems is **Baseline Poisoning**: if an incident lasts 30 minutes and is not manually excluded, the daily commit at 02:00 calculates the burst into the baseline, turning outage volume into the "new normal".
+
+**The 1-Click Closed Loop:**
+Phase 3 embeds an actionable button directly on active or recovering Alert cards (`ALERTING`, `COOLING`, or recently recovered `NORMAL`):
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│ [ALERTING] recharge · DOC-001 (VNPay Topup Timeout)                     Since 02:14:00 │
+│ • recharge:T00032 [ERROR] LixiHandler timeout ... (175/min vs Band: 42.5/min)          │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ [ 🚫 Mark Incident & Exclude from Baseline ]                   [ 📖 View Runbook ]     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Execution Flow:**
+1. SRE clicks **`[ 🚫 Mark Incident & Exclude from Baseline ]`**.
+2. The frontend extracts the incident's active time boundary (`since` $\to$ `now`), widens to whole local hours (`hour_from`, `hour_to`), and dispatches:
+   ```http
+   POST /api/baseline/decisions
+   {"service": "recharge", "day": "2026-10-20", "hour_from": 2, "hour_to": 3, "decision": "exclude"}
+   ```
+3. The button instantly morphs into a confirmed status badge:
+   `[ ✅ Excluded from Baseline (Hours 02:00–03:00) ]`.
+4. The exclusion takes effect at the next nightly commit, ensuring the incident volume is stripped from historical calculations without requiring the operator to switch tabs or remember timestamps.
 
 ---
 
@@ -253,6 +403,36 @@ Extend the response JSON to deliver hourly statistical distribution data for the
 }
 ```
 
+### 6.3 Extended Alerts & Templates Endpoints for Watchdog Insights
+1. **`GET /api/alerts`:**
+   Each row in the returned list receives automated classification attributes:
+   ```json
+   {
+     "service": "recharge",
+     "kind": "document",
+     "doc_id": "DOC-001",
+     "state": "ALERTING",
+     "since": 1792462440,
+     "watchdog": {
+       "anomaly_type": "volume_surge",
+       "delta_percent": 385.2,
+       "first_seen": 1792400000,
+       "burst_window": {"day": "2026-10-20", "hour_from": 2, "hour_to": 3}
+     }
+   }
+   ```
+2. **`GET /api/templates`:**
+   Each template item includes `delta_percent` computed directly from `(rate - mean) / mean * 100`:
+   ```json
+   {
+     "template_id": "recharge:T00032",
+     "rate": 175.0,
+     "mean": 36.0,
+     "delta_percent": 386.1,
+     "band_high": 65.0
+   }
+   ```
+
 ---
 
 ## 7. Performance, Memory & Zero-Build Integrity
@@ -278,12 +458,12 @@ Extend the response JSON to deliver hourly statistical distribution data for the
 
 ## 8. Strategic Implementation Roadmap
 
-| Phase | Milestone | Key Deliverables |
+| Phase | Milestone | Key Deliverables & Acceptance Criteria |
 | :--- | :--- | :--- |
-| **Phase 1: Baseline Overhaul** | Visual Review & Anomaly Band | 1. Vendor ECharts in `static/vendor/`.<br/>2. Implement 24x7 Heatmap Grid in `baseline.js`.<br/>3. Implement Anomaly Band Inspector with 1-click Exclude/Keep. |
-| **Phase 2: Pipeline Topology** | Observability Stream DAG | 1. Implement DAG node layout in `pipeline.js`.<br/>2. Connect live lag, throughput, and flush latency to topology nodes.<br/>3. Add animated particle flow for live traffic. |
-| **Phase 3: Watchdog Intelligence** | Pattern Deltas & Insights | 1. Add Watchdog Insights bar on `alerting.js`.<br/>2. Add Volume Delta (% change vs baseline) in `templates.js`.<br/>3. Add 1-click incident exclusion from Alert cards. |
+| **Phase 1: Baseline Overhaul** | Visual Review & Anomaly Band | 1. Vendor ECharts in `static/vendor/echarts.min.js`.<br/>2. Implement 24x7 Heatmap Grid in `baseline.js` (rows = committed days, cols = 0–23h).<br/>3. Implement Anomaly Band Inspector (actual line vs shaded `mean ± 3σ` band) with 1-click Exclude/Keep.<br/>*Criteria:* Full removal of legacy 4 text tables and sequential hour select form. |
+| **Phase 2: Pipeline Topology** | Observability Stream DAG | 1. Implement DAG node layout in `pipeline.js` representing 5 pipeline stages.<br/>2. Connect live lag, throughput, and flush latency to topology nodes with reactive health status.<br/>3. Add animated particle flow for live traffic.<br/>*Criteria:* Visual identification of pipeline bottlenecks at a glance. |
+| **Phase 3: Watchdog Intelligence** | Pattern Deltas & Insights | 1. **Insights Banner on Alerting:** Real-time synthesis of macro anomalies, distinguishing `[NEW ERROR PATTERN]`, `[VOLUME SURGE]`, and `[TRAFFIC DROP]`.<br/>2. **Volume Delta (%) on Templates:** Compute relative surge $\Delta\%$ vs. baseline mean; highlight deviations $\ge +200\%$ in crimson.<br/>3. **1-Click Baseline Exclusion Loop:** Direct action on Alert Cards to exclude burst hours from next commit, completely eliminating baseline poisoning.<br/>*Criteria:* Zero tab-switching required to protect baseline during live incidents. |
 
 ---
 
-*Authored by Antigravity — Submitted for architectural adoption on branch `embeddings-doc-links`.*
+*Authored by Antigravity — submitted for architectural adoption on branch `embeddings-doc-links` (since merged into `master`).*

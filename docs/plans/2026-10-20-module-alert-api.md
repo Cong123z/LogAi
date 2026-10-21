@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+Status: **not built** (sub-project 4; `GET /api/module-alerts` does not exist yet).
+
 **Goal:** `GET /api/module-alerts?module_code=M&from=…&to=…` returns the
 templates that were ALERTING in that range and logged from module M, with
 module M's per-minute rate next to the template's total rate.
