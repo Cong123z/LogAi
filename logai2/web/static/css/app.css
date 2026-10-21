@@ -955,10 +955,15 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 .link-meta { display:flex; flex-wrap:wrap; gap:4px; align-items:center; font-size:12px; color:var(--text-muted); }
 .link-meta .btn { padding:3px 10px; font-size:12px; }
 .drawer-body { padding:4px 2px 16px; overflow-y:auto; display:flex; flex-direction:column; gap:16px; flex:1; }
-.drawer-actions { display:flex; flex-wrap:wrap; gap:8px; padding-top:12px; border-top:1px solid var(--border); }
+/* pinned to the drawer's bottom edge while the decision is scrolled out of view */
+.drawer-actions { display:flex; flex-wrap:wrap; gap:8px; padding:12px 0; border-top:1px solid var(--border); position:sticky; bottom:0; background:var(--bg-card); z-index:1; }
+#tpl-drawer-title:focus { outline:none; }   /* focused by script to announce the item, not operable */
+.drawer-facts { display:flex; flex-wrap:wrap; gap:6px 24px; align-items:flex-start; margin-top:8px; }
+.drawer-details { margin-top:8px; }
+.drawer-details summary { cursor:pointer; font-size:13px; color:var(--text-muted); padding:4px 0; }
 .drawer-actions .btn { font-size:13px; padding:8px 14px; min-height:38px; }
 .link-picker { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-.link-picker select { flex:1 1 240px; }
+.link-picker select { flex:1 1 240px; min-width:0; max-width:100%; }   /* a long document title must not widen the drawer */
 .reason { font-size:14px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
 
 .similar-list { max-height:50vh; overflow:auto; display:flex; flex-direction:column; gap:6px; margin:8px 0; }
