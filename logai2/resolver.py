@@ -18,7 +18,7 @@ import psycopg
 
 from logai2.commands import enqueue
 from logai2.config import AppConfig
-from logai2.links import candidates, class_sql, next_doc_id
+from logai2.links import candidates, class_sql, level_class, next_doc_id
 from logai2.llm import LlmError, LlmUnavailable, active_profiles, chat_json
 
 logger = logging.getLogger("logai2.resolver")
@@ -29,15 +29,21 @@ PROFILE_DOWN_SECONDS = 300    # a profile that failed (network, HTTP, timeout) i
 
 SYSTEM = ("You link log templates of a telecom platform to operational runbooks. Answer only from the "
           "template and documents given; never invent facts about the system. In template text, <*> marks a "
-          "masked value (a number, id, phone number or address). Reply with one JSON object and nothing else.")
+          "masked value (a number, id, phone number or address). \"level\" is the log level: of the template, "
+          "and of each document's ERROR line (\"any\" when unknown). Judge by meaning, not by shared words: a "
+          "success or progress line (usually INFO) is not the same event as an error line, even when most of "
+          "their words and fields match. Reply with one JSON object and nothing else.")
 
-CONFIRM_TASK = ("Pick the document whose ERROR field describes the same error as this template's log line and "
-                "whose Handling applies to it. If none clearly fits, answer null. "
+CONFIRM_TASK = ("Pick the document whose ERROR field describes the same event as this template's log line and "
+                "whose Handling applies to it. Prefer a document of the same level; pick one of another level only "
+                "when the template clearly reports the same failure. If none clearly fits, answer null. "
                 'Reply {"doc_id": "<one of the given doc_id values>" or null, "reason": "<one sentence>"}.')
 
 SUGGEST_TASK = ("No runbook of this template's service covers it. Write one for this service. If \"references\" "
                 "are given, they are runbooks other services wrote for a similar error: adapt them to this service "
                 "and template, keep what applies, drop what is specific to the other service. "
+                "Use the template's level: an INFO or DEBUG line is usually normal operation unless its text "
+                "reports a failure; an ERROR, FATAL or CRITICAL line usually needs action. "
                 "If the line shows normal operation (for example a "
                 'success or progress message), set "verdict": "safe" and start "handling" with "SAFE: normal '
                 'operation, no action needed." followed by what a spike or a drop of this line would mean. '
@@ -197,7 +203,8 @@ class Resolver:
 
     def _listed(self, t: dict, docs: list[dict]) -> list[dict]:
         budget = max(200, (self.cfg.llm.max_input_chars - len(t["text"]) - 1000) // len(docs))
-        return [{"doc_id": d["doc_id"], "service": d["service"] or "shared", "title": d["title"],
+        return [{"doc_id": d["doc_id"], "service": d["service"] or "shared", "level": d["level"] or "any",
+                 "title": d["title"],
                  "error": d["error"][:budget // 2], "handling": d["handling"][:budget // 2]} for d in docs]
 
     def _write_llm_link(self, t: dict, doc: dict, reason: str) -> bool:
@@ -227,9 +234,10 @@ class Resolver:
         with self.conn.transaction():
             doc_id = next_doc_id(self.conn)
             self.conn.execute(
-                "INSERT INTO documents (doc_id, service, title, error_code, error, handling, status, source, verdict, "
-                "confidence, based_on, revision) VALUES (%s, %s, %s, %s, %s, %s, 'draft', 'llm', %s, %s, %s, %s)",
-                (doc_id, t["service"], title, _text(reply.get("error_code"), 100),
+                "INSERT INTO documents (doc_id, service, level, title, error_code, error, handling, status, source, "
+                "verdict, confidence, based_on, revision) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, 'draft', 'llm', %s, %s, %s, %s)",
+                (doc_id, t["service"], level_class(t["level"]), title, _text(reply.get("error_code"), 100),
                  _text(reply.get("error"), 5000) or t["text"], handling, verdict, confidence, list(based_on),
                  uuid.uuid4().hex))
             written = bool(self.conn.execute(

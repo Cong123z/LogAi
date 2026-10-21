@@ -188,7 +188,12 @@ layers 2–3 only use the template's service's and shared documents, and when
 another service already documents a similar error, the LLM adapts that
 document into a draft for this service. The All-services view groups
 documents with the same ERROR line into one row, so the same error is not
-listed once per service. Same level class only: an ERROR line must not inherit a document from an
+listed once per service.
+
+**Same level class for ERROR matching too** (2026-10-21): a document's
+ERROR line has a level class; layer 2 only links templates of that class
+(an INFO "Log success …" line scored 0.95 against an error line sharing its
+field list). Cross-class cases go to the LLM, which is shown the levels. Same level class only: an ERROR line must not inherit a document from an
 INFO "success" line, however similar the wording.
 
 **Thresholds per level class** (defaults are guesses; tune on real data):

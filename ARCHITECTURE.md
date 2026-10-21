@@ -324,7 +324,7 @@ One `template_doc_links` row per template; its `source` is the layer
 |---|---|---|---|
 | 0 | `manual` | set on the web; `doc_id NULL` = "no document" | yes (NULL: no) |
 | 1 | `inherited` | nearest **manual** template of the same service and level class (ERROR/FATAL/CRITICAL, WARN/WARNING, other), cosine ≥ `inherit_similarity[class]`; `inherited_from` names it | yes |
-| 2 | `corpus` | best **active** document **of the template's service or shared**, by its best ERROR line, ≥ `corpus_similarity[class]` and ≥ `corpus_margin` above the next document | yes |
+| 2 | `corpus` | best **active** document **of the template's service or shared**, whose ERROR line has **the template's level class** (or no level), by its best ERROR line, ≥ `corpus_similarity[class]` and ≥ `corpus_margin` above the next document | yes |
 | 3 | `llm` | the LLM picked one of the template's candidate documents; `note` = its reason | yes |
 | 4 | `draft` | the LLM wrote a document (`status draft`, `source llm`, `verdict` action or safe) | no, until approved |
 | — | `rejected` | the operator rejected a layer 3–4 result | no |
@@ -371,8 +371,11 @@ look stale. For each:
    records them in `documents.based_on`.
 
 The LLM sees only service, level and the normalized template text, plus the
-candidates' title, ERROR and Handling (≤ `llm.max_input_chars`); never raw
-log lines. Any link written meanwhile wins (`ON CONFLICT DO NOTHING`; a
+candidates' service, level, title, ERROR and Handling (≤
+`llm.max_input_chars`); never raw log lines. The prompts tell it to judge
+by meaning rather than shared words (a success line is not the error line
+it resembles), to prefer documents of the template's level, and that an
+INFO line is usually normal operation unless its text reports a failure. Any link written meanwhile wins (`ON CONFLICT DO NOTHING`; a
 draft is rolled back). A failed call backs the template off for 30 min (in
 memory); so does an answer Postgres cannot store (NUL characters are
 stripped first) or any other database error on its write. The client
@@ -739,7 +742,7 @@ service-scoped primary key.
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |
 | `alert_state` | `service, key` | `state`, `since`, `streak`, `score`, `count`, `band_low`, `band_high` | flush |
 | `alert_changes` | `service, key, at` | `from_state`, `to_state`, `count`, `band_low`, `band_high` | flush |
-| `documents` | `doc_id` | `service` (NULL = shared), `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action` = ERROR / `safe` = SAFE), `confidence`, `based_on` (documents an LLM draft adapted), `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`, drafts) |
+| `documents` | `doc_id` | `service` (NULL = shared), `level` (class of the ERROR line; NULL = any), `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action` = ERROR / `safe` = SAFE), `confidence`, `based_on` (documents an LLM draft adapted), `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`, drafts) |
 | `document_errors` | `doc_id, n` | `text` (normalized ERROR line), `embedding` | linker |
 | `template_doc_links` | `service, template_id` | `doc_id` (FK → documents, NULL = no document), `source` (§5.1), `similarity`, `inherited_from`, `note`, `linked_at` | web, linker |
 | `llm_profiles` | `name` | `base_url`, `model`, `api_key` (clear text, never returned by the API), `timeout_seconds`, `priority` (lowest tried first), `active` (any number), `revision`, `updated_at` | web |
@@ -866,7 +869,7 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service), `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level), `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.

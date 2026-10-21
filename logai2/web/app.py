@@ -38,7 +38,8 @@ MAX_PAGE_SIZE = 500
 MAX_ERROR_LINES = 50
 DOC_STATUSES = ("active", "draft", "rejected")
 VERDICTS = ("action", "safe")
-KEEP = object()   # a field left out of an update keeps its value   # shown as ERROR (something to fix) and SAFE (normal operation)
+KEEP = object()   # a field left out of an update keeps its value
+LEVEL_CLASSES = ("ERROR", "WARN", "INFO")   # shown as ERROR (something to fix) and SAFE (normal operation)
 AUTOMATIC_SOURCES = ("inherited", "corpus", "llm", "draft")
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 LINK_SOURCES = ("manual", "inherited", "corpus", "llm", "draft", "rejected")
@@ -306,7 +307,7 @@ def create_app(cfg: AppConfig) -> Flask:
         if status not in DOC_STATUSES:
             raise BadRequest(f"status must be one of {', '.join(DOC_STATUSES)}")
         rows = conn().execute(
-            "SELECT d.doc_id, d.service, d.based_on, d.title, d.error_code, d.error, d.handling, d.status, d.source, d.verdict, "
+            "SELECT d.doc_id, d.service, d.level, d.based_on, d.title, d.error_code, d.error, d.handling, d.status, d.source, d.verdict, "
             "d.confidence, d.revision, d.embedded_revision IS NOT DISTINCT FROM d.revision AS embedded, "
             "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates "
             "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) WHERE d.status = %s "
@@ -337,16 +338,23 @@ def create_app(cfg: AppConfig) -> Flask:
             if service is not None and not (isinstance(service, str) and conn().execute(
                     "SELECT 1 FROM services WHERE service = %s", (service,)).fetchone()):
                 raise BadRequest("service must be a known service, or empty for shared")
-        return {**fields, "verdict": verdict, "service": service, "revision": payload.get("revision")}
+        # level of the ERROR line: ERROR / WARN / INFO, "" or null = any; absent keeps it (update) / any (create)
+        level = KEEP
+        if "level" in payload:
+            level = payload["level"] or None
+            if level is not None and level not in LEVEL_CLASSES:
+                raise BadRequest("level must be ERROR, WARN, INFO or empty for any")
+        return {**fields, "verdict": verdict, "service": service, "level": level, "revision": payload.get("revision")}
 
     @app.post("/api/documents")
     def create_document():
         fields = document_fields()
         c = conn()
         doc_id, revision = next_doc_id(c), uuid.uuid4().hex
-        c.execute("INSERT INTO documents (doc_id, service, title, error_code, error, handling, verdict, revision) "
-                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                  (doc_id, None if fields["service"] is KEEP else fields["service"], fields["title"],
+        c.execute("INSERT INTO documents (doc_id, service, level, title, error_code, error, handling, verdict, revision) "
+                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                  (doc_id, None if fields["service"] is KEEP else fields["service"],
+                   None if fields["level"] is KEEP else fields["level"], fields["title"],
                    fields["error_code"], fields["error"], fields["handling"], fields["verdict"] or "action", revision))
         c.commit()   # abort/raise above leave it uncommitted; teardown rolls back
         return jsonify({"doc_id": doc_id, "revision": revision}), 201
@@ -364,9 +372,10 @@ def create_app(cfg: AppConfig) -> Flask:
         keep_service = fields["service"] is KEEP
         c.execute("UPDATE documents SET title = %s, error_code = %s, error = %s, handling = %s, "
                   "verdict = COALESCE(%s, verdict), service = CASE WHEN %s THEN service ELSE %s END, "
-                  "revision = %s, updated_at = now() WHERE doc_id = %s",
+                  "level = CASE WHEN %s THEN level ELSE %s END, revision = %s, updated_at = now() WHERE doc_id = %s",
                   (fields["title"], fields["error_code"], fields["error"], fields["handling"], fields["verdict"],
-                   keep_service, None if keep_service else fields["service"], revision, doc_id))
+                   keep_service, None if keep_service else fields["service"],
+                   fields["level"] is KEEP, None if fields["level"] is KEEP else fields["level"], revision, doc_id))
         c.commit()
         return jsonify({"doc_id": doc_id, "revision": revision})
 

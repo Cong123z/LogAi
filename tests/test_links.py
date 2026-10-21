@@ -160,3 +160,14 @@ def test_corpus_matching_stays_within_the_service_plus_shared(conn, docs):
     assert links(conn) == {"A1": ("corpus", "A_DOC"), "B2": ("corpus", "SHARED")}
     assert [c["doc_id"] for c in candidates(conn, "b", "B1", 3, 0.5)] == []
     assert [(c["doc_id"], c["service"]) for c in candidates(conn, "b", "B1", 3, 0.5, other_services=True)] == [("A_DOC", "a")]
+
+
+def test_corpus_matching_needs_the_same_level_class_as_the_documents_line(conn, docs):
+    doc(conn, "ERR_DOC", vec((0, 1.0))), doc(conn, "ANY_DOC", vec((5, 1.0)))
+    conn.execute("UPDATE documents SET level = 'ERROR' WHERE doc_id = 'ERR_DOC'")
+    tmpl(conn, "SUCCESS", "INFO", v=at(0.95, 6))          # "Log success …" vs "Error when log …": 0.95, other class
+    tmpl(conn, "FAIL", "ERROR", v=at(0.95, 7))
+    tmpl(conn, "TIMEOUT_INFO", "INFO", v=at(0.95, 8, anchor=5))   # a document without a level matches any class
+    apply_links(conn, docs)
+    assert links(conn) == {"FAIL": ("corpus", "ERR_DOC"), "TIMEOUT_INFO": ("corpus", "ANY_DOC")}
+    assert [(c["doc_id"], c["level"]) for c in candidates(conn, "s", "SUCCESS", 3, 0.5)] == [("ERR_DOC", "ERROR")]

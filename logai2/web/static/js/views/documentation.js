@@ -164,6 +164,7 @@ function renderDocPane() {
     drafting ? '<span class="badge badge-yellow">AI suggestion · unverified</span>' : '',
     svcChip(doc.service),
     verdictBadge(doc),
+    doc.level ? `<span class="badge ${levelBadgeClass(doc.level)}" title="Log level of its ERROR line">${escapeHtml(doc.level)} line</span>` : '',
     !drafting && doc.source === 'llm' ? '<span class="badge badge-yellow">AI-written, approved</span>' : '',
     doc.error_code ? `<span class="tmpl-id">${escapeHtml(doc.error_code)}</span>` : '',
     doc.confidence != null && drafting ? `<span>confidence ${doc.confidence.toFixed(2)}</span>` : '',
@@ -245,6 +246,12 @@ function renderDocEditor() {
             <option value="">Shared: every service</option>
             ${docs.services.map(svc => `<option value="${escapeHtml(svc)}"${(doc ? doc.service === svc : docs.service === svc) ? ' selected' : ''}>${escapeHtml(svc)}</option>`).join('')}
           </select></div>
+        <div class="form-field"><label for="doc-f-level">Log level of the ERROR line</label>
+          <select id="doc-f-level">
+            ${[['', 'Any level'], ['ERROR', 'ERROR (also FATAL, CRITICAL)'], ['WARN', 'WARN'], ['INFO', 'INFO (and others)']]
+              .map(([v, label]) => `<option value="${v}"${(doc ? doc.level || '' : '') === v ? ' selected' : ''}>${label}</option>`).join('')}
+          </select>
+          <p class="hint">Automatic matching only links templates of this level; the LLM is shown it too.</p></div>
         <div class="form-field"><label for="doc-f-verdict">Kind</label>
           <select id="doc-f-verdict">
             <option value="action"${doc && doc.verdict === 'safe' ? '' : ' selected'}>ERROR: something to fix</option>
@@ -277,6 +284,7 @@ async function saveDocument(event) {
     handling: document.getElementById('doc-f-handling').value,
     verdict: document.getElementById('doc-f-verdict').value,
     service: document.getElementById('doc-f-service').value,
+    level: document.getElementById('doc-f-level').value,
   };
   const submit = event.submitter;
   if (submit) submit.disabled = true;

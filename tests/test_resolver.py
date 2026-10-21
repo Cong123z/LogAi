@@ -182,3 +182,16 @@ def test_a_draft_is_written_for_the_templates_service_from_other_services_docume
     assert asked["references"][0]["service"] == "a" and "adapt" in asked["task"]
     d = conn.execute("SELECT service, based_on, status FROM documents WHERE title = 'Pool timeout on b'").fetchone()
     assert d == {"service": "b", "based_on": ["A_DOC"], "status": "draft"}
+
+
+def test_the_llm_sees_levels_and_a_draft_takes_the_templates_level(conn, cfg, profile):
+    doc(conn, "ERR_DOC", vec((0, 1.0)))
+    conn.execute("UPDATE documents SET level = 'ERROR' WHERE doc_id = 'ERR_DOC'")
+    tmpl(conn, "SUCCESS", "INFO", v=at(0.95, 5)), alerting(conn, "SUCCESS")
+    chat = Chat({"doc_id": None, "reason": "a success line, not the error"},
+                {"verdict": "safe", "title": "Log success", "handling": "SAFE: normal operation, no action needed."})
+    run(conn, cfg, chat)
+    confirm = chat.seen[0]
+    assert confirm["template"]["level"] == "INFO" and confirm["documents"][0]["level"] == "ERROR"
+    d = conn.execute("SELECT level, verdict FROM documents WHERE title = 'Log success'").fetchone()
+    assert d == {"level": "INFO", "verdict": "safe"}

@@ -75,6 +75,9 @@ def desired_corpus(conn, thresholds: dict, margin: float) -> dict[tuple[str, str
           SELECT t.service, t.template_id, {t_cls} AS cls, e.doc_id, max(1 - (e.embedding <=> t.embedding)) AS sim
           FROM templates t CROSS JOIN document_errors e JOIN documents d ON d.doc_id = e.doc_id AND d.status = 'active'
           WHERE t.embedding IS NOT NULL AND {_DECIDED} AND {_SAME_SERVICE}
+            -- same level class as the document's ERROR line (an INFO success line never takes an error runbook
+            -- automatically, however many words they share); a document without a level matches any
+            AND (d.level IS NULL OR d.level = {t_cls})
           GROUP BY 1, 2, 3, 4),
         ranked AS (
           SELECT *, row_number() OVER w AS rn, lead(sim) OVER w AS second FROM per_doc
@@ -155,7 +158,7 @@ def candidates(conn, service: str, template_id: str, k: int, min_sim: float, oth
     service and shared ones; with other_services, only other services' documents (references to adapt)."""
     scope = "d.service IS NOT NULL AND d.service <> t.service" if other_services else _SAME_SERVICE
     return conn.execute(f"""
-        SELECT d.doc_id, d.service, d.title, d.error, d.handling, max(1 - (e.embedding <=> t.embedding)) AS similarity
+        SELECT d.doc_id, d.service, d.level, d.title, d.error, d.handling, max(1 - (e.embedding <=> t.embedding)) AS similarity
         FROM templates t CROSS JOIN document_errors e JOIN documents d ON d.doc_id = e.doc_id AND d.status = 'active'
         WHERE t.service = %s AND t.template_id = %s AND t.embedding IS NOT NULL AND {scope}
         GROUP BY d.doc_id HAVING max(1 - (e.embedding <=> t.embedding)) >= %s

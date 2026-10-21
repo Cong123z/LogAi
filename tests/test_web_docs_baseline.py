@@ -177,3 +177,14 @@ def test_document_service_shared_by_default_kept_on_update(client, conn):
     assert listed()[owned["doc_id"]]["service"] is None                     # "" = shared
     assert client.post("/api/documents", json={"title": "t", "error": "e", "service": "nope"}).status_code == 400
     assert listed()[shared["doc_id"]]["based_on"] == []
+
+
+def test_document_level_any_by_default_validated_and_kept(client):
+    d = client.post("/api/documents", json={"title": "t", "error": "e", "level": "ERROR"}).get_json()
+    listed = lambda: {x["doc_id"]: x for x in client.get("/api/documents").get_json()}
+    assert listed()[d["doc_id"]]["level"] == "ERROR"
+    client.put(f"/api/documents/{d['doc_id']}", json={"title": "t2", "error": "e", "revision": d["revision"]})
+    assert listed()[d["doc_id"]]["level"] == "ERROR"
+    assert client.post("/api/documents", json={"title": "t", "error": "e", "level": "DEBUG"}).status_code == 400
+    plain = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
+    assert listed()[plain["doc_id"]]["level"] is None
