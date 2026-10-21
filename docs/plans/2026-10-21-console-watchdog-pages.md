@@ -1,12 +1,12 @@
-# Baseline and Pipeline Pages, Watchdog Style — Implementation Plan
+# Baseline, Review and Pipeline Pages, Watchdog Style — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 Status: **not built**.
 
-**Goal:** Rebuild the Baseline and Pipeline pages so they show how far every hour and every stage is from normal (sub-project 9, phases 1–2), drawn with Apache ECharts.
+**Goal:** A chart-only Baseline page (a service or one template against its baseline, with the period's possible incidents), a new Review page for every exclude/keep decision, and a rebuilt Pipeline page (sub-project 9, phases 1–2), all drawn with Apache ECharts.
 
-**Architecture:** Two new read-only view modules compute everything from tables that exist (`hourly_counts`, `service_hours`, `baseline`, `day_status`, `review_exclusions`, `alert_changes`, `templates`, `worker_status`), reusing `Baseline.lookup` / `judge` so every band is the one detection uses. Flask routes in `app.py` stay thin. The engine and the resolver add a few status fields. The front end gets a vendored ECharts, one helper (`charts.js`), and rewritten `baseline.js` / `pipeline.js`.
+**Architecture:** Two new read-only view modules compute everything from tables that exist (`hourly_counts`, `service_hours`, `baseline`, `day_status`, `review_exclusions`, `alert_changes`, `templates`, `worker_status`), reusing `Baseline.lookup` / `judge` so every band is the one detection uses. Flask routes in `app.py` stay thin. The engine and the resolver add a few status fields. The front end gets a vendored ECharts, one helper (`charts.js`), a new `review.js` (the decision page), and rewritten `baseline.js` / `pipeline.js`.
 
 **Tech Stack:** Python 3, Flask, psycopg 3, pytest against the test Postgres on 127.0.0.1:5433; vanilla JS, Apache ECharts 5.5.1 (vendored, Apache-2.0).
 
@@ -17,14 +17,16 @@ Status: **not built**.
 - New branch from `master`: `console-watchdog`. Never push. Stage by explicit path. No AI attribution in commits.
 - Tests: `.venv/bin/pytest -q` (`docker compose up -d postgres`). After code changes: `graphify update .`.
 - No migration, no new Python dependency. ECharts `5.5.1` full build, vendored at `logai2/web/static/vendor/echarts.min.js`; no CDN at run time.
-- Matrix default key `*total`; days 14 (default) or up to 28; `days` outside 1..28 → 400.
+- Matrix default key `*total`; days 14 (default) or up to 28; `days` outside 1..28 → 400. Baseline series: `days` ∈ {1, 7, 14} (default 14), else 400 `"days must be 1, 7 or 14"`.
+- Routes: `#baseline/<service>/<key>/<days>` (charts, read-only), `#review/<service>/<key>/<days>` (decisions). Documents and Templates pages are not changed.
+- Possible incident = consecutive hours outside the `judge` band (below only for `*total` / `*error` when the profile alerts low); `ongoing` when it contains the newest hour with data. Sample lines only for ongoing incidents (`error_samples` keeps the newest 20 per ERROR+ template); never invent or keep older ones.
 - z = `(rate − mean) / σ`, σ floored at `1.0` event/min when mean > 0; no baseline (no row, or mean = σ = 0) → `z: null, no_baseline: true`.
 - Colour steps on z: inside `|z| ≤ k` (k = 3 full, 4 young) gray; above: k–6, 6–10, > 10; below the same, only for `*total` and `*error`.
 - Thresholds: lag Degraded `> 300 s`; flush Degraded `flush_seconds_max > 10 s`; commit overdue when `last_commit.at` older than `26 h`; Reader Down when the last 5 history points have `eps == 0` while some index is not caught up; linker stale `90 s` (existing `LINKER_STALE_SECONDS`); engine stale `30 s` (existing).
 - Contributors: top `10` increased templates; new templates = first seen from 1 h before the range start to its end.
 - Pipeline small multiples: at most `6`, worst |z| first, then "Show all".
 - Every chart: themes from `tokens.css`, `aria.enabled: true`, `animation: false` and no particle effect under `prefers-reduced-motion`; instances disposed on every view change and theme change; Pipeline's 2 s poll updates existing instances with `setOption` (never re-creates them).
-- Copy as in the spec section 3/4 (e.g. "Exclude: real incident", "Keep: normal", "Takes effect at the next commit (02:00) or Recompute").
+- Copy as in the spec sections 3, 3B and 4 (e.g. "Exclude: real incident", "Keep: normal", "Takes effect at the next commit (02:00) or Recompute").
 
 ## Review Focus
 
@@ -71,7 +73,7 @@ def test_periods_close_open_ones_at_now():
 
 ---
 
-### Task 2: Baseline matrix and coverage API
+### Task 2: Review matrix and coverage API (`/api/baseline/matrix`)
 
 **Files:**
 - Create: `logai2/web/baseline_view.py`
@@ -156,7 +158,7 @@ def test_left_days_before_the_click(conn, cfg):
 
 ---
 
-### Task 3: Baseline inspector API
+### Task 3: Review inspector API (`/api/baseline/inspect`)
 
 **Files:**
 - Modify: `logai2/web/baseline_view.py`, `logai2/web/app.py`
@@ -239,17 +241,18 @@ def test_echarts_is_served_locally(client):
 
 ---
 
-### Task 5: Baseline page UI
+### Task 5: Review page UI (decisions)
 
 **Files:**
-- Modify: `logai2/web/static/index.html` (`#view-baseline` markup), `logai2/web/static/js/views/baseline.js` (rewrite), `logai2/web/static/css/app.css`
+- Create: `logai2/web/static/js/views/review.js` (the decision page; the old `baseline.js` code it replaces goes in Task 7)
+- Modify: `logai2/web/static/index.html` (new `#view-review` section and sidebar link after Baseline; the old `#view-baseline` tables and form are removed), `logai2/web/static/js/main.js` (`viewTitles.review = 'Review'`, `loadData` calls `loadReview`), `logai2/web/static/css/app.css`
 - Test: manual in Chrome (below)
 
 **Interfaces:**
 - Consumes: Task 2 `/api/baseline/matrix`, Task 3 `/api/baseline/inspect`, existing `/api/baseline` (cards, suggestions, decisions, last commit), `POST/DELETE /api/baseline/decisions`, `POST /api/baseline/recompute` + command polling (keep `blPollCommand`); Task 4 `chartFor`, `chartTokens`, `baseOption`.
-- Produces: route `#baseline/<service>/<key>/<days>` (key URL-encoded; read from `state.subView`, which today holds one segment: take the rest of the hash after `baseline/`).
+- Produces: route `#review/<service>/<key>/<days>[/<day>/<hour_from>/<hour_to>]` (key URL-encoded; `setView` keeps everything after the first `/` in `state.subView`); the optional tail preselects a range — Task 7's Review buttons use it.
 
-Build exactly what spec section 3 lists; the mockup is the reference for look and interaction:
+Build exactly what spec section 3 lists (the mockup's Review tab is the reference):
 - Header (service, Show, 14 | 28, Recompute), four cards.
 - Matrix: ECharts heatmap, x hours on top, y days newest first (`inverse: true`), `●` prefix on `in_baseline`, weekend labels muted; per-item colour from `chartTokens().cls[cell.cls]`; label marks `▲` (suggested) / `✕` (exclude) / `✓` (keep); selected cells `borderWidth 3` accent. Click selects (a suggested cell selects its suggestion), shift+click extends within the day. Chart | Table toggle (HTML table of z). To review list and Decisions (Undo) beside it.
 - Inspector: sentence; bounds chart (stacked lower + band series, this day line, last week dashed, out-of-band scatter, `markArea` selection, `▲` scatter for `not_normal_minutes`); increased bar chart (labels `×N normal`, click → `#templates` filtered to that template); new templates table; key chips; Exclude / Keep with the `left_days` sentence shown before the click (warning style when any `< 3`); after a decision reload matrix + inspector and select the next suggestion.
@@ -259,11 +262,89 @@ Build exactly what spec section 3 lists; the mockup is the reference for look an
 - [ ] **Step 1: Implement** the markup, view and styles.
 - [ ] **Step 2: Check in Chrome** on a scratch copy of the live database (`createdb -T logai logai_ui_check`, run `scripts/run_web.py` with `LOGAI2_DATABASE_DSN` pointing at it; drop it after). Pass when: matrix colours match the API `cls`; hover shows rate / expected / z; click and shift+click select; a suggestion selects its range; Exclude shows the `left_days` text before the click, then marks `✕` and moves on; Undo restores; Show = Errors / a doc / a template reloads; 28 days fits; light, dark, 390 px width (matrix scrolls in its box, page does not), keyboard reaches every control, reduced motion has no animation; DevTools shows no error and the instance count stays flat after switching views 10 times (`echarts.getInstanceByDom` on old nodes is undefined).
 - [ ] **Step 3: Run** `.venv/bin/pytest -q` — Expected: all pass.
-- [ ] **Step 4: Commit** `git add logai2/web/static/index.html logai2/web/static/js/views/baseline.js logai2/web/static/css/app.css && git commit -m "Baseline page: matrix, inspector, coverage (ECharts)"`
+- [ ] **Step 4: Commit** `git add logai2/web/static/index.html logai2/web/static/js/views/review.js logai2/web/static/js/main.js logai2/web/static/css/app.css && git commit -m "Review page: matrix, inspector, coverage, decisions (ECharts)"`
 
 ---
 
-### Task 6: Engine and resolver status fields
+### Task 6: Baseline series and incident API
+
+**Files:**
+- Modify: `logai2/web/baseline_view.py`, `logai2/web/app.py`
+- Test: `tests/test_web_baseline_view.py`
+
+**Interfaces:**
+- Consumes: Task 2 `resolve_key`, `_cells` (rate, mean, std, band per day/hour), `UnknownKey`; Task 1 `minutes_by_hour`; Task 3's day/hour validation.
+- Produces (in `baseline_view.py`):
+  - `series(conn, cfg, service: str, key: str, ndays: int, today: date, now: float) -> dict` — spec 3B.7: `key, baseline_state ("full"|"young"|"borrowed"|"none"), points [{day, hour, rate|null, mean, std, band_low, band_high, last_week, z, out}], incidents [{day, hour_from, hour_to, ongoing, hours, peak {hour, rate, mean, band_low, band_high, z}, times_normal|null, decision ("exclude"|"keep"|"review"|null)}], profile {weekday [{hour, mean, band_low, band_high}], weekend [...], today [{hour, rate}]}`. Points run oldest → newest; hours without a `service_hours` row have `rate: null`; an incident never spans a missing hour; incidents crossing midnight are split per day (a decision is per day). `decision` = the covering `review_exclusions` row, else `"review"` when `minutes_by_hour` has minutes in its hours, else null.
+  - `incident(conn, service: str, key: str, day: date, hour_from: int, hour_to: int, now: float) -> dict` — `{ongoing, modules [{module, lines}] (Σ alert_minutes.count by module_code in the range, desc; the key's template, or all the service's templates for *total/*error), samples [{at, template_id, line}]}`; `samples` = newest `error_samples` (≤ 10) of the key's template, or of the 3 ERROR+ templates with the largest excess for `*total` / `*error`, **only when `ongoing`**, else `[]`.
+- Routes: `GET /api/baseline/series?service&key&days`, `GET /api/baseline/incident?service&key&day&hour_from&hour_to` (404 / 400 as `/inspect`).
+
+- [ ] **Step 1: Write the failing tests** (Task 2's helpers and seeding, plus `T00032` with weekday baseline mean 36 σ 6.5 at hours 2–3, ×22 on Tue 20 Oct 02:00–04:00, ×2.4 today 13:00–14:00 with today's last hour 14).
+
+```python
+def test_series_points_and_incidents(conn, cfg):
+    r = series(conn, cfg, "pay", "pay:T00032", 14, TODAY, NOW)
+    tue = [i for i in r["incidents"] if i["day"] == "2026-10-20"][0]
+    assert (tue["hour_from"], tue["hour_to"], tue["ongoing"], tue["times_normal"]) == (2, 4, False, 22.0)
+    assert (tue["peak"]["band_low"], tue["peak"]["band_high"], round(tue["peak"]["z"], 1)) == (16.5, 55.5, 116.3)
+    today = [i for i in r["incidents"] if i["day"] == "2026-10-21"][0]
+    assert today["ongoing"] and (today["hour_from"], today["hour_to"]) == (13, 15)
+    assert r["points"][0]["day"] == "2026-10-08" and r["baseline_state"] == "full"
+
+def test_series_decision_review_and_none(conn, cfg):
+    # 16 Oct 10:00 excluded on Review; 20 Oct 02:00 has alert_changes, no decision; 12 Oct 18:00 out but never alerted
+    d = {(i["day"], i["hour_from"]): i["decision"]
+         for i in series(conn, cfg, "pay", "pay:T00032", 14, TODAY, NOW)["incidents"]}
+    assert d[("2026-10-16", 10)] == "exclude" and d[("2026-10-20", 2)] == "review" and d[("2026-10-12", 18)] is None
+
+def test_series_drops_only_for_service_keys(conn, cfg):
+    # T00011 (INFO) and *total both at 0.45 × mean on Thu 15 Oct 16:00
+    assert not any(i["day"] == "2026-10-15" for i in series(conn, cfg, "pay", "pay:T00011", 14, TODAY, NOW)["incidents"])
+    assert any(i["day"] == "2026-10-15" for i in series(conn, cfg, "pay", "*total", 14, TODAY, NOW)["incidents"])
+
+def test_series_new_template_has_no_band(conn, cfg):
+    r = series(conn, cfg, "pay", "pay:T00309", 1, TODAY, NOW)
+    assert r["baseline_state"] == "none" and r["incidents"] == [] and r["profile"]["weekday"] == []
+    assert all(p["band_high"] is None for p in r["points"])
+
+def test_incident_modules_and_samples_only_when_ongoing(conn, cfg):
+    live = incident(conn, "pay", "pay:T00032", date(2026, 10, 21), 13, 15, NOW)
+    assert live["ongoing"] and live["modules"][0] == {"module": "LIXI_PROMO", "lines": 5210} and len(live["samples"]) == 3
+    old = incident(conn, "pay", "pay:T00032", date(2026, 10, 20), 2, 4, NOW)
+    assert not old["ongoing"] and old["samples"] == [] and old["modules"]
+
+def test_series_validation(client):
+    assert client.get("/api/baseline/series?service=pay&key=*total&days=5").status_code == 400
+    assert client.get("/api/baseline/series?service=pay&key=pay:T09999").status_code == 404
+```
+
+- [ ] **Step 2: Run** `.venv/bin/pytest -q tests/test_web_baseline_view.py -k "series or incident"` — Expected: FAIL (`ImportError: cannot import name 'series'`).
+- [ ] **Step 3: Implement** `series`, `incident` and the two routes. `last_week` = the same key's rate 7 days earlier (null without a row); `profile` from the key's `baseline` rows (weekday / weekend × 24, band with that daytype's k), `today` from today's points.
+- [ ] **Step 4: Run** `.venv/bin/pytest -q tests/test_web_baseline_view.py` — Expected: all pass.
+- [ ] **Step 5: Commit** `git add logai2/web/baseline_view.py logai2/web/app.py tests/test_web_baseline_view.py && git commit -m "Baseline API: series with possible incidents, incident modules and samples"`
+
+---
+
+### Task 7: Baseline page UI (charts)
+
+**Files:**
+- Modify: `logai2/web/static/index.html` (`#view-baseline` markup), `logai2/web/static/js/views/baseline.js` (rewrite), `logai2/web/static/css/app.css`
+- Test: manual in Chrome (below)
+
+**Interfaces:**
+- Consumes: Task 6 `/api/baseline/series`, `/api/baseline/incident`; Task 2 `/api/baseline/matrix` (read-only grid); `/api/services`; `/api/templates?service=<s>&size=500` for the Show list (id, level, text; "(new)" when `first_seen` < 24 h); Task 4 chart helper; Task 5's `#review/...` route.
+- Produces: route `#baseline/<service>/<key>/<days>`.
+
+Build exactly what spec section 3B lists (the mockup's Baseline tab is the reference): header and four cards; the actual-vs-expected chart (stacked band, actual, a week earlier dashed, out-of-band scatter, one `markArea` per incident labelled `✕` / `✓` by decision, `dataZoom` inside + slider when days > 1); the incidents table (state `● ongoing` / `resolved HH:00`; Review button → `#review/<service>/<key>/14/<day>/<hour_from>/<hour_to>`); a row click zooms ±12 h and loads the incident detail (module bar chart in %, then the sample-lines table or the "Not available for this period" note naming the future upgrade); the read-only matrix; the baseline-itself chart.
+
+- [ ] **Step 1: Implement** the markup, view and styles.
+- [ ] **Step 2: Check in Chrome** on the scratch database. Pass when: band and points match `/series`; every incident is shaded and listed; ongoing vs resolved is right; a row click zooms and shows modules; samples show only for an ongoing incident, the note otherwise; Review opens Review with the range selected; a new template shows no band and "None yet"; Today / 7 / 14 switch; light, dark, 390 px, keyboard, reduced motion; no console error; instance count flat after 10 view switches.
+- [ ] **Step 3: Run** `.venv/bin/pytest -q` — Expected: all pass.
+- [ ] **Step 4: Commit** `git add logai2/web/static/index.html logai2/web/static/js/views/baseline.js logai2/web/static/css/app.css && git commit -m "Baseline page: actual vs expected, possible incidents, modules, samples (ECharts)"`
+
+---
+
+### Task 8: Engine and resolver status fields
 
 **Files:**
 - Modify: `logai2/engine.py` (`_status`, `_flush`, `_observe`), `logai2/resolver.py` (`run`)
@@ -301,7 +382,7 @@ def test_llm_today_counts_results_and_failed_calls(conn, cfg, profile):
 
 ---
 
-### Task 7: Pipeline API: services, volume, stages
+### Task 9: Pipeline API: services, volume, stages
 
 **Files:**
 - Create: `logai2/web/pipeline_view.py`
@@ -309,7 +390,7 @@ def test_llm_today_counts_results_and_failed_calls(conn, cfg, profile):
 - Test: `tests/test_web_pipeline_view.py`
 
 **Interfaces:**
-- Consumes: Task 6 status fields; `Baseline`, `judge`; `timeutil`.
+- Consumes: Task 8 status fields; `Baseline`, `judge`; `timeutil`.
 - Produces (in `pipeline_view.py`):
   - `services(conn, cfg, engine: dict, day: date, hour: int) -> list[dict]` — per service `{service, rate, last_week, z, miss_ratio, templates, new_24h, unparsed_1h, not_normal}`; `rate` = `*total` this hour / its minutes so far (null without a row); `z` as Task 2 (σ floor 1.0, null without baseline); `unparsed_1h` = `hourly_counts` key `<service>:unparsed` this hour; `not_normal` = `alert_state` rows with state ≠ NORMAL; sorted by |z| desc, nulls last.
   - `volume(conn, cfg, day: date, hour: int) -> list[dict]` — per service `{service, hours: [{hour, rate|null, band_low, band_high, last_week|null}]}` for hours 0..`hour`, band via `judge` on `*total`.
@@ -357,7 +438,7 @@ def test_pipeline_route_has_new_fields(client):
     assert {"services", "volume", "stages", "status", "cursors", "stale", "linker", "linker_stale"} <= set(body)
 ```
 
-(`ENGINE_OK`, `LINKER_OK`, `ZERO_EPS_5`, `AT_27H_AGO`, `NOW` are module constants in the test file: a healthy status per Task 6's fields, a healthy linker status, five history points with `eps` 0, an ISO time 27 h before `NOW`.)
+(`ENGINE_OK`, `LINKER_OK`, `ZERO_EPS_5`, `AT_27H_AGO`, `NOW` are module constants in the test file: a healthy status per Task 8's fields, a healthy linker status, five history points with `eps` 0, an ISO time 27 h before `NOW`.)
 
 - [ ] **Step 2: Run** `.venv/bin/pytest -q tests/test_web_pipeline_view.py` — Expected: FAIL (`ModuleNotFoundError`).
 - [ ] **Step 3: Implement** `pipeline_view.py` and extend `pipeline()` (day/hour from `day_hour(minute_of(time.time()))`).
@@ -366,14 +447,14 @@ def test_pipeline_route_has_new_fields(client):
 
 ---
 
-### Task 8: Pipeline page UI
+### Task 10: Pipeline page UI
 
 **Files:**
 - Modify: `logai2/web/static/index.html` (`#view-pipeline` markup), `logai2/web/static/js/views/pipeline.js` (rewrite), `logai2/web/static/css/app.css`
 - Test: manual in Chrome (below)
 
 **Interfaces:**
-- Consumes: Task 7 `/api/pipeline` (`stages`, `services`, `volume`, plus existing fields), Task 6 status fields, Task 4 chart helper.
+- Consumes: Task 9 `/api/pipeline` (`stages`, `services`, `volume`, plus existing fields), Task 8 status fields, Task 4 chart helper.
 
 Build exactly what spec section 4 lists; the mockup is the reference:
 - Status line (kept).
@@ -392,13 +473,13 @@ Build exactly what spec section 4 lists; the mockup is the reference:
 
 ---
 
-### Task 9: Docs, merge readiness
+### Task 11: Docs, merge readiness
 
 **Files:**
-- Modify: `docs/WEB_UI.md` (Baseline and Pipeline sections; HTTP API: `/api/baseline/matrix`, `/api/baseline/inspect`, new `/api/pipeline` fields), `ARCHITECTURE.md` (§10.5 engine fields, linker `llm_today`; §16 reading list adds `web/baseline_view.py`, `web/pipeline_view.py`), `docs/specs/2026-10-21-baseline-pipeline-pages.md` (Status: built), `docs/design/per-service-baseline.md` (section 9: phases 1–2 built), this plan (Status line)
+- Modify: `docs/WEB_UI.md` (Baseline, new Review and Pipeline sections; HTTP API: `/api/baseline/matrix`, `/inspect`, `/series`, `/incident`, new `/api/pipeline` fields), `ARCHITECTURE.md` (§10.5 engine fields, linker `llm_today`; §16 reading list adds `web/baseline_view.py`, `web/pipeline_view.py`), `docs/specs/2026-10-21-baseline-pipeline-pages.md` (Status: built), `docs/design/per-service-baseline.md` (section 9: phases 1–2 built), this plan (Status line)
 
 - [ ] **Step 1: Update the docs** to describe the code as built (fields and copy exactly as implemented).
 - [ ] **Step 2: Run** `.venv/bin/pytest -q` and `graphify update .` — Expected: all pass.
 - [ ] **Step 3: Commit** `git add docs/WEB_UI.md ARCHITECTURE.md docs/specs/2026-10-21-baseline-pipeline-pages.md docs/design/per-service-baseline.md docs/plans/2026-10-21-console-watchdog-pages.md && git commit -m "Docs: Baseline and Pipeline pages, new API and status fields"`
 
-Order: 1 → 2 → 3 → 5 and 4 before 5; 6 → 7 → 8 (4 before 8); 9 last. Tasks 1–3 and 6–7 are independent of each other.
+Order: 1 → 2 → 3 → 5 (Review UI) and 2 → 6 → 7 (Baseline UI); 4 before 5, 7 and 10; 8 → 9 → 10 (Pipeline); 11 last. The Review/Baseline chain (1–7) and the Pipeline chain (8–10) are independent.

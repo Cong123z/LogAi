@@ -1,4 +1,4 @@
-# Baseline and Pipeline pages: what they show (sub-project 9, phases 1–2)
+# Baseline, Review and Pipeline pages: what they show (sub-project 9, phases 1–2)
 
 Date: 2026-10-21. Status: **approved direction, detail for review**. Not
 built. Design: [`per-service-baseline.md` section 9](../design/per-service-baseline.md)
@@ -10,7 +10,16 @@ design and detailed later.
 **User rulings (2026-10-21)**
 
 1. **Apache ECharts draws every chart**, self-hosted (section 2).
-2. **The Baseline matrix shows all events (`*total`) by default.**
+2. **The matrix shows all events (`*total`) by default.**
+3. **Baseline is charts only** (section 3B): a service or one of its
+   templates against its baseline, with the period's possible incidents.
+   Every exclude/keep decision moves to a new **Review** page (section 3).
+   Documents and Templates keep their own pages.
+4. **Sample lines** show only for an ongoing incident (the engine keeps the
+   newest 20 per ERROR+ template). Keeping samples per incident is a future
+   upgrade (section 6).
+
+Mockup (sample data): https://claude.ai/artifact/TStddKaZPCS7YEFWB2HZep
 
 Model: Datadog Watchdog. An anomaly is a card with a sentence, a graph of
 the series over a gray band of expected values, and what caused it, split
@@ -25,10 +34,13 @@ Sources: [Watchdog alerts](https://docs.datadoghq.com/watchdog/alerts/),
 
 | Page | Question | Answered by |
 |---|---|---|
-| Baseline | Which hours of the last two weeks were abnormal, and how much? | 3.2 matrix |
-| Baseline | For this period: what was expected, what happened, what caused it? | 3.3 inspector |
-| Baseline | What is the baseline built from, and where is it thin or idle? | 3.4 coverage |
-| Baseline | Exclude or keep, and what does that leave? | 3.3 decision |
+| Baseline | How did this service / template behave against its baseline? | 3B.2 chart |
+| Baseline | When did it leave the band, is it still out, what produced it? | 3B.3 incidents |
+| Baseline | What does normal look like for each hour? | 3B.5 the baseline itself |
+| Review | Which hours of the last two weeks were abnormal, and how much? | 3.2 matrix |
+| Review | For this period: what was expected, what happened, what caused it? | 3.3 inspector |
+| Review | What is the baseline built from, and where is it thin or idle? | 3.4 coverage |
+| Review | Exclude or keep, and what does that leave? | 3.3 decision |
 | Pipeline | Is every stage healthy? If not, which and why? | 4.2 topology |
 | Pipeline | Are we behind, getting better or worse? | 4.3 lag and throughput |
 | Pipeline | Is the volume we read normal for this hour, per service? | 4.4 volume |
@@ -63,7 +75,10 @@ Sources: [Watchdog alerts](https://docs.datadoghq.com/watchdog/alerts/),
   a word. Palettes are checked for color blindness and contrast in both
   themes before building.
 
-## 3. Baseline page
+## 3. Review page (`#review`, decisions)
+
+The former Baseline page content, moved; nothing in 3.1–3.6 changes except
+the route and the page name.
 
 Layout, top to bottom:
 
@@ -82,7 +97,7 @@ Layout, top to bottom:
   (`*total`, default), **Errors** (`*error`), a **document** (the sum of its
   linked templates, as detection judges a doc key), or one **template**
   (search box). **Days**: 14 (default) or 28. The choice is kept in the URL
-  hash (`#baseline/recharge/*total/14`) so a link opens the same view.
+  hash (`#review/recharge/*total/14`) so a link opens the same view.
 - **Cards** (kept from today, compacted): Weekday profile and Weekend
   profile ("No days yet: floor-only" / "Young: mean ± 4σ, 3 of 5 days" /
   "Full: mean ± 3σ" / "weekend borrows weekday, upper alerts only"),
@@ -231,6 +246,101 @@ left out.
 `left_days` is what an exclusion of the range would leave (the rule of
 today's `warning`, computed before the click).
 
+## 3B. Baseline page (`#baseline`, charts only)
+
+Read-only. Layout, top to bottom:
+
+```
+┌ Service [recharge ▾]  Show [All events | Errors | template… ▾]  [Today | 7 days | 14 days] ┐
+├ Cards: Now vs expected · Possible incidents · Needs review · Baseline state                 ┤
+├ 3B.2 Actual vs expected (one chart, zoom)                                                   ┤
+├ 3B.3 Possible incidents table → 3B.4 incident detail (modules, sample lines)                ┤
+└ 3B.5 Days × hours (read-only)          │ 3B.6 The baseline itself                           ┘
+```
+
+### 3B.1 Header and cards
+
+- **Service**; **Show**: All events (`*total`, default), Errors (`*error`),
+  or one template of the service (id, level, start of the text; new ones
+  marked "(new)"); **period** Today / 7 days / 14 days (default 14). Kept in
+  the hash: `#baseline/<service>/<key>/<days>`.
+- Cards: **Now** (this hour's rate, expected range, inside / ▲ above),
+  **Possible incidents** (count, hours outside the band), **Needs review**
+  (incidents without a decision that Review suggests), **Baseline** (full /
+  young / borrowed / "None yet" for a template with no baseline).
+
+### 3B.2 Actual vs expected (ECharts line)
+
+One point per hour over the period: gray band (`judge` band: this and the
+next hour's band joined, as detection does), actual rate, a week earlier
+dashed, out-of-band points in the warm colour. Each possible incident is a
+`markArea` (bad colour), labelled `✕` / `✓` when Review excluded / kept it.
+`dataZoom` inside + slider when the period is longer than a day. Tooltip:
+hour, actual, expected range, z, a week earlier. A template with no
+baseline shows its line and "no baseline yet (floor only)".
+
+### 3B.3 Possible incidents
+
+A **possible incident** = consecutive hours whose hourly rate is above the
+band (or, for `*total` / `*error` on a profile that alerts low, below it).
+It is an hourly view: detection judges minutes, so an hour can alert while
+its average stays inside the band (Review lists those). Table, newest
+first: when (`Tue 20 Oct 02:00–04:00`, or `13:00–now`), **state** (`●
+ongoing` when it includes the newest hour with data, else `resolved
+HH:00`), duration, peak rate, expected range at the peak, `×N normal`
+(peak / mean; — without a mean), **decision** (`✕ excluded` / `✓ kept`
+from `review_exclusions`, `needs review` when Review suggests those hours,
+else `not suggested`), and a **Review** button (opens Review on that day
+and range). A row click zooms the chart to it (±12 h) and opens 3B.4.
+
+### 3B.4 Incident detail
+
+- **Where the lines came from, by module** (horizontal bar, share in %):
+  `alert_minutes` counts per `module_code` for the minutes in the range;
+  for a template its own rows, for `*total` / `*error` all the service's
+  templates. The role Watchdog Explains plays for tags.
+- **Sample lines**: for an **ongoing** incident, the newest `error_samples`
+  lines (time, line, template) of the template, or for `*total` / `*error`
+  of the 3 ERROR+ templates with the largest excess in the range. For a
+  resolved incident: "Not available for this period: the engine keeps only
+  the newest 20 lines per ERROR template" and the future upgrade (section 6).
+
+### 3B.5 Days × hours (read-only)
+
+The 3.2 heatmap for the chosen key (same API, same colours, `✕` / `✓`
+marks), without selection or decisions. Today view shows the last 7 days.
+
+### 3B.6 The baseline itself (ECharts line)
+
+x = 24 hours: the weekday band (gray) and mean line, the weekend mean
+dashed, today so far in the accent colour; from `baseline` for the key (a
+doc-like sum is never shown here). A template with no baseline says so.
+
+### 3B.7 API
+
+**`GET /api/baseline/series?service&key=*total&days=14`** (`days` 1, 7 or 14)
+
+```json
+{"key": "recharge:T00032", "baseline_state": "full",
+ "points": [{"day": "2026-10-20", "hour": 2, "rate": 792.0, "mean": 36.0, "std": 6.5,
+             "band_low": 16.5, "band_high": 55.5, "last_week": 35.0, "z": 116.3, "out": true}],
+ "incidents": [{"day": "2026-10-20", "hour_from": 2, "hour_to": 4, "ongoing": false, "hours": 2,
+                "peak": {"hour": 2, "rate": 792.0, "mean": 36.0, "band_low": 16.5, "band_high": 55.5, "z": 116.3},
+                "times_normal": 22.0, "decision": "review"}],
+ "profile": {"weekday": [{"hour": 2, "mean": 36.0, "band_low": 16.5, "band_high": 55.5}],
+             "weekend": [], "today": [{"hour": 13, "rate": 86.4}]}}
+```
+
+**`GET /api/baseline/incident?service&key&day&hour_from&hour_to`**
+
+```json
+{"ongoing": true,
+ "modules": [{"module": "LIXI_PROMO", "lines": 5210}, {"module": "API_TOPUP", "lines": 1180}],
+ "samples": [{"at": 1792595940.0, "template_id": "recharge:T00032", "line": "ERROR [...] LixiHandler: ..."}]}
+```
+
+`samples` is `[]` when not ongoing. Same validation and 404s as `/inspect`.
+
 ## 4. Pipeline page
 
 Layout, top to bottom:
@@ -345,9 +455,11 @@ thresholds live in one place. `services` and `volume` come from
 
 1. Vendor ECharts, `charts.js` (instances, dispose, resize, themes from
    tokens), palette check in both themes.
-2. Baseline API (`/matrix`, `/inspect`) with tests on the test Postgres.
-3. Baseline page: header, matrix, To review list, inspector, coverage,
-   decisions; remove Add a range / Days / suggestions table.
+2. Review API (`/matrix`, `/inspect`) with tests on the test Postgres.
+3. Review page (`#review`): header, matrix, To review list, inspector,
+   coverage, decisions; the old Baseline page's tables and form go.
+3b. Baseline API (`/series`, `/incident`) with tests; Baseline page:
+   chart, incidents, incident detail, read-only grid, the baseline itself.
 4. Engine and linker status fields (4.6) with tests.
 5. Pipeline API (`services`, `volume`, `stages`) with tests.
 6. Pipeline page: topology, details, lag/throughput, volume, services
@@ -365,6 +477,10 @@ Phase 3 of sub-project 9 (Watchdog tags and banner on Alerting, `×N
 normal` on Templates, exclude from an alert card through 3.3): design
 section 9, detailed later. Also out: minute-level storage of NORMAL
 minutes, notifications.
+
+**Future upgrade:** keep a few sample lines per possible incident (a small
+table written by the flush when a key enters WARMING/ALERTING, with its own
+retention), so a resolved incident still shows its evidence on Baseline.
 
 ## 7. Open questions
 

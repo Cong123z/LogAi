@@ -703,9 +703,25 @@ detection). NORMAL minutes are not stored minute by minute, so history
 charts are per hour, the unit an exclusion acts on. The engine adds a few
 `worker_status` fields (phase 2); no migration.
 
-**Phase 1: Baseline page.**
+**Phase 1: Baseline (charts) and Review (decisions) pages.** Ruling
+2026-10-21: Documents and Templates keep their own pages; **Baseline** only
+charts one key against its baseline and shows the period's possible
+incidents; **Review** (`#review`, new) holds every exclude/keep decision.
 
-- **Matrix**: last 14 days (up to 28) × 24 hours per service. A cell is one
+- **Baseline** (read-only): pick a service, then all events, errors or one
+  of its templates, over today / 7 / 14 days. One expected-bounds chart (one
+  point per hour, gray band, a week earlier dashed, zoom) with each
+  **possible incident** (consecutive hours outside the band) shaded; an
+  incidents table (when, **ongoing / resolved**, duration, peak, expected,
+  ×normal, decision, a Review link); per incident a **per-module
+  breakdown** (from `alert_minutes`, the role of Watchdog Explains) and
+  **sample lines** (`error_samples`); the read-only days × hours grid; and
+  the baseline itself (weekday band and line, weekend line, today).
+- **Sample lines limit.** `error_samples` keeps the newest 20 lines per
+  ERROR+ template, so lines exist only for an **ongoing** incident; a past
+  one says so. **Future upgrade:** keep a few sample lines per possible
+  incident so past incidents keep their evidence (a storage change).
+- **Review**, **Matrix**: last 14 days (up to 28) × 24 hours per service. A cell is one
   key's hour (`*total` by default; `*error`, a document or a template can be
   picked), filled by its distance to the band, `z = (rate − mean) / σ` of
   that day's profile: gray inside the band, warm above, cool below. Glyphs,
@@ -713,7 +729,7 @@ charts are per hour, the unit an exclusion acts on. The engine adds a few
   (hatched), `✓` kept. Rows mark the days the next rebuild uses. Replaces
   the "Days" table; selecting cells (shift+click within a day) replaces the
   "Add a range" form.
-- **Inspector** (a Watchdog card) for the selected cell or suggestion: one
+- **Review**, **Inspector** (a Watchdog card) for the selected cell or suggestion: one
   sentence (when, how many keys, rate vs expected); an **expected-bounds
   chart** of that whole day (gray band per hour, joined with the next
   hour's band as detection does; the day's rate as a line; the selected
@@ -723,7 +739,7 @@ charts are per hour, the unit an exclusion acts on. The engine adds a few
   real incident** / **Keep: normal**. What an exclusion leaves ("02:00
   keeps 2 of 5 weekday days") is shown **before** the click, so one click is
   safe. Decisions still take effect at the next commit or Recompute.
-- **Coverage**: weekday and weekend × 24 hours, usable days per hour (out
+- **Review**, **Coverage**: weekday and weekend × 24 hours, usable days per hour (out
   of 5 / 4) after exclusions, and an **idle** mark where the `*total` mean
   is 0 (every ERROR/WARN template at its floor alerts there).
 
