@@ -47,8 +47,8 @@ source design for all sub-projects:
   confirms a near document, or writes a suggestion (an action runbook, or
   SAFE for a normal-operation line) that waits for approval on the
   Documentation page.
-- **Web** (`scripts/run_web.py`, Flask): seven pages (Alerting, Pipeline,
-  Templates, Documentation, Data sources, LLM profiles, Baseline). It reads Postgres and
+- **Web** (`scripts/run_web.py`, Flask): eight pages (Alerting, Pipeline,
+  Templates, Documentation, Data sources, LLM profiles, Baseline, Review). It reads Postgres and
   writes settings, documents, links, review decisions and commands; it never
   talks to Elasticsearch or to the engine.
 
@@ -183,7 +183,7 @@ The report has the 5 checks of spec section 8: burst template ALERTING within
 3 checks, its document row ALERTING, a spread burst fires the doc key, the
 expected document is shown, and false alerts per hour in the control phase.
 Only a transition into ALERTING inside a phase counts. Afterwards, exclude
-the test hours on the **Baseline** page so the bursts stay out of the
+the test hours on the **Review** page so the bursts stay out of the
 baseline.
 
 ## Repo layout
@@ -200,7 +200,7 @@ logai2/
   commands.py, metrics.py, engine.py the engine loop
   embed.py, links.py, linker.py      embeddings client, layered links (SQL), the linker loop
   llm.py, resolver.py                LLM client (active profile), confirm-or-suggest resolver
-  web/app.py, web/static/            Flask API and the seven pages
+  web/app.py, web/static/            Flask API and the eight pages
   web/static/vendor/                 Apache ECharts 5.5.1 (echarts.min.js, vendored for offline use; Apache-2.0, ECHARTS-LICENSE)
 scripts/run_engine.py, run_web.py, run_linker.py, incident_test.py,
         split_doc_errors.py (seeded ERROR/Handling split), link_eval.py (measure link thresholds and the LLM)
