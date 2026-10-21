@@ -185,12 +185,15 @@ def create_app(cfg: AppConfig) -> Flask:
         row = conn().execute("SELECT status FROM worker_status WHERE worker = 'linker'").fetchone()
         linker = row["status"] if row else None
         linker_stale = linker is None or time.time() - (linker.get("heartbeat") or 0) > LINKER_STALE_SECONDS
+        light = {"status": status or None, "cursors": cursors, "stale": stale,
+                 "linker": linker, "linker_stale": linker_stale}
+        if request.args.get("lite"):      # the header pill polls this on every page: skip the per-service queries
+            return jsonify(light)
         now = time.time()
         day, hour = day_hour(minute_of(now))
         data = service_data(conn(), cfg, day)
         rows = service_rows(conn(), cfg, status, day, hour, data)
-        return jsonify({"status": status or None, "cursors": cursors, "stale": stale,
-                        "linker": linker, "linker_stale": linker_stale, "services": rows,
+        return jsonify({**light, "services": rows, "llm_daily_max": cfg.llm.daily_max,
                         "volume": volume(conn(), cfg, day, hour, data),
                         "stages": stage_states(status, stale, linker, linker_stale,
                                                sum(r["unparsed_1h"] for r in rows), now)})
@@ -489,7 +492,7 @@ def create_app(cfg: AppConfig) -> Flask:
             d["created_at"] = d["created_at"].timestamp()
         last_commit, _ = setting("last_commit")
         return jsonify({"days": days, "suggestions": suggestions, "decisions": decisions,
-                        "last_commit": last_commit,
+                        "last_commit": last_commit, "commit_time": cfg.baseline.commit_time,
                         "full_after_days": {dt: full_after(cfg, dt) for dt in DAY_CAP}})
 
     @app.post("/api/baseline/decisions")

@@ -10,7 +10,7 @@ from logai2.owner.counts import ERROR_LEVELS
 from logai2.review import keys_by_hour, minutes_by_hour, periods
 from logai2.timeutil import TZ, daytype
 
-DROP_KEYS = ("*total", "*error")     # the only keys that alert (and colour) low
+SERVICE_KEYS = ("*total", "*error")  # service-wide keys: they sum a whole service's templates
 SIGMA_FLOOR = 1.0                    # events/min: a flat key (σ 0) still needs a scale
 
 
@@ -18,9 +18,15 @@ class UnknownKey(Exception):
     pass
 
 
+def alerts_low(key: str, lk, cfg: AppConfig) -> bool:
+    """Whether a count below the band is an alert: exactly the detector's drop rule (owner/baseline.py judge)."""
+    return (key == "*total" and not lk.upper_only and lk.days >= full_after(cfg, lk.daytype)
+            and lk.this is not None and lk.this.mean >= cfg.drop.min_mean)
+
+
 def resolve_key(conn, service: str, key: str) -> tuple[str, list[str]]:
     """key -> (kind, template ids whose counts it sums)."""
-    if key in DROP_KEYS:
+    if key in SERVICE_KEYS:
         return key[1:], [key]
     if key.startswith("doc:"):
         ids = [r["template_id"] for r in conn.execute(
@@ -100,10 +106,10 @@ def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: st
             z = (rate - mean) / (max(std, SIGMA_FLOOR) if mean > 0 else std)
             full = lk.days >= full_after(cfg, lk.daytype)
             k = cfg.baseline.sigma_multiplier if full else cfg.baseline.young_sigma_multiplier
-            cls = _cls(z, k, key in DROP_KEYS and not lk.upper_only)
+            cls = _cls(z, k, alerts_low(key, lk, cfg))
         out[(day, hour)] = {"rate": rate, "mean": mean, "std": std, "band_low": v.band_low,
                             "band_high": v.band_high, "z": z, "no_baseline": none, "cls": cls,
-                            "upper_only": lk.upper_only}
+                            "upper_only": lk.upper_only, "low_alerts": alerts_low(key, lk, cfg)}
     return out
 
 
@@ -249,10 +255,9 @@ def series(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
             if c is None:       # no service_hours row: no rate, but the hour still has its band
                 lk, v = _lookup(bl, cfg, service, ids, kind, d, h)
                 c = {"rate": None, "mean": lk.this and lk.this.mean, "std": lk.this and lk.this.std,
-                     "band_low": v.band_low, "band_high": v.band_high, "z": None, "upper_only": lk.upper_only}
+                     "band_low": v.band_low, "band_high": v.band_high, "z": None, "low_alerts": alerts_low(key, lk, cfg)}
             rate, lo, hi = c["rate"], c["band_low"], c["band_high"]
-            down = key in DROP_KEYS and not c["upper_only"]
-            out = rate is not None and hi is not None and (rate > hi or (down and rate < lo))
+            out = rate is not None and hi is not None and (rate > hi or (c["low_alerts"] and rate < lo))
             pts.append({"day": d.isoformat(), "hour": h, "rate": rate, "mean": c["mean"], "std": c["std"],
                         "band_low": lo, "band_high": hi, "last_week": lw and lw["rate"], "z": c["z"], "out": out})
 
@@ -301,7 +306,7 @@ def series(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
 def incident(conn, service: str, key: str, day: date, hour_from: int, hour_to: int, now: float) -> dict:
     """Modules the lines came from, and (ongoing only) the newest sample lines."""
     kind, ids = resolve_key(conn, service, key)
-    if key in DROP_KEYS:
+    if key in SERVICE_KEYS:
         ids = [r["template_id"] for r in conn.execute("SELECT template_id FROM templates WHERE service = %s", (service,))]
     start = datetime(day.year, day.month, day.day, tzinfo=TZ)
     t0, t1 = start + timedelta(hours=hour_from), start + timedelta(hours=hour_to)
@@ -315,7 +320,7 @@ def incident(conn, service: str, key: str, day: date, hour_from: int, hour_to: i
     samples: list[dict] = []
     if ongoing:
         tids = ids
-        if key in DROP_KEYS:        # the 3 ERROR+ templates that rose most over their baseline
+        if key in SERVICE_KEYS:        # the 3 ERROR+ templates that rose most over their baseline
             tids = _top_excess(conn, service, day, hour_from, hour_to)
         samples = [{"at": r["at"].timestamp(), "template_id": r["template_id"], "line": r["line"]} for r in conn.execute(
             "SELECT template_id, at, line FROM error_samples WHERE service = %s AND template_id = ANY(%s) "

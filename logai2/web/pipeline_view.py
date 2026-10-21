@@ -52,7 +52,8 @@ def services(conn, cfg: AppConfig, engine: dict, day: date, hour: int, data=None
 
 
 def volume(conn, cfg: AppConfig, day: date, hour: int, data=None) -> list[dict]:
-    """Per service, hours 0..hour of the day: rate (null without a service_hours row), *total band, same hour last week."""
+    """Per service, hours 0..hour of the day: rate (null without a service_hours row), *total band, same hour last
+    week, and whether the hour is outside the band the way the detector counts it (above, or a drop)."""
     last = day - timedelta(days=7)
     out = []
     for service, (bl, cells) in (data or service_data(conn, cfg, day)).items():
@@ -60,8 +61,10 @@ def volume(conn, cfg: AppConfig, day: date, hour: int, data=None) -> list[dict]:
         for h in range(hour + 1):
             c, lw = cells.get((day, h)), cells.get((last, h))
             band = c or _lookup(bl, cfg, service, [TOTAL], "total", day, h)[1]._asdict()   # an hour without a row still has its band
-            hrs.append({"hour": h, "rate": c and c["rate"], "band_low": band["band_low"],
-                        "band_high": band["band_high"], "last_week": lw and lw["rate"]})
+            r, lo, hi = c and c["rate"], band["band_low"], band["band_high"]
+            above = c is not None and hi is not None and (r > hi or (c["low_alerts"] and r < lo))
+            hrs.append({"hour": h, "rate": r, "band_low": lo, "band_high": hi, "last_week": lw and lw["rate"],
+                        "out": above})
         out.append({"service": service, "hours": hrs})
     return out
 
@@ -84,7 +87,9 @@ def stage_states(engine: dict, engine_stale: bool, linker: dict | None, linker_s
     behind = [i for i, s in indices.items() if not s.get("caught_up")]
     failing = [i for i, s in indices.items() if s.get("failing")]
     slow = [i for i in behind if now * 1000 - (indices[i].get("pos_ms") or now * 1000) > INDEX_BEHIND_MS]
-    if indices and len(failing) == len(indices):
+    if engine_stale:
+        es = _stage("warn", "position unknown (engine stale)")
+    elif indices and len(failing) == len(indices):
         es = _stage("bad", "all indices failing")
     elif failing or slow:
         es = _stage("warn", f"failing: {', '.join(failing)}" if failing else f"catching up: {', '.join(slow)}")
@@ -93,7 +98,9 @@ def stage_states(engine: dict, engine_stale: bool, linker: dict | None, linker_s
 
     history = engine.get("history") or []
     miss = next((w for w in engine.get("warnings") or [] if "miss ratio" in w), None)
-    if behind and len(history) >= READER_IDLE_POINTS and all(p.get("eps") == 0 for p in history[-READER_IDLE_POINTS:]):
+    if engine_stale:
+        reader = _stage("bad", "engine stale")
+    elif behind and len(history) >= READER_IDLE_POINTS and all(p.get("eps") == 0 for p in history[-READER_IDLE_POINTS:]):
         reader = _stage("bad", f"no events read for {READER_IDLE_POINTS} min while {behind[0]} is behind")
     else:
         reader = _stage("warn", miss) if miss else _stage()

@@ -85,6 +85,7 @@ def test_decision_warns_under_3_days(client, conn):
     # 4 rows minus the 10-13 keep that the later 10-13 exclude overlapped
     assert len(page["decisions"]) == 3 and page["last_commit"] is None
     assert page["full_after_days"] == {"weekday": 5, "weekend": 4}   # only 4 weekend days are kept
+    assert page["commit_time"] == "02:00"
     assert client.delete(f"/api/baseline/decisions/{body['id']}").status_code == 200
     assert client.delete(f"/api/baseline/decisions/{body['id']}").status_code == 404
     assert client.get("/api/baseline?service=nope").status_code == 404

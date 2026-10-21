@@ -323,3 +323,23 @@ def test_series_validation(client, conn):
     assert client.get("/api/baseline/series?service=pay").status_code == 200
     assert client.get("/api/baseline/incident?service=pay&key=*total&day=2026-10-21&hour_from=5&hour_to=5").status_code == 400
     assert client.get("/api/baseline/incident?service=pay&key=nope&day=2026-10-21&hour_from=1&hour_to=2").status_code == 404
+
+
+def low_case(conn, key, mean, committed_days):
+    service(conn, "pay")
+    committed(conn, "pay", committed_days)
+    base(conn, "pay", key, "weekday", 16, mean, mean / 10)
+    hours(conn, "pay", key, date(2026, 10, 15), {16: (mean // 2 * 60, 0, 60)})      # half the mean: far below the band
+
+
+@pytest.mark.parametrize("key, mean, days, low", [
+    ("*total", 500, WEEKDAYS, True),            # full profile, mean >= drop.min_mean: the detector raises a drop
+    ("*total", 500, WEEKDAYS[:2], False),       # young profile: no drop
+    ("*total", 10, WEEKDAYS, False),            # mean below drop.min_mean: too quiet to call a drop
+    ("*error", 500, WEEKDAYS, False),           # only *total drops
+])
+def test_low_side_follows_the_detector_drop_rule(conn, cfg, key, mean, days, low):
+    low_case(conn, key, mean, days)
+    c = cell(matrix(conn, cfg, "pay", key, 14, TODAY, NOW), "2026-10-15", 16)
+    p = next(q for q in series(conn, cfg, "pay", key, 14, TODAY, NOW)["points"] if (q["day"], q["hour"]) == ("2026-10-15", 16))
+    assert p["out"] is low and c["cls"].startswith("down") is low

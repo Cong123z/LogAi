@@ -30,6 +30,8 @@ def client(conn, cfg, schema):
     ({"lag_seconds": 301, "detection_enabled": True}, False, LINKER_OK, False, "detection", "warn"),
     ({"lag_seconds": 30, "detection_enabled": False}, False, LINKER_OK, False, "detection", "warn"),
     (ENGINE_OK, True, LINKER_OK, False, "flush", "bad"),
+    (ENGINE_OK, True, LINKER_OK, False, "reader", "bad"),
+    (ENGINE_OK, True, LINKER_OK, False, "elasticsearch", "warn"),
     ({**ENGINE_OK, "flush_seconds_max": 10.5}, False, LINKER_OK, False, "flush", "warn"),
     ({**ENGINE_OK, "last_commit": {"at": AT_27H_AGO, "today": "2026-10-20"}}, False, LINKER_OK, False, "flush", "warn"),
     ({**ENGINE_OK, "warnings": ["high miss ratio: pay 62%"]}, False, LINKER_OK, False, "reader", "warn"),
@@ -89,6 +91,13 @@ def test_volume_today_hours_with_band(conn, cfg):
 def test_pipeline_route_has_new_fields(client):
     body = client.get("/api/pipeline").get_json()
     assert {"services", "volume", "stages", "status", "cursors", "stale", "linker", "linker_stale"} <= set(body)
+
+
+def test_pipeline_lite_and_llm_cap(client):
+    lite = client.get("/api/pipeline?lite=1").get_json()
+    assert {"status", "cursors", "stale", "linker", "linker_stale"} <= set(lite)
+    assert not {"services", "volume", "stages"} & set(lite)
+    assert client.get("/api/pipeline").get_json()["llm_daily_max"] == 50
 
 
 def test_malformed_last_commit_is_not_overdue():
