@@ -4,7 +4,7 @@
 // against its normal band and the linked document; the drawer holds the decision.
 // mode null = not chosen yet: the first answer picks "review" when anything waits for review.
 const tpl = {mode: null, search: '', service: '', level: '', link: '', page: 1, size: 100, refreshTimer: null,
-             items: new Map(), order: [], docs: []};
+             items: new Map(), order: [], docs: [], drawerItem: null};
 const $tplModeToggle = document.getElementById('tpl-mode-toggle');
 const $tplReviewCount = document.getElementById('tpl-review-count');
 const $tplTbody = document.getElementById('template-tbody');
@@ -296,9 +296,11 @@ async function openTemplateDrawer(t) {
       <p class="hint">"Automatic" removes any link and lets inheritance, ERROR matching and the LLM decide again.</p></section>
     <div class="form-error" id="tpl-drawer-error" aria-live="polite"></div>`;
   $tplDrawerBody.dataset.key = tplKey(t);
+  tpl.drawerItem = t;   // the actions use this, not tpl.items: a reload may drop the row while the drawer is open
   $tplDrawerBody.scrollTop = 0;
   $tplDrawer.classList.add('open');
-  $title.focus();
+  // after the modal controller (a MutationObserver) has recorded the opener, so Escape returns focus there
+  queueMicrotask(() => $title.focus());
   try {
     const doc = await linkedDocument(t);
     const $doc = document.getElementById('tpl-drawer-doc');
@@ -319,21 +321,25 @@ async function openTemplateDrawer(t) {
 $tplDrawerBody.addEventListener('click', async event => {
   const button = event.target.closest('[data-act]');
   if (!button) return;
-  const t = tpl.items.get($tplDrawerBody.dataset.key);
+  const t = tpl.drawerItem;
   if (!t) return;
   const act = button.dataset.act;
-  button.disabled = true;
+  // every action at once: a second click while this one (and Next item's reload) runs would act on a decided row
+  const actions = [...$tplDrawerBody.querySelectorAll('[data-act]')];
+  const busy = on => actions.forEach(b => { b.disabled = on; });
+  busy(true);
   try {
     if (act === 'confirm' || act === 'reject') {
       if (act === 'reject' && !(await confirmDialog(`The ${t.link_source === 'draft' ? 'AI suggestion' : 'link'} for ${t.template_id} will be rejected.`,
-        {title: 'Reject this link?', confirmLabel: 'Reject'}))) { button.disabled = false; return; }
+        {title: 'Reject this link?', confirmLabel: 'Reject'}))) { busy(false); return; }
       await apiMutation(linkUrl(t.service, t.template_id, `/${act}`), 'POST', {});
       showToast(`${t.template_id}: ${act === 'confirm' ? 'link confirmed' : 'rejected'}`);
       if (tpl.mode === 'review') {   // next item: the row after this one on the page, if it is still there
         const next = tpl.order[tpl.order.indexOf(tplKey(t)) + 1];
         await loadData();
-        if (next && tpl.items.has(next)) openTemplateDrawer(tpl.items.get(next));
-        else $tplDrawer.classList.remove('open');
+        if (next && tpl.items.has(next)) return openTemplateDrawer(tpl.items.get(next));
+        $tplDrawer.classList.remove('open');
+        $tplTbody.querySelector('button')?.focus();   // the opener was re-rendered away: land in the list, not on body
         return;
       }
       $tplDrawer.classList.remove('open');
@@ -347,7 +353,7 @@ $tplDrawerBody.addEventListener('click', async event => {
     }
   } catch (error) {
     document.getElementById('tpl-drawer-error').textContent = error.message;
-    button.disabled = false;
+    busy(false);
     return;
   }
   loadData();
