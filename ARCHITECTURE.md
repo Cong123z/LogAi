@@ -39,10 +39,10 @@ This is **sub-project 1** of the per-service-baseline design. Out of scope
 | # | Sub-project |
 |---|---|
 | 0 | Benchmark spike on `udcntt*` (ES `took`, docs/s per core, cache hit rate, ingest-time field) |
-| 2/3 | Embeddings, inherited document links, "apply to similar", clustering of undocumented alerts |
+| 2/3 | Embeddings, layered document links (manual → inherited → corpus ERROR field → LLM confirm or suggest), "apply to similar", clustering of undocumented alerts, LLM profiles. Plan [`docs/plans/2026-10-21-embeddings-doc-links.md`](docs/plans/2026-10-21-embeddings-doc-links.md); absorbs the former sub-project 8 (AI drafts) |
 | 4 | Module alert API (`module_code` and `alert_minutes` are collected now so the history exists; plan `docs/plans/2026-10-20-module-alert-api.md` on `master`) |
 | 5 | Sampled catch-up on first start |
-| 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents, LLM profiles) |
+| 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents); LLM profiles move to 2/3 |
 | 7 | v2: Kafka, many readers and owners |
 
 Also out of scope: notifications (state is only exported), authentication on

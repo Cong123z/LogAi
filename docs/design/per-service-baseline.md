@@ -3,7 +3,12 @@
 Status: **sub-project 1 built** (2026-10-20, branch `core-engine-v1`): spec
 [`docs/specs/2026-10-20-core-engine-design.md`](../specs/2026-10-20-core-engine-design.md),
 as implemented in [`ARCHITECTURE.md`](../../ARCHITECTURE.md). The rest of this
-design (sub-projects 0, 2–7) is not built yet. Drafted 2026-10-19.
+design (sub-projects 0, 2–7) is not built yet. Drafted 2026-10-19. On
+2026-10-21 sections 3, 4a and 6 were revised for the layered document
+matching (ERROR field, automatic corpus links, LLM confirm or suggest):
+plan [`2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md),
+which also absorbs the AI drafts first proposed in
+[`antigravity-proposed-additions.md`](antigravity-proposed-additions.md).
 Built as a **new project from scratch**, borrowing modules from logai-engine
 (collector, preprocessor/normalize, Drain3 wrapper, alert state machine, web
 parts). Template and group IDs, manual overrides and the Isolation Forest
@@ -154,19 +159,29 @@ No stored groups. Chosen over "template → group → document" after the test
 below (groups gave no better automatic matching and split one family into
 two groups).
 
-**A template's document, in order:**
+**A document has two parts** (revised 2026-10-21): **ERROR**, the log
+line(s) it is for, and **Handling**, what to do. Only the ERROR lines are
+embedded, each normalized like a template, so matching compares log text
+with log text. The 2026-10-19 test embedded whole documents (prose, partly
+Vietnamese) and was right for 7 of 76 templates; inheritance, which compares
+template with template, had 0 wrong at 0.85. A document with an empty ERROR
+field (incident runbooks such as DOC-016/017/018) is never auto-matched.
 
-1. A manual link set by a person.
-2. Else, inherited from the **nearest manually linked template of the same
-   service and the same level**, when similarity ≥ that level's threshold.
-   Never from a template that itself inherited (links don't drift).
-3. Automatic matching to the corpus is shown as a suggestion only, never
-   used for alerts (it was right too rarely in the test).
+**A template's document, in layers** (a lower number always wins):
 
-Manual always wins. Same level only: an ERROR line must not inherit a
-document from an INFO "success" line, however similar the wording.
+| # | Link source | Rule | Drives alerts |
+|---|---|---|---|
+| 0 | `manual` | set by a person; `doc_id NULL` = "no document" (sticky) | yes |
+| 1 | `inherited` | nearest **manually** linked template of the same service and level class, similarity ≥ the class threshold. Never from a non-manual link (links don't drift) | yes |
+| 2 | `corpus` | best active document by template ↔ ERROR-line similarity ≥ the class threshold and ≥ a margin above every other document | yes, badged "auto" |
+| 3 | `llm` | the LLM picks one of the top 3 candidate documents (section 4a) | yes, badged "AI-confirmed" |
+| 4 | `draft` | the LLM writes a suggested document, action or SAFE (section 4a) | no, until approved |
 
-**Thresholds per level** (defaults are guesses; tune on real data):
+The operator can confirm any automatic link (it becomes manual) or reject
+it. Same level class only: an ERROR line must not inherit a document from an
+INFO "success" line, however similar the wording.
+
+**Thresholds per level class** (defaults are guesses; tune on real data):
 
 ```yaml
 documentation:
@@ -174,7 +189,10 @@ documentation:
     ERROR: 0.85            # ERROR, FATAL, CRITICAL: documents are written for errors, inherit easily
     WARN: 0.88
     INFO: 0.92             # rarely an error: only a near-identical line inherits
+  corpus_similarity: {ERROR: 0.85, WARN: 0.88, INFO: 0.92}   # template vs ERROR lines
+  corpus_margin: 0.05      # over the best ERROR line of any other document
   suggest_similarity: 0.80 # "apply to similar" list; pre-ticked at the level's inherit value
+  cluster_similarity: 0.85 # undocumented alerting templates joined into one row
 ```
 
 **Linking a document** (from the web, or saving an LLM suggestion): the UI
@@ -186,7 +204,8 @@ in the test) with a human decision.
 **Alert rows:** one per (service, document), listing its alerting templates.
 Alerting templates with no document: the few currently alerting templates
 of a service are clustered on the fly by embedding similarity, one row per
-cluster; LLM triage suggests a document.
+cluster (`cluster_similarity`). Undocumented templates go to the LLM
+resolver (section 4a).
 
 **Diffuse incidents:** a safe band over the templates linked to one
 document, `Σmean_i ± 3·Σσ_i`. `σ(ΣX) ≤ Σσ` always, so the band is never too
@@ -215,7 +234,9 @@ ALERTING  payment-svc · DOC-017 "Restart DB pool"
 ### 4. Writing documentation: by hand, with an AI chat alongside
 
 The document editor gets an AI chat panel. **Every LLM call here is started
-by the operator**; nothing is drafted automatically.
+by the operator**; nothing in the editor is drafted automatically. The
+background drafts of section 4a are separate: they land in a review queue
+and change neither the editor nor any alert until a person approves them.
 
 ```
 ┌ Document for payment-svc · T00431, T00433 ──────────────┬ AI chat ───────────────────────────┐
@@ -256,6 +277,50 @@ by the operator**; nothing is drafted automatically.
   `error_samples` table; the web reads them from there.
 - Limits in the web: requests per minute, evidence size, request timeout.
   The API key never reaches the browser.
+
+### 4a. LLM confirm or suggest, reviewed by a person
+
+Revised 2026-10-21 (plan
+[`2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md)
+Phase B; replaces the former sub-project 8 and the drafts-only adoption of
+[`antigravity-proposed-additions.md`](antigravity-proposed-additions.md)).
+Problem it solves: a new template at night alerts as `undocumented` with no
+guidance, and nobody has time to write runbooks for hundreds of templates.
+
+**Process.** `logai2-linker`, a process sharing only Postgres like the web;
+the engine thread never waits on an LLM. For a template with no link at
+layers 0–2 (section 3), of **any level**, ALERTING or first seen in the last
+24 h, ALERTING first then ERROR > WARN > INFO, at most 5 per service per hour
+and 50 per day, one call at a time:
+
+1. **Confirm (layer 3):** if some active documents have an ERROR line with
+   similarity ≥ 0.60, the LLM gets the template and the top 3 of them (title,
+   ERROR, Handling) and answers `{doc_id | null, reason}`. A listed `doc_id`
+   becomes an `llm` link, which drives alerts, badged "AI-confirmed".
+2. **Suggest (layer 4):** otherwise the LLM writes `{verdict, title,
+   error_code, error, handling, confidence}`. `verdict` is `action`, or
+   `safe` for a line that shows normal operation ("SAFE: normal operation,
+   no action needed", plus what a spike or drop of it would mean). The
+   document is stored as `status draft`, linked as `draft`, and drives
+   nothing until approved.
+
+**LLM input = template + corpus only:** service, level and template text
+(already masked by normalize: numbers and ids are `<*>`), plus candidate
+documents. No raw log lines for now, so no customer data leaves the network
+through the LLM provider. More evidence (raw lines, rates) can be added
+later behind masking.
+
+**Operator.** Confirm turns any automatic link into manual; approving a
+draft also makes the document active, and its ERROR line then matches the
+same error in other services at layer 2 without another LLM call. Reject
+stores `rejected` and the template is never sent to the LLM again. Views:
+badges on alert cards and templates, and **Documentation → AI suggestions**
+(filter SAFE for bulk approval).
+
+**LLM profiles** as in logai-engine: `llm_profiles` (name, OpenAI-compatible
+base URL, model, API key, timeout, one active), managed on a web page. The
+client always sends JSON mode and strips `<think>` blocks (deepseek), waits
+120 s with one retry on timeout (the proxy's 60 s timeouts).
 
 ### 5. Pipeline: Elasticsearch → engine, one process first
 
@@ -423,8 +488,11 @@ alert_state   (service, key, PK) → state, since, streak                 -- cur
 alert_changes (service, key, at, PK) → from_state, to_state, value, band
 
 -- documentation, web, ops
-documents (doc_id PK) → title, body, embedding vector(1024)
-template_doc_links (service, template_id, PK) → doc_id, source (manual | inherited), similarity
+documents (doc_id PK) → title, error_code, error, handling, status (active | draft | rejected),
+          source (manual | llm), verdict (action | safe), confidence             -- sections 3, 4a
+document_errors (doc_id, n, PK) → text, embedding vector(1024)              -- one row per ERROR line
+template_doc_links (service, template_id, PK) → doc_id (NULL = no document),
+          source (manual | inherited | corpus | llm | draft | rejected), similarity, inherited_from, note
 error_samples (service, template_id, at) → line                         -- last 20 per template
 settings, llm_profiles, retrain_schedule, commands, worker_status
 kafka_offsets, partition_epochs                                         -- v2 only
@@ -624,6 +692,8 @@ possible).
 5. Module API rate unit: per minute or per second?
 6. Name and location of the new project.
 7. How many days does ES keep on `udcntt*`? (`start.days_back` must fit.)
+8. ~~Raw lines to the LLM?~~ Settled 2026-10-21: the LLM gets template and
+   corpus fields only (section 4a); raw lines later, behind masking.
 
 ## Test: template → document vs group centroid → document
 

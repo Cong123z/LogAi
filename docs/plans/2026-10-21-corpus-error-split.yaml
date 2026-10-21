@@ -1,0 +1,49 @@
+# D8: ERROR / Handling split of the 12 documents seeded from logai-engine's
+# documentation_corpus.json (logai2 deploy of 2026-10-20). Applied once by
+# scripts/split_doc_errors.py (embeddings-doc-links plan, Task 9) to rows whose
+# body is still the original text below; a document edited since is skipped.
+#
+# Rule used: the leading log phrase (up to the first ". ") is the ERROR line,
+# the rest is Handling. Documents with no log phrase keep ERROR empty and are
+# never auto-matched (manual and inherited links only).
+#
+# Note: for DOC-001..DOC-010 the Handling part is one sentence explaining the
+# cause, not steps. Worth enriching by hand later; matching does not need it.
+
+DOC-001:
+  error: "LixiHandler entered Receiving subscriber incorrect"
+  handling: "The subscriber typed an invalid receiving number in the LIXI gift-money USSD menu (*136#)."
+DOC-003:
+  error: "DBAdapter Time invoke pLoadTopupTimeHis pGetNumberTopupInvalid CHAM_DB_LEVEL ms"
+  handling: "A database stored procedure call exceeded the slow-query level."
+DOC-004:
+  error: "DBAdapter Input length must be multiple of 16 when decrypting with padded cipher"
+  handling: "The stored encrypted password is corrupted or was encrypted with another key."
+DOC-005:
+  error: "TransactionManager Transaction timeout TransactionInfo reqID transID msisdn command"
+  handling: "The USSD transaction was not completed by the subscriber before the timeout."
+DOC-007:
+  error: "TransferHandler request transfer to themselt"
+  handling: "The subscriber tried to transfer airtime to their own number."
+DOC-008:
+  error: "TopupUtil sender is not valid for transaction SubInfo isdn subId paidType actState"
+  handling: "The sending subscriber is not eligible for an airtime topup transfer."
+DOC-009:
+  error: "BccsUtil No tag value SUB_ID_BCCS"
+  handling: "The BCCS gateway getInfoSub response did not contain the subscriber id."
+DOC-010:
+  error: "NavigationSync files is empty - skip"
+  handling: "The USSD menu navigation sync found no files to load and skipped this cycle."
+DOC-011:
+  error: "con-<*>-Receiver type group"   # the whole text is a log line
+  handling: ""
+# Incident runbooks: no log line, ERROR stays empty.
+DOC-016:
+  error: ""
+  handling: "(unchanged: whole original text)"
+DOC-017:
+  error: ""
+  handling: "(unchanged: whole original text)"
+DOC-018:
+  error: ""
+  handling: "(unchanged: whole original text)"
