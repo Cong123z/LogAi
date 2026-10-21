@@ -35,12 +35,13 @@ theme).
 | Alerting | `/#alerting` | every 5 s | `GET /api/alerts` |
 | Pipeline | `/#pipeline` (also the fallback for unknown hashes) | every 2 s | `GET /api/pipeline` |
 | Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/services`, `/api/documents` |
-| Documentation | `/#documentation` | on entry and after each change | `GET /api/documents` |
+| Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
+| LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
 | Baseline | `/#baseline` | on entry, after each change, and every 1 s while a recompute runs | `GET /api/services`, `/api/baseline` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
-(Templates, Documentation) and Settings (Data sources, Baseline). The top
+(Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline). The top
 bar has an **engine health pill**, refreshed every 5 s from `/api/pipeline`:
 red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 (degraded) when the engine reports warnings, green otherwise.
@@ -48,12 +49,15 @@ red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 ## Alerting
 
 One card per **alert row** (ARCHITECTURE §5): a document, an undocumented
-template, or the whole service. KPI cards count open rows and rows per state
+template, a **cluster** of similar undocumented templates of one service
+(embedding similarity ≥ `documentation.cluster_similarity`), or the whole
+service. KPI cards count open rows and rows per state
 (ALERTING, WARMING, COOLING); they and the state toggle filter the list.
 Rows keep the server's order (ALERTING first, then oldest).
 
 Each card shows the state badge, `service · title` (document title, or
-"Undocumented", or "Whole service") and `since`. Its lines are:
+"Undocumented", "Undocumented · N similar templates", or "Whole service")
+and `since`. Its lines are:
 
 - `totals` first: "All events" (`*total`), "Errors" (`*error`) or "Linked
   templates combined" (the `doc:` key);
@@ -62,6 +66,10 @@ Each card shows the state badge, `service · title` (document title, or
 Each line shows the last closed minute's count per minute and "(normal mean
 ± σ)" of the **current local hour** from the committed baseline, with the
 alert band (`mean ± kσ`) on hover; "(no baseline yet)" means floor-only.
+A template line also shows how it got its document when that was not by
+hand: `inherited`, `auto 0.87` (matched on the document's ERROR lines),
+`AI-confirmed`, or `AI suggestion: <title>` (a draft: shown, drives
+nothing), plus `SAFE` for a normal-operation document.
 A "Live · updated Ns ago" label turns into a stale warning after 15 s
 without a successful poll.
 
@@ -77,6 +85,9 @@ Live engine status from `worker_status`, written at every flush:
 - **Detection** On/Off ("catching up; counts only" until the first
   catch-up commit), **Bootstrap** (`since`, `until`), **Last commit**
   (time and baseline day);
+- **Linker**: Running / Stale (no report for 90 s) / Not running, with its
+  pending counts (templates and documents waiting for a vector) or its last
+  error;
 - a table of indices: position, floor, and `failing` / `caught up` /
   `catching up` / `not reading` (an `es_cursors` row the engine no longer
   reports).
@@ -85,8 +96,8 @@ Live engine status from `worker_status`, written at every flush:
 
 A paginated table of templates (100 per page by default; 50, 100 or 200
 selectable in the page, server cap 500), newest `last_seen` first. Filters:
-service, level, and a text search (case-insensitive substring of the
-template text, debounced 300 ms).
+service, level, **link** (not linked, or one link source), and a text
+search (case-insensitive substring of the template text, debounced 300 ms).
 
 Columns: alert state, template id, text (`<*>` highlighted), level, **rate**
 (average per minute in the current local hour = this hour's count /
@@ -94,23 +105,74 @@ counted minutes; red when above the band), **band** (`mean ± kσ` for this
 hour, judged exactly as detection does; "—" without a baseline), the
 **document** select, first seen, last seen.
 
-Choosing a document in the select links the template (`PUT …/link`);
-"— None —" unlinks it. Each change enqueues `reload_links`, so the
-engine's doc keys and alert rows follow within a tick. The table is not
-re-rendered while a select has focus.
+The **Document** column shows the linked document (id and title, wrapped)
+and a badge for how it was linked: `manual`, `no document (set by hand)`,
+`inherited 0.91`, `auto-matched 0.87`, `AI-confirmed`, `AI suggestion ·
+unverified`, `AI result rejected`; or "Not linked". Its button (**Review**
+for automatic links, else **Link…** / **Change**) opens a side drawer with
+everything needed to decide (ARCHITECTURE §5.1 for the layers):
+
+- the full template text, level, state, rate and band;
+- how it got its document, in words (inherited from which template and at
+  what similarity, matched on ERROR, confirmed by the LLM) and the LLM's
+  reason in full;
+- the linked document's ERROR and Handling;
+- **Confirm** (→ manual; for a draft, approve) and **Reject** for an
+  automatic link;
+- **Link by hand**: a document (a manual link, then the **Apply to
+  similar** dialog when similar templates of the same service and level
+  exist, pre-ticked at the inherit threshold), **No document** (a sticky
+  manual "no document"), or **Automatic** (removes the row; the linker may
+  link it again).
+
+Template text wraps everywhere (never cut off). Each change enqueues
+`reload_links`, so the engine's doc keys and alert rows follow within a
+tick. A short confirmation appears bottom right (a polite live region).
 
 ## Documentation
 
-The runbook corpus: id, title, body, error code and the number of linked
-templates (expandable to the linked templates, from
-`/api/templates?doc_id=…`). Columns sort client-side.
+A list on the left and the selected item in full on the right, with its
+actions pinned under the text; ↑/↓ move through the list, a search box
+filters it (title, error code, ERROR, Handling, template). Below 900 px the
+two stack. Two tabs (deep links `#documentation` and
+`#documentation/suggestions`):
 
-- **Add document** opens the editor; the server assigns the next
-  `DOC-NNN` id.
-- **Edit** sends the revision read with the list; a 409 `stale` says the
-  document changed in another window.
-- **Delete** asks for confirmation and is refused while templates are
-  linked (also when a link raced in after the list loaded: 409 `linked`).
+Every document belongs to a **service**, or is **shared** (applies to
+every service). The service filter shows **All services** or one
+service's documents only (shared ones appear under All services). With
+**All services**, documents whose ERROR
+lines are the same (after normalizing) form one row with a chip per
+service ("same ERROR in 3: recharge · topup · payment"), so one error is
+never listed three times; the pane has a switch between the services'
+versions. Automatic matching only uses a template's own service's and the
+shared documents. An AI suggestion belongs to its template's service and
+says which other services' documents it was adapted from.
+
+Every document is of one **kind**: **ERROR** (`verdict` `action`: an
+error, something to fix) or **SAFE** (`verdict` `safe`: normal operation,
+no action needed). The **All / ERROR / SAFE** buttons, with counts, filter
+the list in both tabs.
+
+- **Documents** (active): each item shows id, kind, title, error code,
+  linked template count and "no log line" when it has no ERROR line. The pane shows the title,
+  the ERROR block with the lines as matched ("embedding…" until the linker
+  has embedded this revision; no ERROR line = never matched automatically),
+  the Handling text (numbered steps written on one line are shown one per
+  line), and the linked templates in full with their link source.
+  **Edit** opens the form in the pane (title, error code, service, log level of
+  the ERROR line, kind, ERROR, Handling;
+  a 409 `stale` says it changed in another window), **Delete** asks first
+  and is refused while templates are linked. **Mark as SAFE / Mark as
+  ERROR** changes only the kind, in one click. **Add document** opens an
+  empty form; the server assigns the next `DOC-NNN` id.
+- **AI suggestions** (count in the tab): the LLM's drafts. Each item shows
+  ACTION or SAFE, the confidence and the template it was written for. The
+  pane warns that it is unverified, then shows that template in full
+  (level, state, rate), the ERROR and the Handling. **Approve** (the
+  document becomes active and the link manual), **Edit** (saving
+  approves), **Reject** (asks first; the template is never sent to the LLM
+  again); the next suggestion is selected after each decision. **Approve
+  all SAFE** approves every normal-operation suggestion after listing them.
 
 On the first engine start, an empty table is seeded from
 `documentation.seed_path` (ARCHITECTURE §4.4).
@@ -136,6 +198,29 @@ certificates. The password is never shown; leave it empty to keep the
 stored one. Saving endpoints that point at another cluster asks for
 confirmation ("earlier logs are not backfilled") and the server requires
 the password again. The engine reconnects on the `reload_sources` command.
+
+## LLM profiles
+
+A page of its own (Settings → LLM profiles, polled every 5 s), as in
+logai-engine. A banner says when nothing is sent to an LLM (no active
+profile, linker not running) or shows the last LLM error or the daily
+limit. Cards: the active profile, results in the last hour and 24 h
+(confirmed / suggested / rejected, with the limits), suggestions waiting
+for review, and the linker's last cycle. Then the profiles table with Add,
+Edit, Activate / Deactivate and Delete. Every active profile is used,
+lowest **priority** first: when one fails (network, HTTP error, timeout)
+the next one answers and the failing one is skipped for 5 minutes; its
+row shows "failing" with the error, and the banner says whether another
+profile is answering. **Answers** counts each active profile's answers
+since the linker started.
+
+Each profile, as in logai-engine: name, OpenAI-compatible base URL
+(`…/v1`, or a bare host which gets `/v1`; the linker posts to
+`…/chat/completions`), model, API key, timeout (5–600 s, default 120) and
+priority (0–1000, default 100). With no active profile, templates are not
+sent to an LLM. The API key is
+write-only: the list shows only whether one is saved, and a save with an
+empty key keeps the saved one.
 
 ## Baseline
 
@@ -171,18 +256,27 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 |---|---|---|---|---|
 | `GET /` | — | `index.html` | — | — |
 | `GET /static/<path>` | — | static file | 404 | — |
-| `GET /api/pipeline` | — | `{status, cursors, stale}` | — | — |
+| `GET /api/pipeline` | — | `{status, cursors, stale, linker, linker_stale}` | — | — |
 | `GET /api/sources` | — | `{selection, connection, available_indices, resolution, indices}` | — | — |
 | `PUT /api/sources/selection` | `{patterns: [str], revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `GET /api/alerts` | — | `[alert row]` | — | — |
 | `GET /api/services` | — | `[service]` sorted | — | — |
-| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `q` | `{total, items}` | 400 | — |
-| `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null}` | `{doc_id}` | 400, 404 | `reload_links` |
-| `GET /api/documents` | — | `[document]` | — | — |
-| `POST /api/documents` | `{title, body, error_code?}` | `201 {doc_id, revision}` | 400 | — |
-| `PUT /api/documents/<doc_id>` | `{title, body, error_code?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
+| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `link_source`, `q` | `{total, items}` | 400 | — |
+| `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null, also?: [template_id]}` | `{doc_id, linked}` | 400, 404 | `reload_links` |
+| `DELETE /api/templates/<service>/<template_id>/link` | — | `{doc_id: null}` | 404 | `reload_links` |
+| `POST /api/templates/<service>/<template_id>/link/confirm` | — | `{doc_id, source}` | 404, 409 | `reload_links` |
+| `POST /api/templates/<service>/<template_id>/link/reject` | — | `{source}` | 404, 409 | `reload_links` |
+| `GET /api/templates/<service>/<template_id>/similar` | — | `{embedded, items}` | 404 | — |
+| `GET /api/documents` | query `status` (`active` default, `draft`, `rejected`) | `[document]` | 400 | — |
+| `POST /api/documents` | `{title, error?, handling?, error_code?, verdict?, service?, level?}` | `201 {doc_id, revision}` | 400 | — |
+| `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, verdict?, service?, level?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
+| `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
+| `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, profiles, warnings}` | — | — |
+| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` | `{name, revision}` | 400, 409 | — |
+| `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
+| `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
 | `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, full_after_days}` | 404 | — |
 | `POST /api/baseline/decisions` | `{service, day, hour_from, hour_to, decision}` | `201 {id, warning?}` | 400, 404 | — |
 | `DELETE /api/baseline/decisions/<id>` | — | `{id}` | 404 | — |
@@ -209,7 +303,11 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 ```
 
 `status` fields are listed in ARCHITECTURE §10.5. `stale` is true when the
-heartbeat is missing or older than 30 s.
+heartbeat is missing or older than 30 s. `linker` is
+`worker_status['linker']` (`heartbeat`, `embedded_templates`,
+`embedded_documents`, `links_changed`, `pending {templates, documents}`,
+`warnings`, `last_error`) or null; `linker_stale` is true when it is missing
+or older than 90 s.
 
 ### `GET /api/sources`
 
@@ -262,8 +360,11 @@ fields come from the engine's status and are null until it reports.
               "band_low": -3.1, "band_high": 9.4, "mean": 2.0, "std": 1.8}]}]
 ```
 
-`kind` is `document`, `template` or `service`; `doc_id` and `title` are null
-except for documents. `templates` holds the template members, `totals` the
+`kind` is `document`, `template`, `cluster` or `service`; `doc_id` and
+`title` are null except for documents. Each template line has `link`:
+null, or `{doc_id, source, similarity, note, title, verdict}` of its
+`template_doc_links` row, drafts and rejected ones included (badges only:
+grouping uses only the links that drive alerts). `templates` holds the template members, `totals` the
 `*total`, `*error` and `doc:` members. `count` and the bands are from the
 last judged minute; `mean` / `std` are this local hour's baseline (null
 without one; for a doc key, the sums over its linked templates).
@@ -273,14 +374,17 @@ without one; for a doc key, the sums over its linked templates).
 - `page` (default 1) and `size` (default 100) are clamped to 1..10⁶ and
   1..500; a non-integer is 400 `"<name> must be an integer"`.
 - `service`, `level`, `doc_id`: exact match; `q`: case-insensitive
-  substring of the text.
+  substring of the text; `link_source`: `none` (no row) or one of
+  `manual`, `inherited`, `corpus`, `llm`, `draft`, `rejected` (else 400).
 
 ```json
 {"total": 308,
  "items": [{"service": "recharge", "template_id": "recharge:T00032",
             "text": "LixiHandler: <*> enterd Receiving subscriber incorrect: <*>",
             "level": "ERROR", "first_seen": 1792207560.0, "last_seen": 1792381140.0,
-            "doc_id": "DOC-001", "doc_title": "...", "state": "NORMAL",
+            "doc_id": "DOC-001", "doc_title": "...", "doc_verdict": "action",
+            "link_source": "inherited", "similarity": 0.91, "inherited_from": "recharge:T00031",
+            "note": null, "embedded": true, "state": "NORMAL",
             "rate": 2.4, "band_low": 0.0, "band_high": 9.4}]}
 ```
 
@@ -289,25 +393,76 @@ without one; for a doc key, the sums over its linked templates).
 
 ### `PUT /api/templates/<service>/<template_id>/link`
 
-`{"doc_id": "DOC-003"}` links (replacing any link, `source` `manual`),
-`{"doc_id": null}` unlinks. 400 `"doc_id must be a string or null"`; 404
-`"Unknown template"` or `"Unknown document"`. The link and its
+`{"doc_id": "DOC-003"}` links (replacing any link, `source` `manual`);
+`{"doc_id": null}` stores a manual "no document", which nothing automatic
+overwrites. `also` (≤ 500 template ids of the same service) links those
+too ("apply to similar"). 400 `"doc_id must be a string or null"`, `"also
+must be a list of at most 500 template ids"`; 404 `"Unknown template"`
+(also for an `also` id) or `"Unknown document"`. The links and their
 `reload_links` command commit together. The template id may contain `/`;
 the service may not.
 
+`DELETE …/link` removes the row whatever its source (back to automatic; a
+draft's document becomes `rejected`). `POST …/link/confirm` turns an
+`inherited`, `corpus`, `llm` or `draft` link into `manual` (a draft
+document becomes `active`); `POST …/link/reject` turns `inherited` /
+`corpus` into a manual "no document" and `llm` / `draft` into `rejected`
+(never sent to the LLM again). Both: 409 when the template has no automatic
+link.
+
+`GET …/similar`: templates of the same service and level class with
+similarity ≥ `documentation.suggest_similarity`, most similar first (≤
+200): `{template_id, text, level, similarity, current_doc_id,
+current_source, pre_ticked}`; `pre_ticked` = similarity ≥ the class's
+inherit threshold and not already manual. `embedded` is false while the
+template has no vector (then the list is empty).
+
 ### Documents
 
-- `GET /api/documents`: `[{doc_id, title, body, error_code, revision,
-  linked_templates}]` sorted by `doc_id`.
-- `POST`: `title` (≤ 200) and `body` (≤ 20000) required and non-empty after
-  trimming, `error_code` optional (≤ 100). The id is `DOC-` + the next number
+- `GET /api/documents?status=active`: `[{doc_id, service, level, based_on, title, error_code, error,
+  handling, status, source, verdict, confidence, revision, embedded,
+  error_lines, linked_templates}]` sorted by `doc_id`. `error_lines` = the
+  ERROR field normalized as the linker embeds it; `embedded` = the linker
+  has embedded this revision; `linked_templates` counts links that drive
+  alerts.
+- `POST`: `title` (≤ 200) required, and `error` (≤ 5000, ≤ 50 lines) or
+  `handling` (≤ 20000) non-empty after trimming; `error_code` optional (≤
+  100); `verdict` `action` (ERROR, the default) or `safe` (SAFE), else 400
+  `"verdict must be action or safe"`; `service` a known service, or `""` /
+  null for shared (the default), else 400 `"service must be a known
+  service, or empty for shared"`; `level` `ERROR`, `WARN`, `INFO`, or `""` /
+  null for any level (the default), else 400 `"level must be ERROR, WARN,
+  INFO or empty for any"`. The id is `DOC-` + the next number
   after the highest `DOC-<digits>` id, zero-padded to 3 (`DOC-013`); the
   table is locked during the insert so two creates never collide. 400
-  `"<field> must be text of at most N characters"` or `"title and body are
-  required"`.
-- `PUT`: same fields plus `revision`; 404 `"Unknown document"`; 409 stale.
+  `"<field> must be text of at most N characters"`, `"title and an ERROR or
+  Handling text are required"` or `"error must have at most 50 lines"`.
+- `PUT`: same fields plus `revision`; a missing `verdict`, `service` or
+  `level` keeps the current one; 404 `"Unknown document"`; 409 stale.
 - `DELETE`: 409 `linked` with the number of linked templates (the foreign
   key decides, so a link created concurrently is caught); 404.
+
+### LLM profiles
+
+- `GET /api/llm/profiles`: `[{name, base_url, model, timeout_seconds,
+  priority, active, has_api_key, revision}]`, active first in the order
+  they are tried; never the key.
+- `PUT /api/llm/profiles/<name>`: creates (`revision` null) or updates
+  (the revision read; else 409 stale). `name` 1–64 of letters, digits, `.`,
+  `_`, `-`; `base_url` http(s) without credentials (trailing `/` dropped);
+  `model` required; `timeout_seconds` integer 5–600; `priority` integer
+  0–1000; `api_key` without
+  control characters (it goes into a header), empty keeps the saved one.
+- `GET /api/llm/usage`: `hour` / `day` = `{source: count}` of `llm`,
+  `draft` and `rejected` links made in the last hour / 24 h;
+  `drafts_waiting` = draft documents; `limits` = `llm.per_service_hour`,
+  `llm.daily_max`; `linker_running` (heartbeat within 90 s), `last_cycle`
+  (`{confirmed, suggested, none, failed}`), `last_error` (the last LLM
+  error, kept across cycles), `profiles` (`{name: {down_until, error, answers}}` of
+  the active profiles), `warnings` from the linker's status.
+- `POST …/activate {"active": true|false}` turns one profile on or off;
+  any number can be active. `DELETE` removes it. Unknown name: 404
+  `"Unknown profile"`.
 
 ### `GET /api/baseline?service=<service>`
 

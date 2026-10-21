@@ -8,32 +8,37 @@ from tests.conftest import TEST_DSN
 
 @pytest.fixture
 def client(conn, cfg, schema):
-    cfg.database.dsn = f"{TEST_DSN}?options=-csearch_path%3D{schema}"
+    cfg.database.dsn = f"{TEST_DSN}?options=-csearch_path%3D{schema}%2Cpublic"
     return create_app(cfg).test_client()
 
 
 def test_document_crud_revision_and_delete_blocked_while_linked(client, conn):
-    conn.execute("INSERT INTO documents (doc_id, title, body, revision) VALUES ('DOC-DB-002', 'seeded', 'x', 'r0'), "
+    conn.execute("INSERT INTO documents (doc_id, title, handling, revision) VALUES ('DOC-DB-002', 'seeded', 'x', 'r0'), "
                  "('DOC-007', 'old', 'y', 'r1')")
     conn.commit()
-    r = client.post("/api/documents", json={"title": "Pool exhausted", "body": "<b>restart</b>", "error_code": "E42"})
+    r = client.post("/api/documents", json={"title": "Pool exhausted", "error": "Pool exhausted for 10.0.0.1",
+                                                "handling": "<b>restart</b>", "error_code": "E42"})
     assert r.status_code == 201
     doc = r.get_json()
     assert doc["doc_id"] == "DOC-008" and doc["revision"]
-    assert client.post("/api/documents", json={"title": " ", "body": "x"}).status_code == 400
+    assert client.post("/api/documents", json={"title": " ", "handling": "x"}).status_code == 400
+    assert client.post("/api/documents", json={"title": "t"}).status_code == 400          # no ERROR, no Handling
+    assert client.post("/api/documents", json={"title": "t", "error": "x\n" * 51}).status_code == 400
+    created = {d["doc_id"]: d for d in client.get("/api/documents").get_json()}["DOC-008"]
+    assert created["error_lines"] == ["Pool exhausted for <*>"] and created["embedded"] is False
 
-    stale = client.put("/api/documents/DOC-008", json={"title": "t", "body": "b", "error_code": "", "revision": "nope"})
+    stale = client.put("/api/documents/DOC-008", json={"title": "t", "handling": "b", "error_code": "", "revision": "nope"})
     assert stale.status_code == 409 and stale.get_json() == {"error": "stale", "revision": doc["revision"]}
-    ok = client.put("/api/documents/DOC-008", json={"title": "t2", "body": "b2", "error_code": "",
+    ok = client.put("/api/documents/DOC-008", json={"title": "t2", "handling": "b2", "error_code": "",
                                                      "revision": doc["revision"]})
     assert ok.status_code == 200 and ok.get_json()["revision"] != doc["revision"]
-    assert client.put("/api/documents/NOPE", json={"title": "t", "body": "b", "revision": "r"}).status_code == 404
+    assert client.put("/api/documents/NOPE", json={"title": "t", "handling": "b", "revision": "r"}).status_code == 404
 
     conn.execute("INSERT INTO templates VALUES ('pay', 'pay:T00001', 'ERROR', 'boom', now(), now())")
     conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id) VALUES ('pay', 'pay:T00001', 'DOC-008')")
     conn.commit()
     listed = {d["doc_id"]: d for d in client.get("/api/documents").get_json()}
-    assert listed["DOC-008"]["linked_templates"] == 1 and listed["DOC-008"]["body"] == "b2"
+    assert listed["DOC-008"]["linked_templates"] == 1 and listed["DOC-008"]["handling"] == "b2"
     assert listed["DOC-DB-002"]["linked_templates"] == 0
     linked = client.get("/api/templates?doc_id=DOC-008").get_json()["items"]
     assert [t["template_id"] for t in linked] == ["pay:T00001"]
@@ -139,3 +144,47 @@ def test_recompute_enqueues(client, conn):
     conn.commit()
     assert client.get(f"/api/commands/{cid}").get_json()["result"] == {"baseline_rows": 3}
     assert client.get("/api/commands/999999").status_code == 404
+
+
+def test_document_kind_error_or_safe(client, conn):
+    r = client.post("/api/documents", json={"title": "Send OK", "error": "send ok", "verdict": "safe"})
+    doc = r.get_json()
+    assert r.status_code == 201
+    listed = {d["doc_id"]: d for d in client.get("/api/documents").get_json()}
+    assert listed[doc["doc_id"]]["verdict"] == "safe"
+    # an update without a verdict keeps it; with one, changes it
+    r = client.put(f"/api/documents/{doc['doc_id']}", json={"title": "Send OK", "error": "send ok", "revision": doc["revision"]})
+    assert {d["doc_id"]: d for d in client.get("/api/documents").get_json()}[doc["doc_id"]]["verdict"] == "safe"
+    r = client.put(f"/api/documents/{doc['doc_id']}", json={"title": "Send OK", "error": "send ok", "verdict": "action",
+                                                          "revision": r.get_json()["revision"]})
+    assert {d["doc_id"]: d for d in client.get("/api/documents").get_json()}[doc["doc_id"]]["verdict"] == "action"
+    assert client.post("/api/documents", json={"title": "t", "error": "e", "verdict": "maybe"}).status_code == 400
+    plain = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
+    assert {d["doc_id"]: d for d in client.get("/api/documents").get_json()}[plain["doc_id"]]["verdict"] == "action"
+
+
+def test_document_service_shared_by_default_kept_on_update(client, conn):
+    conn.execute("INSERT INTO services VALUES ('pay', 0), ('web', 1)")
+    conn.commit()
+    shared = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
+    owned = client.post("/api/documents", json={"title": "t", "error": "e", "service": "pay"}).get_json()
+    listed = lambda: {d["doc_id"]: d for d in client.get("/api/documents").get_json()}
+    assert listed()[shared["doc_id"]]["service"] is None and listed()[owned["doc_id"]]["service"] == "pay"
+    r = client.put(f"/api/documents/{owned['doc_id']}", json={"title": "t2", "error": "e", "revision": owned["revision"]})
+    assert listed()[owned["doc_id"]]["service"] == "pay"                    # left out: kept
+    client.put(f"/api/documents/{owned['doc_id']}", json={"title": "t2", "error": "e", "service": "",
+                                                          "revision": r.get_json()["revision"]})
+    assert listed()[owned["doc_id"]]["service"] is None                     # "" = shared
+    assert client.post("/api/documents", json={"title": "t", "error": "e", "service": "nope"}).status_code == 400
+    assert listed()[shared["doc_id"]]["based_on"] == []
+
+
+def test_document_level_any_by_default_validated_and_kept(client):
+    d = client.post("/api/documents", json={"title": "t", "error": "e", "level": "ERROR"}).get_json()
+    listed = lambda: {x["doc_id"]: x for x in client.get("/api/documents").get_json()}
+    assert listed()[d["doc_id"]]["level"] == "ERROR"
+    client.put(f"/api/documents/{d['doc_id']}", json={"title": "t2", "error": "e", "revision": d["revision"]})
+    assert listed()[d["doc_id"]]["level"] == "ERROR"
+    assert client.post("/api/documents", json={"title": "t", "error": "e", "level": "DEBUG"}).status_code == 400
+    plain = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
+    assert listed()[plain["doc_id"]]["level"] is None

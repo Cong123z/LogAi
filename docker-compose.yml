@@ -69,6 +69,31 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Embeddings, automatic document links and (later) the LLM resolver. Calls the stack's
+  # bge-m3 on aiops-net (only called, never changed); `--profile tei` runs our own instead.
+  logai2-linker:
+    build: .
+    image: logai2
+    container_name: logai2-linker
+    command: ["python", "scripts/run_linker.py"]
+    environment:
+      <<: *logai2-env
+      LOGAI2_EMBEDDING_URL: ${LOGAI2_EMBEDDING_URL:-http://bge-m3:8080}
+    networks: [default, aiops-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  logai2-tei:
+    profiles: [tei]   # with it: LOGAI2_EMBEDDING_URL=http://logai2-tei:80
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4
+    container_name: logai2-tei
+    command: ["--model-id", "BAAI/bge-m3", "--json-output"]
+    volumes:
+      - logai2-tei:/data
+    restart: unless-stopped
+
 networks:
   aiops-net:
     name: ${LOGAI2_NETWORK:-aiops-net}
@@ -77,6 +102,8 @@ networks:
 volumes:
   logai2-pg:
     name: logai2-pg
+  logai2-tei:
+    name: logai2-tei
   # logai-engine's data volume (holds documentation_corpus.json); read-only here
   logai-seed:
     name: ${LOGAI2_DOC_SEED_VOLUME:-logai-data}

@@ -29,3 +29,18 @@ def test_setting_revision_conflict(conn):
     with pytest.raises(StaleRevision):
         put_setting(conn, "x", {"a": 3}, revision=rev)
     assert get_setting(conn, "x") == {"a": 2}
+
+
+def test_migration_004_assigns_documents_to_the_one_service_that_uses_them(conn):
+    from logai2.db import MIGRATIONS_DIR
+    conn.execute("INSERT INTO documents (doc_id, title, handling, revision) VALUES "
+                 "('ONE', 't', 'h', 'r'), ('TWO', 't', 'h', 'r'), ('NONE', 't', 'h', 'r')")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES "
+                 "('a', 'a:1', 'ONE', 'manual'), ('a', 'a:2', 'ONE', 'corpus'), "
+                 "('a', 'a:3', 'TWO', 'manual'), ('b', 'b:1', 'TWO', 'manual')")
+    conn.execute("UPDATE documents SET service = NULL")
+    sql = (MIGRATIONS_DIR / "004_document_service.sql").read_text()
+    backfill = sql[sql.index("UPDATE documents"):sql.index("CREATE INDEX")]
+    conn.execute(backfill)   # run again on these rows
+    rows = {r["doc_id"]: r["service"] for r in conn.execute("SELECT doc_id, service FROM documents")}
+    assert rows == {"ONE": "a", "TWO": None, "NONE": None}

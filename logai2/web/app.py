@@ -17,12 +17,14 @@ from logai2 import db
 from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
+from logai2.links import ALERTING_SOURCES, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import day_hour, daytype, minute_of
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
+LINKER_STALE_SECONDS = 90   # the linker writes its status once per cycle (30 s), longer with LLM calls
 
 # Copied from logai-engine logai/storage/index_selection.py.
 MAX_ENTRIES = 50
@@ -33,6 +35,14 @@ _PATTERN_RE = re.compile(r"^[a-z0-9*][a-z0-9*._#-]*$")
 MAX_HOSTS = 10
 TEXT_LIMIT = 500
 MAX_PAGE_SIZE = 500
+MAX_ERROR_LINES = 50
+DOC_STATUSES = ("active", "draft", "rejected")
+VERDICTS = ("action", "safe")
+KEEP = object()   # a field left out of an update keeps its value
+LEVEL_CLASSES = ("ERROR", "WARN", "INFO")   # shown as ERROR (something to fix) and SAFE (normal operation)
+AUTOMATIC_SOURCES = ("inherited", "corpus", "llm", "draft")
+PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+LINK_SOURCES = ("manual", "inherited", "corpus", "llm", "draft", "rejected")
 
 
 class BadRequest(ValueError):
@@ -169,7 +179,11 @@ def create_app(cfg: AppConfig) -> Flask:
         status = engine_status()
         cursors = conn().execute("SELECT index, since_ms, floor_ms FROM es_cursors ORDER BY index").fetchall()
         stale = time.time() - (status.get("heartbeat") or 0) > STALE_HEARTBEAT_SECONDS
-        return jsonify({"status": status or None, "cursors": cursors, "stale": stale})
+        row = conn().execute("SELECT status FROM worker_status WHERE worker = 'linker'").fetchone()
+        linker = row["status"] if row else None
+        linker_stale = linker is None or time.time() - (linker.get("heartbeat") or 0) > LINKER_STALE_SECONDS
+        return jsonify({"status": status or None, "cursors": cursors, "stale": stale,
+                        "linker": linker, "linker_stale": linker_stale})
 
     @app.get("/api/sources")
     def sources():
@@ -232,10 +246,11 @@ def create_app(cfg: AppConfig) -> Flask:
         docs = [(svc, k[4:]) for svc, k in pairs if k.startswith("doc:")]
         # Links of the alerting templates (for grouping) and of the alerting doc keys (for their mean ± σ).
         link_rows = c.execute(
-            "SELECT service, template_id, doc_id FROM template_doc_links "
-            "WHERE (service, template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[])) "
-            "OR (service, doc_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
-            ([s for s, _ in pairs], [k for _, k in pairs], [s for s, _ in docs], [d for _, d in docs])).fetchall()
+            "SELECT service, template_id, doc_id FROM template_doc_links WHERE doc_id IS NOT NULL AND source = ANY(%s) "
+            "AND ((service, template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[])) "
+            "OR (service, doc_id) IN (SELECT * FROM unnest(%s::text[], %s::text[])))",
+            (list(ALERTING_SOURCES), [s for s, _ in pairs], [k for _, k in pairs],
+             [s for s, _ in docs], [d for _, d in docs])).fetchall()
         links = {(r["service"], r["template_id"]): r["doc_id"] for r in link_rows}
         doc_ids = list({r["doc_id"] for r in link_rows} | {d for _, d in docs})
         titles = {r["doc_id"]: r["title"] for r in c.execute(
@@ -257,11 +272,22 @@ def create_app(cfg: AppConfig) -> Flask:
             return {"mean": stat.mean if stat else None, "std": stat.std if stat else None}
 
         by_key = {(s["service"], s["key"]): s for s in states}
-        rows = alert_rows(states, links, titles, texts)
+        undocumented = [(svc, k) for svc, k in pairs if not k.startswith(("*", "doc:")) and (svc, k) not in links]
+        edges = cluster_edges(c, undocumented, cfg.documentation.cluster_similarity)
+        # every link of the alerting templates, drafts and rejected included, for the card's badges
+        link_info = {(r["service"], r["template_id"]): r for r in c.execute(
+            "SELECT l.service, l.template_id, l.doc_id, l.source, l.similarity, l.note, d.title, d.verdict "
+            "FROM template_doc_links l LEFT JOIN documents d USING (doc_id) "
+            "WHERE (l.service, l.template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+            ([s for s, _ in pairs], [k for _, k in pairs]))}
+        rows = alert_rows(states, links, titles, texts, edges)
         for r in rows:
             r["since"] = r["since"].timestamp()
             for t in r["templates"]:
                 t.update(normal(r["service"], t["template_id"]))
+                info = link_info.get((r["service"], t["template_id"])) or {}
+                t["link"] = {k: info.get(k) for k in ("doc_id", "source", "similarity", "note", "title", "verdict")} \
+                    if info else None
             # service-wide and doc keys have no template line of their own: the card shows them from here
             r["totals"] = [{"key": k, "state": by_key[(r["service"], k)]["state"],
                             "count": by_key[(r["service"], k)]["count"],
@@ -276,34 +302,60 @@ def create_app(cfg: AppConfig) -> Flask:
 
     @app.get("/api/documents")
     def documents():
-        # Also feeds the Templates link select (doc_id, title).
-        return jsonify(conn().execute(
-            "SELECT d.doc_id, d.title, d.body, d.error_code, d.revision, count(l.template_id) AS linked_templates "
-            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) GROUP BY d.doc_id ORDER BY d.doc_id"
-        ).fetchall())
+        # Also feeds the Templates link select (doc_id, title). Drafts and rejected ones: ?status=draft|rejected.
+        status = request.args.get("status", "active")
+        if status not in DOC_STATUSES:
+            raise BadRequest(f"status must be one of {', '.join(DOC_STATUSES)}")
+        rows = conn().execute(
+            "SELECT d.doc_id, d.service, d.level, d.based_on, d.title, d.error_code, d.error, d.handling, d.status, d.source, d.verdict, "
+            "d.confidence, d.revision, d.embedded_revision IS NOT DISTINCT FROM d.revision AS embedded, "
+            "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates "
+            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) WHERE d.status = %s "
+            "GROUP BY d.doc_id ORDER BY d.doc_id", (list(ALERTING_SOURCES), status)).fetchall()
+        for r in rows:
+            r["error_lines"] = error_lines(r["error"])   # what the linker embeds; empty = never auto-matched
+        return jsonify(rows)
 
     def document_fields() -> dict:
         payload = body()
-        fields = {"title": payload.get("title"), "body": payload.get("body"), "error_code": payload.get("error_code") or ""}
-        for name, limit in (("title", 200), ("body", 20000), ("error_code", 100)):
+        fields = {name: payload.get(name) or "" for name in ("title", "error_code", "error", "handling")}
+        for name, limit in (("title", 200), ("error_code", 100), ("error", 5000), ("handling", 20000)):
             value = fields[name]
             if not isinstance(value, str) or len(value) > limit:
                 raise BadRequest(f"{name} must be text of at most {limit} characters")
             fields[name] = value.strip()
-        if not fields["title"] or not fields["body"]:
-            raise BadRequest("title and body are required")
-        return {**fields, "revision": payload.get("revision")}
+        if not fields["title"] or not (fields["error"] or fields["handling"]):
+            raise BadRequest("title and an ERROR or Handling text are required")
+        if len(fields["error"].splitlines()) > MAX_ERROR_LINES:
+            raise BadRequest(f"error must have at most {MAX_ERROR_LINES} lines")
+        verdict = payload.get("verdict")   # ERROR (action) or SAFE; None on an update keeps the current one
+        if verdict is not None and verdict not in VERDICTS:
+            raise BadRequest("verdict must be action or safe")
+        # service: absent keeps it (update) / shared (create); "" or null = shared (every service)
+        service = KEEP
+        if "service" in payload:
+            service = payload["service"] or None
+            if service is not None and not (isinstance(service, str) and conn().execute(
+                    "SELECT 1 FROM services WHERE service = %s", (service,)).fetchone()):
+                raise BadRequest("service must be a known service, or empty for shared")
+        # level of the ERROR line: ERROR / WARN / INFO, "" or null = any; absent keeps it (update) / any (create)
+        level = KEEP
+        if "level" in payload:
+            level = payload["level"] or None
+            if level is not None and level not in LEVEL_CLASSES:
+                raise BadRequest("level must be ERROR, WARN, INFO or empty for any")
+        return {**fields, "verdict": verdict, "service": service, "level": level, "revision": payload.get("revision")}
 
     @app.post("/api/documents")
     def create_document():
         fields = document_fields()
         c = conn()
-        c.execute("LOCK TABLE documents IN EXCLUSIVE MODE")   # two creates must not pick the same number
-        top = c.execute("SELECT max(substring(doc_id FROM 5)::int) AS n FROM documents "
-                        "WHERE doc_id ~ '^DOC-[0-9]{1,9}$'").fetchone()["n"] or 0
-        doc_id, revision = f"DOC-{top + 1:03d}", uuid.uuid4().hex
-        c.execute("INSERT INTO documents (doc_id, title, body, error_code, revision) VALUES (%s, %s, %s, %s, %s)",
-                  (doc_id, fields["title"], fields["body"], fields["error_code"], revision))
+        doc_id, revision = next_doc_id(c), uuid.uuid4().hex
+        c.execute("INSERT INTO documents (doc_id, service, level, title, error_code, error, handling, verdict, revision) "
+                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                  (doc_id, None if fields["service"] is KEEP else fields["service"],
+                   None if fields["level"] is KEEP else fields["level"], fields["title"],
+                   fields["error_code"], fields["error"], fields["handling"], fields["verdict"] or "action", revision))
         c.commit()   # abort/raise above leave it uncommitted; teardown rolls back
         return jsonify({"doc_id": doc_id, "revision": revision}), 201
 
@@ -317,8 +369,13 @@ def create_app(cfg: AppConfig) -> Flask:
         if row["revision"] != fields["revision"]:
             raise db.StaleRevision(row["revision"])
         revision = uuid.uuid4().hex
-        c.execute("UPDATE documents SET title = %s, body = %s, error_code = %s, revision = %s, updated_at = now() "
-                  "WHERE doc_id = %s", (fields["title"], fields["body"], fields["error_code"], revision, doc_id))
+        keep_service = fields["service"] is KEEP
+        c.execute("UPDATE documents SET title = %s, error_code = %s, error = %s, handling = %s, "
+                  "verdict = COALESCE(%s, verdict), service = CASE WHEN %s THEN service ELSE %s END, "
+                  "level = CASE WHEN %s THEN level ELSE %s END, revision = %s, updated_at = now() WHERE doc_id = %s",
+                  (fields["title"], fields["error_code"], fields["error"], fields["handling"], fields["verdict"],
+                   keep_service, None if keep_service else fields["service"],
+                   fields["level"] is KEEP, None if fields["level"] is KEEP else fields["level"], revision, doc_id))
         c.commit()
         return jsonify({"doc_id": doc_id, "revision": revision})
 
@@ -424,8 +481,13 @@ def create_app(cfg: AppConfig) -> Flask:
     def templates():
         page, size = int_arg("page", 1, 10**6), int_arg("size", 100, MAX_PAGE_SIZE)
         where, args = ["true"], []
+        if request.args.get("link_source") not in (None, "", "none", *LINK_SOURCES):
+            raise BadRequest(f"link_source must be none or one of {', '.join(LINK_SOURCES)}")
+        if request.args.get("link_source") == "none":
+            where.append("l.template_id IS NULL")
         for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
-                              ("l.doc_id", request.args.get("doc_id"))):
+                              ("l.doc_id", request.args.get("doc_id")),
+                              ("l.source", request.args.get("link_source") if request.args.get("link_source") != "none" else None)):
             if value:
                 where.append(f"{column} = %s")
                 args.append(value)
@@ -438,7 +500,8 @@ def create_app(cfg: AppConfig) -> Flask:
                           f"ON l.service = t.service AND l.template_id = t.template_id WHERE {where_sql}", args).fetchone()["n"]
         items = c.execute(
             "SELECT t.service, t.template_id, t.text, t.level, t.first_seen, t.last_seen, l.doc_id, "
-            "d.title AS doc_title, COALESCE(a.state, 'NORMAL') AS state FROM templates t "
+            "d.title AS doc_title, d.verdict AS doc_verdict, l.source AS link_source, l.similarity, l.inherited_from, "
+            "l.note, t.embedding IS NOT NULL AS embedded, COALESCE(a.state, 'NORMAL') AS state FROM templates t "
             "LEFT JOIN template_doc_links l ON l.service = t.service AND l.template_id = t.template_id "
             "LEFT JOIN documents d ON d.doc_id = l.doc_id "
             "LEFT JOIN alert_state a ON a.service = t.service AND a.key = t.template_id "
@@ -465,27 +528,201 @@ def create_app(cfg: AppConfig) -> Flask:
             i["first_seen"], i["last_seen"] = i["first_seen"].timestamp(), i["last_seen"].timestamp()
         return jsonify({"total": total, "items": items})
 
-    @app.put("/api/templates/<service>/<path:template_id>/link")
-    def link_template(service: str, template_id: str):
-        doc_id = body().get("doc_id")
-        if doc_id is not None and not isinstance(doc_id, str):
-            raise BadRequest("doc_id must be a string or null")
-        c = conn()
+    def known_template(c, service: str, template_id: str) -> None:
         if not c.execute("SELECT 1 FROM templates WHERE service = %s AND template_id = %s",
                          (service, template_id)).fetchone():
             abort(404, "Unknown template")
-        if doc_id is None:
-            c.execute("DELETE FROM template_doc_links WHERE service = %s AND template_id = %s", (service, template_id))
-        else:
-            if not c.execute("SELECT 1 FROM documents WHERE doc_id = %s", (doc_id,)).fetchone():
-                abort(404, "Unknown document")
-            c.execute("INSERT INTO template_doc_links (service, template_id, doc_id) VALUES (%s, %s, %s) "
-                      "ON CONFLICT (service, template_id) DO UPDATE "
-                      "SET doc_id = EXCLUDED.doc_id, source = 'manual', linked_at = now()",
-                      (service, template_id, doc_id))
+
+    def set_manual(c, service: str, template_id: str, doc_id: str | None) -> None:
+        # a draft this replaces leaves the AI suggestions queue (its template is decided)
+        c.execute("UPDATE documents SET status = 'rejected', updated_at = now() WHERE status = 'draft' "
+                  "AND doc_id IS DISTINCT FROM %s AND doc_id = (SELECT doc_id FROM template_doc_links "
+                  "WHERE service = %s AND template_id = %s AND source = 'draft')", (doc_id, service, template_id))
+        c.execute("INSERT INTO template_doc_links (service, template_id, doc_id) VALUES (%s, %s, %s) "
+                  "ON CONFLICT (service, template_id) DO UPDATE SET doc_id = EXCLUDED.doc_id, source = 'manual', "
+                  "similarity = NULL, inherited_from = NULL, note = NULL, linked_at = now()",
+                  (service, template_id, doc_id))
+
+    @app.put("/api/templates/<service>/<path:template_id>/link")
+    def link_template(service: str, template_id: str):
+        """Manual link; doc_id null = "no document" (sticky: never linked automatically).
+        also: more templates of the same service linked to the same document ("apply to similar")."""
+        payload = body()
+        doc_id, also = payload.get("doc_id"), payload.get("also") or []
+        if doc_id is not None and not isinstance(doc_id, str):
+            raise BadRequest("doc_id must be a string or null")
+        if not isinstance(also, list) or not all(isinstance(t, str) for t in also) or len(also) > 500:
+            raise BadRequest("also must be a list of at most 500 template ids")
+        c = conn()
+        for tid in [template_id, *also]:
+            known_template(c, service, tid)   # also: same service only, by construction
+        if doc_id is not None and not c.execute("SELECT 1 FROM documents WHERE doc_id = %s", (doc_id,)).fetchone():
+            abort(404, "Unknown document")
+        for tid in sorted({template_id, *also}):   # sorted: same lock order as the linker
+            set_manual(c, service, tid, doc_id)
         enqueue(c, "reload_links")
-        c.commit()   # the link and its reload command land together
-        return jsonify({"doc_id": doc_id})
+        c.commit()   # the links and their reload command land together
+        return jsonify({"doc_id": doc_id, "linked": len({template_id, *also})})
+
+    @app.delete("/api/templates/<service>/<path:template_id>/link")
+    def unlink_template(service: str, template_id: str):
+        """Remove the row, whatever its source: the template goes back to automatic matching."""
+        c = conn()
+        known_template(c, service, template_id)
+        gone = c.execute("DELETE FROM template_doc_links WHERE service = %s AND template_id = %s RETURNING doc_id, source",
+                         (service, template_id)).fetchone()
+        if gone and gone["source"] == "draft":   # its draft document leaves the suggestions queue
+            c.execute("UPDATE documents SET status = 'rejected', updated_at = now() WHERE doc_id = %s AND status = 'draft'",
+                      (gone["doc_id"],))
+        enqueue(c, "reload_links")
+        c.commit()
+        return jsonify({"doc_id": None})
+
+    def automatic_link(c, service: str, template_id: str) -> dict:
+        known_template(c, service, template_id)
+        row = c.execute("SELECT doc_id, source FROM template_doc_links WHERE service = %s AND template_id = %s "
+                        "FOR UPDATE", (service, template_id)).fetchone()
+        if not row or row["source"] not in AUTOMATIC_SOURCES:
+            abort(409, "No automatic link to confirm or reject")
+        return row
+
+    @app.post("/api/templates/<service>/<path:template_id>/link/confirm")
+    def confirm_link(service: str, template_id: str):
+        """An inherited, corpus, llm or draft link becomes manual; a draft document becomes active."""
+        c = conn()
+        row = automatic_link(c, service, template_id)
+        if row["source"] == "draft":
+            c.execute("UPDATE documents SET status = 'active', updated_at = now() WHERE doc_id = %s", (row["doc_id"],))
+        set_manual(c, service, template_id, row["doc_id"])
+        enqueue(c, "reload_links")
+        c.commit()
+        return jsonify({"doc_id": row["doc_id"], "source": "manual"})
+
+    @app.post("/api/templates/<service>/<path:template_id>/link/reject")
+    def reject_link(service: str, template_id: str):
+        """inherited / corpus -> manual "no document"; llm / draft -> rejected (never sent to the LLM again)."""
+        c = conn()
+        row = automatic_link(c, service, template_id)
+        if row["source"] in ("inherited", "corpus"):
+            set_manual(c, service, template_id, None)
+        else:
+            # linked_at stays: it dates the LLM call, which the resolver's rate limits count
+            c.execute("UPDATE template_doc_links SET source = 'rejected' "
+                      "WHERE service = %s AND template_id = %s", (service, template_id))
+            if row["source"] == "draft":
+                c.execute("UPDATE documents SET status = 'rejected', updated_at = now() "
+                          "WHERE doc_id = %s AND status = 'draft'", (row["doc_id"],))
+        enqueue(c, "reload_links")
+        c.commit()
+        return jsonify({"source": "manual" if row["source"] in ("inherited", "corpus") else "rejected"})
+
+    @app.get("/api/templates/<service>/<path:template_id>/similar")
+    def similar_templates(service: str, template_id: str):
+        """Apply-to-similar list: same service and level class, pre-ticked at the inherit threshold."""
+        c = conn()
+        row = c.execute("SELECT level, embedding IS NOT NULL AS embedded FROM templates "
+                        "WHERE service = %s AND template_id = %s", (service, template_id)).fetchone()
+        if not row:
+            abort(404, "Unknown template")
+        tick = cfg.documentation.inherit_similarity[level_class(row["level"])]
+        items = similar(c, service, template_id, cfg.documentation.suggest_similarity)
+        for i in items:
+            i["pre_ticked"] = i["similarity"] >= tick and i["current_source"] != "manual"
+        return jsonify({"embedded": row["embedded"], "items": items})
+
+    # --- LLM profiles (as in logai-engine): the linker's resolver uses the active one. The API key is
+    # write-only: never returned, kept when a save leaves it empty.
+
+    def profile_or_404(c, name: str) -> dict:
+        row = c.execute("SELECT * FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
+        if not row:
+            abort(404, "Unknown profile")
+        return row
+
+    @app.get("/api/llm/profiles")
+    def llm_profiles():
+        return jsonify(conn().execute(
+            "SELECT name, base_url, model, timeout_seconds, priority, active, api_key <> '' AS has_api_key, revision "
+            "FROM llm_profiles ORDER BY active DESC, priority, name").fetchall())
+
+    @app.get("/api/llm/usage")
+    def llm_usage():
+        """What the resolver produced (by link source) in the last hour and day, and the linker's LLM state."""
+        c = conn()
+        rows = c.execute(
+            "SELECT source, count(*) FILTER (WHERE linked_at > now() - interval '1 hour') AS hour, count(*) AS day "
+            "FROM template_doc_links WHERE source IN ('llm', 'draft', 'rejected') "
+            "AND linked_at > now() - interval '1 day' GROUP BY source").fetchall()
+        pending = c.execute("SELECT count(*) AS n FROM documents WHERE status = 'draft'").fetchone()["n"]
+        row = c.execute("SELECT status FROM worker_status WHERE worker = 'linker'").fetchone()
+        linker = row["status"] if row else {}
+        return jsonify({
+            "hour": {r["source"]: r["hour"] for r in rows}, "day": {r["source"]: r["day"] for r in rows},
+            "drafts_waiting": pending, "limits": {"per_service_hour": cfg.llm.per_service_hour,
+                                                  "daily_max": cfg.llm.daily_max},
+            "linker_running": bool(linker) and time.time() - (linker.get("heartbeat") or 0) <= LINKER_STALE_SECONDS,
+            "last_cycle": linker.get("llm"), "last_error": linker.get("llm_last_error"),
+            "profiles": linker.get("llm_profiles") or {},
+            "warnings": linker.get("warnings") or []})
+
+    @app.put("/api/llm/profiles/<name>")
+    def put_llm_profile(name: str):
+        payload = body()
+        if not PROFILE_NAME_RE.fullmatch(name):
+            raise BadRequest("name must be 1-64 letters, digits, '.', '_' or '-'")
+        base_url, model = _text(payload.get("base_url"), "base_url"), _text(payload.get("model"), "model")
+        url = urlparse(base_url)
+        if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
+            raise BadRequest("base_url must be an http(s) URL without credentials")
+        if not model:
+            raise BadRequest("model is required")
+        timeout, priority = payload.get("timeout_seconds", 120), payload.get("priority", 100)
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
+            raise BadRequest("timeout_seconds must be an integer from 5 to 600")
+        if not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 1000:
+            raise BadRequest("priority must be an integer from 0 to 1000")
+        api_key = _text(payload.get("api_key"), "api_key")   # no control characters: it goes into a header
+        if not api_key.isascii():
+            raise BadRequest("api_key must be ASCII")
+        c = conn()
+        row = c.execute("SELECT revision, api_key FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
+        if (row["revision"] if row else None) != payload.get("revision"):
+            raise db.StaleRevision(row["revision"] if row else None)
+        revision = uuid.uuid4().hex
+        # a create (no row read) must not overwrite one created meanwhile: DO UPDATE only on an update
+        written = c.execute(
+            "INSERT INTO llm_profiles (name, base_url, model, api_key, timeout_seconds, priority, revision) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (name) DO UPDATE SET base_url = EXCLUDED.base_url, "
+            "model = EXCLUDED.model, api_key = EXCLUDED.api_key, timeout_seconds = EXCLUDED.timeout_seconds, "
+            "priority = EXCLUDED.priority, revision = EXCLUDED.revision, updated_at = now() WHERE %s",
+            (name, base_url.rstrip("/"), model, api_key or (row["api_key"] if row else ""), timeout, priority,
+             revision, row is not None)).rowcount
+        if not written:
+            c.rollback()
+            current = c.execute("SELECT revision FROM llm_profiles WHERE name = %s", (name,)).fetchone()
+            raise db.StaleRevision(current["revision"] if current else None)
+        c.commit()
+        return jsonify({"name": name, "revision": revision})
+
+    @app.post("/api/llm/profiles/<name>/activate")
+    def activate_llm_profile(name: str):
+        """Every active profile is used, in priority order: a dead one fails over to the next."""
+        active = body().get("active")
+        if not isinstance(active, bool):
+            raise BadRequest("active must be true or false")
+        c = conn()
+        profile_or_404(c, name)
+        c.execute("UPDATE llm_profiles SET active = %s WHERE name = %s", (active, name))
+        c.commit()
+        return jsonify({"name": name, "active": active})
+
+    @app.delete("/api/llm/profiles/<name>")
+    def delete_llm_profile(name: str):
+        c = conn()
+        profile_or_404(c, name)
+        c.execute("DELETE FROM llm_profiles WHERE name = %s", (name,))
+        c.commit()
+        return jsonify({"name": name})
 
     @app.get("/")
     def index():

@@ -20,7 +20,7 @@ def schema():
 def conn(schema):
     c = connect(TEST_DSN)
     c.execute(f"CREATE SCHEMA {schema}")
-    c.execute(f"SET search_path TO {schema}")
+    c.execute(f"SET search_path TO {schema}, public")   # public: pgvector
     c.commit()
     migrate(c)
     ensure_partitions(c, date(2026, 10, 1), date(2026, 10, 31))

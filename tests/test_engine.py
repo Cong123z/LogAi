@@ -238,8 +238,8 @@ def test_seed_documents(conn, cfg, make, tmp_path):
     path.write_text(json.dumps({"entries": [{"id": "D1", "title": "Pay", "text": "body", "error_code": "E1"}]}))
     cfg.documentation.seed_path = str(path)
     make(FakeSource({"a": []}), Clock(NOON)).start()
-    assert q(conn, "SELECT doc_id, title, body, error_code FROM documents") == [
-        {"doc_id": "D1", "title": "Pay", "body": "body", "error_code": "E1"}]
+    assert q(conn, "SELECT doc_id, title, handling, error, error_code FROM documents") == [
+        {"doc_id": "D1", "title": "Pay", "handling": "body", "error": "", "error_code": "E1"}]
 
 
 def test_restart_after_long_downtime_creates_partitions(conn, cfg, make):

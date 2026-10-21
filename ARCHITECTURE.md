@@ -1,7 +1,8 @@
 # logai2 Architecture
 
 This document describes the architecture **as implemented in the code** on
-branch `core-engine-v1`. When the document and the code disagree, the code
+`master` (sub-project 1, merged 2026-10-20, and sub-project 2/3, document
+links, merged 2026-10-21). When the document and the code disagree, the code
 (and its tests) is the source of truth, and this document must be corrected.
 
 Related docs: [`README.md`](README.md) (run, test, incident test),
@@ -21,10 +22,12 @@ alerts when a minute is outside that band for several minutes in a row. An
 alert is shown per **document** (runbook) when the alerting templates are
 linked to one. Results are exported through Prometheus and a web console.
 
-There is no training job, no model and no embedding service: the baseline is
-plain statistics rebuilt nightly from the stored counts.
+There is no training job and no model of its own: the baseline is plain
+statistics rebuilt nightly from the stored counts. Embeddings (bge-m3, the
+stack's existing service) are used only to link templates to documents
+(§5.1).
 
-Two processes share one Postgres database and never call each other:
+Three processes share one Postgres database and never call each other:
 
 - **Engine** (`scripts/run_engine.py`): one thread that reads Elasticsearch,
   templates lines, counts minutes, detects, flushes to Postgres, runs the
@@ -32,17 +35,24 @@ Two processes share one Postgres database and never call each other:
 - **Web** (`scripts/run_web.py`): Flask JSON API plus a static vanilla-JS
   console. It reads and writes Postgres only; it never connects to
   Elasticsearch and never runs migrations.
+- **Linker** (`scripts/run_linker.py`, `logai2/linker.py`): every
+  `embedding.cycle_seconds` (30 s) embeds templates and documents' ERROR
+  lines and recomputes the automatic document links (§5.1); a change
+  enqueues `reload_links` for the engine. It waits for the engine to create
+  the schema and never migrates.
 
-This is **sub-project 1** of the per-service-baseline design. Out of scope
-(later sub-projects):
+This covers **sub-projects 1 and 2/3** of the per-service-baseline design
+(2/3: embeddings, layered document links, the LLM resolver and its
+profiles; plan
+[`docs/plans/2026-10-21-embeddings-doc-links.md`](docs/plans/2026-10-21-embeddings-doc-links.md)).
+Out of scope (later sub-projects):
 
 | # | Sub-project |
 |---|---|
 | 0 | Benchmark spike on `udcntt*` (ES `took`, docs/s per core, cache hit rate, ingest-time field) |
-| 2/3 | Embeddings, layered document links (manual → inherited → corpus ERROR field → LLM confirm or suggest), "apply to similar", clustering of undocumented alerts, LLM profiles. Plan [`docs/plans/2026-10-21-embeddings-doc-links.md`](docs/plans/2026-10-21-embeddings-doc-links.md); absorbs the former sub-project 8 (AI drafts) |
 | 4 | Module alert API (`module_code` and `alert_minutes` are collected now so the history exists; plan `docs/plans/2026-10-20-module-alert-api.md` on `master`) |
 | 5 | Sampled catch-up on first start |
-| 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents); LLM profiles move to 2/3 |
+| 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents) (LLM profiles were built with 2/3) |
 | 7 | v2: Kafka, many readers and owners |
 
 Also out of scope: notifications (state is only exported), authentication on
@@ -61,6 +71,8 @@ flowchart LR
     MET[/metrics :9108/]
     PROM[(Prometheus)]
     USER[Operator browser]
+    LNK[logai2-linker]
+    EMB[bge-m3<br/>embeddings]
 
     APP -->|index documents| ES
     ES -->|range query per index| ENG
@@ -70,13 +82,16 @@ flowchart LR
     ENG --> MET
     PROM -->|scrape| MET
     USER --> WEB
+    LNK <-->|vectors, links,<br/>reload_links, worker_status| PG
+    LNK -->|/v1/embeddings| EMB
 ```
 
 Docker Compose (`docker-compose.yml`) runs `postgres`
-(`pgvector/pgvector:pg16`; pgvector is unused until sub-project 3),
-`logai2-engine` and `logai2-web`. Elasticsearch and the replayer are expected
-to run already on the external `aiops-net` network (the same one
-logai-engine joins). Host ports avoid a running logai-engine:
+(`pgvector/pgvector:pg16`; the `vector` extension is created in `public`),
+`logai2-engine`, `logai2-web` and `logai2-linker`, plus `logai2-tei`
+(bge-m3) under the `tei` profile. Elasticsearch, the replayer and the
+stack's `bge-m3` are expected to run already on the external `aiops-net`
+network (the same one logai-engine joins). Host ports avoid a running logai-engine:
 
 | Service | Container port | Host port |
 |---|---|---|
@@ -118,6 +133,7 @@ this order, later layers overriding earlier ones:
 | `LOGAI2_METRICS_PORT` | `metrics.port` | engine |
 | `LOGAI2_WEB_PORT` | `web.port` | web |
 | `LOGAI2_DOC_SEED_PATH` | `documentation.seed_path` | engine |
+| `LOGAI2_EMBEDDING_URL` | `embedding.url` | linker |
 
 Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 `aiops-net`) and `LOGAI2_DOC_SEED_VOLUME` (volume holding logai-engine's
@@ -160,6 +176,17 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `metrics.port` | 9108 | Prometheus endpoint (`metrics.host` exists but is unused: the exporter binds all interfaces) |
 | `web.host` / `web.port` | `0.0.0.0` / 5555 | Flask |
 | `documentation.seed_path` | `""` | corpus seeded into `documents` once, while the table is empty |
+| `documentation.inherit_similarity` | `{ERROR: 0.85, WARN: 0.88, INFO: 0.92}` | layer 1 threshold per level class (§5.1) |
+| `documentation.corpus_similarity` | `{ERROR: 0.85, WARN: 0.88, INFO: 0.92}` | layer 2 threshold per level class |
+| `documentation.corpus_margin` | 0.05 | layer 2: best document over the next one |
+| `documentation.suggest_similarity` | 0.80 | "apply to similar" list |
+| `documentation.cluster_similarity` | 0.85 | undocumented alerting templates joined into one row |
+| `embedding.url` / `model` | `http://bge-m3:8080` / `bge-m3` | OpenAI-style `/v1/embeddings`; empty url = nothing is embedded |
+| `embedding.batch` / `cycle_seconds` | 32 / 30 | texts per request; linker cycle |
+| `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
+| `llm.per_service_hour` / `daily_max` | 5 / 50 | LLM results per service per hour, in all per day |
+| `llm.new_hours` | 24 | a template first seen this recently is resolved even when not alerting |
+| `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |
 
 The repo's `config.yaml` sets only `elasticsearch.index: recharge-logs`,
 `baseline.sigma_multiplier: 3.0` and the two floors. Secrets and endpoints
@@ -238,7 +265,9 @@ On every start, if `documentation.seed_path` is set and `documents` is
 empty, the file is loaded once: JSON `{"entries": [...]}` (logai-engine's
 `documentation_corpus.json`) or `{"documents": [...]}`, or a bare YAML list.
 Each item gives `id` → `doc_id`, `title` (default the id), `error_code`,
-`text` → `body`. Compose mounts logai-engine's `logai-data` volume
+`error` (optional), `handling` (else `text`). logai-engine's corpus has no
+ERROR field: `scripts/split_doc_errors.py` splits the seeded documents once
+(`docs/plans/2026-10-21-corpus-error-split.yaml`). Compose mounts logai-engine's `logai-data` volume
 read-only for this.
 
 ## 5. Core data contracts
@@ -271,10 +300,112 @@ non-NORMAL `alert_state` row is grouped into one of:
 |---|---|---|
 | `document` | alerting templates linked to the document, plus its `doc:` key | the doc id |
 | `template` | one undocumented alerting template | `undocumented` |
+| `cluster` | undocumented alerting templates of one service joined by embedding similarity ≥ `cluster_similarity` (web only; the metrics pass no similarity) | `undocumented` |
 | `service` | `*total` and/or `*error` of the service ("no single cause") | `service` |
 
 A row's state is its worst member (ALERTING > COOLING > WARMING), `since`
 its earliest member. Rows are sorted by state rank, then oldest first.
+
+### 5.1 Document links
+
+A document is **ERROR** (the log line(s) it is for, one per line) plus
+**Handling** (what to do). Only the ERROR lines are embedded, each through
+`normalize()` first (`links.error_lines`), so they compare with template
+texts; a document with no ERROR line is never matched automatically.
+
+**Documents belong to a service** (`documents.service`; NULL = shared,
+applying to every service). Automatic matching (layer 2) and the LLM's
+candidates (layer 3) only consider documents of the template's own service
+and shared ones, so each service's links point to its own, specific
+runbook. Migration 004 gave each existing document the one service whose
+templates use it, else shared. A manual link may still point anywhere.
+
+**A document's ERROR line has a level class** (`documents.level`: ERROR /
+WARN / INFO; NULL = any). Layer 2 links only templates of that class, for
+the same reason inheritance stays within a class: a success line and an
+error line can share most of their words (`DBAdapter: Log success request
+his TransactionInfo …` scored 0.95 against `DBAdapter: Error when log
+request his TransactionInfo …`). Such a cross-class match is left to the
+LLM, which is shown both levels. Migration 005 set each existing
+document's level from the templates linked to it by hand or that it was
+written for, when they agree on one class; LLM drafts take their
+template's class.
+
+One `template_doc_links` row per template; its `source` is the layer
+(`logai2/links.py`, design section 3):
+
+| # | `source` | Rule | Drives alerts |
+|---|---|---|---|
+| 0 | `manual` | set on the web; `doc_id NULL` = "no document" | yes (NULL: no) |
+| 1 | `inherited` | nearest **manual** template of the same service and level class (ERROR/FATAL/CRITICAL, WARN/WARNING, other), cosine ≥ `inherit_similarity[class]`; `inherited_from` names it | yes |
+| 2 | `corpus` | best **active** document **of the template's service or shared**, whose ERROR line has **the template's level class** (or no level), by its best ERROR line, ≥ `corpus_similarity[class]` and ≥ `corpus_margin` above the next document | yes |
+| 3 | `llm` | the LLM picked one of the template's candidate documents; `note` = its reason | yes |
+| 4 | `draft` | the LLM wrote a document (`status draft`, `source llm`, `verdict` action or safe) | no, until approved |
+| — | `rejected` | the operator rejected a layer 3–4 result | no |
+
+"Drives alerts" = loaded by the detector (`doc:` keys, metrics) and used
+for alert rows: `doc_id IS NOT NULL AND source IN (manual, inherited,
+corpus, llm)` (`links.ALERTING_SOURCES`).
+
+`apply_links` (each linker cycle, one transaction) computes layers 1 and 2
+for every template with a vector and no `manual` / `rejected` row (layer 1
+wins), upserts what changed, replaces `llm` / `draft` rows (an unused
+draft document becomes `rejected`), and deletes `inherited` / `corpus` rows
+that no longer qualify, except while the template, or the manual template
+it inherits from, has no vector (its text just changed). Writes are guarded
+so a `manual` or `rejected` row written meanwhile is never overwritten.
+Inheritance only reads manual links, so links never drift. Templates are
+embedded with `AND text = <text read>`, documents with `AND revision =
+<revision read>`; the engine clears a template's vector when its text
+changes.
+
+**LLM resolver** (`logai2/resolver.py`, layers 3–4, run by the linker after
+`apply_links`). With at least one active `llm_profiles` row, it takes templates that
+have a vector and no link row at all, that are ALERTING or first seen within
+`llm.new_hours` (24), ALERTING first then ERROR > WARN > INFO, about 3 LLM
+calls per cycle (a template's second call may exceed it by one),
+`llm.per_service_hour` (5) per service and `llm.daily_max` (50) in all.
+Templates resolved count, from `llm` / `draft` / `rejected` rows by
+`linked_at` (a rejection keeps it), and so do calls that wrote nothing
+(failed or junk answers, kept in memory). Capped services and templates in
+back-off are left out of the query, so they never block the others. The
+linker writes its status after each template, so a slow model does not
+look stale. For each:
+
+1. candidates = active documents whose best ERROR line is ≥
+   `llm.candidate_similarity` (0.60), top `llm.candidates` (3). If any, the
+   LLM is asked which fits; a listed `doc_id` becomes an `llm` link (with
+   `reload_links`).
+2. Otherwise (or `null`), the LLM writes `{verdict, title, error_code, error,
+   handling, confidence}` for the template's service; it is stored as a
+   `draft` document of that service (next `DOC-NNN` id) linked as `draft`,
+   in one transaction. When other services already document a similar
+   error (their documents' ERROR lines ≥ `llm.candidate_similarity`, top
+   `llm.candidates`), those are sent as `references` to adapt, and the draft
+   records them in `documents.based_on`.
+
+The LLM sees only service, level and the normalized template text, plus the
+candidates' service, level, title, ERROR and Handling (≤
+`llm.max_input_chars`); never raw log lines. The prompts tell it to judge
+by meaning rather than shared words (a success line is not the error line
+it resembles), to prefer documents of the template's level, and that an
+INFO line is usually normal operation unless its text reports a failure. Any link written meanwhile wins (`ON CONFLICT DO NOTHING`; a
+draft is rolled back). A failed call backs the template off for 30 min (in
+memory); so does an answer Postgres cannot store (NUL characters are
+stripped first) or any other database error on its write. The client
+(`logai2/llm.py`) sends JSON mode, strips `<think>` blocks, takes the first
+JSON object of the reply, retries once on a timeout only, and never follows
+a redirect (it would carry the API key elsewhere). A base URL without a
+path gets `/v1` (`https://host` → `https://host/v1/chat/completions`).
+
+**Failover.** Every active profile is used, lowest `priority` first, then
+by name. A profile that fails with a network or HTTP error or a timeout
+(`LlmUnavailable`) is skipped for 5 minutes and the next one answers the
+same question; the failed call counts in the 3 per cycle. A reply that is
+not a JSON object fails the template, not the profile. When no active
+profile answers, the cycle stops with a warning and no template is blamed.
+Each profile's state (`down_until`, `error`) and the last LLM error are in
+`worker_status['linker']` (`llm_profiles`, `llm_last_error`).
 
 ## 6. Reader
 
@@ -615,7 +746,7 @@ service-scoped primary key.
 | `services` | `service` | `partition` (crc32 % 60) | flush |
 | `modules` | `module_code` | `service` (FK) — the first service seen | flush |
 | `es_cursors` | `index` | `since_ms`, `floor_ms`, `updated_at` | flush |
-| `templates` | `service, template_id` | `level`, `text`, `first_seen`, `last_seen` | flush |
+| `templates` | `service, template_id` | `level`, `text`, `first_seen`, `last_seen`, `embedding` (vector(1024), NULL until embedded; cleared when the text changes) | flush; linker (`embedding`) |
 | `drain3_state` | `service` | `blob` (bytea), `version` | flush |
 | `service_hours` * | `service, day, hour` | `n_minutes` | flush |
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
@@ -625,12 +756,14 @@ service-scoped primary key.
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |
 | `alert_state` | `service, key` | `state`, `since`, `streak`, `score`, `count`, `band_low`, `band_high` | flush |
 | `alert_changes` | `service, key, at` | `from_state`, `to_state`, `count`, `band_low`, `band_high` | flush |
-| `documents` | `doc_id` | `title`, `error_code`, `body`, `revision`, `created_at`, `updated_at` | web, seed |
-| `template_doc_links` | `service, template_id` | `doc_id` (FK → documents), `source` (`manual`), `linked_at` | web |
+| `documents` | `doc_id` | `service` (NULL = shared), `level` (class of the ERROR line; NULL = any), `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action` = ERROR / `safe` = SAFE), `confidence`, `based_on` (documents an LLM draft adapted), `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`, drafts) |
+| `document_errors` | `doc_id, n` | `text` (normalized ERROR line), `embedding` | linker |
+| `template_doc_links` | `service, template_id` | `doc_id` (FK → documents, NULL = no document), `source` (§5.1), `similarity`, `inherited_from`, `note`, `linked_at` | web, linker |
+| `llm_profiles` | `name` | `base_url`, `model`, `api_key` (clear text, never returned by the API), `timeout_seconds`, `priority` (lowest tried first), `active` (any number), `revision`, `updated_at` | web |
 | `error_samples` | — (index `service, template_id, at DESC`) | `service`, `template_id`, `at`, `line` | flush |
 | `settings` | `key` | `value` (jsonb), `revision`, `updated_at` | web, engine |
 | `commands` | `id` | `kind`, `payload` (jsonb), `created_at`, `done_at`, `result` (jsonb) | web enqueues, engine finishes |
-| `worker_status` | `worker` | `status` (jsonb), `updated_at` | engine |
+| `worker_status` | `worker` | `status` (jsonb), `updated_at` | engine (`engine`), linker (`linker`) |
 
 \* `PARTITION BY RANGE (day)`, one partition per local day named
 `<table>_YYYYMMDD`. Partitions are created at start (from the start minute's
@@ -664,7 +797,7 @@ transaction.
 
 ### 12.2 Commands
 
-The web inserts a row into `commands`; the engine takes all undone commands
+The web (and the linker) insert a row into `commands`; the engine takes all undone commands
 oldest first (`FOR UPDATE SKIP LOCKED`) at the start of every tick (no
 `LISTEN`), runs them between flushes and writes `done_at` and `result`. A
 failing command stores `{"error": "<Type>: <message>"}` and the engine
@@ -673,7 +806,7 @@ continues.
 | Kind | Enqueued by | Engine action | Result |
 |---|---|---|---|
 | `reload_sources` | `PUT /api/sources/selection`, `PUT /api/sources/connection` | re-apply the saved connection, re-resolve the selection | `{"resolution": {...}}` |
-| `reload_links` | `PUT /api/templates/<service>/<id>/link` | reload `template_doc_links` into the detector | `{}` |
+| `reload_links` | the web's link routes (`PUT`/`DELETE …/link`, `…/link/confirm`, `…/link/reject`), the linker when `apply_links` changed a link | reload the links that drive alerts into the detector | `{}` |
 | `recompute_baseline` | `POST /api/baseline/recompute` | flush, then the daily commit for the owner's day | `{"days_committed", "baseline_rows"}` |
 
 Any other kind fails with `unknown command kind`.
@@ -694,6 +827,11 @@ Any other kind fails with `unknown command kind`.
 | Web started before the engine | the web does not migrate; it sees missing tables until the engine has started once |
 | Container restart | `logai2-engine` and `logai2-web` use `restart: unless-stopped`; Postgres data lives in the `logai2-pg` volume |
 | Bad command | `commands.result.error`; the engine continues |
+| Embeddings service down | the linker logs it, reports `last_error` and pending counts in `worker_status['linker']`, keeps every existing link and retries next cycle |
+| Linker down | no new vectors or automatic links; existing links keep working; the Pipeline page shows the linker stale after 90 s |
+| LLM down, slow or answering junk | the template is skipped (30 min back-off) and `last_error` is reported; each call waits up to the profile timeout, retried once on a timeout |
+| No active LLM profile | the resolver idles with a warning in `worker_status['linker']` |
+| One LLM profile dead (502, timeout, refused) | the next active profile answers; the dead one is retried after 5 min; the LLM profiles page marks it failing |
 
 No DLQ.
 
@@ -720,8 +858,11 @@ No DLQ.
 | Commands | Polled every tick, no `LISTEN`; `recompute_baseline` is not deduplicated | a burst of recompute clicks runs the commit several times |
 | Web | Flask development server, one connection per request, no auth, no pagination on `/api/baseline` | expose only on a trusted network; add a pool if many operators |
 | Web | A `/` in a service name cannot be linked through `PUT /api/templates/<service>/<id>/link` | 404 |
-| Database | `migrate()` has no advisory lock; the ES password is stored in clear | only the engine migrates; review before production |
+| Database | `migrate()` has no advisory lock; the ES password and LLM API keys are stored in clear | only the engine migrates; review before production |
+| LLM | Up to 3 calls per cycle, one at a time; failure back-off is in memory | a cycle can take minutes with a slow model; a restart retries failed templates |
 | Scale | One engine thread per database | v2 (Kafka, many readers/owners) is sub-project 7 |
+| Links | `apply_links` compares every template with every ERROR line and every manual template each cycle, exact search, no vector index | fine for thousands of templates; restrict to changed rows past ~50k |
+| Links | Thresholds are starting values (design test, same model) | calibrate with `scripts/link_eval.py` on real manual links |
 
 ## 15. Where the code departs from the spec
 
@@ -742,14 +883,15 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/001_init.sql`, `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level), `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.
 5. `logai2/owner/owner.py`: the flush transaction.
 6. `logai2/jobs/commit.py`, `logai2/review.py`: the daily commit and suggestions.
 7. `logai2/engine.py`, `logai2/commands.py`, `logai2/metrics.py`: the loop.
-8. `logai2/web/app.py` and [`docs/WEB_UI.md`](docs/WEB_UI.md).
+8. `logai2/links.py`, `logai2/embed.py`, `logai2/linker.py`, `logai2/llm.py`, `logai2/resolver.py`: document links (§5.1).
+9. `logai2/web/app.py` and [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
 Tests under `tests/` are executable examples of these contracts. Good starting
 points: `test_owner.py` (exact counts across a crash), `test_reader.py`

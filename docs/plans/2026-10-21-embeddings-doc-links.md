@@ -2,8 +2,29 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **FINAL, all decisions confirmed by the user on 2026-10-21**;
-waiting for the go to implement. Covers sub-projects 2/3 (embeddings, links)
+Status: **implemented and merged into `master`** (2026-10-21), Phases A
+and B; all decisions confirmed by the user on 2026-10-21. ARCHITECTURE §5.1
+and docs/WEB_UI.md describe the result; where this plan differs, they win.
+
+**Added after the plan, at the user's request (2026-10-21):**
+- LLM failover: every active profile is used in priority order; a failing
+  one is skipped for 5 min (migration 003); a bare-host base URL gets `/v1`.
+- An LLM profiles page of its own, with status banner, usage and answers
+  per profile.
+- Documents per service (migration 004): matching and LLM candidates stay
+  within the template's service; other services' documents are sent to the
+  LLM as references to adapt; the All-services view groups the same ERROR
+  line into one row.
+- A document kind, ERROR or SAFE (the `verdict`), with a filter and a
+  one-click switch.
+- The level class of a document's ERROR line (migration 005): corpus
+  matching stays within the class; the LLM is shown both levels.
+- The Documentation and Templates pages redesigned for reading in full
+  (list + reading pane, review drawer, no truncated text).
+Departures: no `corpus_mode` switch (a `corpus_similarity` above 1 turns
+layer 2 off); no hint layer; no "test" button on LLM profiles (the web
+never calls the LLM; the linker reports LLM errors on the Pipeline page);
+`DELETE …/link` added (back to automatic) next to the sticky `PUT null`. Covers sub-projects 2/3 (embeddings, links)
 and absorbs sub-project 8 (AI drafts) as Phase B.
 
 **Goal:** a corpus document has two parts: **ERROR** (the log line(s) it is
@@ -108,7 +129,7 @@ INFO = everything else.
 |---|---|
 | D1 | **bge-m3**, called through the OpenAI `/v1/embeddings` format at the stack's existing `http://bge-m3:8080` (only called, never changed); optional own `logai2-tei` compose profile |
 | D2 | Inherit thresholds **ERROR 0.85, WARN 0.88, INFO 0.92**, kept as config and calibrated later |
-| D3 | Corpus auto-link on the ERROR field only, **0.85 / 0.88 / 0.92**, margin **0.05**, `corpus_mode: link`; calibrated later (Task 9 measures) |
+| D3 | Corpus auto-link on the ERROR field only, **0.85 / 0.88 / 0.92**, margin **0.05**; calibrated later (Task 9 measures) |
 | D4 | Clustering **0.85**, single link; calibrated later |
 | D5 | Inherit only from manual links |
 | D6 | One process, **`logai2-linker`** (embed, links, LLM resolver); never the engine thread |
@@ -224,7 +245,6 @@ embedding: {url: "http://bge-m3:8080", dims: 1024, batch: 32, cycle_seconds: 30}
 documentation:
   inherit_similarity: {ERROR: 0.85, WARN: 0.88, INFO: 0.92}
   suggest_similarity: 0.80
-  corpus_mode: link
   corpus_similarity: {ERROR: 0.85, WARN: 0.88, INFO: 0.92}
   corpus_margin: 0.05
   cluster_similarity: 0.85
@@ -276,7 +296,8 @@ WHERE t.embedding IS NOT NULL
   ERROR line (`max(1 - (e.embedding <=> t.embedding))` grouped by `doc_id`).
 - `desired_corpus`: for templates without a manual, rejected or layer 1
   result, keep top-1 if ≥ `corpus_similarity[class]` and top1 − top2 ≥
-  `corpus_margin`. Skipped in `hint` mode.
+  `corpus_margin`. (Built without a `corpus_mode` switch: a
+  `corpus_similarity` above 1 turns layer 2 off.)
 - `apply_links(conn, cfg) -> bool`: desired = layer 1 ∪ layer 2 (layer 1
   wins). Diff against the current `inherited` / `corpus` rows, and replace
   `llm` / `draft` rows that now have a layer 1–2 result (edge case 12).
@@ -354,7 +375,7 @@ one service → `kind: "cluster"`. Metrics pass no edges.
     ERROR-only is better.
 
   Set thresholds to the lowest values with **0 wrong**. If none gives a
-  right link, ship in `hint` mode and say so.
+  right link, set `corpus_similarity` above 1 (layer 2 off) and say so.
 
 ---
 

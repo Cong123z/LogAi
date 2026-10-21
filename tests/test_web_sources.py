@@ -10,7 +10,7 @@ from tests.conftest import TEST_DSN
 
 @pytest.fixture
 def client(conn, cfg, schema):
-    cfg.database.dsn = f"{TEST_DSN}?options=-csearch_path%3D{schema}"
+    cfg.database.dsn = f"{TEST_DSN}?options=-csearch_path%3D{schema}%2Cpublic"
     return create_app(cfg).test_client()
 
 

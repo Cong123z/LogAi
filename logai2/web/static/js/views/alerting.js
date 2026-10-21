@@ -17,16 +17,31 @@ function alNormal({mean, std, band_low: low, band_high: high}) {
   return `<span class="alert-band"${band}>(normal ${alNum(mean)} ± ${alNum(std)})</span>`;
 }
 
+// How a template line got its document; drafts drive nothing, they are shown so the operator can act.
+function alLink(link) {
+  if (!link || !link.source || link.source === 'rejected' || (link.source === 'manual' && !link.doc_id)) return '';
+  const doc = escapeHtml(link.doc_id || '');
+  const tag = {
+    manual: '', inherited: `<span class="badge badge-blue">inherited</span>`,
+    corpus: `<span class="badge badge-yellow" title="Matched on ${doc}'s ERROR lines">auto ${link.similarity == null ? '' : link.similarity.toFixed(2)}</span>`,
+    llm: `<span class="badge badge-yellow" title="${escapeHtml(link.note || '')}">AI-confirmed</span>`,
+    draft: `<span class="badge badge-yellow" title="Unverified: check commands before running them">AI suggestion: ${escapeHtml(link.title || doc)}</span>`,
+  }[link.source] || '';
+  const safe = link.verdict === 'safe' ? ' <span class="badge badge-green">SAFE</span>' : '';
+  return tag || safe ? ` <span class="link-meta">${tag}${safe}</span>` : '';
+}
+
 function alLine(label, item, mono) {
   return `<li class="alert-line">
     <div class="${mono ? 'tmpl-text' : 'alert-line-label'}" title="${escapeHtml(label)}">${escapeHtml(label)}</div>
-    <span class="alert-rate">${alNum(item.count)}/min</span>${alNormal(item)}
+    <span class="alert-rate">${alNum(item.count)}/min</span>${alNormal(item)}${alLink(item.link)}
   </li>`;
 }
 
 function alTitle(row) {
   if (row.kind === 'service') return 'Whole service';
   if (row.kind === 'template') return 'Undocumented';
+  if (row.kind === 'cluster') return `Undocumented · ${row.templates.length} similar templates`;
   return row.title || row.doc_id;
 }
 

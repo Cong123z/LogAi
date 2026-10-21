@@ -18,7 +18,7 @@ stack as logai-engine's (six pages).
 | # | Sub-project |
 |---|---|
 | 0 | Benchmark spike on `udcntt*` (ES `took`, docs/s per core, cache hit rate, ingest-time field) |
-| 2/3 | Embeddings, layered document links (manual → inherited → corpus ERROR field → LLM confirm or suggest), "apply to similar", clustering of undocumented alerts, LLM profiles. Plan [`docs/plans/2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md); absorbs the former sub-project 8 (AI drafts) |
+| 2/3 | **Built 2026-10-21.** Embeddings, layered document links (manual → inherited → corpus ERROR field → LLM confirm or suggest), "apply to similar", clustering of undocumented alerts, LLM profiles. Plan [`docs/plans/2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md); absorbs the former sub-project 8 (AI drafts) |
 | 4 | Module alert API (`module_code` is collected now so its history exists) |
 | 5 | Sampled catch-up on first start |
 | 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents); LLM profiles move to 2/3 |

@@ -2,8 +2,9 @@
 
 Status: **sub-project 1 built** (2026-10-20, branch `core-engine-v1`): spec
 [`docs/specs/2026-10-20-core-engine-design.md`](../specs/2026-10-20-core-engine-design.md),
-as implemented in [`ARCHITECTURE.md`](../../ARCHITECTURE.md). The rest of this
-design (sub-projects 0, 2–7) is not built yet. Drafted 2026-10-19. On
+as implemented in [`ARCHITECTURE.md`](../../ARCHITECTURE.md). Sub-project 2/3
+(document links, sections 3 and 4a) built and merged into `master`
+(2026-10-21). Sub-projects 0 and 4–7 are not built yet. Drafted 2026-10-19. On
 2026-10-21 sections 3, 4a and 6 were revised for the layered document
 matching (ERROR field, automatic corpus links, LLM confirm or suggest):
 plan [`2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md),
@@ -178,7 +179,21 @@ field (incident runbooks such as DOC-016/017/018) is never auto-matched.
 | 4 | `draft` | the LLM writes a suggested document, action or SAFE (section 4a) | no, until approved |
 
 The operator can confirm any automatic link (it becomes manual) or reject
-it. Same level class only: an ERROR line must not inherit a document from an
+it.
+
+**Documents per service** (decided 2026-10-21): a document belongs to one
+service, or is shared by all. One shared document stretched across services
+would turn vague over time, so each service gets its own specific runbook:
+layers 2–3 only use the template's service's and shared documents, and when
+another service already documents a similar error, the LLM adapts that
+document into a draft for this service. The All-services view groups
+documents with the same ERROR line into one row, so the same error is not
+listed once per service.
+
+**Same level class for ERROR matching too** (2026-10-21): a document's
+ERROR line has a level class; layer 2 only links templates of that class
+(an INFO "Log success …" line scored 0.95 against an error line sharing its
+field list). Cross-class cases go to the LLM, which is shown the levels. Same level class only: an ERROR line must not inherit a document from an
 INFO "success" line, however similar the wording.
 
 **Thresholds per level class** (defaults are guesses; tune on real data):
