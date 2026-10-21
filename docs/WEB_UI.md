@@ -182,12 +182,17 @@ profile, linker not running) or shows the last LLM error or the daily
 limit. Cards: the active profile, results in the last hour and 24 h
 (confirmed / suggested / rejected, with the limits), suggestions waiting
 for review, and the linker's last cycle. Then the profiles table with Add,
-Edit, Activate / Deactivate and Delete.
+Edit, Activate / Deactivate and Delete. Every active profile is used,
+lowest **priority** first: when one fails (network, HTTP error, timeout)
+the next one answers and the failing one is skipped for 5 minutes; its
+row shows "failing" with the error, and the banner says whether another
+profile is answering.
 
-Each profile, as in logai-engine: name, OpenAI-compatible base URL (`…/v1`; the linker
-posts to `/chat/completions`), model, API key and timeout (5–600 s, default
-120). At most one profile is **active**; the linker's resolver uses it, and
-with none active templates are not sent to an LLM. The API key is
+Each profile, as in logai-engine: name, OpenAI-compatible base URL
+(`…/v1`, or a bare host which gets `/v1`; the linker posts to
+`…/chat/completions`), model, API key, timeout (5–600 s, default 120) and
+priority (0–1000, default 100). With no active profile, templates are not
+sent to an LLM. The API key is
 write-only: the list shows only whether one is saved, and a save with an
 empty key keeps the saved one.
 
@@ -242,8 +247,8 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
 | `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
-| `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, warnings}` | — | — |
-| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, revision}` | `{name, revision}` | 400, 409 | — |
+| `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, profiles, warnings}` | — | — |
+| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` | `{name, revision}` | 400, 409 | — |
 | `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
 | `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
 | `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, full_after_days}` | 404 | — |
@@ -408,20 +413,23 @@ template has no vector (then the list is empty).
 ### LLM profiles
 
 - `GET /api/llm/profiles`: `[{name, base_url, model, timeout_seconds,
-  active, has_api_key, revision}]` sorted by name; never the key.
+  priority, active, has_api_key, revision}]`, active first in the order
+  they are tried; never the key.
 - `PUT /api/llm/profiles/<name>`: creates (`revision` null) or updates
   (the revision read; else 409 stale). `name` 1–64 of letters, digits, `.`,
   `_`, `-`; `base_url` http(s) without credentials (trailing `/` dropped);
-  `model` required; `timeout_seconds` integer 5–600; `api_key` without
+  `model` required; `timeout_seconds` integer 5–600; `priority` integer
+  0–1000; `api_key` without
   control characters (it goes into a header), empty keeps the saved one.
 - `GET /api/llm/usage`: `hour` / `day` = `{source: count}` of `llm`,
   `draft` and `rejected` links made in the last hour / 24 h;
   `drafts_waiting` = draft documents; `limits` = `llm.per_service_hour`,
   `llm.daily_max`; `linker_running` (heartbeat within 90 s), `last_cycle`
-  (`{confirmed, suggested, none, failed}`), `last_error`, `warnings` from
-  the linker's status.
-- `POST …/activate {"active": true}` makes it the only active profile;
-  `false` leaves none active. `DELETE` removes it. Unknown name: 404
+  (`{confirmed, suggested, none, failed}`), `last_error` (the last LLM
+  error, kept across cycles), `profiles` (`{name: {down_until, error}}` of
+  the active profiles), `warnings` from the linker's status.
+- `POST …/activate {"active": true|false}` turns one profile on or off;
+  any number can be active. `DELETE` removes it. Unknown name: 404
   `"Unknown profile"`.
 
 ### `GET /api/baseline?service=<service>`
