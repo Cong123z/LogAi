@@ -769,14 +769,15 @@ charts are per hour, the unit an exclusion acts on. The engine adds a few
 - API: alert template lines gain `first_seen` and `mean`; `/api/templates`
   items gain `mean`.
 
-**Rendering.** The proposal picked Apache ECharts, self-hosted (no CDN).
-The forms needed are two: a heatmap grid and a line over a band (plus the
-topology boxes). Recommended: hand-drawn SVG and a CSS grid of buttons
-(keyboard and screen readers for free; the full ECharts build is about
-1 MB). Open question 9. Either way: colors from `tokens.css`, light and
-dark, a diverging pair for the matrix, one sequential hue for coverage,
-status colors only for states, palettes checked for color blindness and
-contrast; animation off under `prefers-reduced-motion`.
+**Rendering.** Apache ECharts draws every chart (user ruling
+2026-10-21): one pinned 5.x full build vendored in
+`static/vendor/echarts.min.js`, no CDN at run time; themes built from
+`tokens.css` for light and dark; instances disposed on every route change;
+ARIA descriptions and decal patterns on; animation and particles off under
+`prefers-reduced-motion`. Colors: a diverging pair for the matrix, one
+sequential hue for coverage, status colors only for states, palettes checked
+for color blindness and contrast. The matrix defaults to all events
+(`*total`, user ruling 2026-10-21).
 
 **Order.** Phase 1, then 2, then 3; 1 and 2 are independent. Each phase is
 one branch with tests, and WEB_UI.md / ARCHITECTURE updated with the code.
@@ -826,9 +827,10 @@ possible).
 7. How many days does ES keep on `udcntt*`? (`start.days_back` must fit.)
 8. ~~Raw lines to the LLM?~~ Settled 2026-10-21: the LLM gets template and
    corpus fields only (section 4a); raw lines later, behind masking.
-9. Console charts (section 9): hand-drawn SVG (recommended) or self-hosted
-   Apache ECharts as the proposal chose?
-10. Baseline matrix default key: `*total` (shows drops) or `*error`?
+9. ~~Console charts?~~ Settled 2026-10-21: Apache ECharts, self-hosted,
+   draws every chart (section 9).
+10. ~~Baseline matrix default key?~~ Settled 2026-10-21: all events
+    (`*total`).
 
 ## Test: template → document vs group centroid → document
 
