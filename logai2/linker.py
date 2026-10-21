@@ -76,7 +76,7 @@ class Linker:
                 cur.executemany(
                     "UPDATE templates SET embedding = %s::vector WHERE service = %s AND template_id = %s AND text = %s",
                     [(literal(v), r["service"], r["template_id"], r["text"]) for r, v in zip(chunk, vectors)])
-            status["embedded_templates"] += len(chunk)
+                status["embedded_templates"] += cur.rowcount   # rows whose text changed meanwhile are not counted
 
     def _embed_documents(self, status: dict) -> None:
         with self.conn.transaction():

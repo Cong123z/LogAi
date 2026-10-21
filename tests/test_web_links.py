@@ -42,7 +42,7 @@ def test_confirm_and_reject_each_automatic_source(client, conn, cfg):
     assert source(conn, "H") == ("rejected", "DR2")
     assert conn.execute("SELECT status FROM documents WHERE doc_id = 'DR2'").fetchone()["status"] == "rejected"
     assert client.post(url("M", "/confirm")).status_code == 409          # nothing automatic to confirm
-    assert client.post(url("NOPE", "/reject")).status_code == 409
+    assert client.post(url("NOPE", "/reject")).status_code == 404
     # the sticky rows survive the linker
     with conn.transaction():
         apply_links(conn, cfg.documentation)
@@ -100,3 +100,12 @@ def test_pipeline_shows_the_linker(client, conn):
     conn.commit()
     body = client.get("/api/pipeline").get_json()
     assert body["linker_stale"] is False and body["linker"]["pending"]["templates"] == 2
+
+
+def test_delete_on_a_draft_link_rejects_its_document(client, conn):
+    doc(conn, "DR", status="draft")
+    tmpl(conn, "A")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('s', 'A', 'DR', 'draft')")
+    conn.commit()
+    assert client.delete(url("A")).status_code == 200 and source(conn, "A") is None
+    assert conn.execute("SELECT status FROM documents WHERE doc_id = 'DR'").fetchone()["status"] == "rejected"

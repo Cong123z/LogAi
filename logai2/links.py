@@ -95,26 +95,38 @@ def apply_links(conn, docs_cfg) -> bool:
     current = {(r["service"], r["template_id"]): r for r in conn.execute(
         "SELECT service, template_id, doc_id, source, similarity, inherited_from FROM template_doc_links "
         "WHERE source = ANY(%s)", (list(AUTO_SOURCES + LLM_SOURCES),))}
+    # A template, or the manual source it inherits from, whose text just changed has no vector until the
+    # linker embeds it again: keep its link meanwhile instead of flapping the alert to "undocumented".
+    unembedded = {(r["service"], r["template_id"]) for r in conn.execute(
+        "SELECT service, template_id FROM templates WHERE embedding IS NULL")}
+    manual = {(r["service"], r["template_id"]): r["doc_id"] for r in conn.execute(
+        "SELECT service, template_id, doc_id FROM template_doc_links WHERE source = 'manual'")}
     changed = False
-    for (service, tid), (source, doc, sim, frm) in desired.items():
+    # sorted: the same lock order as the web's multi-row writes, so the two never deadlock
+    for (service, tid), (source, doc, sim, frm) in sorted(desired.items()):
         cur = current.get((service, tid))
         same = cur and (cur["source"], cur["doc_id"], cur["inherited_from"]) == (source, doc, frm)
         if same and abs((cur["similarity"] or 0) - sim) < 1e-4:
             continue
         # the WHERE keeps a manual or rejected row a person wrote since we read
-        conn.execute(
+        written = conn.execute(
             "INSERT INTO template_doc_links (service, template_id, doc_id, source, similarity, inherited_from) "
             "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (service, template_id) DO UPDATE SET "
             "doc_id = EXCLUDED.doc_id, source = EXCLUDED.source, similarity = EXCLUDED.similarity, "
             "inherited_from = EXCLUDED.inherited_from, note = NULL, linked_at = now() "
             "WHERE template_doc_links.source NOT IN ('manual', 'rejected')",
-            (service, tid, doc, source, sim, frm))
+            (service, tid, doc, source, sim, frm)).rowcount
+        if not written:   # a person wrote a manual or rejected row since we read
+            continue
         if cur and cur["source"] == "draft":
             conn.execute("UPDATE documents SET status = 'rejected' WHERE doc_id = %s AND status = 'draft'",
                          (cur["doc_id"],))
         changed = changed or not same
-    for (service, tid), cur in current.items():
-        if cur["source"] in AUTO_SOURCES and (service, tid) not in desired:
+    for (service, tid), cur in sorted(current.items()):
+        waiting = (service, tid) in unembedded or (
+            cur["source"] == "inherited" and (service, cur["inherited_from"]) in unembedded
+            and manual.get((service, cur["inherited_from"])) == cur["doc_id"])
+        if cur["source"] in AUTO_SOURCES and (service, tid) not in desired and not waiting:
             conn.execute("DELETE FROM template_doc_links WHERE service = %s AND template_id = %s AND source = %s",
                          (service, tid, cur["source"]))
             changed = True

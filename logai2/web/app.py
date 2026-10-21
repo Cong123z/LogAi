@@ -531,23 +531,28 @@ def create_app(cfg: AppConfig) -> Flask:
             known_template(c, service, tid)   # also: same service only, by construction
         if doc_id is not None and not c.execute("SELECT 1 FROM documents WHERE doc_id = %s", (doc_id,)).fetchone():
             abort(404, "Unknown document")
-        for tid in dict.fromkeys([template_id, *also]):
+        for tid in sorted({template_id, *also}):   # sorted: same lock order as the linker
             set_manual(c, service, tid, doc_id)
         enqueue(c, "reload_links")
         c.commit()   # the links and their reload command land together
-        return jsonify({"doc_id": doc_id, "linked": len(dict.fromkeys([template_id, *also]))})
+        return jsonify({"doc_id": doc_id, "linked": len({template_id, *also})})
 
     @app.delete("/api/templates/<service>/<path:template_id>/link")
     def unlink_template(service: str, template_id: str):
         """Remove the row, whatever its source: the template goes back to automatic matching."""
         c = conn()
         known_template(c, service, template_id)
-        c.execute("DELETE FROM template_doc_links WHERE service = %s AND template_id = %s", (service, template_id))
+        gone = c.execute("DELETE FROM template_doc_links WHERE service = %s AND template_id = %s RETURNING doc_id, source",
+                         (service, template_id)).fetchone()
+        if gone and gone["source"] == "draft":   # its draft document leaves the suggestions queue
+            c.execute("UPDATE documents SET status = 'rejected', updated_at = now() WHERE doc_id = %s AND status = 'draft'",
+                      (gone["doc_id"],))
         enqueue(c, "reload_links")
         c.commit()
         return jsonify({"doc_id": None})
 
     def automatic_link(c, service: str, template_id: str) -> dict:
+        known_template(c, service, template_id)
         row = c.execute("SELECT doc_id, source FROM template_doc_links WHERE service = %s AND template_id = %s "
                         "FOR UPDATE", (service, template_id)).fetchone()
         if not row or row["source"] not in AUTOMATIC_SOURCES:

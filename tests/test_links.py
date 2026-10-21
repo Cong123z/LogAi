@@ -134,3 +134,16 @@ def test_similar_candidates_and_cluster_edges(conn):
 def test_level_class_and_error_lines():
     assert [level_class(x) for x in ("fatal", "Warning", "DEBUG", None)] == ["ERROR", "WARN", "INFO", "INFO"]
     assert error_lines("Timeout for 10.0.0.1\n\n  \n42") == ["Timeout for <*>"]
+
+
+def test_links_are_kept_while_a_template_or_its_source_waits_for_a_new_vector(conn, docs):
+    doc(conn, "D1", vec((5, 1.0)))
+    tmpl(conn, "M", v=vec((0, 1.0))), link(conn, "M", "D1")
+    tmpl(conn, "X", v=at(0.9, 6))                       # inherited from M
+    tmpl(conn, "C", v=at(0.95, 7, anchor=5))            # corpus D1
+    apply_links(conn, docs)
+    conn.execute("UPDATE templates SET embedding = NULL WHERE template_id IN ('M', 'C')")   # texts changed
+    assert apply_links(conn, docs) is False
+    assert links(conn) == {"C": ("corpus", "D1"), "X": ("inherited", "D1")}
+    conn.execute("DELETE FROM template_doc_links WHERE template_id = 'M'")   # the source is gone for good
+    assert apply_links(conn, docs) is True and links(conn) == {"C": ("corpus", "D1")}
