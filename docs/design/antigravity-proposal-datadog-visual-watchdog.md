@@ -3,7 +3,7 @@
 **Document ID:** AGY-PROP-2026-002  
 **Author:** Antigravity (AI Tech Lead / Architecture Pair)  
 **Target Repository:** `logai2`  
-**Status:** PROPOSED (2026-10-21), not adopted. Reviewed against `master` on 2026-10-21: see [Review against the code](#review-against-the-code-2026-10-21). Its Baseline and Pipeline parts (§5.1, §5.2) are taken up, adapted, in spec [`2026-10-21-baseline-pipeline-pages.md`](../specs/2026-10-21-baseline-pipeline-pages.md).  
+**Status:** ADOPTED, adapted (2026-10-21) as sub-project 9, [`per-service-baseline.md` section 9](per-service-baseline.md#9-operator-console-datadog-watchdog-style-sub-project-9); phases 1–2 detailed in spec [`2026-10-21-baseline-pipeline-pages.md`](../specs/2026-10-21-baseline-pipeline-pages.md). The design wins where they differ; the corrections are in [Review against the code](#review-against-the-code-2026-10-21). Not built.  
 **Selected Strategy:** Strategy A — Unified Apache ECharts Visualization Engine  
 **Related Documents:**
 - [`docs/design/antigravity-proposed-additions.md`](antigravity-proposed-additions.md) (AGY-PROP-2026-001)
@@ -15,8 +15,8 @@
 
 ## Review against the code (2026-10-21)
 
-Checked against `master` (`20f4ff6`). Nothing here is built and the user has
-not ruled on it. Where this proposal and [`WEB_UI.md`](../WEB_UI.md) or
+Checked against `master` (`20f4ff6`). Nothing here is built. The user adopted
+the redesign on 2026-10-21; design section 9 applies these corrections. Where this proposal and [`WEB_UI.md`](../WEB_UI.md) or
 [`ARCHITECTURE.md`](../../ARCHITECTURE.md) disagree, those describe the code.
 
 **Accurate today**

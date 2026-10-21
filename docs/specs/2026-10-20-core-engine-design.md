@@ -25,6 +25,7 @@ stack as logai-engine's (six pages).
 | 5 | Sampled catch-up on first start |
 | 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents); LLM profiles move to 2/3 |
 | 7 | v2: Kafka, many readers and owners |
+| 9 | Operator console, Datadog Watchdog style: Baseline matrix + expected-bounds inspector + coverage, Pipeline topology + volume vs expected, Watchdog tags on Alerting/Templates (design section 9, from AGY-PROP-2026-002) |
 
 **First target:** the recharge stack under Docker Compose (node96/97 replayer
 data), checked with a reworked `scripts/incident_test.py`.

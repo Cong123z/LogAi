@@ -54,6 +54,7 @@ Out of scope (later sub-projects):
 | 5 | Sampled catch-up on first start |
 | 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents) (LLM profiles were built with 2/3) |
 | 7 | v2: Kafka, many readers and owners |
+| 9 | Operator console, Datadog Watchdog style: Baseline matrix + expected-bounds inspector + coverage, Pipeline topology + volume vs expected, Watchdog tags on Alerting/Templates (design [section 9](docs/design/per-service-baseline.md), from AGY-PROP-2026-002) |
 
 Also out of scope: notifications (state is only exported), authentication on
 the web API, log sources other than Elasticsearch, and more than one engine

@@ -4,15 +4,17 @@ Status: **sub-project 1 built** (2026-10-20, branch `core-engine-v1`): spec
 [`docs/specs/2026-10-20-core-engine-design.md`](../specs/2026-10-20-core-engine-design.md),
 as implemented in [`ARCHITECTURE.md`](../../ARCHITECTURE.md). Sub-project 2/3
 (document links, sections 3 and 4a) built and merged into `master`
-(2026-10-21). Sub-projects 0 and 4–7 are not built yet. Drafted 2026-10-19. On
+(2026-10-21). Sub-projects 0, 4–7 and 9 are not built yet. Drafted 2026-10-19. On
 2026-10-21 sections 3, 4a and 6 were revised for the layered document
 matching (ERROR field, automatic corpus links, LLM confirm or suggest):
 plan [`2026-10-21-embeddings-doc-links.md`](../plans/2026-10-21-embeddings-doc-links.md),
 which also absorbs the AI drafts first proposed in
 [`antigravity-proposed-additions.md`](antigravity-proposed-additions.md).
-A second Antigravity proposal (charts, pipeline topology, Watchdog-style
-tags: [`antigravity-proposal-datadog-visual-watchdog.md`](antigravity-proposal-datadog-visual-watchdog.md))
-is under review, not adopted.
+Section 9 (sub-project 9, 2026-10-21) adopts, adapted, Antigravity's
+Datadog Watchdog-style console redesign
+[`antigravity-proposal-datadog-visual-watchdog.md`](antigravity-proposal-datadog-visual-watchdog.md):
+Baseline matrix and expected-bounds inspector, Pipeline topology and volume
+vs expected, Watchdog tags on Alerting and Templates. Not built.
 Built as a **new project from scratch**, borrowing modules from logai-engine
 (collector, preprocessor/normalize, Drain3 wrapper, alert state machine, web
 parts). Template and group IDs, manual overrides and the Isolation Forest
@@ -669,6 +671,116 @@ minutes) plus template baselines built live (`days_back: 0`).
 Manual links are not (they were per group; old IDs are gone); operators
 relink with "apply to similar".
 
+### 9. Operator console, Datadog Watchdog style (sub-project 9)
+
+Adopted 2026-10-21 from Antigravity's
+[`AGY-PROP-2026-002`](antigravity-proposal-datadog-visual-watchdog.md),
+adapted to the code (the proposal's "Review against the code" lists what
+changed). Where the two differ, this section wins. Detail for phases 1–2:
+spec [`2026-10-21-baseline-pipeline-pages.md`](../specs/2026-10-21-baseline-pipeline-pages.md).
+
+**Problem.** The console shows state, not data. The Baseline page is four
+tables: an operator asked to exclude 02:00–04:00 cannot see how far those
+hours were from normal, which days the baseline is built from, or what is
+left after an exclusion. The Pipeline page is cards and a sparkline that
+lives only in the open tab. Alerting and Templates show counts but not how
+unusual they are, or whether a pattern is new.
+
+**Model: Datadog Watchdog.** An anomaly is a card with a status, start and
+end, one sentence, a graph of the series over a gray band of **expected
+bounds**, and its scope; log anomalies are either **new patterns** or
+**increases in existing patterns**. Pipeline health is shown per component
+(events in / out, errors, utilization), averaged over 15 minutes and
+compared with the **same time last week**.
+
+**No new storage.** Everything below reads tables that exist:
+`hourly_counts` + `service_hours` give the actual rate of every template,
+`*total` and `*error` per hour for 90 days; `baseline` gives the band per
+daytype and hour; `alert_changes` / `alert_minutes` give the non-NORMAL
+minutes; `templates.first_seen` gives new patterns. Doc keys are not stored
+per hour: a document's line is the sum of its linked templates (as in
+detection). NORMAL minutes are not stored minute by minute, so history
+charts are per hour, the unit an exclusion acts on. The engine adds a few
+`worker_status` fields (phase 2); no migration.
+
+**Phase 1: Baseline page.**
+
+- **Matrix**: last 14 days (up to 28) × 24 hours per service. A cell is one
+  key's hour (`*total` by default; `*error`, a document or a template can be
+  picked), filled by its distance to the band, `z = (rate − mean) / σ` of
+  that day's profile: gray inside the band, warm above, cool below. Glyphs,
+  never color alone: `▲` suggested (a key was not NORMAL), `✕` excluded
+  (hatched), `✓` kept. Rows mark the days the next rebuild uses. Replaces
+  the "Days" table; selecting cells (shift+click within a day) replaces the
+  "Add a range" form.
+- **Inspector** (a Watchdog card) for the selected cell or suggestion: one
+  sentence (when, how many keys, rate vs expected); an **expected-bounds
+  chart** of that whole day (gray band per hour, joined with the next
+  hour's band as detection does; the day's rate as a line; the selected
+  hours shaded; the same day last week as an optional dashed line);
+  **contributors** split into *increased* templates (largest excess over
+  their mean) and *new* templates (first seen in the range); and **Exclude:
+  real incident** / **Keep: normal**. What an exclusion leaves ("02:00
+  keeps 2 of 5 weekday days") is shown **before** the click, so one click is
+  safe. Decisions still take effect at the next commit or Recompute.
+- **Coverage**: weekday and weekend × 24 hours, usable days per hour (out
+  of 5 / 4) after exclusions, and an **idle** mark where the `*total` mean
+  is 0 (every ERROR/WARN template at its floor alerts there).
+
+**Phase 2: Pipeline page.**
+
+- **Topology** in data order (the proposal's diagram had detection after
+  Postgres; detection runs in the engine before the flush, and the linker
+  talks to the engine only through Postgres):
+  `Elasticsearch → Reader (normalize, cache) → Templates (Drain3) → Minutes
+  & detection → Postgres flush`, with `Linker → LLM resolver` beside it.
+  Each node: a state with icon and word (OK / Degraded / Down), one
+  headline number averaged over 15 minutes, the reason when degraded, and a
+  click-through to its details (indices, services, LLM profiles).
+- **Volume vs expected**: per service, today's hourly `*total` against its
+  band and the same hour last week. A stalled reader or a service that
+  stopped logging shows under the band before anything alerts.
+- **Per-service table**: events last hour, vs last week, miss ratio,
+  templates, new in 24 h, unparsed, keys not NORMAL.
+- Engine: `worker_status['engine']` gains `flush_seconds`,
+  `flush_seconds_max` (15 min), `late_counts` and `events_per_second_15m`.
+  The browser-only sparkline goes.
+
+**Phase 3: Watchdog insights on Alerting and Templates.**
+
+- **Tags** on each open alert row, from state the engine already keeps:
+
+  | Tag | Rule |
+  |---|---|
+  | `NEW PATTERN` | a template line judged floor-only (no band for its hour) whose template was first seen in the last 24 h |
+  | `SURGE` | a template, document or `*error` line above its band; shown as `×N normal` (count / mean), or "no normal traffic" when mean is 0 |
+  | `TRAFFIC DROP` | `*total` below its band (detection only raises this on a full profile with mean ≥ 20) |
+
+- **Insights banner** at the top of Alerting: one line per tag with counts
+  and the worst row, in the rows' order (ALERTING first). Nothing new is
+  detected; it summarizes the rows.
+- **Templates**: the rate column gains a third line, `×N normal` against
+  this hour's mean (or `new` without a baseline), highlighted only above
+  the band. No new column and no chart (the Templates redesign ruling).
+- **Exclude from the alert card**: on an ALERTING or COOLING row,
+  **Exclude these hours** opens the Baseline inspector (phase 1) on the
+  row's local hours since `since` (one range per day across midnight),
+  with its warning, rather than posting blind.
+- API: alert template lines gain `first_seen` and `mean`; `/api/templates`
+  items gain `mean`.
+
+**Rendering.** The proposal picked Apache ECharts, self-hosted (no CDN).
+The forms needed are two: a heatmap grid and a line over a band (plus the
+topology boxes). Recommended: hand-drawn SVG and a CSS grid of buttons
+(keyboard and screen readers for free; the full ECharts build is about
+1 MB). Open question 9. Either way: colors from `tokens.css`, light and
+dark, a diverging pair for the matrix, one sequential hue for coverage,
+status colors only for states, palettes checked for color blindness and
+contrast; animation off under `prefers-reduced-motion`.
+
+**Order.** Phase 1, then 2, then 3; 1 and 2 are independent. Each phase is
+one branch with tests, and WEB_UI.md / ARCHITECTURE updated with the code.
+
 ## Pipeline risks and fixes
 
 | # | Stage | Problem | Fix |
@@ -714,6 +826,9 @@ possible).
 7. How many days does ES keep on `udcntt*`? (`start.days_back` must fit.)
 8. ~~Raw lines to the LLM?~~ Settled 2026-10-21: the LLM gets template and
    corpus fields only (section 4a); raw lines later, behind masking.
+9. Console charts (section 9): hand-drawn SVG (recommended) or self-hosted
+   Apache ECharts as the proposal chose?
+10. Baseline matrix default key: `*total` (shows drops) or `*error`?
 
 ## Test: template → document vs group centroid → document
 

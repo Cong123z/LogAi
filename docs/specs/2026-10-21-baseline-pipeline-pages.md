@@ -1,7 +1,8 @@
 # Baseline and Pipeline pages: show the data, Watchdog style
 
-Date: 2026-10-21. Status: **proposed**, waiting for the user's rulings
-(section 9). Not built.
+Date: 2026-10-21. Status: **draft detail for phases 1–2 of sub-project 9**
+([`per-service-baseline.md` section 9](../design/per-service-baseline.md)),
+open questions in section 9 below. Not built.
 
 Inputs: Antigravity's proposal
 [`AGY-PROP-2026-002`](../design/antigravity-proposal-datadog-visual-watchdog.md)
@@ -57,10 +58,10 @@ Watchdog for logs (sources: [Watchdog alerts](https://docs.datadoghq.com/watchdo
 | OP pipelines list | per pipeline: status, events/s, bytes/s averaged over **15 min** | **Yes**: stage headline numbers averaged, not one flush |
 | OP Health tab | per component: events in/out, errors, discarded, utilization, buffer, **week-over-week** change | **Yes**: per-stage in/out where we have it; **this hour vs the same hour last week** for volume |
 
-Not taken from the proposal: the animated particle DAG (decoration; the
-stage order in its diagram is also wrong, see its review §5), the
-one-click exclude without seeing the effect (section 4.4 keeps the
-few-days warning, shown before the click), and Apache ECharts (section 6).
+Changed from the proposal: the topology is in data order (its diagram is
+wrong, see its review §5) and particles are optional; the one-click
+exclude shows its effect before the click (4.2); the chart engine is an
+open question (section 6).
 
 ## 3. Data we already have
 
@@ -240,9 +241,10 @@ service · events last hour · vs same hour last week (%) · miss ratio (5 min)
 
 ## 6. Rendering
 
-Inline SVG and CSS grid, drawn by hand in the existing vanilla JS, colors
-from `tokens.css`, light and dark. Two chart forms only (a heatmap grid and
-a line over a band), plus the existing badges. No chart library:
+Recommended (open question 5; the proposal chose self-hosted Apache
+ECharts): inline SVG and CSS grid, drawn by hand in the existing vanilla JS,
+colors from `tokens.css`, light and dark. Two chart forms only (a heatmap
+grid and a line over a band), plus the existing badges. Why no library:
 
 - the proposal's ECharts is about 1 MB minified for the full build, for
   two simple forms; the page already draws its sparkline in SVG;
@@ -268,10 +270,10 @@ Each step is a branch-sized task; 1–2 and 3–4 are independent.
 
 ## 8. Out of scope
 
-Alerting-page tags and banners (proposal §5.3 Pillar 1), the delta column
-on Templates (Pillar 2, against the Templates ruling), one-click exclude
-from Alerting cards (Pillar 3; could reuse 4.2 later), minute-level storage
-of NORMAL minutes, notifications.
+Phase 3 of sub-project 9 (Watchdog tags and banner on Alerting, `×N
+normal` on Templates, exclude from an alert card through the 4.2
+inspector): specified in design section 9, detailed later. Also out:
+minute-level storage of NORMAL minutes, notifications.
 
 ## 9. Questions for the user
 
