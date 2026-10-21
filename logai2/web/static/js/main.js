@@ -10,8 +10,8 @@ const viewTitles = {
   baseline: 'Baseline',
   review: 'Review',
 };
-// Templates polls only through its Auto-refresh toggle; Documentation and
-// Baseline load on entry and after each change (Baseline polls a running recompute).
+// Templates polls only through its Auto-refresh toggle; Documentation, Baseline and
+// Review load on entry and after each change (Review polls a running recompute).
 const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000};
 const viewOrder = Object.keys(viewTitles);
 
@@ -136,7 +136,7 @@ async function refreshHealth() {
   const text = document.getElementById('engine-health-text');
   let label = 'Web unreachable', cls = 'unavailable', since = null;
   try {
-    const data = await getJson('/api/pipeline', 'Unable to load pipeline');
+    const data = await getJson('/api/pipeline?lite=1', 'Unable to load pipeline');
     since = data.status && data.status.heartbeat;
     cls = data.stale ? 'unavailable' : ((data.status.warnings || []).length ? 'degraded' : 'healthy');
     label = {healthy: 'Engine healthy', degraded: 'Engine degraded', unavailable: 'Engine unavailable'}[cls];

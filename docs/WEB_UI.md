@@ -99,7 +99,7 @@ updates the existing chart instances.
   | Postgres flush | last flush time | slowest flush of the last 15 min |
   | Prometheus | "metrics export" | "scraped by Prometheus" |
   | Linker | pending templates + documents | links changed last cycle or not |
-  | LLM resolver | "N today" (`llm_today`: LLM calls counted against `llm.daily_max`) | profiles up / down |
+  | LLM resolver | "N / M in 24 h" (`llm_today` of `llm_daily_max`: rolling 24 h LLM calls counted against `llm.daily_max`, including calls that wrote nothing) | profiles up / down |
 
   Particles move along the main row at a speed stepped by events/s; they stop
   under reduced motion or when the engine is not running. Click a stage for
@@ -128,8 +128,8 @@ Stage rules (constants in `logai2/web/pipeline_view.py`):
 
 | Stage | Degraded | Down |
 |---|---|---|
-| Elasticsearch | an index failing, or one more than 5 min behind | all indices failing |
-| Reader | a high-miss-ratio warning | 5 minutes of history at 0 events/s while an index is not caught up |
+| Elasticsearch | an index failing, one more than 5 min behind, or engine stale (position unknown) | all indices failing |
+| Reader | a high-miss-ratio warning | engine stale, or 5 minutes of history at 0 events/s while an index is not caught up |
 | Templates | any unparsed line in the last hour | — |
 | Minutes & detection | lag over 5 min, or detection off | engine stale |
 | Postgres flush | slowest flush of the last 15 min over 10 s, or last commit older than 26 h | engine stale |
@@ -352,7 +352,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 |---|---|---|---|---|
 | `GET /` | — | `index.html` | — | — |
 | `GET /static/<path>` | — | static file | 404 | — |
-| `GET /api/pipeline` | — | `{status, cursors, stale, linker, linker_stale, services, volume, stages}` | — | — |
+| `GET /api/pipeline` | query `lite=1` (only `status, cursors, stale, linker, linker_stale`: the header pill's poll) | `{status, cursors, stale, linker, linker_stale, services, llm_daily_max, volume, stages}` | — | — |
 | `GET /api/sources` | — | `{selection, connection, available_indices, resolution, indices}` | — | — |
 | `PUT /api/sources/selection` | `{patterns: [str], revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
@@ -377,7 +377,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `GET /api/baseline/inspect` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{sentence, day, increased, new, keys, left_days}` | 400, 404 | — |
 | `GET /api/baseline/series` | query `service`, `key`, `days` (1, 7 or 14, default 14) | `{key, baseline_state, points, incidents, profile}` | 400, 404 | — |
 | `GET /api/baseline/incident` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{ongoing, modules, samples}` | 400, 404 | — |
-| `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, full_after_days}` | 404 | — |
+| `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, commit_time, full_after_days}` | 404 | — |
 | `POST /api/baseline/decisions` | `{service, day, hour_from, hour_to, decision}` | `201 {id, warning?}` | 400, 404 | — |
 | `DELETE /api/baseline/decisions/<id>` | — | `{id}` | 404 | — |
 | `POST /api/baseline/recompute` | — | `202 {id}` | — | `recompute_baseline` |
@@ -420,7 +420,7 @@ events per minute in the current hour and the same hour a week earlier,
                "miss_ratio": 0.02, "templates": 87, "new_24h": 3,
                "unparsed_1h": 0, "not_normal": 1}],
  "volume": [{"service": "recharge",
-             "hours": [{"hour": 0, "rate": 120.0, "band_low": 80.0, "band_high": 170.0, "last_week": 118.2}]}],
+             "hours": [{"hour": 0, "rate": 120.0, "band_low": 80.0, "band_high": 170.0, "last_week": 118.2, "out": false}]}],
  "stages": {"elasticsearch": {"status": "ok", "reason": null},
             "reader": {"status": "ok", "reason": null},
             "templates": {"status": "warn", "reason": "4 unparsed lines in the last hour"},
@@ -636,8 +636,7 @@ read:
 ```
 
 `cls` is the colour step: `in`, `up1`–`up3`, `down1`–`down3` (|z| up to 6,
-up to 10, beyond; "down" only for `*total` and `*error` when the profile
-alerts low) or `none` (no baseline). A baseline of mean 0 and σ 0 gives
+up to 10, beyond; "down" only where the detector raises a drop: `*total`, full profile, mean ≥ `drop.min_mean`) or `none` (no baseline). A baseline of mean 0 and σ 0 gives
 `up3` for any event and `in` otherwise. `rate` is events per minute,
 `z = (rate - mean) / max(σ, 1)` when mean > 0, else `(rate - mean) / σ`. `suggested` means keys of the service left
 NORMAL in that hour and no decision covers it; `decision` is the latest
@@ -691,8 +690,7 @@ would have per hour of the range if this range were excluded.
 ```
 
 `baseline_state` is `none`, `young`, `full` or `borrowed`. A point is `out`
-when its rate is above the band (or below it, for `*total` / `*error` when
-the profile alerts low); an incident is a run of consecutive `out` hours.
+when its rate is above the band (or below it, where the detector raises a drop: `*total`, full profile, mean ≥ `drop.min_mean`); an incident is a run of consecutive `out` hours.
 `decision` is `exclude`, `keep`, `"review"` (keys left NORMAL in the run and
 nothing decided) or null. `rate` is null for an hour with no `service_hours`
 row (its band is still given). For a `doc:` key `profile.weekday` and `profile.weekend` are empty; `today` is still filled.

@@ -17,7 +17,8 @@ function blApplyRoute() {
   const sub = state.subView || '';
   if (sub === bl.lastSub) return;
   bl.lastSub = sub;
-  const p = sub.split('/').filter(Boolean).map(decodeURIComponent);
+  let p;
+  try { p = sub.split('/').filter(Boolean).map(decodeURIComponent); } catch (e) { return; }   // a malformed tail: keep the defaults
   if (p[0]) bl.service = p[0];
   if (p[1]) bl.key = p[1];
   if (['1', '7', '14'].includes(p[2])) bl.days = Number(p[2]);
@@ -237,11 +238,11 @@ function blRenderModules(modules) {
     ...baseOption(),
     grid: {left: 130, right: 56, top: 4, bottom: 4},
     xAxis: {type: 'value', max: 100, show: false},
-    yAxis: {type: 'category', inverse: true, data: modules.map(m => m.module), axisTick: {show: false},
+    yAxis: {type: 'category', inverse: true, data: modules.map(m => m.module || '(no module)'), axisTick: {show: false},
             axisLine: {show: false}, axisLabel: {color: t.dim, width: 120, overflow: 'truncate'}},
     tooltip: {...baseOption().tooltip, confine: true, formatter: p => {
       const m = modules[p.dataIndex];
-      return `${escapeHtml(m.module)}<br><b>${m.lines.toLocaleString()}</b> lines · ${rvN(100 * m.lines / total)}%`;
+      return `${escapeHtml(m.module || '(no module)')}<br><b>${m.lines.toLocaleString()}</b> lines · ${rvN(100 * m.lines / total)}%`;
     }},
     series: [{type: 'bar', data: modules.map(m => 100 * m.lines / total), barMaxWidth: 16, itemStyle: {color: t.cls.up2},
               label: {show: true, position: 'right', color: t.dim, formatter: p => `${rvN(p.value)}%`}}],
@@ -263,7 +264,7 @@ function blSamplesHtml(d) {
 // ── Days x hours (read-only; colours come from the API's cls) ──
 function blRenderMatrix() {
   const t = chartTokens(), m = bl.matrix, rows = m.days;
-  const drops = ['*total', '*error'].includes(bl.key), k = m.k.weekday;
+  const drops = bl.key === '*total', k = m.k.weekday;
   const items = [['none', 'no baseline'], ['in', `inside ±${k}σ`], ['up1', 'above, to 6σ'], ['up2', '6–10σ'], ['up3', '> 10σ'],
                  ['down1', 'below, to 6σ'], ['down2', '6–10σ'], ['down3', '> 10σ']];
   $bl('bl-legend').innerHTML = items.filter(([c]) => drops || !c.startsWith('down'))

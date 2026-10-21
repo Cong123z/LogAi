@@ -990,8 +990,11 @@ td, .tmpl-id, .stat-value, .group-member-events { font-variant-numeric: tabular-
 .versions .toggle-btn { padding:4px 10px; font-size:12px; border:1px solid var(--border); border-radius:var(--radius-sm); }
 
 /* ── Review page ──────────────────────────────────────────────── */
-#view-review > .section-heading { flex-wrap: wrap; }
+#view-review > .section-heading, #view-baseline > .section-heading { flex-wrap: wrap; }
 #view-review > .section-heading .filter-bar { margin: 0; }
+.section-heading > .filter-bar { min-width: 0; max-width: 100%; }
+#view-baseline .filter-select, #view-review .filter-select { max-width: 100%; min-width: 0; }
+#view-baseline .toggle-group, #view-review .toggle-group { flex-wrap: wrap; max-width: 100%; }
 #view-review { min-width: 0; }
 .rv-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 16px; min-width: 0; }
 .rv-panel[hidden] { display: none; }

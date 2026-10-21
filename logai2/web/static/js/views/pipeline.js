@@ -81,7 +81,7 @@ function plText(d) {
     flush: [`flush ${plFlush(s.flush_seconds)}`, `max 15 min ${plFlush(s.flush_seconds_max)}`],
     prometheus: ['metrics export', 'scraped by Prometheus'],
     linker: [pending == null ? 'no report' : `${pending} pending`, !l ? 'automatic links off' : l.links_changed ? 'links changed last cycle' : 'no link changes last cycle'],
-    llm: [!l ? 'not running' : `${l.llm_today ?? 0} today`, `${prof.length - down} profiles up, ${down} down`],
+    llm: [!l ? 'not running' : `${l.llm_today ?? 0} / ${d.llm_daily_max ?? '?'} in 24 h`, `${prof.length - down} profiles up, ${down} down`],
   };
 }
 
@@ -183,7 +183,7 @@ function plStageBody(id, d) {
     case 'llm': {
       const prof = plProfiles(d);
       if (!l) return '<p>The linker is not running, so the LLM resolver is idle.</p>';
-      return `<p>${plInt(l.llm_today ?? 0)} answers today.</p>` + (prof.length ? `<div class="table-wrap"><table><thead><tr><th>Profile</th><th>State</th><th class="r">Answers</th></tr></thead><tbody>${
+      return `<p>${plInt(l.llm_today ?? 0)} of ${plInt(d.llm_daily_max ?? 0)} LLM calls counted in the last 24 h (rolling; includes calls that wrote nothing).</p>` + (prof.length ? `<div class="table-wrap"><table><thead><tr><th>Profile</th><th>State</th><th class="r">Answers</th></tr></thead><tbody>${
         prof.map(p => `<tr><td><span class="tmpl-id">${escapeHtml(p.name)}</span></td><td>${p.down
           ? `<span class="badge badge-yellow">down until ${escapeHtml(formatFullTs(p.down_until))}</span> ${escapeHtml(p.error || '')}`
           : '<span class="badge badge-green">up</span>'}</td><td class="r">${plInt(p.answers)}</td></tr>`).join('')}</tbody></table></div>` : '<p>No LLM profile is configured.</p>');
@@ -237,18 +237,19 @@ function plRenderTiles(d) {
 // ── Volume small multiples ──
 function plMiniOption(v, row, t) {
   const hrs = v.hours, hh = hrs.map(h => String(h.hour).padStart(2, '0'));
-  const out = hrs.map(h => (h.rate != null && h.band_high != null && (h.rate > h.band_high || h.rate < h.band_low)) ? h.rate : null);
+  const out = hrs.map(h => h.out ? h.rate : null);       // the API decides (a drop counts only for a full *total profile)
+  const lo = h => (h.band_low == null ? null : Math.max(0, h.band_low));
   return {
     ...baseOption(), grid: {left: 44, right: 8, top: 8, bottom: 20},
     xAxis: {type: 'category', data: hh, boundaryGap: false, axisLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10, interval: 5}},
     yAxis: {type: 'value', splitNumber: 3, splitLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10}},
     tooltip: {...baseOption().tooltip, trigger: 'axis', formatter: ps => {
       const h = hrs[ps[0].dataIndex];
-      return `<b>${escapeHtml(v.service)} ${hh[ps[0].dataIndex]}:00</b><br>today ${plInt(h.rate)}/min<br>expected ${plInt(h.band_low)}–${plInt(h.band_high)}<br>last week ${plInt(h.last_week)}`;
+      return `<b>${escapeHtml(v.service)} ${hh[ps[0].dataIndex]}:00</b><br>today ${plInt(h.rate)}/min<br>expected ${plInt(lo(h))}–${plInt(h.band_high)}<br>last week ${plInt(h.last_week)}`;
     }},
     series: [
-      {type: 'line', data: hrs.map(h => h.band_low), stack: 'b', symbol: 'none', lineStyle: {opacity: 0}, silent: true},
-      {type: 'line', data: hrs.map(h => (h.band_high != null && h.band_low != null ? h.band_high - h.band_low : null)), stack: 'b', symbol: 'none', lineStyle: {opacity: 0}, areaStyle: {color: t.band}, silent: true},
+      {type: 'line', data: hrs.map(lo), stack: 'b', symbol: 'none', lineStyle: {opacity: 0}, silent: true},
+      {type: 'line', data: hrs.map(h => (h.band_high != null && h.band_low != null ? h.band_high - lo(h) : null)), stack: 'b', symbol: 'none', lineStyle: {opacity: 0}, areaStyle: {color: t.band}, silent: true},
       {type: 'line', data: hrs.map(h => h.last_week), symbol: 'none', lineStyle: {type: 'dashed', width: 1.2, color: t.lastweek}},
       {type: 'line', data: hrs.map(h => h.rate), symbol: 'none', lineStyle: {width: 2, color: t.line}},
       {type: 'scatter', data: out, symbolSize: 8, itemStyle: {color: t.cls.up2}},
@@ -258,8 +259,8 @@ function plMiniOption(v, row, t) {
 function plMiniTitle(row, v) {
   const last = v.hours[v.hours.length - 1] || {};
   const w = plVsWeek(row || {});
-  const state = last.rate == null || last.band_high == null ? '' : last.rate > last.band_high ? '▲ above expected' : last.rate < last.band_low ? '▼ below expected' : '';
-  return `<b>${escapeHtml(v.service)}</b><span>now ${plInt(row && row.rate)}/min · expected ${plInt(last.band_low)}–${plInt(last.band_high)} · ${w == null ? 'no last week' : `${plPct(w)} vs last week`}${state ? ` · ${state}` : ''}</span>`;
+  const state = !last.out ? '' : last.rate > last.band_high ? '▲ above expected' : '▼ below expected';
+  return `<b>${escapeHtml(v.service)}</b><span>now ${plInt(row && row.rate)}/min · expected ${plInt(last.band_low == null ? null : Math.max(0, last.band_low))}–${plInt(last.band_high)} · ${w == null ? 'no last week' : `${plPct(w)} vs last week`}${state ? ` · ${state}` : ''}</span>`;
 }
 function plDisposeMini(el) {
   _chartObservers.get(el)?.disconnect(); _chartObservers.delete(el);

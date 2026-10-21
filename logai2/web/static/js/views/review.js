@@ -43,7 +43,8 @@ function rvApplyRoute() {
   const sub = state.subView || '';
   if (sub === rv.lastSub) return;
   rv.lastSub = sub;
-  const p = sub.split('/').filter(Boolean).map(decodeURIComponent);
+  let p;
+  try { p = sub.split('/').filter(Boolean).map(decodeURIComponent); } catch (e) { return; }   // a malformed tail: keep the defaults
   if (p[0]) rv.service = p[0];
   if (p[1]) rv.key = p[1];
   if (p[2] === '14' || p[2] === '28') rv.days = Number(p[2]);
@@ -183,7 +184,7 @@ function rvRenderLegend() {
   const t = chartTokens(), k = rv.matrix.k.weekday;
   const items = [['none', 'no baseline'], ['in', `inside ±${k}σ`], ['up1', `above, to 6σ`], ['up2', '6–10σ'], ['up3', '> 10σ'],
                  ['down1', 'below, to 6σ'], ['down2', '6–10σ'], ['down3', '> 10σ']];
-  const drops = ['*total', '*error'].includes(rv.key);
+  const drops = rv.key === '*total';
   $rv('rv-legend').innerHTML = items.filter(([c]) => drops || !c.startsWith('down'))
     .map(([c, label]) => `<span><i style="background:${t.cls[c]}"></i>${label}</span>`).join('')
     + (drops ? '' : '<span>(below the band is never coloured for this key)</span>');
@@ -473,7 +474,7 @@ function rvRenderEffect(sel, d, row, decided) {
   $rv('rv-exclude').hidden = $rv('rv-keep').hidden = Boolean(decided);
   $rv('rv-undo').hidden = !decided;
   $rv('rv-undo').dataset.id = decided ? decided.id : '';
-  const commit = 'Takes effect at the next commit (02:00) or Recompute.';
+  const commit = `Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or Recompute.`;
   const thin = d.left_days.filter(x => x.days < 3);
   if (decided) {
     effect.className = 'rv-effect';
@@ -503,8 +504,8 @@ async function rvDecide(decision) {
     const result = await apiMutation('/api/baseline/decisions', 'POST',
       {service: rv.service, day: sel.day, hour_from: sel.from, hour_to: sel.to, decision});
     if (result.warning) showToast(`${result.warning.map(rvHour).join(', ')} now ${result.warning.length === 1 ? 'has' : 'have'} fewer than 3 days of baseline: floor-only alerts there.`, true);
-    rvStatus(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (02:00) or Recompute.`);
-    rvDecisionNote(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (02:00) or Recompute.`);
+    rvStatus(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or Recompute.`);
+    rvDecisionNote(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or Recompute.`);
     await rvReloadData();
     const next = rvSuggestions()[0];
     rv.sel = next ? {day: next.day, from: next.hour_from, to: next.hour_to} : null;
@@ -521,6 +522,7 @@ async function rvDecide(decision) {
 async function rvUndo(id) {
   try {
     await apiMutation(`/api/baseline/decisions/${id}`, 'DELETE', {});
+    rv.note = null; rvDecisionNote('');
     rvStatus('Decision undone: the hours are suggested again.');
     await rvReloadData();
     rvRenderAll();
@@ -572,7 +574,7 @@ function rvRenderCoverage() {
 }
 
 // ── Header controls ──
-function rvChangeRoute() { rv.sel = null; rv.cur = null; rvWriteRoute(); loadData(); }
+function rvChangeRoute() { rv.sel = null; rv.note = null; rvDecisionNote(''); rv.cur = null; rvWriteRoute(); loadData(); }
 $rv('rv-service').addEventListener('change', () => { rv.service = $rv('rv-service').value; rv.key = '*total'; rv.tplService = null; rvChangeRoute(); });
 $rv('rv-key').addEventListener('change', () => {
   const v = $rv('rv-key').value;
