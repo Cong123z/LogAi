@@ -201,6 +201,7 @@ logai2/
   embed.py, links.py, linker.py      embeddings client, layered links (SQL), the linker loop
   llm.py, resolver.py                LLM client (active profile), confirm-or-suggest resolver
   web/app.py, web/static/            Flask API and the seven pages
+  web/static/vendor/                 Apache ECharts 5.5.1 (echarts.min.js, vendored for offline use; Apache-2.0, ECHARTS-LICENSE)
 scripts/run_engine.py, run_web.py, run_linker.py, incident_test.py,
         split_doc_errors.py (seeded ERROR/Handling split), link_eval.py (measure link thresholds and the LLM)
 tests/                               pytest (Postgres on 5433)

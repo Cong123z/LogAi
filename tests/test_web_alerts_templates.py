@@ -180,3 +180,8 @@ def test_verify_certs_must_be_boolean(client):
     r = client.put("/api/sources/connection", json={"hosts": ["http://es:9200"], "username": "u", "password": "p",
                                                     "verify_certs": "false", "revision": None})
     assert r.status_code == 400 and "verify_certs" in r.get_json()["error"]
+
+
+def test_echarts_is_served_locally(client):
+    r = client.get("/static/vendor/echarts.min.js")
+    assert r.status_code == 200 and b"echarts" in r.data[:4096]

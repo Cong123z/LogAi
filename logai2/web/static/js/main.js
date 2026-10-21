@@ -23,6 +23,7 @@ function setView(route, updateHash = true) {
   const previousIndex = viewOrder.indexOf(previousView);
   const nextIndex = viewOrder.indexOf(view);
   const direction = nextIndex > previousIndex ? 'slide-from-right' : 'slide-from-left';
+  if (previousView !== view) disposeCharts();
   state.activeView = view;
   document.querySelectorAll('.view').forEach(section => {
     const active = section.id === `view-${view}`;
@@ -103,8 +104,12 @@ document.getElementById('theme-toggle').addEventListener('click', () => {
   document.documentElement.dataset.theme = next;
   try { localStorage.setItem('logai.theme', next); } catch (e) { /* storage unavailable */ }
   updateThemeToggle();
+  disposeCharts(); loadData();
 });
 updateThemeToggle();
+window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+  updateThemeToggle(); disposeCharts(); loadData();
+});
 
 // ── Sidebar: collapse to an icon rail on desktop (remembered per browser) ──
 const $sidebar = document.querySelector('.sidebar');
