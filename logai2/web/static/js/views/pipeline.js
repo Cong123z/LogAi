@@ -28,6 +28,14 @@ const plHm = t => new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', mi
 const ST_WORD = {ok: 'OK', warn: 'Degraded', bad: 'Down'};
 const ST_ICON = {ok: '●', warn: '▲', bad: '■'};
 
+// Rewrite only when the HTML changed, and keep keyboard focus on the same row.
+function plSetHtml(el, html) {
+  if (el._plHtml === html) return;
+  const svc = document.activeElement?.closest?.('tr[data-svc]')?.dataset.svc;
+  el._plHtml = html; el.innerHTML = html;
+  if (svc) [...el.querySelectorAll('tr[data-svc]')].find(r => r.dataset.svc === svc)?.focus();
+}
+
 function plCard(label, value, sub = '', tone = '') {
   return `<div class="stat-card${tone ? ` pl-${tone}` : ''}"><div>
     <div class="stat-label">${escapeHtml(label)}</div>
@@ -109,7 +117,7 @@ function plTopologyOption(d, t) {
                   s: {color: t.muted, fontSize: 11, lineHeight: 15}, st: {color: col(n.id), fontSize: 11, fontWeight: 700, lineHeight: 16}}}})),
        links: [
          ...PL_MAIN.slice(0, -1).map((a, i) => ({source: name(a), target: name(PL_MAIN[i + 1]), lineStyle: {width}})),
-         {source: name('linker'), target: name('flush'), lineStyle: {type: 'dashed'}, label: {show: true, formatter: 'via Postgres', color: t.muted, fontSize: 11}},
+         {source: name('linker'), target: name('flush'), lineStyle: {type: 'dashed'}, label: {show: true, formatter: 'via Postgres', color: t.muted, fontSize: 11, rotate: 0, position: 'middle', offset: [34, 0]}},
          {source: name('linker'), target: name('llm')},
        ],
        edgeSymbol: ['none', 'arrow'], edgeSymbolSize: 9,
@@ -169,7 +177,7 @@ function plStageBody(id, d) {
     case 'linker': {
       if (!l) return '<p>The linker has not reported: automatic links are off.</p>';
       const p = l.pending || {};
-      return `<p>Pending: ${plInt(p.templates || 0)} templates, ${plInt(p.documents || 0)} documents. Last report ${escapeHtml(formatTs(l.heartbeat))}.</p>
+      return `<p>Pending: ${plInt(p.templates || 0)} templates, ${plInt(p.documents || 0)} documents.</p>
         <p>${l.links_changed ? 'Links changed last cycle.' : 'No link changes last cycle.'} ${l.last_error ? `Last error: ${escapeHtml(l.last_error)}` : 'No error.'}</p>`;
     }
     case 'llm': {
@@ -187,8 +195,8 @@ function plStageBody(id, d) {
 function plRenderStage(d) {
   const n = PL_NODES.find(x => x.id === pl.sel) || PL_NODES[0];
   const st = (d.stages || {})[n.id] || {status: 'warn', reason: null};
-  $pl('pl-stage').innerHTML = `<h4>${escapeHtml(n.name)} <span class="pl-state pl-state-${st.status}">${ST_ICON[st.status]} ${ST_WORD[st.status]}</span></h4>
-    <p>${st.reason ? escapeHtml(st.reason) : 'No problem reported.'}</p>${plStageBody(n.id, d)}`;
+  plSetHtml($pl('pl-stage'), `<h4>${escapeHtml(n.name)} <span class="pl-state pl-state-${st.status}">${ST_ICON[st.status]} ${ST_WORD[st.status]}</span></h4>
+    <p>${st.reason ? escapeHtml(st.reason) : 'No problem reported.'}</p>${plStageBody(n.id, d)}`);
 }
 
 // ── Lag and events/s ──
@@ -304,14 +312,14 @@ function plRenderServices(d) {
     const b = th.querySelector('.pl-sort');
     th.setAttribute('aria-sort', b && b.dataset.sort === key ? (dir > 0 ? 'ascending' : 'descending') : 'none');
   });
-  $pl('pl-services-tbody').innerHTML = rows.length ? rows.map(r => {
+  plSetHtml($pl('pl-services-tbody'), rows.length ? rows.map(r => {
     const out = r.z != null && Math.abs(r.z) > 3;
     return `<tr data-svc="${escapeHtml(r.service)}" tabindex="0" class="${pl.svc === r.service ? 'sel' : ''}">
       <td><span class="tmpl-id">${escapeHtml(r.service)}</span></td><td class="r">${plInt(r.rate)}</td><td class="r">${plPct(r.vs_week)}</td>
       <td class="r">${out ? `<span class="badge ${r.z < 0 ? 'badge-red' : 'badge-yellow'}">${r.z < 0 ? '▼' : '▲'} ${plZ(r.z)}</span>` : plZ(r.z)}</td>
       <td class="r">${plPercent(r.miss_ratio)}</td><td class="r">${plInt(r.templates)}</td><td class="r">${plInt(r.new_24h)}</td>
       <td class="r">${plInt(r.unparsed_1h)}</td><td class="r">${plInt(r.not_normal)}</td></tr>`;
-  }).join('') : '<tr><td colspan="9" class="empty-state">No service yet.</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty-state">No service yet.</td></tr>');
 }
 
 function plSelectService(svc) {
@@ -328,10 +336,11 @@ $pl('pl-services-tbody').addEventListener('keydown', e => {
 });
 document.querySelector('#pl-services thead').addEventListener('click', e => {
   const key = e.target.closest('.pl-sort')?.dataset.sort; if (!key) return;
+  if (!pl.data) return;
   pl.sort = {key, dir: pl.sort.key === key ? -pl.sort.dir : 1};
   plRenderServices(pl.data);
 });
-$pl('pl-multiples-more').addEventListener('click', () => { pl.showAll = !pl.showAll; plRenderMultiples(pl.data); });
+$pl('pl-multiples-more').addEventListener('click', () => { if (!pl.data) return; pl.showAll = !pl.showAll; plRenderMultiples(pl.data); });
 
 function plRenderIndices(d) {
   const rows = plIndexRows(d);
@@ -354,7 +363,9 @@ function plClear() {
   ['pl-topology', 'pl-lag', 'pl-eps'].forEach(id => echarts.getInstanceByDom($pl(id))?.clear());
   for (const [, card] of pl.minis) plDisposeMini(card.querySelector('.pl-mini-chart'));
   pl.minis.clear();
+  $pl('pl-multiples-more').hidden = true;
   $pl('pl-multiples').innerHTML = '';
+  $pl('pl-stage')._plHtml = $pl('pl-services-tbody')._plHtml = null;
   $pl('pl-stage').innerHTML = $pl('pl-tiles').innerHTML = $pl('pl-warnings').innerHTML = '';
   $pl('pl-services-tbody').innerHTML = $pl('pl-indices-tbody').innerHTML = '';
 }
