@@ -48,12 +48,15 @@ red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 ## Alerting
 
 One card per **alert row** (ARCHITECTURE §5): a document, an undocumented
-template, or the whole service. KPI cards count open rows and rows per state
+template, a **cluster** of similar undocumented templates of one service
+(embedding similarity ≥ `documentation.cluster_similarity`), or the whole
+service. KPI cards count open rows and rows per state
 (ALERTING, WARMING, COOLING); they and the state toggle filter the list.
 Rows keep the server's order (ALERTING first, then oldest).
 
 Each card shows the state badge, `service · title` (document title, or
-"Undocumented", or "Whole service") and `since`. Its lines are:
+"Undocumented", "Undocumented · N similar templates", or "Whole service")
+and `since`. Its lines are:
 
 - `totals` first: "All events" (`*total`), "Errors" (`*error`) or "Linked
   templates combined" (the `doc:` key);
@@ -62,6 +65,10 @@ Each card shows the state badge, `service · title` (document title, or
 Each line shows the last closed minute's count per minute and "(normal mean
 ± σ)" of the **current local hour** from the committed baseline, with the
 alert band (`mean ± kσ`) on hover; "(no baseline yet)" means floor-only.
+A template line also shows how it got its document when that was not by
+hand: `inherited`, `auto 0.87` (matched on the document's ERROR lines),
+`AI-confirmed`, or `AI suggestion: <title>` (a draft: shown, drives
+nothing), plus `SAFE` for a normal-operation document.
 A "Live · updated Ns ago" label turns into a stale warning after 15 s
 without a successful poll.
 
@@ -77,6 +84,9 @@ Live engine status from `worker_status`, written at every flush:
 - **Detection** On/Off ("catching up; counts only" until the first
   catch-up commit), **Bootstrap** (`since`, `until`), **Last commit**
   (time and baseline day);
+- **Linker**: Running / Stale (no report for 90 s) / Not running, with its
+  pending counts (templates and documents waiting for a vector) or its last
+  error;
 - a table of indices: position, floor, and `failing` / `caught up` /
   `catching up` / `not reading` (an `es_cursors` row the engine no longer
   reports).
@@ -85,8 +95,8 @@ Live engine status from `worker_status`, written at every flush:
 
 A paginated table of templates (100 per page by default; 50, 100 or 200
 selectable in the page, server cap 500), newest `last_seen` first. Filters:
-service, level, and a text search (case-insensitive substring of the
-template text, debounced 300 ms).
+service, level, **link** (not linked, or one link source), and a text
+search (case-insensitive substring of the template text, debounced 300 ms).
 
 Columns: alert state, template id, text (`<*>` highlighted), level, **rate**
 (average per minute in the current local hour = this hour's count /
@@ -94,16 +104,35 @@ counted minutes; red when above the band), **band** (`mean ± kσ` for this
 hour, judged exactly as detection does; "—" without a baseline), the
 **document** select, first seen, last seen.
 
-Choosing a document in the select links the template (`PUT …/link`);
-"— None —" unlinks it. Each change enqueues `reload_links`, so the
+The document select (ARCHITECTURE §5.1 for the layers):
+
+- a document: a **manual** link (`PUT …/link`). If similar templates of the
+  same service and level exist, an **Apply to similar** dialog lists them
+  (similarity ≥ `suggest_similarity`), pre-ticked at the inherit threshold;
+  the ticked ones become manual links too, in one request;
+- **No document**: a sticky manual "no document" (never linked
+  automatically);
+- **Automatic**: removes the row (`DELETE …/link`); the linker may link it
+  again.
+
+Under the select, the link source: `manual`, `no document`, `inherited 0.91
+from <template>`, `auto 0.87`, `AI-confirmed`, `AI suggestion`,
+`rejected`, or "not embedded yet". Automatic links have **Confirm** (→
+manual) and **Reject** buttons. Each change enqueues `reload_links`, so the
 engine's doc keys and alert rows follow within a tick. The table is not
 re-rendered while a select has focus.
 
 ## Documentation
 
-The runbook corpus: id, title, body, error code and the number of linked
-templates (expandable to the linked templates, from
-`/api/templates?doc_id=…`). Columns sort client-side.
+The runbook corpus (active documents): id, title, **ERROR / Handling**,
+error code and the number of linked templates (expandable to the linked
+templates, from `/api/templates?doc_id=…`). Columns sort client-side.
+
+A document has an **ERROR** field, the log line(s) it is for, one per line,
+and a **Handling** field, what to do. Only the ERROR lines are matched
+against templates; the list shows them normalized as matched ("no ERROR
+line" = never matched automatically, "embedding…" until the linker has
+embedded the current revision).
 
 - **Add document** opens the editor; the server assigns the next
   `DOC-NNN` id.
@@ -171,17 +200,21 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 |---|---|---|---|---|
 | `GET /` | — | `index.html` | — | — |
 | `GET /static/<path>` | — | static file | 404 | — |
-| `GET /api/pipeline` | — | `{status, cursors, stale}` | — | — |
+| `GET /api/pipeline` | — | `{status, cursors, stale, linker, linker_stale}` | — | — |
 | `GET /api/sources` | — | `{selection, connection, available_indices, resolution, indices}` | — | — |
 | `PUT /api/sources/selection` | `{patterns: [str], revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `GET /api/alerts` | — | `[alert row]` | — | — |
 | `GET /api/services` | — | `[service]` sorted | — | — |
-| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `q` | `{total, items}` | 400 | — |
-| `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null}` | `{doc_id}` | 400, 404 | `reload_links` |
-| `GET /api/documents` | — | `[document]` | — | — |
-| `POST /api/documents` | `{title, body, error_code?}` | `201 {doc_id, revision}` | 400 | — |
-| `PUT /api/documents/<doc_id>` | `{title, body, error_code?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
+| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `link_source`, `q` | `{total, items}` | 400 | — |
+| `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null, also?: [template_id]}` | `{doc_id, linked}` | 400, 404 | `reload_links` |
+| `DELETE /api/templates/<service>/<template_id>/link` | — | `{doc_id: null}` | 404 | `reload_links` |
+| `POST /api/templates/<service>/<template_id>/link/confirm` | — | `{doc_id, source}` | 404, 409 | `reload_links` |
+| `POST /api/templates/<service>/<template_id>/link/reject` | — | `{source}` | 404, 409 | `reload_links` |
+| `GET /api/templates/<service>/<template_id>/similar` | — | `{embedded, items}` | 404 | — |
+| `GET /api/documents` | query `status` (`active` default, `draft`, `rejected`) | `[document]` | 400 | — |
+| `POST /api/documents` | `{title, error?, handling?, error_code?}` | `201 {doc_id, revision}` | 400 | — |
+| `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
 | `GET /api/baseline` | query `service` | `{days, suggestions, decisions, last_commit, full_after_days}` | 404 | — |
 | `POST /api/baseline/decisions` | `{service, day, hour_from, hour_to, decision}` | `201 {id, warning?}` | 400, 404 | — |
@@ -209,7 +242,11 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 ```
 
 `status` fields are listed in ARCHITECTURE §10.5. `stale` is true when the
-heartbeat is missing or older than 30 s.
+heartbeat is missing or older than 30 s. `linker` is
+`worker_status['linker']` (`heartbeat`, `embedded_templates`,
+`embedded_documents`, `links_changed`, `pending {templates, documents}`,
+`warnings`, `last_error`) or null; `linker_stale` is true when it is missing
+or older than 90 s.
 
 ### `GET /api/sources`
 
@@ -262,8 +299,11 @@ fields come from the engine's status and are null until it reports.
               "band_low": -3.1, "band_high": 9.4, "mean": 2.0, "std": 1.8}]}]
 ```
 
-`kind` is `document`, `template` or `service`; `doc_id` and `title` are null
-except for documents. `templates` holds the template members, `totals` the
+`kind` is `document`, `template`, `cluster` or `service`; `doc_id` and
+`title` are null except for documents. Each template line has `link`:
+null, or `{doc_id, source, similarity, note, title, verdict}` of its
+`template_doc_links` row, drafts and rejected ones included (badges only:
+grouping uses only the links that drive alerts). `templates` holds the template members, `totals` the
 `*total`, `*error` and `doc:` members. `count` and the bands are from the
 last judged minute; `mean` / `std` are this local hour's baseline (null
 without one; for a doc key, the sums over its linked templates).
@@ -273,14 +313,17 @@ without one; for a doc key, the sums over its linked templates).
 - `page` (default 1) and `size` (default 100) are clamped to 1..10⁶ and
   1..500; a non-integer is 400 `"<name> must be an integer"`.
 - `service`, `level`, `doc_id`: exact match; `q`: case-insensitive
-  substring of the text.
+  substring of the text; `link_source`: `none` (no row) or one of
+  `manual`, `inherited`, `corpus`, `llm`, `draft`, `rejected` (else 400).
 
 ```json
 {"total": 308,
  "items": [{"service": "recharge", "template_id": "recharge:T00032",
             "text": "LixiHandler: <*> enterd Receiving subscriber incorrect: <*>",
             "level": "ERROR", "first_seen": 1792207560.0, "last_seen": 1792381140.0,
-            "doc_id": "DOC-001", "doc_title": "...", "state": "NORMAL",
+            "doc_id": "DOC-001", "doc_title": "...", "doc_verdict": "action",
+            "link_source": "inherited", "similarity": 0.91, "inherited_from": "recharge:T00031",
+            "note": null, "embedded": true, "state": "NORMAL",
             "rate": 2.4, "band_low": 0.0, "band_high": 9.4}]}
 ```
 
@@ -289,22 +332,45 @@ without one; for a doc key, the sums over its linked templates).
 
 ### `PUT /api/templates/<service>/<template_id>/link`
 
-`{"doc_id": "DOC-003"}` links (replacing any link, `source` `manual`),
-`{"doc_id": null}` unlinks. 400 `"doc_id must be a string or null"`; 404
-`"Unknown template"` or `"Unknown document"`. The link and its
+`{"doc_id": "DOC-003"}` links (replacing any link, `source` `manual`);
+`{"doc_id": null}` stores a manual "no document", which nothing automatic
+overwrites. `also` (≤ 500 template ids of the same service) links those
+too ("apply to similar"). 400 `"doc_id must be a string or null"`, `"also
+must be a list of at most 500 template ids"`; 404 `"Unknown template"`
+(also for an `also` id) or `"Unknown document"`. The links and their
 `reload_links` command commit together. The template id may contain `/`;
 the service may not.
 
+`DELETE …/link` removes the row whatever its source (back to automatic; a
+draft's document becomes `rejected`). `POST …/link/confirm` turns an
+`inherited`, `corpus`, `llm` or `draft` link into `manual` (a draft
+document becomes `active`); `POST …/link/reject` turns `inherited` /
+`corpus` into a manual "no document" and `llm` / `draft` into `rejected`
+(never sent to the LLM again). Both: 409 when the template has no automatic
+link.
+
+`GET …/similar`: templates of the same service and level class with
+similarity ≥ `documentation.suggest_similarity`, most similar first (≤
+200): `{template_id, text, level, similarity, current_doc_id,
+current_source, pre_ticked}`; `pre_ticked` = similarity ≥ the class's
+inherit threshold and not already manual. `embedded` is false while the
+template has no vector (then the list is empty).
+
 ### Documents
 
-- `GET /api/documents`: `[{doc_id, title, body, error_code, revision,
-  linked_templates}]` sorted by `doc_id`.
-- `POST`: `title` (≤ 200) and `body` (≤ 20000) required and non-empty after
-  trimming, `error_code` optional (≤ 100). The id is `DOC-` + the next number
+- `GET /api/documents?status=active`: `[{doc_id, title, error_code, error,
+  handling, status, source, verdict, confidence, revision, embedded,
+  error_lines, linked_templates}]` sorted by `doc_id`. `error_lines` = the
+  ERROR field normalized as the linker embeds it; `embedded` = the linker
+  has embedded this revision; `linked_templates` counts links that drive
+  alerts.
+- `POST`: `title` (≤ 200) required, and `error` (≤ 5000, ≤ 50 lines) or
+  `handling` (≤ 20000) non-empty after trimming; `error_code` optional (≤
+  100). The id is `DOC-` + the next number
   after the highest `DOC-<digits>` id, zero-padded to 3 (`DOC-013`); the
   table is locked during the insert so two creates never collide. 400
-  `"<field> must be text of at most N characters"` or `"title and body are
-  required"`.
+  `"<field> must be text of at most N characters"`, `"title and an ERROR or
+  Handling text are required"` or `"error must have at most 50 lines"`.
 - `PUT`: same fields plus `revision`; 404 `"Unknown document"`; 409 stale.
 - `DELETE`: 409 `linked` with the number of linked templates (the foreign
   key decides, so a link created concurrently is caught); 404.

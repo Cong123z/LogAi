@@ -21,10 +21,12 @@ alerts when a minute is outside that band for several minutes in a row. An
 alert is shown per **document** (runbook) when the alerting templates are
 linked to one. Results are exported through Prometheus and a web console.
 
-There is no training job, no model and no embedding service: the baseline is
-plain statistics rebuilt nightly from the stored counts.
+There is no training job and no model of its own: the baseline is plain
+statistics rebuilt nightly from the stored counts. Embeddings (bge-m3, the
+stack's existing service) are used only to link templates to documents
+(§5.1).
 
-Two processes share one Postgres database and never call each other:
+Three processes share one Postgres database and never call each other:
 
 - **Engine** (`scripts/run_engine.py`): one thread that reads Elasticsearch,
   templates lines, counts minutes, detects, flushes to Postgres, runs the
@@ -32,6 +34,11 @@ Two processes share one Postgres database and never call each other:
 - **Web** (`scripts/run_web.py`): Flask JSON API plus a static vanilla-JS
   console. It reads and writes Postgres only; it never connects to
   Elasticsearch and never runs migrations.
+- **Linker** (`scripts/run_linker.py`, `logai2/linker.py`): every
+  `embedding.cycle_seconds` (30 s) embeds templates and documents' ERROR
+  lines and recomputes the automatic document links (§5.1); a change
+  enqueues `reload_links` for the engine. It waits for the engine to create
+  the schema and never migrates.
 
 This is **sub-project 1** of the per-service-baseline design. Out of scope
 (later sub-projects):
@@ -61,6 +68,8 @@ flowchart LR
     MET[/metrics :9108/]
     PROM[(Prometheus)]
     USER[Operator browser]
+    LNK[logai2-linker]
+    EMB[bge-m3<br/>embeddings]
 
     APP -->|index documents| ES
     ES -->|range query per index| ENG
@@ -70,13 +79,16 @@ flowchart LR
     ENG --> MET
     PROM -->|scrape| MET
     USER --> WEB
+    LNK <-->|vectors, links,<br/>reload_links, worker_status| PG
+    LNK -->|/v1/embeddings| EMB
 ```
 
 Docker Compose (`docker-compose.yml`) runs `postgres`
-(`pgvector/pgvector:pg16`; pgvector is unused until sub-project 3),
-`logai2-engine` and `logai2-web`. Elasticsearch and the replayer are expected
-to run already on the external `aiops-net` network (the same one
-logai-engine joins). Host ports avoid a running logai-engine:
+(`pgvector/pgvector:pg16`; the `vector` extension is created in `public`),
+`logai2-engine`, `logai2-web` and `logai2-linker`, plus `logai2-tei`
+(bge-m3) under the `tei` profile. Elasticsearch, the replayer and the
+stack's `bge-m3` are expected to run already on the external `aiops-net`
+network (the same one logai-engine joins). Host ports avoid a running logai-engine:
 
 | Service | Container port | Host port |
 |---|---|---|
@@ -118,6 +130,7 @@ this order, later layers overriding earlier ones:
 | `LOGAI2_METRICS_PORT` | `metrics.port` | engine |
 | `LOGAI2_WEB_PORT` | `web.port` | web |
 | `LOGAI2_DOC_SEED_PATH` | `documentation.seed_path` | engine |
+| `LOGAI2_EMBEDDING_URL` | `embedding.url` | linker |
 
 Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 `aiops-net`) and `LOGAI2_DOC_SEED_VOLUME` (volume holding logai-engine's
@@ -160,6 +173,14 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `metrics.port` | 9108 | Prometheus endpoint (`metrics.host` exists but is unused: the exporter binds all interfaces) |
 | `web.host` / `web.port` | `0.0.0.0` / 5555 | Flask |
 | `documentation.seed_path` | `""` | corpus seeded into `documents` once, while the table is empty |
+| `documentation.inherit_similarity` | `{ERROR: 0.85, WARN: 0.88, INFO: 0.92}` | layer 1 threshold per level class (§5.1) |
+| `documentation.corpus_similarity` | `{ERROR: 0.85, WARN: 0.88, INFO: 0.92}` | layer 2 threshold per level class |
+| `documentation.corpus_margin` | 0.05 | layer 2: best document over the next one |
+| `documentation.suggest_similarity` | 0.80 | "apply to similar" list |
+| `documentation.cluster_similarity` | 0.85 | undocumented alerting templates joined into one row |
+| `embedding.url` / `model` | `http://bge-m3:8080` / `bge-m3` | OpenAI-style `/v1/embeddings`; empty url = nothing is embedded |
+| `embedding.batch` / `cycle_seconds` | 32 / 30 | texts per request; linker cycle |
+| `llm.*` | | Phase B (LLM resolver), not used yet |
 
 The repo's `config.yaml` sets only `elasticsearch.index: recharge-logs`,
 `baseline.sigma_multiplier: 3.0` and the two floors. Secrets and endpoints
@@ -238,7 +259,9 @@ On every start, if `documentation.seed_path` is set and `documents` is
 empty, the file is loaded once: JSON `{"entries": [...]}` (logai-engine's
 `documentation_corpus.json`) or `{"documents": [...]}`, or a bare YAML list.
 Each item gives `id` → `doc_id`, `title` (default the id), `error_code`,
-`text` → `body`. Compose mounts logai-engine's `logai-data` volume
+`error` (optional), `handling` (else `text`). logai-engine's corpus has no
+ERROR field: `scripts/split_doc_errors.py` splits the seeded documents once
+(`docs/plans/2026-10-21-corpus-error-split.yaml`). Compose mounts logai-engine's `logai-data` volume
 read-only for this.
 
 ## 5. Core data contracts
@@ -271,10 +294,46 @@ non-NORMAL `alert_state` row is grouped into one of:
 |---|---|---|
 | `document` | alerting templates linked to the document, plus its `doc:` key | the doc id |
 | `template` | one undocumented alerting template | `undocumented` |
+| `cluster` | undocumented alerting templates of one service joined by embedding similarity ≥ `cluster_similarity` (web only; the metrics pass no similarity) | `undocumented` |
 | `service` | `*total` and/or `*error` of the service ("no single cause") | `service` |
 
 A row's state is its worst member (ALERTING > COOLING > WARMING), `since`
 its earliest member. Rows are sorted by state rank, then oldest first.
+
+### 5.1 Document links
+
+A document is **ERROR** (the log line(s) it is for, one per line) plus
+**Handling** (what to do). Only the ERROR lines are embedded, each through
+`normalize()` first (`links.error_lines`), so they compare with template
+texts; a document with no ERROR line is never matched automatically.
+
+One `template_doc_links` row per template; its `source` is the layer
+(`logai2/links.py`, design section 3):
+
+| # | `source` | Rule | Drives alerts |
+|---|---|---|---|
+| 0 | `manual` | set on the web; `doc_id NULL` = "no document" | yes (NULL: no) |
+| 1 | `inherited` | nearest **manual** template of the same service and level class (ERROR/FATAL/CRITICAL, WARN/WARNING, other), cosine ≥ `inherit_similarity[class]`; `inherited_from` names it | yes |
+| 2 | `corpus` | best **active** document by its best ERROR line, ≥ `corpus_similarity[class]` and ≥ `corpus_margin` above the next document | yes |
+| 3 | `llm` | Phase B: the LLM picked a candidate document | yes |
+| 4 | `draft` | Phase B: the LLM wrote a document (`status draft`) | no |
+| — | `rejected` | the operator rejected a layer 3–4 result | no |
+
+"Drives alerts" = loaded by the detector (`doc:` keys, metrics) and used
+for alert rows: `doc_id IS NOT NULL AND source IN (manual, inherited,
+corpus, llm)` (`links.ALERTING_SOURCES`).
+
+`apply_links` (each linker cycle, one transaction) computes layers 1 and 2
+for every template with a vector and no `manual` / `rejected` row (layer 1
+wins), upserts what changed, replaces `llm` / `draft` rows (an unused
+draft document becomes `rejected`), and deletes `inherited` / `corpus` rows
+that no longer qualify, except while the template, or the manual template
+it inherits from, has no vector (its text just changed). Writes are guarded
+so a `manual` or `rejected` row written meanwhile is never overwritten.
+Inheritance only reads manual links, so links never drift. Templates are
+embedded with `AND text = <text read>`, documents with `AND revision =
+<revision read>`; the engine clears a template's vector when its text
+changes.
 
 ## 6. Reader
 
@@ -615,7 +674,7 @@ service-scoped primary key.
 | `services` | `service` | `partition` (crc32 % 60) | flush |
 | `modules` | `module_code` | `service` (FK) — the first service seen | flush |
 | `es_cursors` | `index` | `since_ms`, `floor_ms`, `updated_at` | flush |
-| `templates` | `service, template_id` | `level`, `text`, `first_seen`, `last_seen` | flush |
+| `templates` | `service, template_id` | `level`, `text`, `first_seen`, `last_seen`, `embedding` (vector(1024), NULL until embedded; cleared when the text changes) | flush; linker (`embedding`) |
 | `drain3_state` | `service` | `blob` (bytea), `version` | flush |
 | `service_hours` * | `service, day, hour` | `n_minutes` | flush |
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
@@ -625,12 +684,14 @@ service-scoped primary key.
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |
 | `alert_state` | `service, key` | `state`, `since`, `streak`, `score`, `count`, `band_low`, `band_high` | flush |
 | `alert_changes` | `service, key, at` | `from_state`, `to_state`, `count`, `band_low`, `band_high` | flush |
-| `documents` | `doc_id` | `title`, `error_code`, `body`, `revision`, `created_at`, `updated_at` | web, seed |
-| `template_doc_links` | `service, template_id` | `doc_id` (FK → documents), `source` (`manual`), `linked_at` | web |
+| `documents` | `doc_id` | `title`, `error_code`, `error`, `handling`, `status` (`active`/`draft`/`rejected`), `source` (`manual`/`llm`), `verdict` (`action`/`safe`), `confidence`, `revision`, `embedded_revision`, `created_at`, `updated_at` | web, seed; linker (`embedded_revision`) |
+| `document_errors` | `doc_id, n` | `text` (normalized ERROR line), `embedding` | linker |
+| `template_doc_links` | `service, template_id` | `doc_id` (FK → documents, NULL = no document), `source` (§5.1), `similarity`, `inherited_from`, `note`, `linked_at` | web, linker |
+| `llm_profiles` | `name` | `base_url`, `model`, `api_key`, `timeout_seconds`, `active` (at most one), `revision` | Phase B |
 | `error_samples` | — (index `service, template_id, at DESC`) | `service`, `template_id`, `at`, `line` | flush |
 | `settings` | `key` | `value` (jsonb), `revision`, `updated_at` | web, engine |
 | `commands` | `id` | `kind`, `payload` (jsonb), `created_at`, `done_at`, `result` (jsonb) | web enqueues, engine finishes |
-| `worker_status` | `worker` | `status` (jsonb), `updated_at` | engine |
+| `worker_status` | `worker` | `status` (jsonb), `updated_at` | engine (`engine`), linker (`linker`) |
 
 \* `PARTITION BY RANGE (day)`, one partition per local day named
 `<table>_YYYYMMDD`. Partitions are created at start (from the start minute's
@@ -664,7 +725,7 @@ transaction.
 
 ### 12.2 Commands
 
-The web inserts a row into `commands`; the engine takes all undone commands
+The web (and the linker) insert a row into `commands`; the engine takes all undone commands
 oldest first (`FOR UPDATE SKIP LOCKED`) at the start of every tick (no
 `LISTEN`), runs them between flushes and writes `done_at` and `result`. A
 failing command stores `{"error": "<Type>: <message>"}` and the engine
@@ -673,7 +734,7 @@ continues.
 | Kind | Enqueued by | Engine action | Result |
 |---|---|---|---|
 | `reload_sources` | `PUT /api/sources/selection`, `PUT /api/sources/connection` | re-apply the saved connection, re-resolve the selection | `{"resolution": {...}}` |
-| `reload_links` | `PUT /api/templates/<service>/<id>/link` | reload `template_doc_links` into the detector | `{}` |
+| `reload_links` | the web's link routes (`PUT`/`DELETE …/link`, `…/link/confirm`, `…/link/reject`), the linker when `apply_links` changed a link | reload the links that drive alerts into the detector | `{}` |
 | `recompute_baseline` | `POST /api/baseline/recompute` | flush, then the daily commit for the owner's day | `{"days_committed", "baseline_rows"}` |
 
 Any other kind fails with `unknown command kind`.
@@ -694,6 +755,8 @@ Any other kind fails with `unknown command kind`.
 | Web started before the engine | the web does not migrate; it sees missing tables until the engine has started once |
 | Container restart | `logai2-engine` and `logai2-web` use `restart: unless-stopped`; Postgres data lives in the `logai2-pg` volume |
 | Bad command | `commands.result.error`; the engine continues |
+| Embeddings service down | the linker logs it, reports `last_error` and pending counts in `worker_status['linker']`, keeps every existing link and retries next cycle |
+| Linker down | no new vectors or automatic links; existing links keep working; the Pipeline page shows the linker stale after 90 s |
 
 No DLQ.
 
@@ -722,6 +785,8 @@ No DLQ.
 | Web | A `/` in a service name cannot be linked through `PUT /api/templates/<service>/<id>/link` | 404 |
 | Database | `migrate()` has no advisory lock; the ES password is stored in clear | only the engine migrates; review before production |
 | Scale | One engine thread per database | v2 (Kafka, many readers/owners) is sub-project 7 |
+| Links | `apply_links` compares every template with every ERROR line and every manual template each cycle, exact search, no vector index | fine for thousands of templates; restrict to changed rows past ~50k |
+| Links | Thresholds are starting values (design test, same model) | calibrate with `scripts/link_eval.py` on real manual links |
 
 ## 15. Where the code departs from the spec
 
@@ -742,14 +807,15 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/001_init.sql`, `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/`, `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.
 5. `logai2/owner/owner.py`: the flush transaction.
 6. `logai2/jobs/commit.py`, `logai2/review.py`: the daily commit and suggestions.
 7. `logai2/engine.py`, `logai2/commands.py`, `logai2/metrics.py`: the loop.
-8. `logai2/web/app.py` and [`docs/WEB_UI.md`](docs/WEB_UI.md).
+8. `logai2/links.py`, `logai2/embed.py`, `logai2/linker.py`: document links (§5.1).
+9. `logai2/web/app.py` and [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
 Tests under `tests/` are executable examples of these contracts. Good starting
 points: `test_owner.py` (exact counts across a crash), `test_reader.py`
