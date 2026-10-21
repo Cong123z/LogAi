@@ -17,7 +17,7 @@ from logai2 import db
 from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
-from logai2.links import ALERTING_SOURCES, cluster_edges, error_lines, level_class, next_doc_id, similar
+from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import day_hour, daytype, minute_of
@@ -480,24 +480,36 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.get("/api/templates")
     def templates():
         page, size = int_arg("page", 1, 10**6), int_arg("size", 100, MAX_PAGE_SIZE)
-        where, args = ["true"], []
-        if request.args.get("link_source") not in (None, "", "none", *LINK_SOURCES):
-            raise BadRequest(f"link_source must be none or one of {', '.join(LINK_SOURCES)}")
-        if request.args.get("link_source") == "none":
-            where.append("l.template_id IS NULL")
+        link_source = request.args.get("link_source") or None
+        if link_source not in (None, "none", "review", *LINK_SOURCES):
+            raise BadRequest(f"link_source must be none, review or one of {', '.join(LINK_SOURCES)}")
+        where, args = ["true"], []   # every filter but link_source: review_total counts within these
         for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
-                              ("l.doc_id", request.args.get("doc_id")),
-                              ("l.source", request.args.get("link_source") if request.args.get("link_source") != "none" else None)):
+                              ("l.doc_id", request.args.get("doc_id"))):
             if value:
                 where.append(f"{column} = %s")
                 args.append(value)
         if request.args.get("q"):
             where.append("strpos(lower(t.text), lower(%s)) > 0")   # substring, no LIKE wildcards to escape
             args.append(request.args["q"])
+        review_sql, review_args = " AND ".join([*where, "l.source = ANY(%s)"]), [*args, list(AUTOMATIC_SOURCES)]
+        if link_source == "none":
+            where.append("l.template_id IS NULL")
+        elif link_source == "review":
+            where, args = [review_sql], review_args
+        elif link_source:
+            where.append("l.source = %s")
+            args.append(link_source)
         where_sql = " AND ".join(where)
+        order = "t.last_seen DESC, t.template_id"
+        if link_source == "review":   # what needs a decision first: alerting, then the worst level
+            order = (f"(a.state = 'ALERTING') IS TRUE DESC, CASE {class_sql('t.level')} WHEN 'ERROR' THEN 0 "
+                     f"WHEN 'WARN' THEN 1 ELSE 2 END, {order}")
         c = conn()
-        total = c.execute("SELECT count(*) AS n FROM templates t LEFT JOIN template_doc_links l "
-                          f"ON l.service = t.service AND l.template_id = t.template_id WHERE {where_sql}", args).fetchone()["n"]
+        count_sql = ("SELECT count(*) AS n FROM templates t LEFT JOIN template_doc_links l "
+                     "ON l.service = t.service AND l.template_id = t.template_id WHERE ")
+        total = c.execute(count_sql + where_sql, args).fetchone()["n"]
+        review_total = c.execute(count_sql + review_sql, review_args).fetchone()["n"]
         items = c.execute(
             "SELECT t.service, t.template_id, t.text, t.level, t.first_seen, t.last_seen, l.doc_id, "
             "d.title AS doc_title, d.verdict AS doc_verdict, l.source AS link_source, l.similarity, l.inherited_from, "
@@ -505,7 +517,7 @@ def create_app(cfg: AppConfig) -> Flask:
             "LEFT JOIN template_doc_links l ON l.service = t.service AND l.template_id = t.template_id "
             "LEFT JOIN documents d ON d.doc_id = l.doc_id "
             "LEFT JOIN alert_state a ON a.service = t.service AND a.key = t.template_id "
-            f"WHERE {where_sql} ORDER BY t.last_seen DESC, t.template_id LIMIT %s OFFSET %s",
+            f"WHERE {where_sql} ORDER BY {order} LIMIT %s OFFSET %s",
             [*args, size, (page - 1) * size]).fetchall()
 
         # Rate and band for the current local hour, judged exactly as detection does.
@@ -526,7 +538,7 @@ def create_app(cfg: AppConfig) -> Flask:
             verdict = judge(0, tid, i["level"], baseline.lookup(svc, tid, day, hour), cfg)
             i["band_low"], i["band_high"] = verdict.band_low, verdict.band_high
             i["first_seen"], i["last_seen"] = i["first_seen"].timestamp(), i["last_seen"].timestamp()
-        return jsonify({"total": total, "items": items})
+        return jsonify({"total": total, "review_total": review_total, "items": items})
 
     def known_template(c, service: str, template_id: str) -> None:
         if not c.execute("SELECT 1 FROM templates WHERE service = %s AND template_id = %s",
