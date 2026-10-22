@@ -164,6 +164,11 @@ input::placeholder, textarea::placeholder { color: var(--text-muted); }
 .stat-icon.known { background: var(--green-bg); color: var(--green); }
 .stat-icon.unknown { background: var(--orange-bg); color: var(--orange); }
 .stat-icon.services { background: var(--blue-bg); color: var(--blue); }
+.stat-icon.error { background: var(--red-bg); color: var(--red); }
+.stat-icon.warn { background: var(--yellow-bg); color: var(--yellow); }
+.stat-icon.info { background: var(--blue-bg); color: var(--blue); }
+#tpl-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }   /* six cards on one row */
+.toggle-group[hidden] { display: none; }
 .stat-label { font-size: 13px; color: var(--text-dim); margin-bottom: 2px; }
 .stat-value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; }
 

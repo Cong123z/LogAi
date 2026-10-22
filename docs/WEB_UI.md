@@ -174,6 +174,18 @@ Unreviewed hours are kept in the baseline.
 
 ## Templates
 
+A stats row on top (`stats` in `GET /api/templates`): **Templates**, **Known**
+(linked to a document by `manual`, `inherited`, `corpus` or `llm`),
+**Unknown** (the rest: not linked, AI suggestion, rejected, no document) and
+**ERROR / WARN / INFO** (level classes). They follow the service, level and
+search filters, not the mode, the link filter or the known filter.
+
+Templates, Known and Unknown are buttons: a click opens All templates with the
+**All · Known · Unknown** toggle set to match (`?status=known|unknown`; the
+pressed card is outlined). The toggle sits next to the mode toggle, is hidden
+and cleared in To review like the link filter, and each row carries a
+**Known** / **Unknown** badge next to its level (`known` per item).
+
 Two modes, a toggle at the left of the filter bar:
 
 - **To review (N)**: templates whose link is automatic (`inherited`,

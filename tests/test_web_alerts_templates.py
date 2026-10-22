@@ -145,6 +145,29 @@ def test_review_total_follows_filters(client, conn):
     assert get("q=nothing-matches") == 0
 
 
+def test_stats_count_levels_and_known(client, conn):
+    _review_fixture(conn)
+    get = lambda q: client.get(f"/api/templates?{q}").get_json()["stats"]
+    # pay: corpus, llm, inherited and manual are known; the draft and the unlinked one are not
+    assert get("service=pay") == {"total": 6, "error": 4, "warn": 1, "info": 1, "known": 4, "unknown": 2}
+    assert get("service=pay&link_source=none") == get("service=pay")   # link_source does not narrow the cards
+    assert get("level=ERROR")["known"] == 3
+
+
+def test_status_filter_known_unknown(client, conn):
+    _review_fixture(conn)
+    get = lambda q: client.get(f"/api/templates?service=pay&{q}").get_json()
+    known = get("status=known")
+    assert sorted(i["template_id"] for i in known["items"]) == ["pay:T00001", "pay:T00002", "pay:T00003", "pay:T00005"]
+    assert known["total"] == 4 and all(i["known"] for i in known["items"])
+    unknown = get("status=unknown")
+    assert sorted(i["template_id"] for i in unknown["items"]) == ["pay:T00004", "pay:T00006"]
+    assert not any(i["known"] for i in unknown["items"])
+    assert unknown["stats"]["total"] == 6 and unknown["review_total"] == 4   # status narrows only the list
+    assert get("status=unknown&link_source=review")["total"] == 1             # the draft
+    assert client.get("/api/templates?status=bogus").status_code == 400
+
+
 def test_link_unknown_doc_404_and_link_enqueues_reload(client, conn):
     add_template(conn, "pay:T00001")
     add_doc(conn, "D1")

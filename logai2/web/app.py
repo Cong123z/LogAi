@@ -46,6 +46,9 @@ LEVEL_CLASSES = ("ERROR", "WARN", "INFO")   # shown as ERROR (something to fix) 
 AUTOMATIC_SOURCES = ("inherited", "corpus", "llm", "draft")
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 LINK_SOURCES = ("manual", "inherited", "corpus", "llm", "draft", "rejected")
+# known = linked to a document that drives alerting; drafts, rejected, "no document" and unlinked are unknown.
+# One %s: ALERTING_SOURCES. IS TRUE so an unlinked template (NULLs) reads false, not NULL.
+KNOWN_SQL = "(l.doc_id IS NOT NULL AND l.source = ANY(%s)) IS TRUE"
 
 
 class BadRequest(ValueError):
@@ -545,6 +548,9 @@ def create_app(cfg: AppConfig) -> Flask:
         link_source = request.args.get("link_source") or None
         if link_source not in (None, "none", "review", *LINK_SOURCES):
             raise BadRequest(f"link_source must be none, review or one of {', '.join(LINK_SOURCES)}")
+        status = request.args.get("status") or None
+        if status not in (None, "known", "unknown"):
+            raise BadRequest("status must be known or unknown")
         where, args = ["true"], []   # every filter but link_source: review_total counts within these
         for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
                               ("l.doc_id", request.args.get("doc_id"))):
@@ -554,14 +560,18 @@ def create_app(cfg: AppConfig) -> Flask:
         if request.args.get("q"):
             where.append("strpos(lower(t.text), lower(%s)) > 0")   # substring, no LIKE wildcards to escape
             args.append(request.args["q"])
+        base_sql, base_args = " AND ".join(where), list(args)   # the stats cards count within these too
         review_sql, review_args = " AND ".join([*where, "l.source = ANY(%s)"]), [*args, list(AUTOMATIC_SOURCES)]
         if link_source == "none":
             where.append("l.template_id IS NULL")
         elif link_source == "review":
-            where, args = [review_sql], review_args
+            where, args = [review_sql], list(review_args)   # a copy: status appends to args
         elif link_source:
             where.append("l.source = %s")
             args.append(link_source)
+        if status:   # like link_source, it does not narrow review_total or the stats cards
+            where.append(f"{'' if status == 'known' else 'NOT '}{KNOWN_SQL}")
+            args.append(list(ALERTING_SOURCES))
         where_sql = " AND ".join(where)
         order = "t.last_seen DESC, t.template_id"
         if link_source == "review":   # what needs a decision first: alerting, then the worst level
@@ -572,15 +582,24 @@ def create_app(cfg: AppConfig) -> Flask:
                      "ON l.service = t.service AND l.template_id = t.template_id WHERE ")
         total = c.execute(count_sql + where_sql, args).fetchone()["n"]
         review_total = c.execute(count_sql + review_sql, review_args).fetchone()["n"]
+        level = class_sql("t.level")
+        stats = c.execute(
+            f"SELECT count(*) AS total, count(*) FILTER (WHERE {level} = 'ERROR') AS error, "
+            f"count(*) FILTER (WHERE {level} = 'WARN') AS warn, count(*) FILTER (WHERE {level} = 'INFO') AS info, "
+            f"count(*) FILTER (WHERE {KNOWN_SQL}) AS known FROM templates t "
+            "LEFT JOIN template_doc_links l ON l.service = t.service AND l.template_id = t.template_id WHERE " + base_sql,
+            [list(ALERTING_SOURCES), *base_args]).fetchone()
+        stats["unknown"] = stats["total"] - stats["known"]
         items = c.execute(
             "SELECT t.service, t.template_id, t.text, t.level, t.first_seen, t.last_seen, l.doc_id, "
             "d.title AS doc_title, d.verdict AS doc_verdict, l.source AS link_source, l.similarity, l.inherited_from, "
-            "l.note, t.embedding IS NOT NULL AS embedded, COALESCE(a.state, 'NORMAL') AS state FROM templates t "
+            f"l.note, t.embedding IS NOT NULL AS embedded, COALESCE(a.state, 'NORMAL') AS state, {KNOWN_SQL} AS known "
+            "FROM templates t "
             "LEFT JOIN template_doc_links l ON l.service = t.service AND l.template_id = t.template_id "
             "LEFT JOIN documents d ON d.doc_id = l.doc_id "
             "LEFT JOIN alert_state a ON a.service = t.service AND a.key = t.template_id "
             f"WHERE {where_sql} ORDER BY {order} LIMIT %s OFFSET %s",
-            [*args, size, (page - 1) * size]).fetchall()
+            [list(ALERTING_SOURCES), *args, size, (page - 1) * size]).fetchall()
 
         # Rate and band for the current local hour, judged exactly as detection does.
         day, hour = day_hour(minute_of(time.time()))
@@ -600,7 +619,7 @@ def create_app(cfg: AppConfig) -> Flask:
             verdict = judge(0, tid, i["level"], baseline.lookup(svc, tid, day, hour), cfg)
             i["band_low"], i["band_high"] = verdict.band_low, verdict.band_high
             i["first_seen"], i["last_seen"] = i["first_seen"].timestamp(), i["last_seen"].timestamp()
-        return jsonify({"total": total, "review_total": review_total, "items": items})
+        return jsonify({"total": total, "review_total": review_total, "stats": stats, "items": items})
 
     def known_template(c, service: str, template_id: str) -> None:
         if not c.execute("SELECT 1 FROM templates WHERE service = %s AND template_id = %s",

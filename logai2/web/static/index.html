@@ -89,10 +89,23 @@
       </section>
 
       <section class="view groups-section" id="view-templates" aria-label="Templates">
+        <div class="stats-row" id="tpl-stats" aria-live="polite">
+          <button type="button" class="stat-card stat-filter" data-tpl-status="" aria-pressed="false"><div class="stat-icon total"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h10"/></svg></div><div><div class="stat-label">Templates</div><div class="stat-value" id="tpl-stat-total">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-tpl-status="known" aria-pressed="false"><div class="stat-icon known"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4L12 14.01l-3-3"/></svg></div><div><div class="stat-label" title="Linked to a document that drives alerting">Known</div><div class="stat-value" id="tpl-stat-known">—</div></div></button>
+          <button type="button" class="stat-card stat-filter" data-tpl-status="unknown" aria-pressed="false"><div class="stat-icon unknown"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></div><div><div class="stat-label">Unknown</div><div class="stat-value" id="tpl-stat-unknown">—</div></div></button>
+          <div class="stat-card"><div class="stat-icon error"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6"/><path d="M9 9l6 6"/></svg></div><div><div class="stat-label">ERROR</div><div class="stat-value" id="tpl-stat-error">—</div></div></div>
+          <div class="stat-card"><div class="stat-icon warn"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 2.9L1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0z"/></svg></div><div><div class="stat-label">WARN</div><div class="stat-value" id="tpl-stat-warn">—</div></div></div>
+          <div class="stat-card"><div class="stat-icon info"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg></div><div><div class="stat-label">INFO</div><div class="stat-value" id="tpl-stat-info">—</div></div></div>
+        </div>
         <div class="filter-bar">
           <div class="toggle-group" id="tpl-mode-toggle" role="tablist" aria-label="Templates to review or all">
             <button class="toggle-btn" role="tab" aria-selected="false" data-tpl-mode="review">To review<span class="count-pill" id="tpl-review-count" hidden></span></button>
             <button class="toggle-btn" role="tab" aria-selected="false" data-tpl-mode="all">All templates</button>
+          </div>
+          <div class="toggle-group" id="tpl-status-toggle" role="group" aria-label="Known or unknown templates" hidden>
+            <button type="button" class="toggle-btn" data-tpl-status="" aria-pressed="true">All</button>
+            <button type="button" class="toggle-btn" data-tpl-status="known" aria-pressed="false">Known</button>
+            <button type="button" class="toggle-btn" data-tpl-status="unknown" aria-pressed="false">Unknown</button>
           </div>
           <div class="search-wrap">
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>

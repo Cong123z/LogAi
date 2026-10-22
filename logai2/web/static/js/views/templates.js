@@ -3,7 +3,7 @@
 // person, alerting first; "All templates" lists every template. Each row shows this hour's rate
 // against its normal band and the linked document; the drawer holds the decision.
 // mode null = not chosen yet: the first answer picks "review" when anything waits for review.
-const tpl = {mode: null, search: '', service: '', level: '', link: '', page: 1, size: 100, refreshTimer: null,
+const tpl = {mode: null, search: '', service: '', level: '', link: '', status: '', page: 1, size: 100, refreshTimer: null,
              items: new Map(), order: [], docs: [], drawerItem: null};
 const $tplModeToggle = document.getElementById('tpl-mode-toggle');
 const $tplReviewCount = document.getElementById('tpl-review-count');
@@ -11,6 +11,7 @@ const $tplTbody = document.getElementById('template-tbody');
 const $tplService = document.getElementById('filter-service');
 const $tplLevel = document.getElementById('filter-level');
 const $tplLink = document.getElementById('filter-link');
+const $tplStatusToggle = document.getElementById('tpl-status-toggle');
 const $similarModal = document.getElementById('similar-modal');
 const NO_DOCUMENT = '__none__';
 const AUTOMATIC_SOURCES = ['inherited', 'corpus', 'llm', 'draft'];
@@ -26,6 +27,7 @@ function fetchTemplates() {
   if (tpl.level) params.set('level', tpl.level);
   if (tpl.mode === 'review') params.set('link_source', 'review');
   else if (tpl.link) params.set('link_source', tpl.link);
+  if (tpl.status) params.set('status', tpl.status);
   return getJson(`/api/templates?${params}`, 'Unable to load templates');
 }
 function fetchServices() { return getJson('/api/services', 'Unable to load services'); }
@@ -133,7 +135,8 @@ function renderTemplates(data) {
       <tr class="tpl-row" data-key="${escapeHtml(tplKey(t))}">
         <td>${tplStateCell(t)}</td>
         <td><div class="cell-stack"><span class="link-meta"><span class="tmpl-id">${escapeHtml(t.template_id)}</span>
-          <span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span></span>
+          <span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span>
+          <span class="badge ${t.known ? 'badge-known' : 'badge-unknown'}">${t.known ? 'Known' : 'Unknown'}</span></span>
           <div class="tmpl-text">${highlightWildcards(escapeHtml(t.text))}</div></div></td>
         <td>${tplRateHtml(t)}</td>
         <td>${tplDocCell(t)}</td>
@@ -192,10 +195,30 @@ async function loadTemplates() {
   $tplReviewCount.hidden = !data.review_total;
   $tplModeToggle.querySelector('[data-tpl-mode="review"]')
     .setAttribute('aria-label', `To review, ${data.review_total} template${data.review_total === 1 ? '' : 's'}`);
+  for (const [k, n] of Object.entries(data.stats)) document.getElementById(`tpl-stat-${k}`).textContent = n.toLocaleString();
   renderTemplates(data);
 }
 
-// The link filter overlaps To review (it lists only automatic links): hidden and cleared there.
+// Known / Unknown: the toggle and the stat cards set the same filter; the cards show it only in All templates.
+function setTplStatus(status) {
+  tpl.status = status;
+  tpl.page = 1;
+  document.querySelectorAll('[data-tpl-status]').forEach(b => {
+    const on = b.dataset.tplStatus === status && (tpl.mode === 'all' || b.closest('#tpl-status-toggle'));
+    b.setAttribute('aria-pressed', String(Boolean(on)));
+    b.classList.toggle('active', Boolean(on) && b.classList.contains('toggle-btn'));
+  });
+}
+
+// A card is a way into All templates: its number is the list it opens.
+document.querySelectorAll('[data-tpl-status]').forEach(b => b.addEventListener('click', () => {
+  if (tpl.mode !== 'all') setTplMode('all');
+  else if (b.dataset.tplStatus === tpl.status) return;
+  setTplStatus(b.dataset.tplStatus);
+  loadData();
+}));
+
+// The link and known filters overlap To review (it lists only automatic links): hidden and cleared there.
 function setTplMode(mode) {
   tpl.mode = mode;
   tpl.page = 1;
@@ -203,8 +226,9 @@ function setTplMode(mode) {
     b.classList.toggle('active', b.dataset.tplMode === mode);
     b.setAttribute('aria-selected', String(b.dataset.tplMode === mode));
   });
-  $tplLink.hidden = mode === 'review';
+  $tplLink.hidden = $tplStatusToggle.hidden = mode === 'review';
   if (mode === 'review') tpl.link = $tplLink.value = '';
+  setTplStatus(mode === 'review' ? '' : tpl.status);
 }
 
 $tplModeToggle.addEventListener('click', event => {
