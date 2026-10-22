@@ -124,7 +124,6 @@ class LlmConfig:
     candidates: int = 3
     per_service_hour: int = 5
     daily_max: int = 50
-    new_hours: int = 24                  # a template first seen this recently is resolved even when not alerting
     max_input_chars: int = 8000
 
 

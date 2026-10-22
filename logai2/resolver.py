@@ -133,13 +133,12 @@ class Resolver:
                 WHERE t.embedding IS NOT NULL
                   AND NOT EXISTS (SELECT 1 FROM template_doc_links l
                                   WHERE l.service = t.service AND l.template_id = t.template_id)
-                  AND (a.state = 'ALERTING' OR t.first_seen > now() - make_interval(hours => %s))
                   AND NOT t.service = ANY(%s)
                   AND (t.service, t.template_id) NOT IN (SELECT * FROM unnest(%s::text[], %s::text[]))
                 ORDER BY (a.state = 'ALERTING') IS TRUE DESC,
                          CASE {class_sql('t.level')} WHEN 'ERROR' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END,
                          t.last_seen DESC
-                LIMIT 50""", (lc.new_hours, capped, [k[0] for k in self._failed],
+                LIMIT 50""", (capped, [k[0] for k in self._failed],
                               [k[1] for k in self._failed])).fetchall()
         done = {"confirmed": 0, "suggested": 0, "none": 0, "failed": 0}
         self._calls = 0

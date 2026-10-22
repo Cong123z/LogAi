@@ -186,7 +186,6 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `embedding.batch` / `cycle_seconds` | 32 / 30 | texts per request; linker cycle |
 | `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
 | `llm.per_service_hour` / `daily_max` | 5 / 50 | LLM results per service per hour, in all per day |
-| `llm.new_hours` | 24 | a template first seen this recently is resolved even when not alerting |
 | `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |
 
 The repo's `config.yaml` sets only `elasticsearch.index: recharge-logs`,
@@ -362,8 +361,8 @@ changes.
 
 **LLM resolver** (`logai2/resolver.py`, layers 3–4, run by the linker after
 `apply_links`). With at least one active `llm_profiles` row, it takes templates that
-have a vector and no link row at all, that are ALERTING or first seen within
-`llm.new_hours` (24), ALERTING first then ERROR > WARN > INFO, about 3 LLM
+have a vector and no link row at all, of any level, alert state or age,
+ALERTING first then ERROR > WARN > INFO, about 3 LLM
 calls per cycle (a template's second call may exceed it by one),
 `llm.per_service_hour` (5) per service and `llm.daily_max` (50) in all.
 Templates resolved count, from `llm` / `draft` / `rejected` rows by
