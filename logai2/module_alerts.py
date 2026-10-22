@@ -74,7 +74,7 @@ def module_alerts(conn, module_code: str, start: float, end: float, warm_consecu
             WHERE service = ANY(%(s)s) AND key NOT LIKE '*%%' AND key NOT LIKE 'doc:%%'
               AND at >= %(lo)s AND at < %(hi)s
            ORDER BY at""",
-        {"s": services, "lo": ts(start + 60), "hi": ts(end + 60)}).fetchall()
+        {"s": services, "lo": ts(start + 60), "hi": ts(end + 60 * warm_consecutive)}).fetchall()
     by_service = defaultdict(list)
     for r in rows:
         by_service[r["service"]].append(r)
@@ -106,10 +106,12 @@ def module_alerts(conn, module_code: str, start: float, end: float, warm_consecu
     def counted(svc_key, m):
         return start <= m < end and any(ps <= m < pe for ps, pe in found[svc_key]["p"])
 
+    svcs, keys = [k[0] for k in found], [k[1] for k in found]
+    pairs = "(service, {}) IN (SELECT * FROM unnest(%s::text[], %s::text[]))"
     minutes = conn.execute(
-        """SELECT service, key, module_code, minute, count FROM alert_minutes
-            WHERE service = ANY(%s) AND day BETWEEN %s AND %s AND minute >= %s AND minute < %s""",
-        (services, _day(start), _day(end - 1), ts(start), ts(end))).fetchall()
+        f"""SELECT service, key, module_code, minute, count FROM alert_minutes
+            WHERE {pairs.format('key')} AND day BETWEEN %s AND %s AND minute >= %s AND minute < %s""",
+        (svcs, keys, _day(start), _day(end - 1), ts(start), ts(end))).fetchall()
     mod: dict = defaultdict(lambda: defaultdict(int))   # (svc, key) -> minute -> module count
     tpl: dict = defaultdict(lambda: defaultdict(int))
     for r in minutes:
@@ -120,11 +122,14 @@ def module_alerts(conn, module_code: str, start: float, end: float, warm_consecu
                 mod[k][m] += r["count"]
 
     meta = {(r["service"], r["template_id"]): r for r in conn.execute(
-        "SELECT service, template_id, level, text FROM templates WHERE service = ANY(%s)", (services,))}
+        f"SELECT service, template_id, level, text FROM templates WHERE {pairs.format('template_id')}",
+        (svcs, keys))}
     docs = {(r["service"], r["template_id"]): r for r in conn.execute(
         """SELECT l.service, l.template_id, d.doc_id, d.title FROM template_doc_links l
-             JOIN documents d USING (doc_id) WHERE l.service = ANY(%s) AND l.source = ANY(%s)""",
-        (services, list(links.ALERTING_SOURCES)))}
+             JOIN documents d USING (doc_id)
+            WHERE (l.service, l.template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))
+              AND l.source = ANY(%s)""",
+        (svcs, keys, list(links.ALERTING_SOURCES)))}
 
     def stats(per_minute, n):
         total = sum(per_minute.values())
@@ -135,7 +140,7 @@ def module_alerts(conn, module_code: str, start: float, end: float, warm_consecu
         if not sum(mod[k].values()):
             continue
         svc, key = k
-        n = int(sum((min(pe, end) - max(ps, start)) / 60 for ps, pe in f["p"]))
+        n = round(sum((min(pe, end) - max(ps, start)) / 60 for ps, pe in f["p"]))
         m_stats = stats(mod[k], n)
         if end - start <= 86400:
             m_stats["series"] = [{"minute": m, "count": c} for m, c in sorted(mod[k].items())]

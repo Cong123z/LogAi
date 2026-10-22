@@ -188,6 +188,8 @@ def test_parse_window():
     oldest = datetime(2026, 7, 22, tzinfo=TZ).timestamp()       # local date of now is 2026-10-20
     assert pw(module_code="M", **{"from": "0", "to": "1792458000"})[3] == oldest
     assert pw(module_code="M", **{"from": "1792458000", "to": str(now + 3600)})[4] == now
+    # both after now: collapses to one minute at floor(from)
+    assert pw(module_code="M", **{"from": str(now + 3630), "to": str(now + 7200)})[3:] == (now + 3600, now + 3660)
     for bad in ({}, {"module_code": ""}, {"module_code": "M"}, {"module_code": "M", "from": "0"},
                 {"module_code": "M", "to": "0"}, {"module_code": "M", "from": "abc", "to": "0"},
                 {"module_code": "M", "from": "200", "to": "100"}):
