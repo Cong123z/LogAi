@@ -67,5 +67,5 @@ def test_usage_counts_llm_results_and_reports_the_linker(client, conn):
     conn.commit()
     u = client.get("/api/llm/usage").get_json()
     assert u["hour"] == {"llm": 1, "draft": 0} and u["day"] == {"llm": 1, "draft": 1} and u["drafts_waiting"] == 1
-    assert u["linker_running"] and u["last_error"] == "llm: timeout" and u["limits"]["daily_max"] == 50
+    assert u["linker_running"] and u["last_error"] == "llm: timeout" and u["limits"]["daily_max"] == 0
     assert u["profiles"] == {"p": {"down_until": 1, "error": "502"}}

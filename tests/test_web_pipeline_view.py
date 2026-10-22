@@ -97,7 +97,7 @@ def test_pipeline_lite_and_llm_cap(client):
     lite = client.get("/api/pipeline?lite=1").get_json()
     assert {"status", "cursors", "stale", "linker", "linker_stale"} <= set(lite)
     assert not {"services", "volume", "stages"} & set(lite)
-    assert client.get("/api/pipeline").get_json()["llm_daily_max"] == 50
+    assert client.get("/api/pipeline").get_json()["llm_daily_max"] == 0
 
 
 def test_malformed_last_commit_is_not_overdue():

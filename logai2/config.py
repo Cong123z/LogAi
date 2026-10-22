@@ -122,8 +122,8 @@ class EmbeddingConfig:
 class LlmConfig:
     candidate_similarity: float = 0.60   # documents the LLM may confirm
     candidates: int = 3
-    per_service_hour: int = 5
-    daily_max: int = 50
+    per_service_hour: int = 0            # 0 = no limit
+    daily_max: int = 0                   # 0 = no limit
     max_input_chars: int = 8000
 
 

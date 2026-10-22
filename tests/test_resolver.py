@@ -109,6 +109,25 @@ def test_any_age_or_state_is_resolved_worst_level_first(conn, cfg, profile):
     assert [s["template"]["text"] for s in chat.seen] == ["text OLD_ERROR"]
 
 
+def test_zero_limits_mean_no_cap_but_one_cycle_stays_bounded(conn, cfg, profile):
+    cfg.llm.daily_max = cfg.llm.per_service_hour = 0
+    for n in range(5):
+        tmpl(conn, f"T{n}", "INFO", v=vec((n, 1.0)))
+    status = run(conn, cfg, Chat(*[{"title": "t", "handling": "h"}] * 3))
+    assert status["llm"]["suggested"] == 3          # PER_CYCLE bounds the cycle, not a budget
+    assert status["llm_today"] == 3
+    assert not [w for w in status["warnings"] if "daily limit" in w]
+
+
+def test_a_positive_daily_max_still_stops_and_warns(conn, cfg, profile):
+    cfg.llm.daily_max, cfg.llm.per_service_hour = 2, 0
+    for n in range(3):
+        tmpl(conn, f"T{n}", v=vec((n, 1.0)))
+    status = run(conn, cfg, Chat(*[{"title": "t", "handling": "h"}] * 2))
+    assert status["llm"]["suggested"] == 2
+    assert "LLM daily limit reached (2)" in status["warnings"]
+
+
 def test_failures_back_off_and_bad_suggestions_fail(conn, cfg, profile):
     tmpl(conn, "A", v=vec((0, 1.0))), alerting(conn, "A")
     resolver_chat = Chat(LlmError("timeout"))

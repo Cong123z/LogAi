@@ -125,7 +125,7 @@ class Resolver:
             for svc, t in self._spent:
                 if t > now - 3600:
                     per_service[svc] = per_service.get(svc, 0) + 1
-            capped = [svc for svc, n in per_service.items() if n >= lc.per_service_hour]
+            capped = [svc for svc, n in per_service.items() if 0 < lc.per_service_hour <= n]
             # capped services and backed-off templates are left out here, so they never fill the LIMIT
             todo = self.conn.execute(f"""
                 SELECT t.service, t.template_id, t.level, t.text FROM templates t
@@ -144,9 +144,9 @@ class Resolver:
         self._calls = 0
         for t in todo:
             key = (t["service"], t["template_id"])
-            if self._calls >= PER_CYCLE or day >= lc.daily_max:
+            if self._calls >= PER_CYCLE or 0 < lc.daily_max <= day:
                 break
-            if per_service.get(t["service"], 0) >= lc.per_service_hour:
+            if 0 < lc.per_service_hour <= per_service.get(t["service"], 0):
                 continue
             try:
                 outcome = self._resolve(t)
@@ -172,7 +172,7 @@ class Resolver:
                                               "answers": self.answers.get(p["name"], 0)}
                                   for p in self.profiles}
         status["llm_last_error"] = self.last_error
-        if day >= lc.daily_max:
+        if 0 < lc.daily_max <= day:
             status["warnings"].append(f"LLM daily limit reached ({lc.daily_max})")
 
     def _resolve(self, t: dict) -> str:
