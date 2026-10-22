@@ -1,6 +1,6 @@
 # Module alert API
 
-Date: 2026-10-22. Status: **approved 2026-10-22, not built**. Sub-project 4. Plan:
+Date: 2026-10-22. Status: **built**, merged into `master` as `466efad`; docs/WEB_UI.md describes the API as built. Sub-project 4. Plan:
 [`docs/plans/2026-10-20-module-alert-api.md`](../plans/2026-10-20-module-alert-api.md).
 Design: [`per-service-baseline.md`](../design/per-service-baseline.md) §7.
 

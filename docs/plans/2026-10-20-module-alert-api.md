@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **approved, not built** (sub-project 4). Rewritten 2026-10-22 against `master` `6c600f3`.
+Status: **built** (sub-project 4), merged into `master` as `466efad` (2026-10-22). Rewritten 2026-10-22 against `master` `6c600f3`.
 
 **Goal:** other services call `GET /api/module-alerts?module_code=M&from=…&to=…` and get the
 templates that were WARMING or ALERTING in that window and were logged by module M, with M's
