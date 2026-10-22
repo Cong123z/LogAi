@@ -93,6 +93,7 @@ class MetricsConfig:
 class WebConfig:
     host: str = "0.0.0.0"
     port: int = 5555
+    api_token: str = ""   # set = GET /api/module-alerts needs Authorization: Bearer <token>
 
 
 def _by_class(error: float, warn: float, info: float):
@@ -188,6 +189,8 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.metrics.port = int(env("LOGAI2_METRICS_PORT"))
     if env("LOGAI2_WEB_PORT"):
         cfg.web.port = int(env("LOGAI2_WEB_PORT"))
+    if env("LOGAI2_API_TOKEN"):
+        cfg.web.api_token = env("LOGAI2_API_TOKEN")
     if env("LOGAI2_DOC_SEED_PATH"):
         cfg.documentation.seed_path = env("LOGAI2_DOC_SEED_PATH")
     if env("LOGAI2_EMBEDDING_URL"):

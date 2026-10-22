@@ -60,7 +60,9 @@ services:
     image: logai2
     container_name: logai2-web
     command: ["python", "scripts/run_web.py"]
-    environment: *logai2-env
+    environment:
+      <<: *logai2-env
+      LOGAI2_API_TOKEN: ${LOGAI2_API_TOKEN:-}
     ports:
       - "5565:5555"
     networks: [default, aiops-net]
