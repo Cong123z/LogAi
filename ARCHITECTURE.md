@@ -41,7 +41,7 @@ Three processes share one Postgres database and never call each other:
   enqueues `reload_links` for the engine. It waits for the engine to create
   the schema and never migrates.
 
-This covers **sub-projects 1 and 2/3** of the per-service-baseline design
+This covers **sub-projects 1, 2/3 and 4** (4: the module alert API, `GET /api/module-alerts`, `logai2/module_alerts.py`; spec `docs/specs/2026-10-22-module-alert-api.md`) of the per-service-baseline design
 (2/3: embeddings, layered document links, the LLM resolver and its
 profiles; plan
 [`docs/plans/2026-10-21-embeddings-doc-links.md`](docs/plans/2026-10-21-embeddings-doc-links.md)).
@@ -50,7 +50,6 @@ Out of scope (later sub-projects):
 | # | Sub-project |
 |---|---|
 | 0 | Benchmark spike on `udcntt*` (ES `took`, docs/s per core, cache hit rate, ingest-time field) |
-| 4 | Module alert API (`module_code` and `alert_minutes` are collected now so the history exists; plan `docs/plans/2026-10-20-module-alert-api.md` on `master`) |
 | 5 | Sampled catch-up on first start |
 | 6 | AI chat in the document editor; LLM pages (AI Insights, Incidents) (LLM profiles were built with 2/3) |
 | 7 | v2: Kafka, many readers and owners |
@@ -133,6 +132,7 @@ this order, later layers overriding earlier ones:
 | `LOGAI2_ES_INDEX` | `elasticsearch.index` | engine, web (fallback selection) |
 | `LOGAI2_METRICS_PORT` | `metrics.port` | engine |
 | `LOGAI2_WEB_PORT` | `web.port` | web |
+| `LOGAI2_API_TOKEN` | `web.api_token`; set = `GET /api/module-alerts` needs `Authorization: Bearer <token>` | web |
 | `LOGAI2_DOC_SEED_PATH` | `documentation.seed_path` | engine |
 | `LOGAI2_EMBEDDING_URL` | `embedding.url` | linker |
 
@@ -875,6 +875,7 @@ No DLQ.
 | Commit | The rebuild recomputes every key nightly | restrict to keys touched since the last commit if it gets slow |
 | Commands | Polled every tick, no `LISTEN`; `recompute_baseline` is not deduplicated | a burst of recompute clicks runs the commit several times |
 | Web | Flask development server, one connection per request, no auth, no pagination on `/api/baseline` | expose only on a trusted network; add a pool if many operators |
+| Web | One shared `LOGAI2_API_TOKEN` guards `/api/module-alerts`, no per-caller keys | rotate by changing the env var and restarting the web |
 | Web | A `/` in a service name cannot be linked through `PUT /api/templates/<service>/<id>/link` | 404 |
 | Database | `migrate()` has no advisory lock; the ES password and LLM API keys are stored in clear | only the engine migrates; review before production |
 | LLM | Up to 3 calls per cycle, one at a time; failure back-off is in memory | a cycle can take minutes with a slow model; a restart retries failed templates |

@@ -135,10 +135,23 @@ connection and index selection saved on the **Data sources** page.
 | `LOGAI2_ES_INDEX` | index or pattern read until a selection is saved |
 | `LOGAI2_METRICS_PORT`, `LOGAI2_WEB_PORT` | container ports |
 | `LOGAI2_DOC_SEED_PATH` | documentation corpus to seed |
+| `LOGAI2_API_TOKEN` | optional shared bearer token for `GET /api/module-alerts` (web only; empty = open) |
 | `LOGAI2_EMBEDDING_URL` | embeddings service (OpenAI `/v1/embeddings`, e.g. TEI); default `http://bge-m3:8080` |
 
 Every `config.yaml` key and default (floors, k, commit time, retention,
 flush, Drain3) is listed in [ARCHITECTURE §3](ARCHITECTURE.md#3-configuration).
+
+## Module alert API
+
+Other services ask which templates were WARMING/ALERTING in a window and how many lines
+their module wrote in them (details: [docs/WEB_UI.md](docs/WEB_UI.md#get-apimodule-alerts)):
+
+```bash
+curl -H "Authorization: Bearer $LOGAI2_API_TOKEN" \
+  "http://localhost:5565/api/module-alerts?module_code=VTN_CNTT_VAS_066_301&from=2026-09-30T07:00:00Z&to=2026-09-30T07:15:00Z"
+```
+
+Omit the header when no token is configured.
 
 ## Test
 

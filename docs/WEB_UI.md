@@ -526,6 +526,57 @@ grouping uses only the links that drive alerts). `templates` holds the template 
 last judged minute; `mean` / `std` are this local hour's baseline (null
 without one; for a doc key, the sums over its linked templates).
 
+### `GET /api/module-alerts`
+
+For other services: which templates were WARMING or ALERTING in a window, and how many
+lines one module wrote in them. Spec: `docs/specs/2026-10-22-module-alert-api.md`.
+
+```
+GET /api/module-alerts?module_code=VTN_CNTT_VAS_066_301&from=2026-09-30T07:00:30.500Z&to=2026-09-30T07:14:10.200Z
+Authorization: Bearer <token>
+```
+
+| Parameter | Rule |
+|---|---|
+| `module_code` | required, trimmed, exact (case-sensitive); spaces, `/` and Unicode allowed (URL-encode) |
+| `from`, `to` | both required: ISO-8601 (offset allowed, none = UTC) or epoch (> 1e11 = ms, else s) |
+| `Authorization` | only when `LOGAI2_API_TOKEN` is set: `Bearer <token>` |
+
+```json
+{"module_code": "VTN_CNTT_VAS_066_301",
+ "from": "2026-09-30T07:00:30.500Z", "to": "2026-09-30T07:14:10.200Z",
+ "effective_from": "2026-09-30T07:00:00Z", "effective_to": "2026-09-30T07:15:00Z",
+ "resolution": "minute", "data_until": "2026-09-30T07:13:00Z", "unit": "events_per_minute",
+ "templates": [{"service": "vtn_cntt_vas_066", "template_id": "vtn_cntt_vas_066:T00431",
+   "text": "Timeout acquiring connection <*>", "level": "ERROR",
+   "doc_id": "DOC-017", "doc_title": "Restart DB pool", "peak_state": "ALERTING",
+   "periods": [{"start": "2026-09-30T06:58:00Z", "end": null}], "alerting_minutes": 15,
+   "module": {"total": 300, "avg": 20.0, "peak": 42,
+              "series": [{"minute": "2026-09-30T07:00:00Z", "count": 18}]},
+   "template": {"total": 420, "avg": 28.0, "peak": 55}}]}
+```
+
+- Times are UTC with `Z`; milliseconds appear only when non-zero.
+- Rounding is outward to whole minutes: `effective_from` = `from` rounded down,
+  `effective_to` = `to` rounded up (unchanged on a boundary), window `[effective_from, effective_to)`.
+  `07:00:30.500 -> 07:00:31.200` reads `[07:00, 07:01)`; `07:00:59.999 -> 07:01:00.001` reads
+  `[07:00, 07:02)`; `from == to` reads the one minute holding it. `from` older than
+  `retention.counts_days` (local midnight) and `to` after now are clamped; `effective_*` show it.
+- A template counts while WARMING or ALERTING (COOLING and NORMAL minutes do not).
+  `peak_state` is `ALERTING` if it reached that state in the window, else `WARMING`.
+  A period opened by NORMAL to WARMING is back-dated to its first high minute.
+- `periods[].end: null` = still open at the window's end. Periods are minute starts, not clipped to the window.
+- `data_until` = end of the last minute the engine judged (`null` before the engine ran). When
+  `effective_to > data_until` the tail is not judged yet: an empty list there is not "no alert".
+- `series` is per minute (`minute`) for a window of one day or less, per hour (`hour`, hours in the
+  deployment zone, +07) above that.
+- Only ERROR/WARN templates alert; DEBUG/INFO templates never appear.
+- Errors: 400 `{"error": ...}` for a missing or empty `module_code`, a missing `from`/`to`, an
+  unparsable time, or `from > to`; 401 `{"error": "unauthorized"}` when a token is set and the header
+  is missing or wrong (checked before the parameters); an unknown module is 200 with `templates: []`.
+- Token: `LOGAI2_API_TOKEN` (`web.api_token`); empty = open like the rest of the API. It guards this
+  route only.
+
 ### `GET /api/templates`
 
 - `page` (default 1) and `size` (default 100) are clamped to 1..10⁶ and
@@ -762,7 +813,8 @@ ARCHITECTURE §12.2.
 
 ## Security
 
-The API has no authentication or authorization, and the connection endpoint
+The API has no authentication or authorization (except the optional shared bearer token on
+`GET /api/module-alerts`), and the connection endpoint
 lets a caller point the engine at any http(s) host. Expose the web only on a
 trusted network. The ES password is stored in Postgres in clear and never
 returned.

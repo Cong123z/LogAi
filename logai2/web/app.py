@@ -1,10 +1,11 @@
 """LogAI2 console web API. Talks only to Postgres: never to the engine, never to Elasticsearch."""
 from __future__ import annotations
 
+import hmac
 import re
 import time
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
@@ -17,6 +18,7 @@ from logai2 import db
 from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
+from logai2.module_alerts import data_until, module_alerts, parse_window
 from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
@@ -53,6 +55,14 @@ KNOWN_SQL = "(l.doc_id IS NOT NULL AND l.source = ANY(%s)) IS TRUE"
 
 class BadRequest(ValueError):
     pass
+
+
+def iso(ts: float | None) -> str | None:
+    """UTC ISO-8601 with Z; milliseconds only when non-zero."""
+    if ts is None:
+        return None
+    d = datetime.fromtimestamp(ts, timezone.utc)
+    return d.isoformat(timespec="milliseconds" if d.microsecond else "seconds").replace("+00:00", "Z")
 
 
 def validate_patterns(raw: Any) -> List[str]:
@@ -253,6 +263,27 @@ def create_app(cfg: AppConfig) -> Flask:
         except ValueError:
             raise BadRequest(f"{name} must be an integer") from None
         return min(max(value, 1), high)
+
+    @app.get("/api/module-alerts")
+    def module_alerts_route():
+        token = cfg.web.api_token
+        if token and not hmac.compare_digest(request.headers.get("Authorization", "").encode(), f"Bearer {token}".encode()):
+            return jsonify({"error": "unauthorized"}), 401
+        try:
+            module, from_s, to_s, start, end = parse_window(request.args, time.time(), cfg.retention.counts_days)
+        except ValueError as exc:
+            raise BadRequest(str(exc)) from exc
+        c = conn()
+        items = module_alerts(c, module, start, end, cfg.alert.warm_consecutive)
+        for it in items:
+            for p in it["periods"]:
+                p["start"], p["end"] = iso(p["start"]), iso(p["end"])
+            for s in it["module"]["series"]:
+                k = "minute" if "minute" in s else "hour"
+                s[k] = iso(s[k])
+        return jsonify({"module_code": module, "from": iso(from_s), "to": iso(to_s),
+                        "effective_from": iso(start), "effective_to": iso(end), "resolution": "minute",
+                        "data_until": iso(data_until(c)), "unit": "events_per_minute", "templates": items})
 
     @app.get("/api/alerts")
     def alerts():
