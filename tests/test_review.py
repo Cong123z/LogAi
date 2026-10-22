@@ -55,3 +55,12 @@ def test_periods_close_open_ones_at_now():
     at = datetime(2026, 10, 20, 2, 0, tzinfo=TZ)
     changes = [{"service": "s", "key": "k", "at": at, "from_state": "NORMAL", "to_state": "WARMING"}]
     assert periods(changes, at.timestamp() + 600) == [("k", at.timestamp(), at.timestamp() + 600)]
+
+
+def test_periods_states_argument():
+    t = lambda h, m: local(2026, 10, 14, h, m)
+    ch = [chg("s:T1", "NORMAL", "WARMING", t(8, 1)), chg("s:T1", "WARMING", "ALERTING", t(8, 3)),
+          chg("s:T1", "ALERTING", "COOLING", t(8, 5)), chg("s:T1", "COOLING", "ALERTING", t(8, 6))]
+    s = lambda d: d.timestamp()
+    assert periods(ch, s(t(9, 0)), {"WARMING", "ALERTING"}) == [("s:T1", s(t(8, 1)), s(t(8, 5))), ("s:T1", s(t(8, 6)), s(t(9, 0)))]
+    assert periods(ch, s(t(9, 0)), {"ALERTING"}) == [("s:T1", s(t(8, 3)), s(t(8, 5))), ("s:T1", s(t(8, 6)), s(t(9, 0)))]
