@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterable, Mapping
 
+from logai2.links import level_class
 from logai2.timeutil import day_hour
 
 ERROR_LEVELS = {"ERROR", "FATAL", "CRITICAL"}
@@ -45,8 +46,8 @@ class OpenMinutes:
         tkey = (service, template_id)
         keys[tkey] = keys.get(tkey, 0) + n
         keys[(service, "*total")] = keys.get((service, "*total"), 0) + n
-        if level.upper() in ERROR_LEVELS:
-            keys[(service, "*error")] = keys.get((service, "*error"), 0) + n
+        ckey = (service, "*" + level_class(level).lower())
+        keys[ckey] = keys.get(ckey, 0) + n
         mkey = (service, template_id, module)
         cm.modules[mkey] = cm.modules.get(mkey, 0) + n
         old = cm.levels.get(tkey)
@@ -68,9 +69,9 @@ class OpenMinutes:
                 seen = self.hour_keys[dh]
             keys = {k: 0 for k in seen}
             listed = (s for s, f in first.items() if f is None or f <= m)
-            for s in {*listed, *(k[0] for k in cm.keys)}:  # an unlisted service still gets *error
-                keys[(s, "*total")] = 0
-                keys[(s, "*error")] = 0
+            for s in {*listed, *(k[0] for k in cm.keys)}:  # an unlisted service still gets all four service keys
+                for k in ("*total", "*error", "*warn", "*info"):
+                    keys[(s, k)] = 0
             keys.update(cm.keys)
             seen.update(k for k in cm.keys if not k[1].startswith("*"))
             cm.keys = keys

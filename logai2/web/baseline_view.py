@@ -4,13 +4,13 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 from logai2.config import AppConfig
-from logai2.links import ALERTING_SOURCES
+from logai2.links import ALERTING_SOURCES, class_sql
 from logai2.owner.baseline import DAY_CAP, Baseline, Stat, full_after, judge
 from logai2.owner.counts import ERROR_LEVELS
 from logai2.review import keys_by_hour, minutes_by_hour, periods
 from logai2.timeutil import TZ, daytype
 
-SERVICE_KEYS = ("*total", "*error")  # service-wide keys: they sum a whole service's templates
+SERVICE_KEYS = ("*total", "*error", "*warn", "*info")  # service-wide keys: stored counts of a whole service (by level class)
 SIGMA_FLOOR = 1.0                    # events/min: a flat key (σ 0) still needs a scale
 
 
@@ -28,7 +28,14 @@ def resolve_key(conn, service: str, key: str) -> tuple[str, list[str]]:
     """key -> (kind, template ids whose counts it sums)."""
     if key in SERVICE_KEYS:
         return key[1:], [key]
-    if key.startswith("doc:"):
+    if key.startswith("verdict:"):
+        ids = [r["template_id"] for r in conn.execute(
+            "SELECT l.template_id FROM template_doc_links l JOIN documents d ON d.doc_id = l.doc_id "
+            "WHERE l.service = %s AND l.source = ANY(%s) AND d.status = 'active' AND d.verdict = %s "
+            "ORDER BY l.template_id", (service, list(ALERTING_SOURCES), key[8:]))]
+        if ids and key[8:] in ("action", "safe"):
+            return "doc", ids
+    elif key.startswith("doc:"):
         ids = [r["template_id"] for r in conn.execute(
             "SELECT template_id FROM template_doc_links WHERE service = %s AND doc_id = %s AND source = ANY(%s) "
             "ORDER BY template_id", (service, key[4:], list(ALERTING_SOURCES)))]
@@ -113,6 +120,15 @@ def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: st
     return out
 
 
+def _young_level_key(conn, cfg: AppConfig, service: str, key: str, dt: str, picked: list[date]) -> bool:
+    """A stored view-only key (*warn, *info) is young until it has its own full_after days (the band's k stays the service's)."""
+    if key not in ("*warn", "*info"):
+        return False
+    n = conn.execute("SELECT count(DISTINCT day) AS n FROM hourly_counts WHERE service = %s AND key = %s AND day = ANY(%s)",
+                     (service, key, picked)).fetchone()["n"]
+    return n < full_after(cfg, dt)
+
+
 def matrix(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date, now: float) -> dict:
     kind, ids = resolve_key(conn, service, key)
     days = [today - timedelta(days=i) for i in range(ndays)]
@@ -155,10 +171,16 @@ def matrix(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
             return "borrowed" if picked["weekday"] else "none"
         return "none" if n == 0 else "full" if n >= full_after(cfg, dt) else "young"
 
+    dt = daytype(today)
+    state = "none" if not conn.execute("SELECT 1 FROM baseline WHERE service = %s AND key = ANY(%s) LIMIT 1",
+                                       (service, ids)).fetchone() else profile(dt)
+    if state == "full" and _young_level_key(conn, cfg, service, key, dt, picked[dt]):
+        state = "young"
+
     return {"service": service, "key": key,
             "k": {dt: cfg.baseline.sigma_multiplier if len(picked[dt]) >= full_after(cfg, dt)
                   else cfg.baseline.young_sigma_multiplier for dt in DAY_CAP},
-            "days": rows, "coverage": coverage, "profiles": {dt: profile(dt) for dt in DAY_CAP}}
+            "baseline_state": state, "days": rows, "coverage": coverage, "profiles": {dt: profile(dt) for dt in DAY_CAP}}
 
 
 def inspect(conn, cfg: AppConfig, service: str, key: str, day: date, hour_from: int, hour_to: int,
@@ -298,6 +320,8 @@ def series(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
     lk = bl.lookup_doc(service, ids, today, last_hour) if kind == "doc" else bl.lookup(service, ids[0], today, last_hour)
     state = ("none" if not any(k[:2] == (service, t) for k in bl.stats for t in ids) else
              "borrowed" if lk.upper_only else "full" if lk.days >= full_after(cfg, lk.daytype) else "young")
+    if state == "full" and _young_level_key(conn, cfg, service, key, lk.daytype, picked_days(conn, service)[lk.daytype]):
+        state = "young"
     return {"key": key, "baseline_state": state, "points": pts, "incidents": incidents,
             "profile": {**prof, "today": [{"hour": p["hour"], "rate": p["rate"]} for p in pts
                                           if p["day"] == today.isoformat() and p["rate"] is not None]}}
@@ -307,7 +331,9 @@ def incident(conn, service: str, key: str, day: date, hour_from: int, hour_to: i
     """Modules the lines came from, and (ongoing only) the newest sample lines."""
     kind, ids = resolve_key(conn, service, key)
     if key in SERVICE_KEYS:
-        ids = [r["template_id"] for r in conn.execute("SELECT template_id FROM templates WHERE service = %s", (service,))]
+        cls = "%" if key == "*total" else key[1:].upper()      # *total: every template; else its level class
+        ids = [r["template_id"] for r in conn.execute(
+            f"SELECT template_id FROM templates WHERE service = %s AND ({class_sql('level')}) LIKE %s", (service, cls))]
     start = datetime(day.year, day.month, day.day, tzinfo=TZ)
     t0, t1 = start + timedelta(hours=hour_from), start + timedelta(hours=hour_to)
     modules = [{"module": r["module_code"], "lines": r["n"]} for r in conn.execute(
@@ -320,8 +346,10 @@ def incident(conn, service: str, key: str, day: date, hour_from: int, hour_to: i
     samples: list[dict] = []
     if ongoing:
         tids = ids
-        if key in SERVICE_KEYS:        # the 3 ERROR+ templates that rose most over their baseline
+        if key in ("*total", "*error"):        # the 3 ERROR+ templates that rose most over their baseline
             tids = _top_excess(conn, service, day, hour_from, hour_to)
+        elif key in SERVICE_KEYS:              # *warn / *info: no samples are stored for them
+            tids = []
         samples = [{"at": r["at"].timestamp(), "template_id": r["template_id"], "line": r["line"]} for r in conn.execute(
             "SELECT template_id, at, line FROM error_samples WHERE service = %s AND template_id = ANY(%s) "
             "ORDER BY at DESC LIMIT 10", (service, tids))]

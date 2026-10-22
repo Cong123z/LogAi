@@ -57,3 +57,15 @@ def test_first_start_backlog_is_linear():
     closed = om.close_before(M + 2880, ["s"])
     assert len(closed) == 2880 and om.next_to_close == M + 2880
     assert om.close_before(M + 2880, ["s"]) == []
+
+
+def test_level_class_keys_add_up_to_total():
+    om = OpenMinutes(M)
+    for level, n in (("ERROR", 1), ("Fatal", 2), ("WARN", 3), ("warning", 4), ("INFO", 5), ("debug", 6), ("notice", 7)):
+        om.add("s", f"s:T{n}", level, "", M, n)
+    c, silent = om.close_before(M + 2, ["s", "t"])
+    k = c.keys
+    assert (k[("s", "*error")], k[("s", "*warn")], k[("s", "*info")]) == (3, 7, 18)
+    assert k[("s", "*error")] + k[("s", "*warn")] + k[("s", "*info")] == k[("s", "*total")] == 28
+    for key in ("*total", "*error", "*warn", "*info"):
+        assert silent.keys[("s", key)] == 0 and c.keys[("t", key)] == 0

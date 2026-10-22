@@ -101,3 +101,10 @@ def test_doc_key_band_is_sum_of_linked_bands(cfg):
         above.run(cm(m, {("s", "s:T1"): 6, ("s", "s:T2"): 12}), historic=False)    # doc 18 > 17
     row = above.states[("s", "doc:DOC-1")]
     assert (row.state, row.band_high, row.count) == ("ALERTING", 17, 18)
+
+
+def test_view_only_keys_never_alert(cfg):
+    det = Detector(cfg, Baseline({}, {}), {}, {("s", "*warn"): "WARN", ("s", "*info"): "ERROR"}, {})
+    for m in range(10):
+        det.run(cm(m, {("s", "*warn"): 10_000, ("s", "*info"): 10_000}), historic=False)
+    assert det.states == {} and det.touched == set()

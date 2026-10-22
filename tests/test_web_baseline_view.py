@@ -4,7 +4,7 @@ import pytest
 
 from logai2.timeutil import TZ
 from logai2.web.app import create_app
-from logai2.web.baseline_view import incident, inspect, left_days, matrix, series
+from logai2.web.baseline_view import incident, inspect, left_days, matrix, resolve_key, series
 from tests.conftest import TEST_DSN
 
 TODAY = date(2026, 10, 21)
@@ -312,6 +312,8 @@ def test_incident_modules_and_samples_only_when_ongoing(conn, cfg):
     assert live["ongoing"] and live["modules"][0] == {"module": "LIXI_PROMO", "lines": 5210} and len(live["samples"]) == 10
     live = incident(conn, "pay", "*error", date(2026, 10, 21), 13, 15, NOW)
     assert live["modules"][1] == {"module": "API_TOPUP", "lines": 1180} and live["samples"][0]["template_id"] == "pay:T00032"
+    warn = incident(conn, "pay", "*warn", date(2026, 10, 21), 13, 15, NOW)
+    assert warn["modules"] == [] and warn["samples"] == []        # no WARN templates: no modules, never ERROR samples
     old = incident(conn, "pay", "pay:T00032", date(2026, 10, 20), 2, 4, NOW)
     assert not old["ongoing"] and old["samples"] == [] and old["modules"] == [{"module": "API_TOPUP", "lines": 40}]
 
@@ -343,3 +345,76 @@ def test_low_side_follows_the_detector_drop_rule(conn, cfg, key, mean, days, low
     c = cell(matrix(conn, cfg, "pay", key, 14, TODAY, NOW), "2026-10-15", 16)
     p = next(q for q in series(conn, cfg, "pay", key, 14, TODAY, NOW)["points"] if (q["day"], q["hour"]) == ("2026-10-15", 16))
     assert p["out"] is low and c["cls"].startswith("down") is low
+
+
+def _verdict_fixture(conn):
+    service(conn, "pay"); service(conn, "web")
+    for doc, verdict, status, svc in (("D-SAFE", "safe", "active", None), ("D-ACT", "action", "active", "pay"),
+                                      ("D-DRAFT", "safe", "draft", "pay")):
+        conn.execute("INSERT INTO documents (doc_id, title, handling, revision, verdict, status, service) "
+                     "VALUES (%s, 't', 'h', 'r', %s, %s, %s)", (doc, verdict, status, svc))
+    rows = [("pay", "pay:T1", "D-SAFE", "manual"), ("pay", "pay:T2", "D-SAFE", "corpus"),
+            ("pay", "pay:T3", "D-SAFE", "draft"), ("pay", "pay:T4", "D-ACT", "llm"),
+            ("pay", "pay:T5", "D-DRAFT", "manual"), ("web", "web:T1", "D-SAFE", "manual")]
+    for svc, tid, doc, source in rows:
+        conn.execute("INSERT INTO templates VALUES (%s, %s, 'INFO', 'x', now(), now())", (svc, tid))
+        conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES (%s, %s, %s, %s)",
+                     (svc, tid, doc, source))
+    conn.commit()
+
+
+def test_verdict_key_resolves_linked_templates_of_this_service(conn):
+    _verdict_fixture(conn)
+    assert resolve_key(conn, "pay", "verdict:safe") == ("doc", ["pay:T1", "pay:T2"])   # not the draft link, not web, not the draft doc
+    assert resolve_key(conn, "pay", "verdict:action") == ("doc", ["pay:T4"])
+
+
+def test_verdict_key_unknown_or_empty_404(client, conn):
+    _verdict_fixture(conn)
+    for key in ("verdict:nope", "verdict:", "verdict:action"):
+        svc = "web" if key == "verdict:action" else "pay"      # web has no action-linked template
+        assert client.get(f"/api/baseline/series?service={svc}&key={key}").status_code == 404
+
+
+def test_verdict_key_sums_like_a_document(conn, cfg):
+    _verdict_fixture(conn)
+    committed(conn, "pay", WEEKDAYS)
+    base(conn, "pay", "pay:T1", "weekday", 2, 1, 0.5)
+    base(conn, "pay", "pay:T2", "weekday", 2, 0.5, 0.5)
+    hours(conn, "pay", "pay:T1", date(2026, 10, 20), {2: (120, 0, 60)})
+    hours(conn, "pay", "pay:T2", date(2026, 10, 20), {2: (60, 0, 60)})
+    h = cell(matrix(conn, cfg, "pay", "verdict:safe", 14, TODAY, NOW), "2026-10-20", 2)
+    assert (h["rate"], h["mean"], h["std"]) == (3.0, 1.5, 1.0)
+
+
+def test_level_keys_are_service_keys(client, conn, cfg):
+    service(conn, "pay")
+    committed(conn, "pay", WEEKDAYS)
+    base(conn, "pay", "*warn", "weekday", 2, 2, 1)
+    for d in WEEKDAYS:
+        hours(conn, "pay", "*warn", d, {2: (240, 0, 60)})
+    assert cell(matrix(conn, cfg, "pay", "*warn", 14, TODAY, NOW), "2026-10-20", 2)["rate"] == 4.0
+    assert series(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "full"
+    assert client.get("/api/baseline/series?service=pay&key=*info").status_code == 200   # no rows yet: empty, not 404
+
+
+def test_new_level_key_is_young_until_it_has_its_own_days(conn, cfg):
+    service(conn, "pay")
+    committed(conn, "pay", WEEKDAYS)
+    base(conn, "pay", "*warn", "weekday", 2, 2, 1)
+    hours(conn, "pay", "*warn", WEEKDAYS[0], {2: (240, 0, 60)})
+    assert series(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "young"
+    assert matrix(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "young"
+    for d in WEEKDAYS[1:]:
+        hours(conn, "pay", "*warn", d, {2: (240, 0, 60)})
+    assert series(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "full"
+    assert matrix(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "full"
+
+
+def test_incident_warn_lists_only_warn_modules(conn, cfg):
+    seed_series(conn)
+    conn.execute("INSERT INTO templates VALUES ('pay', 'pay:W1', 'WARN', 'w', now(), now())")
+    conn.execute("INSERT INTO alert_minutes VALUES ('pay', 'pay:W1', 'WARN_MOD', %s, '2026-10-21 06:12+00', 7)", (TODAY,))
+    conn.commit()
+    r = incident(conn, "pay", "*warn", TODAY, 13, 15, NOW)
+    assert r["modules"] == [{"module": "WARN_MOD", "lines": 7}] and r["samples"] == []

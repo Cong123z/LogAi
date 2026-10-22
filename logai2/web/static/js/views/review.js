@@ -4,7 +4,8 @@
 // Decisions are used by the next daily commit or by "Recompute baseline".
 const rv = {service: '', key: '*total', days: 14, sel: null, view: 'chart', lastSub: null,
             matrix: null, base: null, insp: null, cells: new Map(), rows: [], index: new Map(), cur: null,
-            seq: 0, inspSeq: 0, commandId: null, pollTimer: null, docs: [], tplService: null};
+            seq: 0, inspSeq: 0, commandId: null, pollTimer: null, docs: [], templates: [], tplService: null};
+const rvPicker = createKeyPicker(document.getElementById('rv-picker'), {onPick: key => { rv.key = key; rvChangeRoute(); }});
 const $rv = id => document.getElementById(id);
 const RV_DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const RV_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -81,8 +82,7 @@ async function loadReview() {
   if (rv.tplService !== rv.service) {
     const t = await getJson(`/api/templates?service=${svc}&size=500`, 'Unable to load templates');
     rv.tplService = rv.service;
-    $rv('rv-tpl-list').innerHTML = t.items.map(i =>
-      `<option value="${escapeHtml(i.template_id)}">${escapeHtml(`${i.level} ${i.text}`.slice(0, 90))}</option>`).join('');
+    rv.templates = t.items;
   }
   rv.docs = await getJson('/api/documents', 'Unable to load documents');
   rvRenderControls();
@@ -119,15 +119,7 @@ function rvShowLoadError(message) {
 }
 
 function rvRenderControls() {
-  const docs = rv.docs.filter(d => !d.service || d.service === rv.service);
-  const isDoc = rv.key.startsWith('doc:');
-  const isTpl = !rv.key.startsWith('*') && !isDoc;
-  const docOpts = docs.map(d => `<option value="doc:${escapeHtml(d.doc_id)}">Document ${escapeHtml(d.doc_id)} · ${escapeHtml(d.title)}</option>`);
-  if (isDoc && !docs.some(d => `doc:${d.doc_id}` === rv.key)) docOpts.push(`<option value="${escapeHtml(rv.key)}">Document ${escapeHtml(rv.key.slice(4))}</option>`);
-  $rv('rv-key').innerHTML = `<option value="*total">All events</option><option value="*error">Errors</option>${docOpts.join('')}<option value="__tpl">A template…</option>`;
-  $rv('rv-key').value = isTpl ? '__tpl' : rv.key;
-  $rv('rv-tpl').hidden = !isTpl;
-  if (isTpl) $rv('rv-tpl').value = rv.key;
+  rvPicker.render({service: rv.service, key: rv.key, templates: rv.templates, docs: rv.docs, baselineState: rv.matrix?.baseline_state});
   $rv('rv-days').querySelectorAll('button').forEach(b => {
     const on = Number(b.dataset.days) === rv.days;
     b.classList.toggle('active', on);
@@ -145,6 +137,7 @@ function rvIndexMatrix() {
 }
 
 function rvRenderAll() {
+  rvRenderControls();   // the picker's young-baseline note needs the matrix just loaded
   rvRenderCards();
   rvRenderLegend();
   rvRenderMatrix();
@@ -253,11 +246,7 @@ function rvCellTip(c) {
   }
   return `${head}<br>${body}<br>${status}${c.row.in_baseline ? '<br>this day is in the next baseline' : ''}`;
 }
-function rvKeyName() {
-  if (rv.key === '*total') return 'All events';
-  if (rv.key === '*error') return 'Errors';
-  return rv.key;
-}
+const rvKeyName = () => keyLabel(rv.key, rv.templates, rv.docs);
 
 function rvRenderTable() {
   if (rv.view !== 'table') return;
@@ -576,12 +565,6 @@ function rvRenderCoverage() {
 // ── Header controls ──
 function rvChangeRoute() { rv.sel = null; rv.note = null; rvDecisionNote(''); rv.cur = null; rvWriteRoute(); loadData(); }
 $rv('rv-service').addEventListener('change', () => { rv.service = $rv('rv-service').value; rv.key = '*total'; rv.tplService = null; rvChangeRoute(); });
-$rv('rv-key').addEventListener('change', () => {
-  const v = $rv('rv-key').value;
-  if (v === '__tpl') { $rv('rv-tpl').hidden = false; $rv('rv-tpl').focus(); return; }
-  rv.key = v; rvChangeRoute();
-});
-$rv('rv-tpl').addEventListener('change', () => { const v = $rv('rv-tpl').value.trim(); if (v) { rv.key = v; rvChangeRoute(); } });
 $rv('rv-days').addEventListener('click', event => {
   const b = event.target.closest('[data-days]');
   if (!b || Number(b.dataset.days) === rv.days) return;

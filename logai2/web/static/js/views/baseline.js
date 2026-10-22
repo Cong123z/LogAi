@@ -2,7 +2,8 @@
 // All numbers, bands, incidents and decisions come from /api/baseline/*; nothing is computed here
 // beyond picking labels. Helpers rvPad/rvN/rvZ/rvDayLabel/rvInk/rvCard come from review.js.
 const bl = {service: '', key: '*total', days: 14, series: null, matrix: null, sel: null, zoom: null,
-            seq: 0, incSeq: 0, lastSub: null, tplService: null, templates: []};
+            seq: 0, incSeq: 0, lastSub: null, tplService: null, templates: [], docs: []};
+const blPicker = createKeyPicker(document.getElementById('bl-picker'), {onPick: key => { bl.key = key; blChangeRoute(); }});
 const $bl = id => document.getElementById(id);
 const blIncKey = i => `${i.day}|${i.hour_from}|${i.hour_to}`;
 const blPlural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
@@ -50,8 +51,10 @@ async function loadBaseline() {
     if (bl.tplService !== bl.service) {
       const t = await getJson(`/api/templates?service=${svc}&size=500`, 'Unable to load templates');
       if (seq !== bl.seq) return;
-      bl.tplService = bl.service;
-      bl.templates = t.items;
+      const docs = await getJson('/api/documents', 'Unable to load documents');
+      if (seq !== bl.seq) return;
+      bl.templates = t.items; bl.docs = docs;
+      bl.tplService = bl.service;   // cached only once both fetches have succeeded
     }
     [series, matrix] = await Promise.all([
       getJson(`/api/baseline/series?service=${svc}&key=${key}&days=${bl.days}`, 'Unable to load the series'),
@@ -80,22 +83,9 @@ function blClear() {
   $bl('bl-profile-note').textContent = '';
 }
 
-function blKeyName(key = bl.key) {
-  if (key === '*total') return 'All events';
-  if (key === '*error') return 'Errors';
-  return key;
-}
+const blKeyName = (key = bl.key) => keyLabel(key, bl.templates, bl.docs);
 function blRenderControls() {
-  const now = Date.now() / 1000;
-  const tpls = bl.templates.map(i => {
-    const fresh = now - i.first_seen < 86400 ? ' (new)' : '';
-    return `<option value="${escapeHtml(i.template_id)}">${escapeHtml(`${i.template_id} · ${i.level} · ${i.text}`.slice(0, 90) + fresh)}</option>`;
-  });
-  if (!bl.key.startsWith('*') && !bl.templates.some(i => i.template_id === bl.key)) {
-    tpls.unshift(`<option value="${escapeHtml(bl.key)}">${escapeHtml(bl.key)}</option>`);
-  }
-  $bl('bl-key').innerHTML = `<option value="*total">All events</option><option value="*error">Errors</option>${tpls.join('')}`;
-  $bl('bl-key').value = bl.key;
+  blPicker.render({service: bl.service, key: bl.key, templates: bl.templates, docs: bl.docs, baselineState: bl.series?.baseline_state});
   $bl('bl-days').querySelectorAll('button').forEach(b => {
     const on = Number(b.dataset.days) === bl.days;
     b.classList.toggle('active', on);
@@ -330,7 +320,6 @@ function blRenderProfile() {
 // ── Events ──
 function blChangeRoute() { bl.sel = bl.zoom = null; blWriteRoute(); loadData(); }
 $bl('bl-service').addEventListener('change', () => { bl.service = $bl('bl-service').value; bl.key = '*total'; bl.tplService = null; blChangeRoute(); });
-$bl('bl-key').addEventListener('change', () => { bl.key = $bl('bl-key').value; blChangeRoute(); });
 $bl('bl-days').addEventListener('click', event => {
   const b = event.target.closest('[data-days]');
   if (!b || Number(b.dataset.days) === bl.days) return;
