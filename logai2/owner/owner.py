@@ -103,7 +103,7 @@ class Owner:
                              if r["first"] else start_minute for r in conn.execute(
                                  "SELECT s.service, min(t.first_seen) AS first FROM services s "
                                  "LEFT JOIN templates t USING (service) GROUP BY s.service")}
-            self.modules = {r["module_code"] for r in conn.execute("SELECT module_code FROM modules")}
+            self.modules = {(r["service"], r["module_code"]) for r in conn.execute("SELECT service, module_code FROM modules")}
             states = {(r["service"], r["key"]): AlertRow(
                 r["service"], r["key"], r["state"], r["streak"], r["since"].timestamp(), r["score"],
                 r["count"], r["band_low"], r["band_high"]) for r in conn.execute("SELECT * FROM alert_state")}
@@ -121,7 +121,7 @@ class Owner:
 
     def _clear(self) -> None:
         self._services: dict[str, int] = {}
-        self._modules: dict[str, str] = {}
+        self._modules: list[tuple[str, str]] = []
         self._templates: dict[tuple[str, str], dict] = {}
         self._blobs: dict[str, bytes] = {}
         self._hours: Counter = Counter()
@@ -187,7 +187,7 @@ class Owner:
                 continue
             for (service, template_id, module), n in cm.modules.items():
                 row = self.detector.states.get((service, template_id))
-                if row is not None and row.state != "NORMAL":
+                if row is not None and (row.state != "NORMAL" or row.streak):
                     self._alert_minutes.append((service, template_id, module, cm.day, _ts(cm.minute * 60), n))
         return resolved
 
@@ -197,9 +197,9 @@ class Owner:
             self._services[service] = zlib.crc32(service.encode("utf-8")) % 60
         if first is None or minute < first:
             self.services[service] = minute
-        if module and module not in self.modules:
-            self.modules.add(module)
-            self._modules[module] = service
+        if module and (service, module) not in self.modules:
+            self.modules.add((service, module))
+            self._modules.append((module, service))
         key = (service, template_id)
         if _more_severe(level, self.levels.get(key)):
             self.levels[key] = level
@@ -224,7 +224,7 @@ class Owner:
         touched = list(self.detector.touched)
         with self.conn.transaction(), self.conn.cursor() as cur:
             cur.executemany(SQL["services"], list(self._services.items()))
-            cur.executemany(SQL["modules"], list(self._modules.items()))
+            cur.executemany(SQL["modules"], self._modules)
             cur.executemany(SQL["templates"], new_t)
             cur.executemany(SQL["templates_seen"], seen_t)
             cur.executemany(SQL["drain3_state"], list(self._blobs.items()))

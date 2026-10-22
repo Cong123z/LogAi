@@ -199,8 +199,8 @@ def test_detection_states_survive_restart(conn, cfg):
     ch = rows(conn, "SELECT from_state, to_state FROM alert_changes WHERE key = 's:T00001' ORDER BY at")
     assert [(c["from_state"], c["to_state"]) for c in ch] == [("NORMAL", "WARMING"), ("WARMING", "ALERTING")]
     am = rows(conn, "SELECT key, module_code, minute, count FROM alert_minutes ORDER BY minute")
-    assert [(r["key"], r["module_code"], r["count"]) for r in am] == [("s:T00001", "PAY", 10)] * 2
-    assert am[0]["minute"] == datetime.fromtimestamp((M + 1) * 60, timezone.utc)
+    assert [(r["key"], r["module_code"], r["count"]) for r in am] == [("s:T00001", "PAY", 10)] * 3   # incl. the streak's first minute
+    assert am[0]["minute"] == datetime.fromtimestamp(M * 60, timezone.utc)
     assert rows(conn, "SELECT module_code, service FROM modules") == [{"module_code": "PAY", "service": "s"}]
 
 
@@ -246,3 +246,57 @@ def test_text_change_clears_the_vector_and_only_alerting_links_load(conn, cfg):
     conn.commit()
     owner = Owner(conn, cfg, start_minute=0)
     assert owner.detector.links == {("s", "s:T1"): "D1", ("s", "s:T2"): "D1", ("s", "s:T3"): "D1"}
+
+
+def _svc_hits(minute, service, module, n=1):
+    kw = dict(moduleCode=module) if module else {}
+    return [hit(f"{service}-{minute}-{i}", T0 + minute * 60_000 + 1000 * i, service=service,
+                message="payment failed for user 42", **kw) for i in range(n)]
+
+
+def _module_pairs(conn):
+    return [(r["service"], r["module_code"]) for r in
+            rows(conn, "SELECT service, module_code FROM modules ORDER BY 1, 2")]
+
+
+def test_module_rows_per_service(conn, cfg):
+    hits = _svc_hits(0, "a", "M1") + _svc_hits(0, "b", "M1") + _svc_hits(0, "a", None)
+    run_minutes(conn, cfg, None, T0 + 60_000, src=FakeSource({"a": hits}))
+    assert _module_pairs(conn) == [("a", "M1"), ("b", "M1")]
+
+
+def test_module_set_survives_restart(conn, cfg):
+    src = FakeSource({"a": _svc_hits(0, "a", "M1")})
+    run_minutes(conn, cfg, None, T0 + 60_000, src=src)
+    src.hits["a"] += _svc_hits(1, "b", "M1")
+    run_minutes(conn, cfg, None, T0 + 120_000, src=src)
+    assert _module_pairs(conn) == [("a", "M1"), ("b", "M1")]
+
+
+def _high_setup(conn):
+    put_setting(conn, "detection_enabled", True)
+    for hour in (10, 11):
+        conn.execute("INSERT INTO baseline VALUES ('s', 's:T00001', 'weekday', %s, 1, 0.5, 5)", (hour,))
+    conn.commit()
+
+
+def _alert_minutes(conn):
+    return [(r["minute"], r["count"]) for r in rows(
+        conn, "SELECT minute, count FROM alert_minutes WHERE key = 's:T00001' AND module_code = 'M1' ORDER BY minute")]
+
+
+def test_first_high_minute_in_alert_minutes(conn, cfg):
+    _high_setup(conn)
+    hits = [h for m in range(4) for h in lines(m, 40, level="ERROR", moduleCode="M1")]
+    run_minutes(conn, cfg, None, T0 + 4 * 60_000, src=FakeSource({"a": hits}))
+    got = _alert_minutes(conn)
+    assert [m for m, _ in got] == [datetime.fromtimestamp((M + k) * 60, timezone.utc) for k in range(4)]
+    assert {c for _, c in got} == {40}
+
+
+def test_single_high_minute_writes_one_row_and_no_change(conn, cfg):
+    _high_setup(conn)
+    hits = lines(0, 40, level="ERROR", moduleCode="M1")
+    run_minutes(conn, cfg, None, T0 + 3 * 60_000, src=FakeSource({"a": hits}))
+    assert len(_alert_minutes(conn)) == 1
+    assert rows(conn, "SELECT 1 FROM alert_changes") == []

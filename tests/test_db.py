@@ -44,3 +44,9 @@ def test_migration_004_assigns_documents_to_the_one_service_that_uses_them(conn)
     conn.execute(backfill)   # run again on these rows
     rows = {r["doc_id"]: r["service"] for r in conn.execute("SELECT doc_id, service FROM documents")}
     assert rows == {"ONE": "a", "TWO": None, "NONE": None}
+
+
+def test_module_can_belong_to_two_services(conn):
+    conn.execute("INSERT INTO services VALUES ('a', 1), ('b', 2)")
+    conn.execute("INSERT INTO modules (module_code, service) VALUES ('M1', 'a'), ('M1', 'b')")
+    assert conn.execute("SELECT count(*) AS n FROM modules WHERE module_code = 'M1'").fetchone()["n"] == 2
