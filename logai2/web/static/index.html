@@ -20,6 +20,7 @@
   <script defer src="/static/js/views/sources.js"></script>
   <script defer src="/static/js/views/pipeline.js"></script>
   <script defer src="/static/js/views/documentation.js"></script>
+  <script defer src="/static/js/keypicker.js"></script>
   <script defer src="/static/js/views/baseline.js"></script>
   <script defer src="/static/js/views/review.js"></script>
   <script defer src="/static/js/views/llm.js"></script>
@@ -286,8 +287,6 @@
           <div class="filter-bar">
             <label for="bl-service" class="filter-label">Service</label>
             <select class="filter-select" id="bl-service"></select>
-            <label for="bl-key" class="filter-label">Show</label>
-            <select class="filter-select" id="bl-key"></select>
             <div class="toggle-group" id="bl-days" role="group" aria-label="Period">
               <button type="button" class="toggle-btn" data-days="1" aria-pressed="false">Today</button>
               <button type="button" class="toggle-btn" data-days="7" aria-pressed="false">7 days</button>
@@ -296,6 +295,7 @@
           </div>
           <span class="sync-status">Read-only. Decide on the <a href="#review">Review</a> page.</span>
         </div>
+        <div id="bl-picker"></div>
         <p class="ins-toast" id="bl-status" role="status" aria-live="polite"></p>
         <div class="stats-row" id="bl-cards"></div>
         <div class="rv-panel">
@@ -335,10 +335,6 @@
           <div class="filter-bar">
             <label for="rv-service" class="filter-label">Service</label>
             <select class="filter-select" id="rv-service"></select>
-            <label for="rv-key" class="filter-label">Show</label>
-            <select class="filter-select" id="rv-key"></select>
-            <input type="text" class="filter-select" id="rv-tpl" list="rv-tpl-list" placeholder="Template id…" aria-label="Template id" autocomplete="off" spellcheck="false" hidden>
-            <datalist id="rv-tpl-list"></datalist>
             <div class="toggle-group" id="rv-days" role="group" aria-label="Days shown">
               <button type="button" class="toggle-btn" data-days="14" aria-pressed="false">14 days</button>
               <button type="button" class="toggle-btn" data-days="28" aria-pressed="false">28 days</button>
@@ -346,6 +342,7 @@
           </div>
           <button type="button" class="btn btn-primary" id="rv-recompute">Recompute baseline</button>
         </div>
+        <div id="rv-picker"></div>
         <p class="ins-toast" id="rv-status" role="status" aria-live="polite"></p>
         <div class="stats-row" id="rv-cards"></div>
         <div class="rv-panel">
