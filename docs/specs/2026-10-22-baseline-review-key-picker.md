@@ -1,6 +1,6 @@
 # Baseline and Review: grouped key picker and combined series
 
-Date: 2026-10-22. Status: approved design, not built. Mockup (approved layout):
+Date: 2026-10-22. Status: built (branch `key-picker`, merged into `master` as `aaf88e7`); docs/WEB_UI.md describes the pages as built. Mockup (approved layout):
 session scratchpad `mockup/index.html`, real `recharge` data, fake chart.
 
 ## Goal
