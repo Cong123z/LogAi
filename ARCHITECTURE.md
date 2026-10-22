@@ -295,7 +295,7 @@ of that service's miner), `<service>:unparsed`, `*total`, `*error`, `*warn`, `*i
 (`links.level_class`) and add up to `*total`. `*warn` and `*info` are **view
 only**: stored and zero-filled like `*error` (no backfill), skipped by the
 detector (`detect.VIEW_ONLY_KEYS`), so they never alert. The console also
-derives `verdict:` keys from alert history (not stored).
+derives `verdict:action` / `verdict:safe` keys (not stored): the service's templates linked (manual, inherited, corpus, llm) to **active** documents of that verdict.
 
 **Alert rows** (`logai2/alerts.py`, used by the web and the metrics): every
 non-NORMAL `alert_state` row is grouped into one of:

@@ -391,7 +391,30 @@ def test_level_keys_are_service_keys(client, conn, cfg):
     service(conn, "pay")
     committed(conn, "pay", WEEKDAYS)
     base(conn, "pay", "*warn", "weekday", 2, 2, 1)
-    hours(conn, "pay", "*warn", date(2026, 10, 20), {2: (240, 0, 60)})
+    for d in WEEKDAYS:
+        hours(conn, "pay", "*warn", d, {2: (240, 0, 60)})
     assert cell(matrix(conn, cfg, "pay", "*warn", 14, TODAY, NOW), "2026-10-20", 2)["rate"] == 4.0
     assert series(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "full"
     assert client.get("/api/baseline/series?service=pay&key=*info").status_code == 200   # no rows yet: empty, not 404
+
+
+def test_new_level_key_is_young_until_it_has_its_own_days(conn, cfg):
+    service(conn, "pay")
+    committed(conn, "pay", WEEKDAYS)
+    base(conn, "pay", "*warn", "weekday", 2, 2, 1)
+    hours(conn, "pay", "*warn", WEEKDAYS[0], {2: (240, 0, 60)})
+    assert series(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "young"
+    assert matrix(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "young"
+    for d in WEEKDAYS[1:]:
+        hours(conn, "pay", "*warn", d, {2: (240, 0, 60)})
+    assert series(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "full"
+    assert matrix(conn, cfg, "pay", "*warn", 14, TODAY, NOW)["baseline_state"] == "full"
+
+
+def test_incident_warn_lists_only_warn_modules(conn, cfg):
+    seed_series(conn)
+    conn.execute("INSERT INTO templates VALUES ('pay', 'pay:W1', 'WARN', 'w', now(), now())")
+    conn.execute("INSERT INTO alert_minutes VALUES ('pay', 'pay:W1', 'WARN_MOD', %s, '2026-10-21 06:12+00', 7)", (TODAY,))
+    conn.commit()
+    r = incident(conn, "pay", "*warn", TODAY, 13, 15, NOW)
+    assert r["modules"] == [{"module": "WARN_MOD", "lines": 7}] and r["samples"] == []

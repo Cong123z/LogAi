@@ -119,7 +119,7 @@ function rvShowLoadError(message) {
 }
 
 function rvRenderControls() {
-  rvPicker.render({service: rv.service, key: rv.key, templates: rv.templates, docs: rv.docs, baselineState: rv.matrix?.profiles?.weekday});
+  rvPicker.render({service: rv.service, key: rv.key, templates: rv.templates, docs: rv.docs, baselineState: rv.matrix?.baseline_state});
   $rv('rv-days').querySelectorAll('button').forEach(b => {
     const on = Number(b.dataset.days) === rv.days;
     b.classList.toggle('active', on);

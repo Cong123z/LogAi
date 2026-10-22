@@ -332,7 +332,7 @@ Review page.
   with counts, All events, then Level (ERROR, WARN, INFO) and Documentation
   (ERROR docs, SAFE docs); a click shows the group's combined series
   (`*total`, `*error`, `*warn`, `*info`, `verdict:action`, `verdict:safe`).
-  A group with nothing in it for the service is disabled. **Show** opens a
+  A group with nothing in it for the service is disabled. A documentation group's count is the active documents with a linked template (manual, inherited, auto-matched, AI-confirmed) in this service; a verdict series is the sum of those templates. The Errors incident list shows modules of ERROR templates only. **Show** opens a
   searchable list: the combined key, then documents, then templates (newest
   first). Keys: Up / Down, Enter, Esc. A line under it says how the series is
   counted (stored key, new stored key with a young baseline, derived from
@@ -388,7 +388,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` | `{name, revision}` | 400, 409 | — |
 | `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
 | `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
-| `GET /api/baseline/matrix` | query `service`, `key` (default `*total`; also `*error`, `*warn`, `*info`, `verdict:action`, `verdict:safe`, `doc:<id>`, a template id; same for the other `/api/baseline/*` routes), `days` (1–28, default 14) | `{service, key, k, days, coverage, profiles}` | 400, 404 | — |
+| `GET /api/baseline/matrix` | query `service`, `key` (default `*total`; also `*error`, `*warn`, `*info`, `verdict:action`, `verdict:safe`, `doc:<id>`, a template id; same for the other `/api/baseline/*` routes), `days` (1–28, default 14) | `{service, key, k, baseline_state, days, coverage, profiles}` | 400, 404 | — |
 | `GET /api/baseline/inspect` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{sentence, day, increased, new, keys, left_days}` | 400, 404 | — |
 | `GET /api/baseline/series` | query `service`, `key`, `days` (1, 7 or 14, default 14) | `{key, baseline_state, points, incidents, profile}` | 400, 404 | — |
 | `GET /api/baseline/incident` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{ongoing, modules, samples}` | 400, 404 | — |
@@ -633,7 +633,7 @@ decisions are newest first. Not paginated.
 ### `GET /api/baseline/matrix`
 
 `service` (404 `"Unknown service"`), `key` is `*total` (default), `*error`, `*warn`, `*info`,
-`verdict:action`, `verdict:safe` (all templates of the documents with that verdict,
+`verdict:action`, `verdict:safe` (the service's templates linked (manual, inherited, auto-matched, AI-confirmed) to active documents of that verdict,
 404 when none is linked in the service), `doc:<doc_id>` (the document's alerting templates) or a template id (404
 `"Unknown key"`), `days` is an integer 1–28 (400 `"days must be an integer
 from 1 to 28"`). `days` are newest first and hold only hours with minutes
@@ -714,6 +714,8 @@ row (its band is still given). For a `doc:` key `profile.weekday` and `profile.w
 ### `GET /api/baseline/incident`
 
 Same `day` / hour validation as `inspect`.
+
+For `*error` the modules come from ERROR templates only; `*warn` lists WARN templates only (and never returns samples).
 
 ```json
 {"ongoing": true, "modules": [{"module": "RechargeService", "lines": 340}],

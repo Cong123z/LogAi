@@ -33,7 +33,10 @@ hours AS (
       AND sh.hour >= x.hour_from AND sh.hour < x.hour_to)),
 keys AS (
   SELECT DISTINCT hc.service, hc.key FROM hourly_counts hc
-  JOIN hours h USING (service, day, hour))
+  JOIN hours h USING (service, day, hour)),
+born AS (       -- view-only level keys are new: earlier days are unknown, not zero
+  SELECT service, key, min(day) AS day FROM hourly_counts
+  WHERE key IN ('*warn', '*info') GROUP BY service, key)
 INSERT INTO baseline (service, key, daytype, hour, mean, std, days)
 SELECT k.service, k.key, h.daytype, h.hour,
        sum(coalesce(hc.sum, 0))::float / sum(h.n_minutes),
@@ -41,8 +44,10 @@ SELECT k.service, k.key, h.daytype, h.hour,
                      - (sum(coalesce(hc.sum, 0))::float / sum(h.n_minutes))^2, 0)),
        count(*)
 FROM keys k JOIN hours h ON h.service = k.service
+LEFT JOIN born b ON b.service = k.service AND b.key = k.key
 LEFT JOIN hourly_counts hc
   ON hc.service = k.service AND hc.key = k.key AND hc.day = h.day AND hc.hour = h.hour
+WHERE b.day IS NULL OR h.day >= b.day
 GROUP BY k.service, k.key, h.daytype, h.hour
 """
 

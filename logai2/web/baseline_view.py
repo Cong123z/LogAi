@@ -120,6 +120,15 @@ def _cells(conn, cfg: AppConfig, service: str, template_ids: list[str], kind: st
     return out
 
 
+def _young_level_key(conn, cfg: AppConfig, service: str, key: str, dt: str, picked: list[date]) -> bool:
+    """A stored view-only key (*warn, *info) is young until it has its own full_after days (the band's k stays the service's)."""
+    if key not in ("*warn", "*info"):
+        return False
+    n = conn.execute("SELECT count(DISTINCT day) AS n FROM hourly_counts WHERE service = %s AND key = %s AND day = ANY(%s)",
+                     (service, key, picked)).fetchone()["n"]
+    return n < full_after(cfg, dt)
+
+
 def matrix(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date, now: float) -> dict:
     kind, ids = resolve_key(conn, service, key)
     days = [today - timedelta(days=i) for i in range(ndays)]
@@ -162,10 +171,16 @@ def matrix(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
             return "borrowed" if picked["weekday"] else "none"
         return "none" if n == 0 else "full" if n >= full_after(cfg, dt) else "young"
 
+    dt = daytype(today)
+    state = "none" if not conn.execute("SELECT 1 FROM baseline WHERE service = %s AND key = ANY(%s) LIMIT 1",
+                                       (service, ids)).fetchone() else profile(dt)
+    if state == "full" and _young_level_key(conn, cfg, service, key, dt, picked[dt]):
+        state = "young"
+
     return {"service": service, "key": key,
             "k": {dt: cfg.baseline.sigma_multiplier if len(picked[dt]) >= full_after(cfg, dt)
                   else cfg.baseline.young_sigma_multiplier for dt in DAY_CAP},
-            "days": rows, "coverage": coverage, "profiles": {dt: profile(dt) for dt in DAY_CAP}}
+            "baseline_state": state, "days": rows, "coverage": coverage, "profiles": {dt: profile(dt) for dt in DAY_CAP}}
 
 
 def inspect(conn, cfg: AppConfig, service: str, key: str, day: date, hour_from: int, hour_to: int,
@@ -305,6 +320,8 @@ def series(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
     lk = bl.lookup_doc(service, ids, today, last_hour) if kind == "doc" else bl.lookup(service, ids[0], today, last_hour)
     state = ("none" if not any(k[:2] == (service, t) for k in bl.stats for t in ids) else
              "borrowed" if lk.upper_only else "full" if lk.days >= full_after(cfg, lk.daytype) else "young")
+    if state == "full" and _young_level_key(conn, cfg, service, key, lk.daytype, picked_days(conn, service)[lk.daytype]):
+        state = "young"
     return {"key": key, "baseline_state": state, "points": pts, "incidents": incidents,
             "profile": {**prof, "today": [{"hour": p["hour"], "rate": p["rate"]} for p in pts
                                           if p["day"] == today.isoformat() and p["rate"] is not None]}}

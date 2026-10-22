@@ -69,7 +69,7 @@ class OpenMinutes:
                 seen = self.hour_keys[dh]
             keys = {k: 0 for k in seen}
             listed = (s for s, f in first.items() if f is None or f <= m)
-            for s in {*listed, *(k[0] for k in cm.keys)}:  # an unlisted service still gets *error
+            for s in {*listed, *(k[0] for k in cm.keys)}:  # an unlisted service still gets all four service keys
                 for k in ("*total", "*error", "*warn", "*info"):
                     keys[(s, k)] = 0
             keys.update(cm.keys)

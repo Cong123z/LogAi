@@ -46,7 +46,7 @@ function keyLabel(key, templates, docs) {
 let kpSeq = 0;
 function createKeyPicker(root, {onPick}) {
   const uid = `kp${++kpSeq}`;
-  const st = {service: '', key: '*total', templates: [], docs: [], baselineState: null, group: 'all', open: false, active: 0, opts: []};
+  const st = {service: '', key: '*total', templates: [], docs: [], baselineState: null, docIds: new Set(), group: 'all', open: false, active: 0, opts: []};
   root.innerHTML = `
     <div class="kp-bar"><div class="kp-groups" role="group" aria-label="Group"></div></div>
     <div class="kp-bar">
@@ -73,7 +73,7 @@ function createKeyPicker(root, {onPick}) {
   // Active documents of this service (or of none), and those with a linked template here (a verdict key needs one).
   const svcDocs = () => st.docs.filter(d => !d.service || d.service === st.service);
   const linkedDocIds = () => new Set(st.templates.filter(kpLinked).map(t => t.doc_id));
-  const inGroup = (t, id) => id === 'all' || (kpIsDocGroup(id) ? kpLinked(t) && t.doc_verdict === id : levelClass(t.level) === id);
+  const inGroup = (t, id) => id === 'all' || (kpIsDocGroup(id) ? kpLinked(t) && t.doc_verdict === id && st.docIds.has(t.doc_id) : levelClass(t.level) === id);
   const linkedIn = id => st.templates.filter(t => kpLinked(t) && t.doc_id === id).length;   // linked templates in this service
   const groupDocs = id => {
     const ds = svcDocs();
@@ -132,6 +132,7 @@ function createKeyPicker(root, {onPick}) {
 
   function render({service, key, templates, docs, baselineState}) {
     Object.assign(st, {service, key, templates: templates || [], docs: docs || [], baselineState: baselineState || null});
+    st.docIds = new Set(svcDocs().map(d => d.doc_id));
     st.group = keyGroup(key, st.templates, st.docs);
     renderGroups();
     const g = group(), label = keyLabel(key, st.templates, st.docs), gi = KP_GROUPS.find(x => x.key === key);

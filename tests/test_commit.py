@@ -89,3 +89,14 @@ def test_failed_commit_rolls_back_everything(conn, cfg, monkeypatch):
     committed = [r["day"] for r in conn.execute("SELECT day FROM day_status WHERE committed")]
     assert committed == [date(2026, 10, 12)]
     assert baseline_rows(conn) == before_rows
+
+
+def test_new_level_key_baseline_starts_at_its_first_day(conn, cfg):
+    days = [date(2026, 10, d) for d in (7, 8, 9, 12, 13)]
+    for day in days[:-1]:
+        seed(conn, "s", day, 10, 60, {"*total": (60, 60)})
+    seed(conn, "s", days[-1], 10, 60, {"*total": (60, 60), "*warn": (60, 60), "k": (60, 60)})
+    commit(conn, cfg, today=date(2026, 10, 14))
+    rows = {r["key"]: r for r in conn.execute("SELECT key, mean, days FROM baseline WHERE hour = 10")}
+    assert rows["*warn"]["mean"] == pytest.approx(1.0) and rows["*warn"]["days"] == 1
+    assert rows["k"]["mean"] == pytest.approx(0.2) and rows["k"]["days"] == 5     # absent days were really 0
