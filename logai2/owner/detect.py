@@ -33,6 +33,9 @@ class Change(NamedTuple):
     band_high: float | None
 
 
+VIEW_ONLY_KEYS = frozenset({"*warn", "*info"})  # stored for the console only; never judged
+
+
 def step(prev: AlertRow, high: bool, cfg: AlertConfig) -> AlertRow:
     """logai-engine AlertStateMachine._transition; floors replace min_events_1m, so low = not high.
 
@@ -107,6 +110,8 @@ class Detector:
         at = (cm.minute + 1) * 60.0
         changes = []
         for (svc, key), count in keys.items():
+            if key in VIEW_ONLY_KEYS:
+                continue
             level = _worst(doc_levels[(svc, key)]) if (svc, key) in doc_levels else self._level(cm, (svc, key))
             lk = (self.baseline.lookup_doc(svc, doc_tids[(svc, key)], cm.day, cm.hour) if (svc, key) in doc_tids
                   else self.baseline.lookup(svc, key, cm.day, cm.hour))

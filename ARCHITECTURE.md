@@ -290,8 +290,12 @@ purpose: it is the message shape Kafka would carry in v2. `reader/` never
 imports `owner/`; they meet in `engine.py`.
 
 **Keys.** A `key` is a template id (`<service>:T00042`, the Drain3 cluster id
-of that service's miner), `<service>:unparsed`, `*total`, `*error` or
-`doc:<doc_id>`.
+of that service's miner), `<service>:unparsed`, `*total`, `*error`, `*warn`, `*info` or
+`doc:<doc_id>`. `*error` / `*warn` / `*info` are the line level classes
+(`links.level_class`) and add up to `*total`. `*warn` and `*info` are **view
+only**: stored and zero-filled like `*error` (no backfill), skipped by the
+detector (`detect.VIEW_ONLY_KEYS`), so they never alert. The console also
+derives `verdict:` keys from alert history (not stored).
 
 **Alert rows** (`logai2/alerts.py`, used by the web and the metrics): every
 non-NORMAL `alert_state` row is grouped into one of:
@@ -461,15 +465,15 @@ open minutes, the detector and everything pending for the next flush.
 ### 7.2 Open and closed minutes
 
 `OpenMinutes` (`owner/counts.py`) keeps one `ClosedMinute` per open minute.
-Each count adds `n` to its template key, to `*total`, and to `*error` when
-the level is ERROR, FATAL or CRITICAL (case-insensitive), and to the
-(template, module) count. A count for a minute already closed is **late**: it
+Each count adds `n` to its template key, to `*total`, to the level-class key
+(`*error` for ERROR, FATAL, CRITICAL; `*warn` for WARN, WARNING; `*info` for
+anything else; case-insensitive), and to the (template, module) count. A count for a minute already closed is **late**: it
 is dropped and counted in `logai_late_counts_total` (expected to stay 0).
 
 `close_before(watermark_ms // 60000)` closes every minute before the
 watermark's minute, in order, including minutes with no event:
 
-- **Silent zeros.** Every known service gets `*total = 0` and `*error = 0`
+- **Silent zeros.** Every known service gets `*total`, `*error`, `*warn` and `*info` = 0
   in every closed minute from its first minute on; every template seen
   earlier in the same local hour gets 0. A template not seen in the hour adds
   nothing.
@@ -524,6 +528,7 @@ transaction as its cursor. Open-minute counts are never written.
 | `(service, template_id)` | that template's events (0 when silent in a seen hour) |
 | `(service, '*total')` | all events of the service |
 | `(service, '*error')` | ERROR, FATAL, CRITICAL events of the service |
+| `(service, '*warn')`, `(service, '*info')` | WARN / other events of the service; stored, view only, never judged |
 | `(service, 'doc:' + doc_id)` | sum of the minute's counts of the templates linked to the document |
 
 Also judged with count 0: any key whose state is not NORMAL or has a partial
