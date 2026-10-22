@@ -2,80 +2,128 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **not built** (sub-project 4; `GET /api/module-alerts` does not exist yet).
+Status: **approved, not built** (sub-project 4). Rewritten 2026-10-22 against `master` `6c600f3`.
 
-**Goal:** `GET /api/module-alerts?module_code=M&from=…&to=…` returns the
-templates that were ALERTING in that range and logged from module M, with
-module M's per-minute rate next to the template's total rate.
+**Goal:** other services call `GET /api/module-alerts?module_code=M&from=…&to=…` and get the
+templates that were WARMING or ALERTING in that window and were logged by module M, with M's
+per-minute count next to the template's total.
 
-**Architecture:** No second detector and no new storage. The web serves a
-read view over tables the core engine already writes: `modules` (module →
-service), `alert_changes` (ALERTING periods per template key) and
-`alert_minutes` (per-module counts for minutes a key was not NORMAL). A pure
-function turns state changes into ALERTING periods; one query module joins
-periods, minutes, template texts and documents.
+**Architecture:** no second detector, no new table. A read view over what the engine already
+writes: `modules`, `alert_changes`, `alert_minutes`. Two small engine changes (module per
+service; the streak's first minute in `alert_minutes`). `review.periods` gains a `states`
+argument; a new `logai2/module_alerts.py` holds the window parser and the query; one route.
 
-**Tech Stack:** as core engine v1 (Python ≥ 3.11, psycopg 3, Flask 3, pytest, Postgres 16). No new dependency.
+**Tech stack:** unchanged (Python 3.11, psycopg 3, Flask 3, pytest, Postgres 16). No new dependency.
 
-**Spec:** [`docs/design/per-service-baseline.md`](../design/per-service-baseline.md)
-section 7 "Module alert API", and [`docs/specs/2026-10-20-core-engine-design.md`](../specs/2026-10-20-core-engine-design.md)
-(sub-project 4 in its Scope table). Builds on
-[`2026-10-20-core-engine-v1.md`](2026-10-20-core-engine-v1.md): its Task 1 (schema),
-Task 8 (`Change`, `alerts.py`), Task 9 (owner flush), Task 12 (web routes), Task 13 (`review.suggest`),
-Task 14 (`incident_test.py`). Replaces logai-engine's
-`docs/superpowers/plans/2026-10-19-module-alert-api.md` (groups, file store).
-
-## Global Constraints
-
-- Start after `core-engine-v1` is merged: branch `module-alert-api` off `master`. Never add `Co-Authored-By` or any Claude attribution to commits.
-- "Alerting" means state `ALERTING` only. WARMING and COOLING minutes are not counted (decided 2026-10-19).
-- Template keys only (`service:T…`). `*total`, `*error` and `doc:` keys are not returned (see "Out of scope").
-- Module key = ES field `reader.module_field` (default `moduleCode`), already collected; `""` means no module and cannot be queried.
-- Rate unit: events **per minute** (the unit of the stats). Open question 5 in the design; change the unit only in Task 3's response if the callers ask for it.
-- Input times: ISO-8601 (`2026-10-20T08:00:00Z`, offsets allowed) or epoch seconds. Output: ISO-8601 UTC with `Z`.
-- Defaults: `to` = now, `from` = `to − 15 min`. Longest range 24 h.
-- Errors are `{"error": code, "message": text}`. 400 `invalid_request` for a missing/empty `module_code`, a bad time, `from >= to`, or a range over 24 h. An unknown module returns 200 with `templates: []`.
-- No authentication (same as the rest of the web; revisit before exposing outside the trusted network).
-- Queries on `alert_minutes` always carry a `day` range so Postgres prunes partitions (`day` = local day through `timeutil`).
-
-## Review Focus
-
-1. **Template already ALERTING before `from`** (alert started yesterday, still open): it must be returned with its period start before `from`. The latest change before `from` decides the state at `from`. Tested in Task 2.
-2. **One module code logged by two services:** the design assumes a module belongs to one service. Core v1's `modules (module_code PK)` would keep only the first service and hide the second service's alerts (the same bug class as logai-engine's `TemplateState.service`). Task 1 makes the key `(service, module_code)`. Tested in Tasks 1 and 2.
-3. **The first ALERTING minute must be counted:** `alert_minutes` has to be written from the state *after* the minute's step, and `alert_changes.at` has to be that minute's start. Otherwise the series misses the minute that tripped the alert, or the period is off by one. Pinned in Task 1.
-4. **`module_code` with spaces, slashes or Unicode** (`VTN_CNTT/066 é`) goes in the query string, so it must round-trip unchanged. Tested in Task 3.
-5. **A range that crosses local midnight** touches two `alert_minutes` partitions. Both days must be read. Tested in Task 2.
+**Spec (the contract, approved 2026-10-22):** [`docs/specs/2026-10-22-module-alert-api.md`](../specs/2026-10-22-module-alert-api.md).
+Every value below is copied from it; when they disagree, the spec wins.
 
 ---
 
-## File map
+## Part A — Execution with Opus and Sonnet
+
+Team workflow per [`docs/TEAM_WORKFLOW.md`](../TEAM_WORKFLOW.md), with **Claude models only**
+(user, 2026-10-22): no Gemini on this build.
+
+### Roles
+
+| Role | Model | Does |
+|---|---|---|
+| Tech lead | Opus 5.5 (main session) | writes the 3 briefs, creates worktrees, dispatches, answers `QUESTION:`, final review of every task, merges `--no-ff` **only after the user confirms that merge**, keeps `.team/ledger.md`, deploys after the user says so |
+| Implementer | Sonnet 5.5 subagent (`model: sonnet`), one per task | tests first, code, full suite, commits, PR file `.team/prs/task-<id>-<slug>.md` |
+| Task reviewer | a **fresh** Sonnet 5.5 subagent (never the implementer's conversation) | spec + quality review of the branch against its brief: `Spec ✅/❌`, Critical / Important / Minor, `Approved / Needs fixes` |
+| Adversarial reviewer (Task 2 only) | Opus 5.5 subagent (`model: opus`) | Task 2 holds the time math (minute ends vs starts, back-dating, clamps, partitions); one extra review that writes edge-case tests against it |
+
+Why Sonnet implements all three: each task touches SQL or the owner's flush path, which
+TEAM_WORKFLOW gives to the judgment model; the tasks are small enough that one Sonnet run each fits.
+
+### Tasks, branches, order
+
+| Id | Task | Branch / worktree | Depends on | Files (disjoint between 1 and 2) |
+|---|---|---|---|---|
+| 41 | Engine: module per service, first minute | `task/41-module-per-service`, `../logai2-task-41` | — | migrations/006, owner/owner.py, tests/test_db.py, tests/test_owner.py, ARCHITECTURE.md §7.2/§8.5/§11 |
+| 42 | Window parser + module query | `task/42-module-query`, `../logai2-task-42` | — | review.py, module_alerts.py (new), tests/test_review.py, tests/test_module_alerts.py (new) |
+| 43 | Route, token, docs, deploy config | `task/43-module-route`, `../logai2-task-43` | 41 and 42 merged | config.py, web/app.py, tests/test_web_module_alerts.py (new), tests/test_config.py, docs/WEB_UI.md, README.md, ARCHITECTURE.md §1/§3/§14, docker-compose.yml, k8s/logai-web.yaml |
 
 ```
-logai2/migrations/002_modules_per_service.sql   new: modules PK (service, module_code)
-logai2/owner/owner.py                           modify: new-module key (service, module)
-logai2/alerts.py                                modify: add periods()
-logai2/review.py                                modify: suggest() uses periods()
-logai2/module_alerts.py                         new: parse_range(), module_alerts()
-logai2/web/app.py                               modify: GET /api/module-alerts
-scripts/incident_test.py                        modify: module API check
-README.md                                       modify: API section
-tests/test_owner.py, tests/test_alerts.py, tests/test_module_alerts.py, tests/test_web_module_alerts.py
+ t0 ──┬─ 41 Sonnet impl ─ Sonnet review ─ Opus final ─ merge ──┐
+      └─ 42 Sonnet impl ─ Sonnet review ─ Opus adversarial ─ Opus final ─ merge ──┤
+                                                                                  └─ 43 Sonnet impl ─ Sonnet review ─ Opus final ─ merge
+                                                                                        └─ graphify update, agents.md, deploy (user's go)
 ```
+
+41 and 42 run **in parallel** (no shared file; 42 seeds its rows directly and does not need 41's
+code). 43 branches off `master` after both merges. Every "merge" in this diagram waits for the
+user's confirmation of that branch.
+
+### Per-task loop (tech lead)
+
+1. Write the brief `docs/tasks/<id>-<slug>.md` from `docs/templates/task-brief.md`: it points to
+   this plan's task section and the spec sections, and copies the file list and done-when.
+2. `git worktree add ../logai2-task-<id> -b task/<id>-<slug> master`; ledger line `dispatch`.
+3. Dispatch the Sonnet implementer (`Agent`, `model: sonnet`, run in background): "Work in
+   `../logai2-task-<id>`. Brief: `docs/tasks/<id>-<slug>.md`. PR file: `.team/prs/task-<id>-<slug>.md`.
+   Reply with Status / commits / test output / `QUESTION:` or concerns."
+4. `QUESTION:` → answer by `SendMessage` to the same agent; ledger line `Ruling:` with its cost if wrong.
+5. `DONE <sha>` → check `git -C ../logai2-task-<id> status`, diff stays inside the brief's files,
+   commit messages without attribution; then dispatch the fresh Sonnet reviewer (and for 42 the
+   Opus adversarial reviewer) on brief + PR file + `git diff master...task/<id>-<slug>`.
+6. Needs fixes → `SendMessage` the findings to the implementer; at most 3 rounds, then the tech lead rules.
+7. Opus final review: seams (units: minute **ends** in `alert_changes` vs minute **starts** in
+   the API; transactions; the token; partitions), full suite on the branch, docs updated.
+8. **Ask the user to confirm the merge** (show the review verdict, the diff stat and the test
+   output). Nothing reaches `master` before the user says yes for that branch (user rule 2026-10-22).
+9. On the user's yes: `git merge --no-ff task/<id>-<slug>` with the PR summary as message; full suite
+   on `master`; `git worktree remove`, `git branch -d`; ledger line `merged <sha> (user confirmed)`.
+
+### Finish
+
+- After 43: `graphify update .` in `~/Documents/logai2`; `agents.md` entry; spec and plan Status → built.
+- Deploy **only when the user says so**: `docker compose build logai2-engine logai2-web`, restart
+  `logai2-engine` first (migration 006), then `logai2-web`; linker untouched. k8s: the user pushes
+  the image and adds `LOGAI_API_TOKEN` to Secret `logai-env` (optional key).
+- Live check on the test stack: the route answers 400 without `from`/`to`, 200 with `templates: []`
+  for an unknown module, and `data_until` close to now. (The test stack's `recharge-logs` has no
+  `moduleCode`, so a non-empty answer needs `udcntt*`.)
 
 ---
 
-### Task 1: Module per service and alert-minute timing in the engine
+## Part B — Tasks
 
-**Files:**
-- Create: `logai2/migrations/002_modules_per_service.sql`
-- Modify: `logai2/owner/owner.py` (the known-modules set and the pending `modules` rows)
-- Test: `tests/test_owner.py` (append), `tests/test_db.py` (append)
+### Facts from the current code the tasks rely on
 
-**Interfaces:**
-- Consumes: `Owner`, `run_minutes` helper and FakeSource from core v1 Task 9.
-- Produces: `modules` primary key `(service, module_code)` plus index `modules_code (module_code)`. The owner's known-module set is keyed `(service, module)`, so a module that shows up under a second service gets a second row. Rows are written only for `module != ""`.
+- `alert_changes.at` = **end** of the closed minute, `(minute + 1) * 60` (`owner/detect.py`).
+  Do **not** change it: Review, Baseline and `alert_rows.since` read it as is. The API converts
+  to minute starts (Task 42).
+- Hysteresis `detect.step`, defaults `warm 2 / alert 3 / cool 3`: high minute 1 → NORMAL streak 1;
+  high minute 2 → WARMING; high minute 3 → ALERTING; low after ALERTING → COOLING.
+- `alert_minutes` rows are appended in `Owner.handle` after `detector.run(cm)`, from the state
+  after the step, for template keys with `state != "NORMAL"` (`owner.py` ~line 189). The streak's
+  first minute (NORMAL, streak 1) has no row today.
+- `modules (module_code PK, service)`; the owner keeps a set of codes and `_modules[module] = service`,
+  so a module seen in a second service is never recorded for it.
+- `drop_partitions_before(conn, table, cutoff)` drops days `< today − retention.counts_days`; the
+  oldest kept local day is `today − counts_days`.
+- `worker_status['engine'].status` has `heartbeat` and `lag_seconds` (`engine._status`).
+- `app.py` already has a `parse_range` (Baseline); the new parser is `parse_window`.
+- Test helpers: `tests/test_owner.py` `make`, `run_minutes`, `lines`, `rows`; web tests build
+  `create_app(cfg)` in an `app` fixture over the test schema (`tests/test_web_alerts_templates.py`).
 
-- [ ] **Step 1: Write the failing tests**
+### Task 41: engine — a module per service, and the streak's first minute
+
+**Files:** create `logai2/migrations/006_modules_per_service.sql`; modify `logai2/owner/owner.py`,
+`ARCHITECTURE.md` (§7.2 / §8.5 `alert_minutes` rule, §11 `modules` key, migration list in §11 and §16);
+tests `tests/test_db.py`, `tests/test_owner.py`.
+
+**Requirements**
+1. `modules` primary key `(service, module_code)`, plus index `modules_code (module_code)`.
+2. The owner's known set is `{(service, module_code)}`, loaded with `SELECT service, module_code FROM modules`;
+   a new pair (module ≠ `""`) is queued and inserted as `(module_code, service)` with `ON CONFLICT DO NOTHING`.
+3. `alert_minutes` rows are also written for a template key whose row after the step is NORMAL
+   with `streak > 0`: condition `row is not None and (row.state != "NORMAL" or row.streak)`.
+   Historic minutes still write none.
+
+- [ ] **Step 1: failing tests**
 
 ```python
 # tests/test_db.py
@@ -86,238 +134,255 @@ def test_module_can_belong_to_two_services(conn):
 
 # tests/test_owner.py
 def test_module_rows_per_service(conn, cfg):
-    # same moduleCode "M1" on service a and service b, plus lines with no module
-    run_minutes(conn, cfg, hits, ...)
-    rows = conn.execute("SELECT service, module_code FROM modules ORDER BY 1").fetchall()
-    assert [(r["service"], r["module_code"]) for r in rows] == [("a", "M1"), ("b", "M1")]
+    # one minute: service a module M1, service b module M1, service a no module
+    ...
+    assert rows(conn, "SELECT service, module_code FROM modules ORDER BY 1") == [("a", "M1"), ("b", "M1")]
 
-def test_first_alerting_minute_is_in_alert_minutes(conn, cfg):
-    # committed baseline mean 1 std 0.5 for s:T1 (ERROR); minutes M..M+4 at 40/min from module M1,
-    # detection_enabled, not historic
-    run_minutes(conn, cfg, hits, ...)
-    ch = conn.execute("SELECT at, to_state FROM alert_changes WHERE key = 's:T1' ORDER BY at").fetchall()
-    alerting_at = next(r["at"] for r in ch if r["to_state"] == "ALERTING")
-    assert alerting_at == minute_start(M + 2)                     # 3rd high minute, its start
-    mins = [r["minute"] for r in conn.execute(
-        "SELECT minute FROM alert_minutes WHERE key = 's:T1' AND module_code = 'M1' ORDER BY minute")]
-    assert minute_start(M) in mins and minute_start(M + 2) in mins   # first WARMING minute and the ALERTING minute
+def test_module_set_survives_restart(conn, cfg):
+    # run with (a, M1); new Owner on the same schema; then (b, M1) → both rows, no error
+
+def test_first_high_minute_in_alert_minutes(conn, cfg):
+    # committed baseline s:T1 (ERROR) mean 1 std 0.5, detection on, not historic;
+    # minutes M..M+3 at 40/min from module M1
+    # → alert_minutes for s:T1/M1 holds minutes M (NORMAL streak 1), M+1 (WARMING), M+2, M+3 (ALERTING)
+
+def test_single_high_minute_writes_one_row_and_no_change(conn, cfg):
+    # one high minute then low → one alert_minutes row, no alert_changes row
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [ ] **Step 2:** `.venv/bin/pytest tests/test_db.py tests/test_owner.py -q` → new tests fail.
+- [ ] **Step 3:** implement.
 
-Run: `.venv/bin/pytest tests/test_db.py tests/test_owner.py -q`
-Expected: FAIL on `test_module_can_belong_to_two_services` (unique violation) and `test_module_rows_per_service`. If `test_first_alerting_minute_is_in_alert_minutes` already passes, the core plan got the timing right; keep the test as a pin.
-
-- [ ] **Step 3: Implement**
-
-`002_modules_per_service.sql`:
 ```sql
+-- 006_modules_per_service.sql
 ALTER TABLE modules DROP CONSTRAINT modules_pkey;
 ALTER TABLE modules ADD PRIMARY KEY (service, module_code);
 CREATE INDEX modules_code ON modules (module_code);
 ```
-In `owner.py`, key the known-modules set and the `ON CONFLICT` target by `(service, module_code)`. If the timing test failed, fix the owner so that `alert_minutes` rows come from `detector.not_normal()` *after* `detector.run(cm, …)`, and `Change.at = cm.minute * 60`.
+- [ ] **Step 4:** `.venv/bin/pytest -q` all green. ARCHITECTURE updated.
+- [ ] **Step 5:** commit `Engine: modules keyed by (service, module_code); alert_minutes from a streak's first minute`.
 
-- [ ] **Step 4: Run the whole suite**
+### Task 42: window parser and the module query
 
-Run: `.venv/bin/pytest tests -q`
-Expected: all PASS.
+**Files:** modify `logai2/review.py`; create `logai2/module_alerts.py`;
+tests `tests/test_review.py`, new `tests/test_module_alerts.py`.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "Key modules by service and pin alert-minute timing"
-```
-
----
-
-### Task 2: ALERTING periods and the module query
-
-**Files:**
-- Modify: `logai2/alerts.py` (add `periods`), `logai2/review.py` (`suggest` calls `periods`)
-- Create: `logai2/module_alerts.py`
-- Test: `tests/test_alerts.py` (append), `tests/test_module_alerts.py`
-
-**Interfaces:**
-- Consumes: `alert_changes`, `alert_minutes`, `modules`, `templates`, `template_doc_links`, `documents` (core v1 Task 1 + Task 1 above). `timeutil.day_hour`, `timeutil.minute_of` (core Task 1).
-- Produces:
-  - `periods(changes: list[dict], states: set[str], end: float) -> dict[tuple[str, str], list[tuple[float, float | None]]]` in `alerts.py` (pure). `changes` are `alert_changes` rows (`service, key, at, from_state, to_state`) sorted by `at`, epoch seconds. A period opens at the first change *into* `states` and closes at the next change *out of* `states`. A key whose first change has `from_state` in `states` opens a period at `-inf`. Periods still open at `end` get `None`. `review.suggest` uses it with `{"WARMING", "ALERTING", "COOLING"}`, and its existing tests must still pass.
-  - `parse_range(args: Mapping[str, str], now: float) -> tuple[str, float, float]` in `module_alerts.py`: returns `(module_code, start, end)` in epoch seconds and raises `ValueError(message)` for every 400 case in Global Constraints.
-  - `module_alerts(conn, module_code: str, start: float, end: float) -> list[dict]`. Each item:
-    ```
-    {"service", "template_id", "text", "level", "doc_id": str|None, "doc_title": str|None,
-     "periods": [{"start": float, "end": float|None}],            # raw period bounds, not clipped to the range
-     "alerting_minutes": int,                                     # minutes of periods ∩ [start, end)
-     "module":   {"total": int, "avg": float, "peak": int, "series": [{"minute": float, "count": int}]},
-     "template": {"total": int, "avg": float, "peak": int}}
-    ```
-
-Query rules (`module_alerts`):
-1. `services = SELECT service FROM modules WHERE module_code = %s`; none → `[]`.
-2. Changes for those services on template keys (`key NOT LIKE '*%%' AND key NOT LIKE 'doc:%%'`): the latest row per `(service, key)` with `at < start` (`DISTINCT ON`), plus every row with `start <= at < end`. Then `periods(rows, {"ALERTING"}, end)`, keeping only periods that overlap `[start, end)`.
-3. A minute `m` counts when `max(p.start, start) <= m < min(p.end or end, end)` for one of the key's periods. Read `alert_minutes` for those keys with `minute` in `[start, end)` and `day BETWEEN local day of start AND local day of end`. Sum over all modules gives `template`, rows with `module_code = M` give `module`; drop minutes outside the periods.
-4. Leave out a template whose module total is 0. `alerting_minutes` = whole minutes in periods ∩ range (at least 1). `avg = round(total / alerting_minutes, 2)`; `series` holds stored minutes only (missing minutes mean 0). Sort by `module.total` descending, then `template_id`.
-5. Text and level come from `templates`, the document from `template_doc_links` + `documents`. A template row missing from `templates` gives `text: ""`, not an error.
-
-- [ ] **Step 1: Write the failing tests**
+**Interfaces (Task 43 relies on these exact names)**
 
 ```python
-# tests/test_alerts.py
-def test_periods_open_closed_and_already_alerting():
-    ch = [c("s", "s:T1", 100, "WARMING", "ALERTING"), c("s", "s:T1", 400, "ALERTING", "COOLING"),
-          c("s", "s:T2", 50, "ALERTING", "COOLING")]   # first row leaves ALERTING → opened at -inf
-    p = periods(ch, {"ALERTING"}, end=1000)
-    assert p[("s", "s:T1")] == [(100, 400)]
-    assert p[("s", "s:T2")] == [(float("-inf"), 50)]
-    assert periods([c("s", "s:T3", 900, "WARMING", "ALERTING")], {"ALERTING"}, 1000)[("s", "s:T3")] == [(900, None)]
+# review.py
+NON_NORMAL = frozenset({"WARMING", "ALERTING", "COOLING"})
+def periods(changes, end_now, states=NON_NORMAL) -> list[tuple[str, float, float]]
+    # a change whose to_state is in `states` opens a period if none is open; any other change closes it.
+    # Default unchanged: every Review/Baseline test passes untouched.
 
-# tests/test_module_alerts.py — seed rows directly; t(h, m) = epoch of 2026-10-14 h:m local
-def test_module_rates_inside_alerting_period(conn):
-    # s:T1 ALERTING 08:02–08:06; alert_minutes 08:01 (WARMING) M1=9, 08:02..08:05 M1=10 M2=5
-    items = module_alerts(conn, "M1", t(8, 0), t(8, 15))
-    it = items[0]
-    assert it["alerting_minutes"] == 4
-    assert it["module"] == {"total": 40, "avg": 10.0, "peak": 10, "series": [...4 minutes...]}
-    assert it["template"]["total"] == 60                   # 08:01 WARMING minute excluded
+# module_alerts.py
+def parse_window(args: Mapping[str, str], now: float, retention_days: int) -> tuple[str, float, float, float, float]
+    # -> (module_code, from_s, to_s, start, end): from_s/to_s as sent (epoch s, ms kept as fraction),
+    #    start/end the effective window (rounded outward, clamped). ValueError(message) for each 400 case.
+def data_until(conn) -> float | None
+    # floor((heartbeat - lag_seconds) / 60) * 60 from worker_status['engine']; None when no row.
+def module_alerts(conn, module_code: str, start: float, end: float) -> list[dict]
+```
 
-def test_started_before_range_and_still_open(conn):
-    # NORMAL→…→ALERTING at 07:50, no change after; query 08:00–08:10
+**`parse_window` rules** (spec §2)
+1. `module_code` stripped; missing or empty → ValueError. `from` and `to` both required → ValueError.
+2. A value parses as a number first: `> 1e11` = epoch ms, else epoch s. Otherwise ISO-8601 via
+   `datetime.fromisoformat(v.replace("Z", "+00:00"))`, naive = UTC. Neither → ValueError.
+3. `from > to` → ValueError (checked on the values as sent).
+4. Clamp: `oldest` = 00:00 local of `(local date of now) − retention_days` (`timeutil.TZ`);
+   `from = max(from, oldest)`, `to = min(to, now)`; if clamping makes `from > to`, `to = from`.
+5. `start = floor(from / 60) * 60`; `end = ceil(to / 60) * 60`, and `end = start + 60` when equal.
+
+**`module_alerts` rules** (spec §3, §6)
+1. `SELECT service FROM modules WHERE module_code = %s`; none → `[]`.
+2. Changes of those services on template keys (`key NOT LIKE '*%%' AND key NOT LIKE 'doc:%%'`):
+   latest row per `(service, key)` with `at < start + 60` (`DISTINCT ON (service, key) … ORDER BY service, key, at DESC`)
+   plus every row with `start + 60 <= at < end + 60`, ordered by `at`. (`+ 60`: `at` is a minute end, so
+   the change that ends the window's first minute belongs to the window.)
+3. Per service: `p = periods(rows, end + 60, {"WARMING", "ALERTING"})` and
+   `a = periods(rows, end + 60, {"ALERTING"})`. Convert every bound to a minute start (`− 60`);
+   a WARMING/ALERTING period whose opening change is `NORMAL → WARMING` moves its start back
+   `(cfg.alert.warm_consecutive − 1) * 60` more (take the value as a parameter with default 2, or
+   pass `cfg`; one choice, stated in the PR). An end equal to `end` (open at the window's end)
+   is reported as `None` when no closing change exists.
+4. Keep periods overlapping `[start, end)`. Minute `m` counts when `p.start <= m < p.end` and `start <= m < end`.
+   `peak_state` = `ALERTING` when some `a` period overlaps `[start, end)`, else `WARMING`.
+5. `alert_minutes` rows of those keys with `minute >= start AND minute < end AND day BETWEEN
+   day_of(start) AND day_of(end − 1)` (local days via `timeutil`). Minutes failing rule 4 are dropped.
+   All modules → `template`; `module_code = M` → `module`.
+6. Drop a template whose module total is 0. `alerting_minutes` = counted minutes of the periods
+   inside the window. `avg = round(total / alerting_minutes, 2)`, `peak` = max per minute.
+   `series`: per minute (`{"minute", "count"}`, stored minutes only) when `end − start <= 86400`,
+   else per local hour start (`{"hour", "count"}`).
+7. `text`, `level` from `templates` (missing row → `""`, `"INFO"`); `doc_id`/`doc_title` from
+   `template_doc_links` (`doc_id IS NOT NULL AND source = ANY(links.ALERTING_SOURCES)`) joined to `documents`.
+8. Sort by `module.total` desc, then `service`, `template_id`. Times stay epoch seconds here; Task 43 formats.
+9. Item shape:
+   ```
+   {"service", "template_id", "text", "level", "doc_id", "doc_title", "peak_state",
+    "periods": [{"start": float, "end": float | None}],
+    "alerting_minutes": int,
+    "module":   {"total", "avg", "peak", "series": [...]},
+    "template": {"total", "avg", "peak"}}
+   ```
+
+- [ ] **Step 1: failing tests** (seed `modules`, `templates`, `alert_changes`, `alert_minutes`
+  directly; `t(h, m)` = epoch of 2026-10-14 h:m local; `at` values are minute **ends**)
+
+```python
+# tests/test_review.py
+def test_periods_states_argument():
+    ch = [c("s:T1", t(8, 1), "NORMAL", "WARMING"), c("s:T1", t(8, 3), "WARMING", "ALERTING"),
+          c("s:T1", t(8, 5), "ALERTING", "COOLING"), c("s:T1", t(8, 6), "COOLING", "ALERTING")]
+    assert periods(ch, t(9, 0), {"WARMING", "ALERTING"}) == [("s:T1", t(8, 1), t(8, 5)), ("s:T1", t(8, 6), t(9, 0))]
+    assert periods(ch, t(9, 0), {"ALERTING"}) == [("s:T1", t(8, 3), t(8, 5)), ("s:T1", t(8, 6), t(9, 0))]
+
+# tests/test_module_alerts.py
+def test_counts_from_first_high_minute_to_cooling(conn):
+    # minute 08:00 streak 1, 08:01 WARMING (change at 08:02), 08:02..08:05 ALERTING (change at 08:03),
+    # COOLING from 08:06 (change at 08:07); alert_minutes M1=10, M2=5 on 08:00..08:08
+    it = module_alerts(conn, "M1", t(8, 0), t(8, 15))[0]
+    assert it["periods"] == [{"start": t(8, 0), "end": t(8, 6)}] and it["peak_state"] == "ALERTING"
+    assert it["alerting_minutes"] == 6
+    assert it["module"]["total"] == 60 and it["module"]["peak"] == 10 and it["module"]["avg"] == 10.0
+    assert it["template"]["total"] == 90
+
+def test_warming_that_falls_back(conn):
+    # 08:00 streak 1, 08:01 WARMING (at 08:02), 08:02 low → NORMAL (at 08:03)
+    it = module_alerts(conn, "M1", t(8, 0), t(8, 15))[0]
+    assert it["peak_state"] == "WARMING" and it["alerting_minutes"] == 2
+
+def test_started_before_window_and_still_open(conn):
+    # only change before the window: WARMING → ALERTING at 07:50 (end of minute 07:49)
     it = module_alerts(conn, "M1", t(8, 0), t(8, 10))[0]
-    assert it["periods"] == [{"start": t(7, 50), "end": None}] and it["alerting_minutes"] == 10
+    assert it["periods"] == [{"start": t(7, 49), "end": None}] and it["alerting_minutes"] == 10
 
-def test_excludes_cooling_before_range_and_other_module(conn):
-    # s:T2 ALERTING→COOLING at 07:59; s:T3 ALERTING but only M2 minutes → query M1 returns neither
+def test_window_of_one_minute_inside_an_alert(conn):
+    # ALERTING 08:00..08:09; window [08:03, 08:04) → 1 minute, that minute's counts only
+
+def test_cooling_before_window_and_other_module_left_out(conn):
+    # s:T2 ALERTING→COOLING at 07:59; s:T3 ALERTING with only M2 rows
     assert [i["template_id"] for i in module_alerts(conn, "M1", t(8, 0), t(8, 15))] == ["s:T1"]
 
 def test_module_in_two_services(conn):
-    # M1 in services a and b, each with one ALERTING template → both returned
     assert {i["service"] for i in module_alerts(conn, "M1", t(8, 0), t(8, 15))} == {"a", "b"}
 
-def test_range_across_local_midnight(conn):
-    # ALERTING 23:58 (Oct 14) → 00:03 (Oct 15), M1 rows in both days' partitions
+def test_window_across_local_midnight(conn):
+    # ALERTING minutes 23:58 (Oct 14) .. 00:02 (Oct 15), M1 = 7 per minute, both partitions
     assert module_alerts(conn, "M1", t(23, 55), t(23, 55) + 600)[0]["module"]["total"] == 5 * 7
 
-def test_unknown_module_and_missing_template_text(conn):
+def test_series_per_hour_over_one_day(conn):
+    # window of 2 days → series items have "hour", not "minute"
+
+def test_unknown_module_and_missing_template_row(conn):
     assert module_alerts(conn, "NOPE", t(8, 0), t(8, 15)) == []
-    # alerting key with no templates row → text ""
+    # alerting key with no templates row → text "" and level "INFO", no error
 
-def test_parse_range():
-    now = 1_760_000_000.0
-    assert parse_range({"module_code": " M1 "}, now) == ("M1", now - 900, now)
-    assert parse_range({"module_code": "M1", "from": "2026-10-20T01:00:00Z", "to": "1792461600"}, now)[1:] \
-        == (1792458000.0, 1792461600.0)                  # ISO from, epoch to
-    for bad in ({}, {"module_code": ""}, {"module_code": "M", "from": "abc"},
-                {"module_code": "M", "from": "200", "to": "100"},
-                {"module_code": "M", "from": "0", "to": str(25 * 3600)}):
+def test_doc_and_service_keys_never_returned(conn):
+    # doc:DOC-1 and *error ALERTING with M1 rows → []
+
+def test_data_until(conn):
+    # worker_status engine {heartbeat: 1000.0, lag_seconds: 75.0} → 900.0; no row → None
+
+def test_parse_window():
+    now = 1792461600.0                                  # 2026-10-20T02:00:00Z
+    pw = lambda **a: parse_window(a, now, 90)
+    assert pw(module_code=" M1 ", **{"from": "1792458000", "to": "1792458300"})[0] == "M1"
+    assert pw(module_code="M", **{"from": "2026-10-20T01:00:00Z", "to": "1792461600"})[3:] == (1792458000.0, 1792461600.0)
+    assert pw(module_code="M", **{"from": "1792458030500", "to": "1792458031200"})[3:] == (1792458000.0, 1792458060.0)
+    assert pw(module_code="M", **{"from": "2026-10-20T01:00:59.999Z", "to": "2026-10-20T01:01:00.001Z"})[3:] \
+        == (1792458000.0, 1792458120.0)
+    assert pw(module_code="M", **{"from": "1792458000", "to": "1792458300"})[3:] == (1792458000.0, 1792458300.0)
+    assert pw(module_code="M", **{"from": "1792458012", "to": "1792458012"})[3:] == (1792458000.0, 1792458060.0)
+    assert pw(module_code="M", **{"from": "2026-10-20T08:00:00+07:00", "to": "1792458060"})[3:] \
+        == (1792458000.0, 1792458060.0)                 # offset honoured
+    # clamps: from older than retention → 00:00 local of today − 90; to in the future → now
+    oldest = datetime(2026, 7, 22, tzinfo=TZ).timestamp()       # local date of now is 2026-10-20
+    assert pw(module_code="M", **{"from": "0", "to": "1792458000"})[3] == oldest
+    assert pw(module_code="M", **{"from": "1792458000", "to": str(now + 3600)})[4] == now
+    for bad in ({}, {"module_code": ""}, {"module_code": "M"}, {"module_code": "M", "from": "0"},
+                {"module_code": "M", "to": "0"}, {"module_code": "M", "from": "abc", "to": "0"},
+                {"module_code": "M", "from": "200", "to": "100"}):
         with pytest.raises(ValueError):
-            parse_range(bad, now)
+            parse_window(bad, now, 90)
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [ ] **Step 2:** run → fail. **Step 3:** implement. **Step 4:** `.venv/bin/pytest -q` all green
+  (Review/Baseline tests unchanged).
+- [ ] **Step 5:** commit `Module alerts: window parser and WARMING/ALERTING query per module`.
 
-Run: `.venv/bin/pytest tests/test_alerts.py tests/test_module_alerts.py tests/test_review.py -q`
-Expected: FAIL (`ImportError: periods`, `module_alerts`).
+### Task 43: route, token, docs, deploy config
 
-- [ ] **Step 3: Implement `periods`, switch `review.suggest` to it, implement `module_alerts.py`.** Parse ISO with `datetime.fromisoformat(v.replace("Z", "+00:00"))` (a naive value is UTC), else `float(v)`. Clip `-inf`/`None` period bounds to the range only when counting minutes; return raw bounds in `periods`.
+**Files:** modify `logai2/config.py`, `logai2/web/app.py`, `docs/WEB_UI.md`, `README.md`,
+`ARCHITECTURE.md` (§1 sub-project 4 built, §3 env table, §14 limits), `docker-compose.yml`,
+`k8s/logai-web.yaml`; tests new `tests/test_web_module_alerts.py`, `tests/test_config.py`.
 
-- [ ] **Step 4: Run tests**
+**Requirements**
+1. `WebConfig.api_token: str = ""`; `LOGAI2_API_TOKEN` sets it (empty ignored, like the other vars).
+2. `GET /api/module-alerts`:
+   - token set and `not hmac.compare_digest(request.headers.get("Authorization", ""), "Bearer " + token)`
+     → 401 `{"error": "unauthorized"}`. Only this route checks it.
+   - `parse_window(request.args, time.time(), cfg.retention.counts_days)`; `ValueError` → `BadRequest(str(exc))`.
+   - 200 body (spec §4):
+     ```json
+     {"module_code", "from", "to", "effective_from", "effective_to",
+      "resolution": "minute", "data_until", "unit": "events_per_minute", "templates": [...]}
+     ```
+     every time through one helper `iso(ts) -> str | None` (UTC, `Z`, milliseconds kept when non-zero:
+     `from`/`to` echo `…T07:00:30.500Z`; minute bounds print `…T07:00:00Z`). Items as Task 42 with
+     `periods`, `series` minutes/hours formatted.
+3. Compose: `LOGAI2_API_TOKEN: ${LOGAI2_API_TOKEN:-}` on `logai2-web`. k8s `logai-web.yaml`:
+   `LOGAI2_API_TOKEN` from Secret `logai-env` key `LOGAI_API_TOKEN` with `optional: true`. No token value in any file.
+4. Docs: WEB_UI.md HTTP API section (request, response, errors, rounding, WARMING/ALERTING and
+   `peak_state`, `data_until`, token, DEBUG/INFO never alert); README env table + "Module alert API"
+   with a `curl` example; ARCHITECTURE §1, §3, §14 ("one shared token, no per-caller keys").
 
-Run: `.venv/bin/pytest tests -q`
-Expected: all PASS, including the unchanged `tests/test_review.py`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "Add ALERTING periods and module alert query"
-```
-
----
-
-### Task 3: `GET /api/module-alerts`, docs and the end-to-end check
-
-**Files:**
-- Modify: `logai2/web/app.py`, `scripts/incident_test.py`, `README.md`
-- Test: `tests/test_web_module_alerts.py`
-
-**Interfaces:**
-- Consumes: `parse_range`, `module_alerts` (Task 2); the request-scoped `conn()` and JSON error style from core Task 11.
-- Produces: the route. Response 200:
-
-```json
-{
-  "module_code": "VTN_CNTT_VAS_066_301",
-  "from": "2026-10-20T08:00:00Z", "to": "2026-10-20T08:15:00Z",
-  "unit": "events_per_minute",
-  "templates": [{
-    "service": "payment-svc", "template_id": "payment-svc:T00431",
-    "text": "Timeout acquiring connection <*>", "level": "ERROR",
-    "doc_id": "DOC-017", "doc_title": "Restart DB pool",
-    "periods": [{"start": "2026-10-20T07:58:00Z", "end": null}],
-    "alerting_minutes": 15,
-    "module":   {"total": 300, "avg": 20.0, "peak": 42, "series": [{"minute": "2026-10-20T08:00:00Z", "count": 18}]},
-    "template": {"total": 420, "avg": 28.0, "peak": 55}
-  }]
-}
-```
-Times go through one helper `iso(ts: float | None) -> str | None`. A `-inf` period start becomes `null`, meaning "before retained history".
-
-- [ ] **Step 1: Write the failing tests** (Flask client on the test schema, seeded as in Task 2)
+- [ ] **Step 1: failing tests**
 
 ```python
-def test_module_alerts_200_shape(client, conn):
-    body = client.get("/api/module-alerts?module_code=M1&from=2026-10-14T01:00:00Z&to=2026-10-14T01:15:00Z").get_json()
-    assert body["unit"] == "events_per_minute" and body["from"].endswith("Z")
-    assert body["templates"][0]["module"]["total"] == 40
+# tests/test_config.py
+def test_api_token_from_env(monkeypatch): ...   # set → cfg.web.api_token; "" → ""
 
-def test_unknown_module_empty_200(client):
-    r = client.get("/api/module-alerts?module_code=NOPE")
-    assert r.status_code == 200 and r.get_json()["templates"] == []
+# tests/test_web_module_alerts.py  (rows seeded as Task 42's first test)
+def test_shape(client, conn):
+    body = client.get("/api/module-alerts?module_code=M1&from=<08:00:30.5 local ISO>&to=<08:14:10.2>").get_json()
+    assert body["effective_from"].endswith("T01:00:00Z") and body["from"].endswith(".500Z")
+    assert body["resolution"] == "minute" and body["unit"] == "events_per_minute"
+    assert body["templates"][0]["module"]["total"] == 60 and body["templates"][0]["peak_state"] == "ALERTING"
 
-@pytest.mark.parametrize("qs", ["", "module_code=", "module_code=M&from=abc",
-                                "module_code=M&from=200&to=100", "module_code=M&from=0&to=90000"])
-def test_bad_input_400(client, qs):
-    r = client.get("/api/module-alerts?" + qs)
-    assert r.status_code == 400 and r.get_json()["error"] == "invalid_request"
+def test_unknown_module_empty_200(client): ...   # with from/to → 200, templates []
 
-def test_module_code_unicode_and_slash_round_trips(client, conn):
-    # seed module "VTN/066 é" → query with urlencoded value → body["module_code"] == "VTN/066 é" and 1 template
+@pytest.mark.parametrize("qs", ["", "module_code=&from=0&to=60", "module_code=M", "module_code=M&from=0",
+                                "module_code=M&to=60", "module_code=M&from=abc&to=60",
+                                "module_code=M&from=200&to=100"])
+def test_bad_input_400(client, qs): ...
+
+def test_module_code_unicode_and_slash_round_trip(client, conn):   # "VTN/066 é", urlencoded
+
+def test_data_until_null_without_engine_row(client): ...
+
+def test_token(conn, cfg, schema):   # cfg.web.api_token = "s3cret"
+    # no header → 401; "Bearer wrong" → 401; "Bearer s3cret" → 200; /api/alerts still 200 without a header
 ```
 
-- [ ] **Step 2: Run to verify they fail**
-
-Run: `.venv/bin/pytest tests/test_web_module_alerts.py -q`
-Expected: FAIL (404).
-
-- [ ] **Step 3: Implement the route** (catch `ValueError` from `parse_range` → 400). Add a "Module alert API" section to `README.md` with the request, the response above, the error codes and the rule "ALERTING minutes only, per minute". In `scripts/incident_test.py`, each target gains `module` (the moduleCode its injected lines carry). After a burst check passes, call `/api/module-alerts?module_code=<module>&from=<burst start>` and record check **6: the burst template is listed with `module.total > 0`** in the report.
-
-- [ ] **Step 4: Run tests, then on the recharge stack**
-
-Run: `.venv/bin/pytest tests -q` → all PASS.
-Then `docker compose up -d --build logai2-web` and `python3 scripts/incident_test.py run && python3 scripts/incident_test.py report`. Expected: check 6 passes for every burst target.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A && git commit -m "Add GET /api/module-alerts"
-```
+- [ ] **Step 2–4:** fail, implement, `.venv/bin/pytest -q` all green.
+- [ ] **Step 5:** commit `Web: GET /api/module-alerts with optional bearer token`.
 
 ---
 
-## Spec coverage check
+## Review focus (task reviewers and the final review)
 
-| Design section 7 requirement | Task |
-|---|---|
-| Same detection, read view filtered by module | 2 |
-| module → service | 1 (multi-service), 2 |
-| Templates ALERTING in `[from, to]`, state at `from` from the latest earlier change | 2 |
-| Module M's rate per minute (series, average, peak) next to the template total | 2, 3 |
-| Text and document per template | 2 |
-| Alerted but no logs from M → left out | 2 |
-| Unknown module 200 empty; bad time / `from >= to` / > 24 h → 400; ISO or epoch in, ISO UTC out | 2, 3 |
-| `module_code` only in `alert_minutes`, incident minutes only | already core v1; timing pinned in 1 |
+1. Minute ends (`alert_changes.at`) vs minute starts (API): the first counted minute, the last
+   one before COOLING, and a window of one minute inside an alert.
+2. Back-dating applies only to a period opened by `NORMAL → WARMING`.
+3. A period open since before `from`; a WARMING that falls back (`peak_state: WARMING`).
+4. One module in two services; a window across local midnight; a 2-day window (hourly series).
+5. Clamps: `from` older than retention, `to` in the future; `from == to`; ms and `+07:00` input.
+6. Token: 401 cases, constant-time compare, other routes unaffected, no token value committed.
+7. Engine: `modules` migration on a database that already has rows; the owner restart path.
 
-## Out of scope (add when asked)
+## Out of scope (spec §9)
 
-- **`doc:` and service-wide alerts.** A diffuse alert on a document key has no per-template `alert_minutes` rows. To add it, have the owner also write `alert_minutes` for templates linked to a non-NORMAL `doc:` key, and return a `documents` list next to `templates`.
-- WARMING/COOLING in the response, per-second unit, auth, pagination, a web page for the API.
-- Normal rate (`mean ± σ`) per template in the response: one `baseline` lookup per item, if callers ask how far the rate is from normal.
+Document and service alerts, query by `groupModule`, COOLING minutes, per-second unit,
+per-caller keys, pagination, a web page, the normal rate per template.
