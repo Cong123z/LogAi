@@ -14,6 +14,7 @@ const KP_GROUPS = [
   {id: 'safe', label: 'SAFE docs', dot: 'safe', key: 'verdict:safe', combined: 'All templates of SAFE documents', derived: true},
 ];
 const kpIsDocGroup = id => id === 'action' || id === 'safe';
+const KP_CAP = 500;   // the pages fetch /api/templates?size=500
 const kpLinked = t => KP_LINKED.includes(t.link_source);
 
 function levelClass(level) {
@@ -73,9 +74,10 @@ function createKeyPicker(root, {onPick}) {
   const svcDocs = () => st.docs.filter(d => !d.service || d.service === st.service);
   const linkedDocIds = () => new Set(st.templates.filter(kpLinked).map(t => t.doc_id));
   const inGroup = (t, id) => id === 'all' || (kpIsDocGroup(id) ? kpLinked(t) && t.doc_verdict === id : levelClass(t.level) === id);
+  const linkedIn = id => st.templates.filter(t => kpLinked(t) && t.doc_id === id).length;   // linked templates in this service
   const groupDocs = id => {
     const ds = svcDocs();
-    if (id === 'all') return ds;
+    if (id === 'all') { const ids = linkedDocIds(); return ds.filter(d => ids.has(d.doc_id)); }
     if (kpIsDocGroup(id)) { const ids = linkedDocIds(); return ds.filter(d => d.verdict === id && ids.has(d.doc_id)); }
     const ids = new Set(st.templates.filter(t => kpLinked(t) && inGroup(t, id)).map(t => t.doc_id));
     return ds.filter(d => ids.has(d.doc_id));
@@ -86,8 +88,10 @@ function createKeyPicker(root, {onPick}) {
     groupsEl.innerHTML = KP_GROUPS.map(g => {
       if (g.sep) return `<span class="kp-gl">${g.sep}</span>`;
       const n = groupCount(g.id), on = g.id === st.group;
-      return `<button type="button" class="toggle-btn${on ? ' active' : ''}" aria-pressed="${on}" data-g="${g.id}"${n ? '' : ` disabled title="Nothing in this group for ${escapeHtml(st.service)}"`}>`
-        + `${g.dot ? `<span class="kp-dot ${g.dot}" aria-hidden="true"></span>` : ''}${g.label}<span class="kp-n">${n}</span></button>`;
+      // The template list is capped at KP_CAP: its counts are lower bounds, so never disable on them.
+      const cut = st.templates.length >= KP_CAP && !kpIsDocGroup(g.id);
+      return `<button type="button" class="toggle-btn${on ? ' active' : ''}" aria-pressed="${on}" data-g="${g.id}"${n || cut ? '' : ` disabled title="Nothing in this group for ${escapeHtml(st.service)}"`}>`
+        + `${g.dot ? `<span class="kp-dot ${g.dot}" aria-hidden="true"></span>` : ''}${g.label}<span class="kp-n">${n}${cut ? '+' : ''}</span></button>`;
     }).join('');
   }
 
@@ -100,7 +104,7 @@ function createKeyPicker(root, {onPick}) {
     if (hit(g.combined, g.key)) out.push({sec: 'Combined'}, {key: g.key, html: `<strong>${escapeHtml(g.combined)}</strong><span class="kp-txt">${escapeHtml(g.key)}</span>`});
     const ds = groupDocs(g.id).filter(d => hit(d.doc_id, d.title));
     if (ds.length) out.push({sec: `Documents (${ds.length})`}, ...ds.map(d => ({key: `doc:${d.doc_id}`,
-      html: `<span class="tmpl-id">${escapeHtml(d.doc_id)}</span>${verdictBadge(d.verdict)}<span class="kp-txt">${escapeHtml(d.title)} · ${d.linked_templates} templates</span>`})));
+      html: `<span class="tmpl-id">${escapeHtml(d.doc_id)}</span>${verdictBadge(d.verdict)}<span class="kp-txt">${escapeHtml(d.title)} · ${linkedIn(d.doc_id)} templates</span>`})));
     const ts = tpls.filter(t => hit(t.template_id, t.text, t.doc_id));
     if (ts.length) out.push({sec: `Templates (${ts.length})`}, ...ts.map(t => ({key: t.template_id,
       html: `<span class="tmpl-id">${escapeHtml(t.template_id)}</span>${levelBadge(levelClass(t.level))}<span class="kp-txt">${escapeHtml(t.text)}</span>`})));

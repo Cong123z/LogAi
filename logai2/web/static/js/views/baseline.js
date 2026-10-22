@@ -51,10 +51,10 @@ async function loadBaseline() {
     if (bl.tplService !== bl.service) {
       const t = await getJson(`/api/templates?service=${svc}&size=500`, 'Unable to load templates');
       if (seq !== bl.seq) return;
-      bl.tplService = bl.service;
-      bl.templates = t.items;
-      bl.docs = await getJson('/api/documents', 'Unable to load documents');
+      const docs = await getJson('/api/documents', 'Unable to load documents');
       if (seq !== bl.seq) return;
+      bl.templates = t.items; bl.docs = docs;
+      bl.tplService = bl.service;   // cached only once both fetches have succeeded
     }
     [series, matrix] = await Promise.all([
       getJson(`/api/baseline/series?service=${svc}&key=${key}&days=${bl.days}`, 'Unable to load the series'),
