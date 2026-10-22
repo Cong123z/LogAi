@@ -10,18 +10,20 @@ from datetime import date, datetime
 from logai2.timeutil import TZ
 
 
-def periods(changes: list[dict], end_now: float) -> list[tuple[str, float, float]]:
-    """alert_changes (ordered by `at`) -> (key, start_s, end_s) per non-NORMAL period;
-    a period still open ends at `end_now`."""
+NON_NORMAL = frozenset({"WARMING", "ALERTING", "COOLING"})
+
+
+def periods(changes: list[dict], end_now: float, states=NON_NORMAL) -> list[tuple[str, float, float]]:
+    """alert_changes (ordered by `at`) -> (key, start_s, end_s) per period in `states`;
+    a change to a state outside `states` closes it; a period still open ends at `end_now`."""
     opened: dict[str, float] = {}
     out: list[tuple[str, float, float]] = []
     for c in changes:
         at = c["at"].timestamp()
-        if c["to_state"] == "NORMAL":
-            if c["key"] in opened:
-                out.append((c["key"], opened.pop(c["key"]), at))
-        else:
+        if c["to_state"] in states:
             opened.setdefault(c["key"], at)   # first change of a key may already be non-NORMAL (retention)
+        elif c["key"] in opened:
+            out.append((c["key"], opened.pop(c["key"]), at))
     return out + [(k, start, end_now) for k, start in opened.items()]
 
 
