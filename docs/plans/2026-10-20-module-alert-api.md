@@ -198,8 +198,7 @@ def module_alerts(conn, module_code: str, start: float, end: float) -> list[dict
 1. `SELECT service FROM modules WHERE module_code = %s`; none → `[]`.
 2. Changes of those services on template keys (`key NOT LIKE '*%%' AND key NOT LIKE 'doc:%%'`):
    latest row per `(service, key)` with `at < start + 60` (`DISTINCT ON (service, key) … ORDER BY service, key, at DESC`)
-   plus every row with `start + 60 <= at < end + 60`, ordered by `at`. (`+ 60`: `at` is a minute end, so
-   the change that ends the window's first minute belongs to the window.)
+   plus every row with `start + 60 <= at < end + 60 * warm_consecutive`, ordered by `at`. (`+ 60`: `at` is a minute end, so the change that ends the window's first minute belongs to the window; the upper bound reaches `warm_consecutive` minutes past `end` so a streak whose first high minute is the window's last minute still counts, per the spec.)
 3. Per service: `p = periods(rows, end + 60, {"WARMING", "ALERTING"})` and
    `a = periods(rows, end + 60, {"ALERTING"})`. Convert every bound to a minute start (`− 60`);
    a WARMING/ALERTING period whose opening change is `NORMAL → WARMING` moves its start back
