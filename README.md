@@ -191,7 +191,7 @@ baseline.
 ```
 logai2/
   config.py, timeutil.py, db.py      config layers, local time, Postgres (migrate, partitions, settings)
-  migrations/                        001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level
+  migrations/                        001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service
   reader/                            es_source.py (ES query, hit → Line), normalize.py, cache.py, reader.py (watermark)
   owner/                             miners.py (Drain3 per service), counts.py (open minutes), baseline.py (bands),
                                      detect.py (hysteresis), owner.py (flush transaction)
