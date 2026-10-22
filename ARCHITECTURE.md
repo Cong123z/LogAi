@@ -596,8 +596,9 @@ events (low = not high):
 `since` and `alert_changes.at` are the **end** of the closed minute
 (`(minute + 1) * 60`). Every state change becomes an `alert_changes` row.
 `alert_minutes` gets one row per (service, template, module) for each
-closed minute in which the template's state is not NORMAL (template keys
-only, not `*` or doc keys).
+closed minute in which the template's state is not NORMAL, or is NORMAL
+with `streak > 0` (the first high minute of a streak; template keys only,
+not `*` or doc keys).
 
 ## 9. Daily commit and review exclusions
 
@@ -753,7 +754,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -762,7 +763,7 @@ service-scoped primary key.
 |---|---|---|---|
 | `schema_migrations` | `version` | `applied_at` | engine |
 | `services` | `service` | `partition` (crc32 % 60) | flush |
-| `modules` | `module_code` | `service` (FK) — the first service seen | flush |
+| `modules` | `service, module_code` (index on `module_code`) | — (a module may belong to several services) | flush |
 | `es_cursors` | `index` | `since_ms`, `floor_ms`, `updated_at` | flush |
 | `templates` | `service, template_id` | `level`, `text`, `first_seen`, `last_seen`, `embedding` (vector(1024), NULL until embedded; cleared when the text changes) | flush; linker (`embedding`) |
 | `drain3_state` | `service` | `blob` (bytea), `version` | flush |
@@ -900,7 +901,7 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level), `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service), `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.
