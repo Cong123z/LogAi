@@ -1,0 +1,112 @@
+# Postgres for logai2 (engine, web and linker share it; nothing else is stored on disk).
+# pgvector/pgvector ships the `vector` extension; POSTGRES_USER is a superuser, so the
+# engine's first migration can create it. Apply logai-engine.yaml first: it holds the Secret.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: logai-pg-pv
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 20Gi
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: logai-pg-storage
+  hostPath:
+    path: /u01/logai-pg
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logai-pg-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: logai-pg-storage
+  volumeName: logai-pg-pv
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: logai-postgres
+  labels:
+    app.kubernetes.io/name: logai
+spec:
+  serviceName: logai-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: logai-postgres
+  template:
+    metadata:
+      labels:
+        app: logai-postgres
+        app.kubernetes.io/name: logai
+    spec:
+      enableServiceLinks: false
+      volumes:
+        - name: pgdata
+          persistentVolumeClaim:
+            claimName: logai-pg-pvc
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:pg16
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: logai
+            - name: POSTGRES_DB
+              value: logai
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logai-env
+                  key: POSTGRES_PASSWORD
+            # a subfolder: initdb refuses a mount root that is not empty
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "logai", "-d", "logai"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "logai", "-d", "logai"]
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logai-postgres
+spec:
+  type: ClusterIP
+  selector:
+    app: logai-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP

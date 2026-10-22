@@ -45,7 +45,7 @@ class FlushConfig:
 
 @dataclass
 class StartConfig:
-    days_back: int = 2
+    days_back: int = 7
 
 
 @dataclass

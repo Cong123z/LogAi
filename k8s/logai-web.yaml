@@ -1,0 +1,74 @@
+# logai2 web console on 5555. Talks only to Postgres (never to Elasticsearch or the engine);
+# the LOGAI_ES_* values are shown on the Data sources page until a connection is saved there.
+# Secret logai-env comes from logai-engine.yaml. No authentication: keep the Service internal.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logai-web
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: logai-web
+  template:
+    metadata:
+      labels:
+        app: logai-web
+        logai-workload-group: logai
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: logai-web
+          image: congdock123/logai2:v1
+          imagePullPolicy: Always
+          command: ["python", "scripts/run_web.py"]
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: logai-env, key: POSTGRES_PASSWORD}}
+            - name: LOGAI2_DATABASE_DSN
+              value: "postgresql://logai:$(POSTGRES_PASSWORD)@logai-postgres:5432/logai"
+            - name: LOGAI2_ES_HOSTS
+              valueFrom: {secretKeyRef: {name: logai-env, key: LOGAI_ES_HOSTS}}
+            - name: LOGAI2_ES_INDEX
+              valueFrom: {secretKeyRef: {name: logai-env, key: LOGAI_ES_INDEX}}
+            - name: LOGAI2_ES_USER
+              valueFrom: {secretKeyRef: {name: logai-env, key: LOGAI_ES_USER}}
+            - name: LOGAI2_ES_PASSWORD
+              valueFrom: {secretKeyRef: {name: logai-env, key: LOGAI_ES_PASSWORD}}
+            - name: LOGAI2_ES_VERIFY_CERTS
+              valueFrom: {secretKeyRef: {name: logai-env, key: LOGAI_ES_VERIFY_CERTS}}
+          ports:
+            - name: web
+              containerPort: 5555
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: web
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: web
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logai-web
+spec:
+  selector:
+    app: logai-web
+  ports:
+    - name: http
+      port: 5555
+      targetPort: 5555

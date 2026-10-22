@@ -77,6 +77,7 @@ def catch_up(engine, clock, ticks=10):
 
 
 def test_first_start_reads_days_back_then_enables_detection(conn, cfg, make):
+    cfg.start.days_back = 2   # the history below is 2 days
     clock = Clock(NOON)
     src = FakeSource({"a": history(NOON - 2 * 86400, NOON - 60, 1)})
     engine = make(src, clock)
