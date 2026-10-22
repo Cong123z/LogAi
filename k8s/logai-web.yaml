@@ -1,6 +1,7 @@
 # logai2 web console on 5555. Talks only to Postgres (never to Elasticsearch or the engine);
 # the LOGAI_ES_* values are shown on the Data sources page until a connection is saved there.
-# Secret logai-env comes from logai-engine.yaml. No authentication except the optional LOGAI2_API_TOKEN on /api/module-alerts: keep the Service internal.
+# Secret logai-env comes from logai-engine.yaml. No authentication except the optional
+# LOGAI2_API_TOKEN on /api/module-alerts: keep the Service internal.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

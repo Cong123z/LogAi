@@ -56,7 +56,8 @@ Out of scope (later sub-projects):
 | 9 | Operator console, Datadog Watchdog style: Baseline charts, Review matrix + expected-bounds inspector + coverage, Pipeline topology + volume vs expected (phases 1-2 built); Watchdog tags on Alerting/Templates (phase 3, not built) (design [section 9](docs/design/per-service-baseline.md), from AGY-PROP-2026-002) |
 
 Also out of scope: notifications (state is only exported), authentication on
-the web API, log sources other than Elasticsearch, and more than one engine
+the web API beyond the one optional shared bearer token on `GET /api/module-alerts`
+(no per-caller auth), log sources other than Elasticsearch, and more than one engine
 per database.
 
 ## 2. System context
@@ -874,7 +875,7 @@ No DLQ.
 | Flush | `executemany` per table, not `COPY` | switch when flush time shows on the Pipeline page |
 | Commit | The rebuild recomputes every key nightly | restrict to keys touched since the last commit if it gets slow |
 | Commands | Polled every tick, no `LISTEN`; `recompute_baseline` is not deduplicated | a burst of recompute clicks runs the commit several times |
-| Web | Flask development server, one connection per request, no auth, no pagination on `/api/baseline` | expose only on a trusted network; add a pool if many operators |
+| Web | Flask development server, one connection per request, no auth except the optional shared token on `/api/module-alerts`, no pagination on `/api/baseline` | expose only on a trusted network; add a pool if many operators |
 | Web | One shared `LOGAI2_API_TOKEN` guards `/api/module-alerts`, no per-caller keys | rotate by changing the env var and restarting the web |
 | Web | A `/` in a service name cannot be linked through `PUT /api/templates/<service>/<id>/link` | 404 |
 | Database | `migrate()` has no advisory lock; the ES password and LLM API keys are stored in clear | only the engine migrates; review before production |
