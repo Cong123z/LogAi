@@ -185,8 +185,7 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `embedding.url` / `model` | `http://bge-m3:8080` / `bge-m3` | OpenAI-style `/v1/embeddings`; empty url = nothing is embedded |
 | `embedding.batch` / `cycle_seconds` | 32 / 30 | texts per request; linker cycle |
 | `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
-| `llm.per_service_hour` / `daily_max` | 5 / 50 | LLM results per service per hour, in all per day |
-| `llm.new_hours` | 24 | a template first seen this recently is resolved even when not alerting |
+| `llm.per_service_hour` / `daily_max` | 0 / 0 | LLM results per service per hour, in all per day; 0 = no limit |
 | `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |
 
 The repo's `config.yaml` sets only `elasticsearch.index: recharge-logs`,
@@ -362,10 +361,11 @@ changes.
 
 **LLM resolver** (`logai2/resolver.py`, layers 3–4, run by the linker after
 `apply_links`). With at least one active `llm_profiles` row, it takes templates that
-have a vector and no link row at all, that are ALERTING or first seen within
-`llm.new_hours` (24), ALERTING first then ERROR > WARN > INFO, about 3 LLM
-calls per cycle (a template's second call may exceed it by one),
-`llm.per_service_hour` (5) per service and `llm.daily_max` (50) in all.
+have a vector and no link row at all, of any level, alert state or age,
+ALERTING first then ERROR > WARN > INFO, about 3 LLM
+calls per cycle (a template's second call may exceed it by one), and, when
+set above 0, `llm.per_service_hour` per service and `llm.daily_max` in all
+(both 0 = no limit by default).
 Templates resolved count, from `llm` / `draft` / `rejected` rows by
 `linked_at` (a rejection keeps it), and so do calls that wrote nothing
 (failed or junk answers, kept in memory). Capped services and templates in
@@ -723,7 +723,7 @@ The status is built before a flush runs, so it reports the previous completed
 flush. The web treats a heartbeat older than 30 s as stale (engine not running).
 
 The linker's status (`worker_status['linker']`) also carries `llm_today`, the
-number counted against `llm.daily_max`: `llm` / `draft` / `rejected` link rows of the last 24 h (rolling) plus calls that wrote nothing. `llm_profiles[name].answers` is per profile since the linker started.
+rolling 24 h count (checked against `llm.daily_max` when it is above 0): `llm` / `draft` / `rejected` link rows of the last 24 h (rolling) plus calls that wrote nothing. `llm_profiles[name].answers` is per profile since the linker started.
 The Pipeline page reads both rows; its stage states are derived in
 `logai2/web/pipeline_view.py` (rules in [`docs/WEB_UI.md`](docs/WEB_UI.md)).
 

@@ -312,8 +312,9 @@ the engine thread never waits on an LLM. For a template with no link at
 layers 0–2 (section 3), of **any level, alert state or age** (revised
 2026-10-21: no longer only ALERTING or first seen in the last 24 h; spec
 [`2026-10-21-llm-resolve-all-templates.md`](../specs/2026-10-21-llm-resolve-all-templates.md)),
-ALERTING first then ERROR > WARN > INFO, at most 5 per service per hour and
-50 per day, one call at a time:
+ALERTING first then ERROR > WARN > INFO, about 3 calls per cycle;
+`llm.per_service_hour` / `llm.daily_max` cap only when set above 0 (default 0
+= no limit, amended 2026-10-22), one call at a time:
 
 1. **Confirm (layer 3):** if some active documents have an ERROR line with
    similarity ≥ 0.60, the LLM gets the template and the top 3 of them (title,

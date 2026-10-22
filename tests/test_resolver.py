@@ -77,21 +77,55 @@ def test_confirm_a_listed_candidate_or_else_suggest_a_draft(conn, cfg, profile):
 def test_eligibility_order_and_limits(conn, cfg, profile):
     cfg.llm.per_service_hour = 1
     tmpl(conn, "OLD", v=vec((1, 1.0)))
-    conn.execute("UPDATE templates SET first_seen = now() - interval '3 days' WHERE template_id = 'OLD'")  # not alerting
+    conn.execute("UPDATE templates SET first_seen = now() - interval '3 days' WHERE template_id = 'OLD'")  # old, not alerting
     tmpl(conn, "LINKED", v=vec((2, 1.0)), service="z"), alerting(conn, "LINKED", "z")
     doc(conn, "D1")
     conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) "
                  "VALUES ('z', 'LINKED', 'D1', 'rejected')")   # never resent (and counts in z's budget)
     tmpl(conn, "NOVEC"), alerting(conn, "NOVEC")                     # waits for its vector
-    tmpl(conn, "NEW_INFO", "INFO", v=vec((3, 1.0)))                  # new (first seen now), not alerting
+    tmpl(conn, "NEW_INFO", "INFO", v=vec((3, 1.0)))                  # not alerting
     tmpl(conn, "ALERT_INFO", "INFO", v=vec((4, 1.0))), alerting(conn, "ALERT_INFO")
     tmpl(conn, "O1", v=vec((5, 1.0)), service="o"), alerting(conn, "O1", "o")
     suggestion = {"title": "t", "handling": "h"}
     chat = Chat(dict(suggestion), dict(suggestion))
     run(conn, cfg, chat)
-    # alerting first; one per service per hour: s gets ALERT_INFO, o gets O1; NEW_INFO waits
+    # alerting first; one per service per hour: s gets ALERT_INFO, o gets O1; OLD and NEW_INFO wait for the cap
     assert {r["template_id"] for r in conn.execute("SELECT template_id FROM template_doc_links WHERE source = 'draft'")} \
         == {"ALERT_INFO", "O1"}
+
+
+def test_any_age_or_state_is_resolved_worst_level_first(conn, cfg, profile):
+    cfg.llm.per_service_hour = 1
+    for tid, level, n in (("OLD_INFO", "INFO", 1), ("OLD_ERROR", "ERROR", 2), ("NODOC", "ERROR", 3)):
+        tmpl(conn, tid, level, v=vec((n, 1.0)))
+        conn.execute("UPDATE templates SET first_seen = now() - interval '10 days' WHERE template_id = %s", (tid,))
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) "
+                 "VALUES ('s', 'NODOC', NULL, 'manual')")     # a person said "no document": never sent
+    chat = Chat({"title": "t", "handling": "h"})
+    run(conn, cfg, chat)
+    # neither alerting nor new: still resolved, ERROR before INFO under the per-service cap
+    assert [r["template_id"] for r in conn.execute(
+        "SELECT template_id FROM template_doc_links WHERE source = 'draft'")] == ["OLD_ERROR"]
+    assert [s["template"]["text"] for s in chat.seen] == ["text OLD_ERROR"]
+
+
+def test_zero_limits_mean_no_cap_but_one_cycle_stays_bounded(conn, cfg, profile):
+    cfg.llm.daily_max = cfg.llm.per_service_hour = 0
+    for n in range(5):
+        tmpl(conn, f"T{n}", "INFO", v=vec((n, 1.0)))
+    status = run(conn, cfg, Chat(*[{"title": "t", "handling": "h"}] * 3))
+    assert status["llm"]["suggested"] == 3          # PER_CYCLE bounds the cycle, not a budget
+    assert status["llm_today"] == 3
+    assert not [w for w in status["warnings"] if "daily limit" in w]
+
+
+def test_a_positive_daily_max_still_stops_and_warns(conn, cfg, profile):
+    cfg.llm.daily_max, cfg.llm.per_service_hour = 2, 0
+    for n in range(3):
+        tmpl(conn, f"T{n}", v=vec((n, 1.0)))
+    status = run(conn, cfg, Chat(*[{"title": "t", "handling": "h"}] * 2))
+    assert status["llm"]["suggested"] == 2
+    assert "LLM daily limit reached (2)" in status["warnings"]
 
 
 def test_failures_back_off_and_bad_suggestions_fail(conn, cfg, profile):

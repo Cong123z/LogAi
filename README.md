@@ -42,7 +42,7 @@ source design for all sub-projects:
   ERROR line it matches (threshold and margin). Changes enqueue
   `reload_links` for the engine. A document is **ERROR** (the log lines it
   is for, the only part matched) + **Handling** (what to do). Templates still
-  unmatched, if ALERTING or first seen in the last 24 h, go to the LLM
+  unmatched, of any level, alert state or age, go to the LLM
   (active profiles on the LLM profiles page, in priority order): it
   confirms a near document, or writes a suggestion (an action runbook, or
   SAFE for a normal-operation line) that waits for approval on the

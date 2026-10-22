@@ -99,7 +99,7 @@ updates the existing chart instances.
   | Postgres flush | last flush time | slowest flush of the last 15 min |
   | Prometheus | "metrics export" | "scraped by Prometheus" |
   | Linker | pending templates + documents | links changed last cycle or not |
-  | LLM resolver | "N / M in 24 h" (`llm_today` of `llm_daily_max`: rolling 24 h LLM calls counted against `llm.daily_max`, including calls that wrote nothing) | profiles up / down |
+  | LLM resolver | "N / M in 24 h" (`llm_today` of `llm_daily_max`: rolling 24 h LLM calls counted against `llm.daily_max`, including calls that wrote nothing; "N in 24 h" when `llm.daily_max` is 0, no limit) | profiles up / down |
 
   Particles move along the main row at a speed stepped by events/s; they stop
   under reduced motion or when the engine is not running. Click a stage for
@@ -592,7 +592,7 @@ template has no vector (then the list is empty).
 - `GET /api/llm/usage`: `hour` / `day` = `{source: count}` of `llm`,
   `draft` and `rejected` links made in the last hour / 24 h;
   `drafts_waiting` = draft documents; `limits` = `llm.per_service_hour`,
-  `llm.daily_max`; `linker_running` (heartbeat within 90 s), `last_cycle`
+  `llm.daily_max` (0 = no limit, shown as "no limit"); `linker_running` (heartbeat within 90 s), `last_cycle`
   (`{confirmed, suggested, none, failed}`), `last_error` (the last LLM
   error, kept across cycles), `profiles` (`{name: {down_until, error, answers}}` of
   the active profiles), `warnings` from the linker's status.

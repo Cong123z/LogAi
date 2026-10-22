@@ -81,7 +81,7 @@ function plText(d) {
     flush: [`flush ${plFlush(s.flush_seconds)}`, `max 15 min ${plFlush(s.flush_seconds_max)}`],
     prometheus: ['metrics export', 'scraped by Prometheus'],
     linker: [pending == null ? 'no report' : `${pending} pending`, !l ? 'automatic links off' : l.links_changed ? 'links changed last cycle' : 'no link changes last cycle'],
-    llm: [!l ? 'not running' : `${l.llm_today ?? 0} / ${d.llm_daily_max ?? '?'} in 24 h`, `${prof.length - down} profiles up, ${down} down`],
+    llm: [!l ? 'not running' : `${l.llm_today ?? 0}${d.llm_daily_max ? ` / ${d.llm_daily_max}` : ''} in 24 h`, `${prof.length - down} profiles up, ${down} down`],
   };
 }
 
@@ -183,7 +183,8 @@ function plStageBody(id, d) {
     case 'llm': {
       const prof = plProfiles(d);
       if (!l) return '<p>The linker is not running, so the LLM resolver is idle.</p>';
-      return `<p>${plInt(l.llm_today ?? 0)} of ${plInt(d.llm_daily_max ?? 0)} LLM calls counted in the last 24 h (rolling; includes calls that wrote nothing).</p>` + (prof.length ? `<div class="table-wrap"><table><thead><tr><th>Profile</th><th>State</th><th class="r">Answers</th></tr></thead><tbody>${
+      return `<p>${d.llm_daily_max ? `${plInt(l.llm_today ?? 0)} of ${plInt(d.llm_daily_max)} LLM calls counted in the last 24 h (rolling; includes calls that wrote nothing).`
+        : `${plInt(l.llm_today ?? 0)} LLM calls in the last 24 h (rolling; includes calls that wrote nothing), no daily limit.`}</p>` + (prof.length ? `<div class="table-wrap"><table><thead><tr><th>Profile</th><th>State</th><th class="r">Answers</th></tr></thead><tbody>${
         prof.map(p => `<tr><td><span class="tmpl-id">${escapeHtml(p.name)}</span></td><td>${p.down
           ? `<span class="badge badge-yellow">down until ${escapeHtml(formatFullTs(p.down_until))}</span> ${escapeHtml(p.error || '')}`
           : '<span class="badge badge-green">up</span>'}</td><td class="r">${plInt(p.answers)}</td></tr>`).join('')}</tbody></table></div>` : '<p>No LLM profile is configured.</p>');
