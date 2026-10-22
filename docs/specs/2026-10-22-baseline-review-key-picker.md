@@ -165,10 +165,11 @@ weekend days` (only while `baseline_state` is `none` or `young`),
   with no backend change, and applies to every key of the service as today.
 - The days × hours grid and inspector work for every new key through
   `matrix` / `inspect`.
-- "Needs review" suggestions come from alert history. View-only keys have
-  none, so for them the grid shows out-of-band cells but no "review"
-  suggestions. The page says so in the empty state: "This series does not
-  alert, so nothing is suggested. Out-of-band hours are still marked."
+- "Needs review" suggestions are service-wide: an hour is suggested when any
+  key of the service left NORMAL in it (`matrix` reads `keys_by_hour` for the
+  whole service). So the new keys show the same suggestions as every other
+  key of the service; nothing changes there. (Corrected while planning: an
+  earlier draft said view-only keys would show none.)
 
 ## `incident()` for the new keys
 
