@@ -1,7 +1,7 @@
 # LLM resolver: every unlinked template, not only alerting or new ones
 
 Date: 2026-10-21, amended 2026-10-22 (no rate limits by default). Status:
-approved by the user, not built.
+approved by the user, built (merge 623e888).
 
 ## Problem
 

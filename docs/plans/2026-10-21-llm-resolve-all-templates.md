@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-Status: **not built**. Rewritten 2026-10-22 for the spec's amendment (limits default to 0 = none); the 2026-10-21 version (gate only) was never started.
+Status: **built** (merge 623e888). Rewritten 2026-10-22 for the spec's amendment (limits default to 0 = none); the 2026-10-21 version (gate only) was never started.
 
 **Goal:** The LLM resolver takes every template that has a vector and no link row, whatever its level, alert state or age, with no daily or per-service cap unless one is configured.
 
