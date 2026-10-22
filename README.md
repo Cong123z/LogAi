@@ -144,7 +144,8 @@ flush, Drain3) is listed in [ARCHITECTURE §3](ARCHITECTURE.md#3-configuration).
 ## Module alert API
 
 Other services ask which templates were WARMING/ALERTING in a window and how many lines
-their module wrote in them (details: [docs/WEB_UI.md](docs/WEB_UI.md#get-apimodule-alerts)):
+their module wrote in them. Guide for callers (Vietnamese, to hand to other teams):
+[docs/API.md](docs/API.md); reference: [docs/WEB_UI.md](docs/WEB_UI.md#get-apimodule-alerts).
 
 ```bash
 curl -H "Authorization: Bearer $LOGAI2_API_TOKEN" \

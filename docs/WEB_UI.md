@@ -529,7 +529,8 @@ without one; for a doc key, the sums over its linked templates).
 ### `GET /api/module-alerts`
 
 For other services: which templates were WARMING or ALERTING in a window, and how many
-lines one module wrote in them. Spec: `docs/specs/2026-10-22-module-alert-api.md`.
+lines one module wrote in them. Spec: `docs/specs/2026-10-22-module-alert-api.md`;
+caller guide (Vietnamese): `docs/API.md`.
 
 ```
 GET /api/module-alerts?module_code=VTN_CNTT_VAS_066_301&from=2026-09-30T07:00:30.500Z&to=2026-09-30T07:14:10.200Z
