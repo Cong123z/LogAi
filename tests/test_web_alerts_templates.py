@@ -20,9 +20,10 @@ def client(app):
     return app.test_client()
 
 
-def add_template(conn, tid, text="user <*> logged in", level="INFO", service="pay", last_seen="2026-10-20 10:00Z"):
-    conn.execute("INSERT INTO templates VALUES (%s, %s, %s, %s, '2026-10-19 10:00Z', %s)",
-                 (service, tid, level, text, last_seen))
+def add_template(conn, tid, text="user <*> logged in", level="INFO", service="pay", last_seen="2026-10-20 10:00Z",
+                 first_seen="2026-10-19 10:00Z"):
+    conn.execute("INSERT INTO templates VALUES (%s, %s, %s, %s, %s, %s)",
+                 (service, tid, level, text, first_seen, last_seen))
 
 
 def add_doc(conn, doc_id, title="Card gateway down"):
@@ -86,6 +87,19 @@ def test_templates_rate_and_band(client, conn):
     assert (items["pay:T00001"]["rate"], items["pay:T00001"]["band_low"], items["pay:T00001"]["band_high"]) == (5.0, 1.0, 7.0)
     assert (items["young:T00001"]["band_low"], items["young:T00001"]["band_high"]) == (0.0, 8.0)
     assert items["idle:T00001"]["rate"] is None and items["idle:T00001"]["band_high"] is None
+
+
+def test_templates_sort_first_seen(client, conn):
+    add_template(conn, "pay:A", first_seen="2026-10-19 10:00Z", last_seen="2026-10-22 10:00Z")
+    add_template(conn, "pay:B", first_seen="2026-10-21 10:00Z", last_seen="2026-10-20 10:00Z")
+    conn.commit()
+    ids = lambda q: [i["template_id"] for i in client.get(f"/api/templates{q}").get_json()["items"]]
+    assert ids("?sort=first_seen") == ["pay:B", "pay:A"]
+    assert ids("") == ids("?sort=last_seen") == ["pay:A", "pay:B"]
+
+
+def test_templates_sort_rejects_unknown(client):
+    assert client.get("/api/templates?sort=rate").status_code == 400
 
 
 def test_templates_paginated_and_filtered(client, conn):

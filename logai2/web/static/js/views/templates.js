@@ -3,12 +3,13 @@
 // person, alerting first; "All templates" lists every template. Each row shows this hour's rate
 // against its normal band and the linked document; the drawer holds the decision.
 // mode null = not chosen yet: the first answer picks "review" when anything waits for review.
-const tpl = {mode: null, search: '', service: '', level: '', link: '', status: '', docId: '', routeSub: null, page: 1, size: 100, refreshTimer: null,
+const tpl = {mode: null, search: '', service: '', level: '', link: '', status: '', sort: 'last_seen', docId: '', routeSub: null, page: 1, size: 100, refreshTimer: null,
              items: new Map(), order: [], docs: [], drawerItem: null};
 const $tplModeToggle = document.getElementById('tpl-mode-toggle');
 const $tplReviewCount = document.getElementById('tpl-review-count');
 const $tplTbody = document.getElementById('template-tbody');
 const $tplService = document.getElementById('filter-service');
+const $tplServiceList = document.getElementById('service-options');
 const $tplLevel = document.getElementById('filter-level');
 const $tplLink = document.getElementById('filter-link');
 const $tplStatusToggle = document.getElementById('tpl-status-toggle');
@@ -28,6 +29,7 @@ function fetchTemplates() {
   if (tpl.mode === 'review') params.set('link_source', 'review');
   else if (tpl.link) params.set('link_source', tpl.link);
   if (tpl.status) params.set('status', tpl.status);
+  if (tpl.sort !== 'last_seen' && tpl.mode !== 'review') params.set('sort', tpl.sort);
   return getJson(`/api/templates?${params}`, 'Unable to load templates');
 }
 function fetchLevels() {
@@ -107,15 +109,17 @@ function tplStateCell(t) {
 }
 
 function renderServiceFilter(services) {
-  const current = tpl.service;
-  $tplService.innerHTML = '<option value="">All services</option>';
-  services.forEach(s => {
-    const opt = document.createElement('option');
-    opt.value = s;
-    opt.textContent = s;
-    opt.selected = s === current;
-    $tplService.appendChild(opt);
-  });
+  $tplServiceList.innerHTML = services.map(s => `<option value="${escapeHtml(s)}"></option>`).join('');
+  if (document.activeElement !== $tplService) $tplService.value = tpl.service;   // not while the operator types
+}
+
+// aria-sort on the two time headers; To review keeps its own order, so neither is marked there.
+function renderTplSort() {
+  const review = tpl.mode === 'review';
+  for (const key of ['first_seen', 'last_seen']) {
+    document.getElementById(key === 'first_seen' ? 'tpl-th-first' : 'tpl-th-last')
+      .setAttribute('aria-sort', !review && tpl.sort === key ? 'descending' : 'none');
+  }
 }
 
 // Every level present in the data; the selected one stays listed even when this service has none.
@@ -129,13 +133,13 @@ function renderLevelFilter(levels) {
 function renderTemplates(data) {
   if (!data.items.length && tpl.mode === 'review') {
     $tplTbody.innerHTML = `
-      <tr><td colspan="6" class="empty-state">
+      <tr><td colspan="7" class="empty-state">
         <p>Nothing to review${tpl.search || tpl.service || tpl.level ? ' for these filters' : ''}.</p>
         <button type="button" class="btn" data-tpl-goto="all">Show all templates</button>
       </td></tr>`;
   } else if (!data.items.length) {
     $tplTbody.innerHTML = `
-      <tr><td colspan="6" class="empty-state">
+      <tr><td colspan="7" class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
         </svg>
@@ -151,10 +155,12 @@ function renderTemplates(data) {
           <div class="tmpl-text">${highlightWildcards(escapeHtml(t.text))}</div></div></td>
         <td>${tplRateHtml(t)}</td>
         <td>${tplDocCell(t)}</td>
+        <td class="tpl-num" title="${escapeHtml(formatFullTs(t.first_seen))}">${escapeHtml(formatTs(t.first_seen))}</td>
         <td class="tpl-num" title="${escapeHtml(formatFullTs(t.last_seen))}">${escapeHtml(formatTs(t.last_seen))}</td>
         <td class="tpl-action">${tplActionButton(t)}</td>
       </tr>`).join('');
   }
+  renderTplSort();
   renderTplPagination(data.total);
 }
 
@@ -472,7 +478,21 @@ $tplSearch.addEventListener('input', () => {
   }, 300);
 });
 
-$tplService.addEventListener('change', () => { tpl.service = $tplService.value; tpl.docId = ''; tpl.page = 1; loadData(); });
+// An exact service name applies; empty means all services; anything else waits until it matches.
+$tplService.addEventListener('input', () => {
+  const v = $tplService.value.trim();
+  if (v === tpl.service || (v && ![...$tplServiceList.options].some(o => o.value === v))) return;
+  tpl.service = v; tpl.docId = ''; tpl.page = 1; loadData();
+});
+$tplService.addEventListener('change', () => { $tplService.value = tpl.service; });   // leaving it half-typed restores the applied one
+document.querySelector('thead [data-tpl-sort]').closest('tr').addEventListener('click', event => {
+  const b = event.target.closest('[data-tpl-sort]');
+  if (!b || (b.dataset.tplSort === tpl.sort && tpl.mode !== 'review')) return;
+  tpl.sort = b.dataset.tplSort;
+  tpl.page = 1;
+  if (tpl.mode === 'review') setTplMode('all');   // the sort does not apply to To review
+  loadData();
+});
 $tplLevel.addEventListener('change', () => { tpl.level = $tplLevel.value; tpl.page = 1; loadData(); });
 $tplLink.addEventListener('change', () => { tpl.link = $tplLink.value; tpl.page = 1; loadData(); });
 document.getElementById('page-size').addEventListener('change', event => {

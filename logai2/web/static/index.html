@@ -112,7 +112,8 @@
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
             <input type="text" class="search-input" id="search-input" placeholder="Search templates..." aria-label="Search template text" autocomplete="off" spellcheck="false">
           </div>
-          <select class="filter-select" id="filter-service" aria-label="Service"><option value="">All services</option></select>
+          <input class="filter-select" id="filter-service" list="service-options" placeholder="All services" aria-label="Service" autocomplete="off" spellcheck="false">
+          <datalist id="service-options"></datalist>
           <select class="filter-select" id="filter-level" aria-label="Level"></select>
           <select class="filter-select" id="filter-link" aria-label="Link">
             <option value="">All links</option><option value="none">Not linked</option>
@@ -128,7 +129,9 @@
               <tr>
                 <th>State</th><th>Template</th>
                 <th title="Average events per minute this hour, against the normal band (mean ± kσ)">Rate</th>
-                <th>Document</th><th>Last seen</th><th><span class="visually-hidden">Action</span></th>
+                <th>Document</th>
+                <th id="tpl-th-first" aria-sort="none"><button type="button" class="pl-sort" data-tpl-sort="first_seen">First seen</button></th>
+                <th id="tpl-th-last" aria-sort="descending"><button type="button" class="pl-sort" data-tpl-sort="last_seen">Last seen</button></th><th><span class="visually-hidden">Action</span></th>
               </tr>
             </thead>
             <tbody id="template-tbody">
