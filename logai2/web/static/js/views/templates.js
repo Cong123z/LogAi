@@ -18,7 +18,6 @@ const AUTOMATIC_SOURCES = ['inherited', 'corpus', 'llm', 'draft'];
 const $tplSearch = document.getElementById('search-input');
 const $tplPageInfo = document.getElementById('page-info');
 const $tplPageBtns = document.getElementById('page-btns');
-const TPL_LEVELS = ['FATAL', 'CRITICAL', 'ERROR', 'WARN', 'WARNING', 'NOTICE', 'INFO', 'DEBUG', 'TRACE'];
 
 function fetchTemplates() {
   const params = new URLSearchParams({page: tpl.page, size: tpl.size});
@@ -30,6 +29,9 @@ function fetchTemplates() {
   else if (tpl.link) params.set('link_source', tpl.link);
   if (tpl.status) params.set('status', tpl.status);
   return getJson(`/api/templates?${params}`, 'Unable to load templates');
+}
+function fetchLevels() {
+  return getJson(`/api/template-levels${tpl.service ? `?service=${encodeURIComponent(tpl.service)}` : ''}`, 'Unable to load levels');
 }
 function fetchServices() { return getJson('/api/services', 'Unable to load services'); }
 function fetchDocuments() { return getJson('/api/documents', 'Unable to load documents'); }
@@ -114,6 +116,14 @@ function renderServiceFilter(services) {
     opt.selected = s === current;
     $tplService.appendChild(opt);
   });
+}
+
+// Every level present in the data; the selected one stays listed even when this service has none.
+function renderLevelFilter(levels) {
+  if (tpl.level && !levels.some(l => l.level === tpl.level)) levels = levels.concat({level: tpl.level, n: 0});
+  $tplLevel.innerHTML = '<option value="">All levels</option>'
+    + levels.map(l => `<option value="${escapeHtml(l.level)}">${escapeHtml(l.level)} (${l.n})</option>`).join('');
+  $tplLevel.value = tpl.level;
 }
 
 function renderTemplates(data) {
@@ -210,7 +220,7 @@ let tplPendingOpen = null;
 async function loadTemplates() {
   const seq = ++tplSeq;
   tplPendingOpen = applyTplRoute() || tplPendingOpen;
-  const [data, services, docs] = await Promise.all([fetchTemplates(), fetchServices(), fetchDocuments()]);
+  const [data, services, docs, levels] = await Promise.all([fetchTemplates(), fetchServices(), fetchDocuments(), fetchLevels()]);
   if (seq !== tplSeq) return;   // a newer request (filter, page) is in flight: drop this answer
   if (tpl.mode === null) {      // first load: open on To review when anything waits for a decision
     setTplMode(data.review_total > 0 ? 'review' : 'all');
@@ -222,6 +232,7 @@ async function loadTemplates() {
     return loadTemplates();
   }
   renderServiceFilter(services);
+  renderLevelFilter(levels);
   tpl.items = new Map(data.items.map(t => [tplKey(t), t]));
   tpl.order = data.items.map(tplKey);
   tpl.docs = docs;
@@ -278,7 +289,6 @@ $tplModeToggle.addEventListener('click', event => {
 });
 
 // ── Event listeners ──
-$tplLevel.innerHTML = '<option value="">All levels</option>' + TPL_LEVELS.map(l => `<option value="${l}">${l}</option>`).join('');
 
 $tplPageBtns.addEventListener('click', event => {
   const btn = event.target.closest('.page-btn');

@@ -7,7 +7,7 @@
 // the All / ERROR / SAFE buttons filter the list.
 // Documents belong to a service. The filter shows one service's documents, or all of them; "All
 // services" groups documents with the same ERROR line into one row, with a version per service.
-const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: '',
+const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: '', level: '',
               service: '', services: []};
 const $docService = document.getElementById('doc-service');
 const svcLabel = service => service || 'shared';
@@ -36,7 +36,18 @@ function syncDocModeFromRoute() {
     docs.mode = mode;
     docs.selected = null;
     docs.editing = false;
-    document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(b => {
+    document.getElementById('doc-level-toggle').addEventListener('click', event => {
+  const button = event.target.closest('[data-doc-level]');
+  if (!button) return;
+  docs.level = button.dataset.docLevel;
+  renderLevelToggle();
+  const shown = docs.items.filter(docMatches);
+  if (!shown.some(d => d.doc_id === docs.selected)) { docs.selected = shown.length ? shown[0].doc_id : null; docs.editing = false; }
+  renderDocList();
+  renderDocPane();
+});
+
+document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.docMode === mode);
       b.setAttribute('aria-selected', String(b.dataset.docMode === mode));
     });
@@ -80,6 +91,7 @@ function renderServiceOptions() {
 
 function docMatches(doc) {
   if (docs.kind && doc.verdict !== docs.kind) return false;
+  if (docs.level && doc.template_level !== docs.level) return false;
   if (docs.service && doc.service !== docs.service) return false;
   const q = docs.query.toLowerCase();
   if (!q) return true;
@@ -107,6 +119,21 @@ function renderKindCounts() {
   document.querySelectorAll('#doc-kind-toggle .kind-count').forEach(el => { el.textContent = n(el.dataset.count); });
 }
 
+// AI suggestions: one button per level of the templates the drafts were written for.
+function renderLevelToggle() {
+  const $box = document.getElementById('doc-level-toggle');
+  const counts = new Map();
+  if (isDraftMode()) docs.items.filter(d => (!docs.service || d.service === docs.service) && d.template_level)
+    .forEach(d => counts.set(d.template_level, (counts.get(d.template_level) || 0) + 1));
+  if (docs.level && !counts.has(docs.level)) docs.level = '';
+  $box.hidden = !counts.size;
+  const order = ['FATAL', 'CRITICAL', 'SEVERE', 'ERROR', 'WARNING', 'WARN', 'NOTICE', 'INFO', 'DEBUG', 'TRACE'];
+  const rank = l => (order.includes(l) ? order.indexOf(l) : order.length);
+  const levels = [...counts.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  $box.innerHTML = [['', 'Any level', [...counts.values()].reduce((a, b) => a + b, 0)], ...levels.map(l => [l, l, counts.get(l)])]
+    .map(([v, label, n]) => `<button class="toggle-btn${v === docs.level ? ' active' : ''}" data-doc-level="${escapeHtml(v)}" aria-pressed="${v === docs.level}">${escapeHtml(label)} <span class="kind-count">${n}</span></button>`).join('');
+}
+
 function renderDocumentation() {
   const drafting = isDraftMode();
   document.getElementById('add-document-btn').hidden = drafting;
@@ -118,6 +145,7 @@ function renderDocumentation() {
     ? `${plural(inService.length, 'suggestion')} to review. Unverified: check commands before running them.`
     : `${plural(inService.length, 'document')} · ${linked} linked to templates`;
   renderKindCounts();
+  renderLevelToggle();
   renderDocList();
   renderDocPane();
 }

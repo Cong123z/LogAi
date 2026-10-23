@@ -238,3 +238,24 @@ def test_templates_filter_by_template_id(client, conn):
     conn.commit()
     items = client.get("/api/templates?service=pay&template_id=pay:T2").get_json()["items"]
     assert [t["template_id"] for t in items] == ["pay:T2"]
+
+
+def test_template_levels_includes_unknown_last(client, conn):
+    for tid, lvl in (("pay:A", "INFO"), ("pay:B", "ERROR"), ("pay:C", "ALERT"), ("pay:D", "DEBUG"), ("pay:E", "ERROR")):
+        add_template(conn, tid, level=lvl)
+    add_template(conn, "web:A", level="TRACE", service="web")
+    conn.commit()
+    assert client.get("/api/template-levels?service=pay").get_json() == [
+        {"level": "ERROR", "n": 2}, {"level": "INFO", "n": 1}, {"level": "DEBUG", "n": 1}, {"level": "ALERT", "n": 1}]
+    assert client.get("/api/template-levels").get_json()[-2:] == [{"level": "TRACE", "n": 1}, {"level": "ALERT", "n": 1}]
+
+
+def test_draft_documents_carry_template_level(client, conn):
+    add_doc(conn, "D5")
+    add_doc(conn, "D6")
+    conn.execute("UPDATE documents SET status = 'draft' WHERE doc_id IN ('D5', 'D6')")
+    add_template(conn, "pay:W", level="WARNING")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('pay', 'pay:W', 'D5', 'draft')")
+    conn.commit()
+    drafts = {d["doc_id"]: d for d in client.get("/api/documents?status=draft").get_json()}
+    assert drafts["D5"]["template_level"] == "WARNING" and drafts["D6"]["template_level"] is None

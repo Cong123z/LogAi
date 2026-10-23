@@ -19,7 +19,7 @@ from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
 from logai2.module_alerts import data_until, module_alerts, parse_window
-from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
+from logai2.links import ALERTING_SOURCES, LEVEL_ORDER, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
@@ -358,6 +358,15 @@ def create_app(cfg: AppConfig) -> Flask:
     def services():
         return jsonify([r["service"] for r in conn().execute("SELECT service FROM services ORDER BY service")])
 
+    @app.get("/api/template-levels")
+    def template_levels():
+        # every level present in the data (levels are stored as read from the logs), with its template count
+        service = request.args.get("service")
+        rows = conn().execute("SELECT level, count(*) AS n FROM templates WHERE %s::text IS NULL OR service = %s "
+                              "GROUP BY level", (service, service)).fetchall()
+        rows.sort(key=lambda r: (LEVEL_ORDER.index(r["level"]) if r["level"] in LEVEL_ORDER else len(LEVEL_ORDER), r["level"]))
+        return jsonify(rows)
+
     @app.get("/api/documents")
     def documents():
         # Also feeds the Templates link select (doc_id, title). Drafts and rejected ones: ?status=draft|rejected.
@@ -367,8 +376,10 @@ def create_app(cfg: AppConfig) -> Flask:
         rows = conn().execute(
             "SELECT d.doc_id, d.service, d.level, d.based_on, d.title, d.error_code, d.error, d.handling, d.status, d.source, d.verdict, "
             "d.confidence, d.revision, d.embedded_revision IS NOT DISTINCT FROM d.revision AS embedded, "
-            "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates "
-            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) WHERE d.status = %s "
+            "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates, "
+            "max(t.level) FILTER (WHERE l.source = 'draft') AS template_level "   # level of the template a draft was written for
+            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) "
+            "LEFT JOIN templates t ON t.service = l.service AND t.template_id = l.template_id WHERE d.status = %s "
             "GROUP BY d.doc_id ORDER BY d.doc_id", (list(ALERTING_SOURCES), status)).fetchall()
         for r in rows:
             r["error_lines"] = error_lines(r["error"])   # what the linker embeds; empty = never auto-matched

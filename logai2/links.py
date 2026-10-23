@@ -15,6 +15,7 @@ LLM_SOURCES = ("llm", "draft")               # written by the resolver; replaced
 
 _ERROR = ("ERROR", "FATAL", "CRITICAL")
 _WARN = ("WARN", "WARNING")
+LEVEL_ORDER = ("FATAL", "CRITICAL", "SEVERE", "ERROR", "WARNING", "WARN", "NOTICE", "INFO", "DEBUG", "TRACE")   # others last, A-Z
 
 
 def level_class(level: str | None) -> str:
