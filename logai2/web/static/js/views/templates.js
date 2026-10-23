@@ -37,7 +37,8 @@ function fetchLevels() {
   return getJson(`/api/template-levels${tpl.service ? `?service=${encodeURIComponent(tpl.service)}` : ''}`, 'Unable to load levels');
 }
 function fetchModules() {
-  return tpl.service ? getJson(`/api/modules?service=${encodeURIComponent(tpl.service)}`, 'Unable to load modules') : Promise.resolve([]);
+  // a secondary widget: if it fails the table still loads
+  return tpl.service ? getJson(`/api/modules?service=${encodeURIComponent(tpl.service)}`, 'Unable to load modules').catch(() => []) : Promise.resolve([]);
 }
 function fetchServices() { return getJson('/api/services', 'Unable to load services'); }
 function fetchDocuments() { return getJson('/api/documents', 'Unable to load documents'); }
@@ -63,7 +64,7 @@ function tplModulesHtml(t) {
   const i = tpl.module === null ? -1 : mods.findIndex(m => m.module === tpl.module);
   if (i > 0) mods.unshift(...mods.splice(i, 1));
   return `<div class="tpl-mods">${mods.map(m => m.share == null
-    ? `<span class="mod-chip old" title="last seen ${escapeHtml(formatFullTs(m.last_seen))}">${escapeHtml(modName(m.module))}</span>`
+    ? `<span class="mod-chip old${m.module === tpl.module ? ' hit' : ''}" title="last seen ${escapeHtml(formatFullTs(m.last_seen))}">${escapeHtml(modName(m.module))}</span>`
     : `<span class="mod-chip${m.module === tpl.module ? ' hit' : ''}" title="${m.lines.toLocaleString()} lines in the last 24 h">${escapeHtml(modName(m.module))} <span class="p">${Math.round(m.share * 100)}%</span></span>`).join('')}</div>`;
 }
 
@@ -71,7 +72,7 @@ function tplModulesHtml(t) {
 function tplModulesDrawerHtml(t) {
   const mods = t.modules || [];
   const live = mods.filter(m => m.share != null).length;
-  return `<section class="pane-section"><h3>Last 24 h · ${live} module${live === 1 ? '' : 's'}</h3>${mods.map(m => `
+  return `<section class="pane-section"><h3>Last 24 h · ${live} modules</h3>${mods.map(m => `
     <div class="mod-row"><div><strong class="mono">${escapeHtml(modName(m.module))}</strong>
       <span class="link-meta">${m.share == null ? 'not in the last 24 h' : `${m.lines.toLocaleString()} lines · ${Math.round(m.share * 100)}%`}
         · last seen <span title="${escapeHtml(formatFullTs(m.last_seen))}">${escapeHtml(formatTs(m.last_seen))}</span></span></div>
@@ -83,7 +84,7 @@ function tplModulesDrawerHtml(t) {
 function renderModuleFilter(modules) {
   const $row = document.getElementById('tpl-module-row');
   $row.hidden = !tpl.service;
-  if (!tpl.service) return;
+  if (!tpl.service) { $row.innerHTML = ''; tpl.module = null; return; }
   const btn = (value, label, n) => `<button type="button" class="mod-chip" data-tpl-module="${value === null ? '' : `m${escapeHtml(value)}`}"
     aria-pressed="${tpl.module === value}">${escapeHtml(label)}${n == null ? '' : ` <span class="p">${n}</span>`}</button>`;
   $row.innerHTML = btn(null, 'All modules') + modules.map(m => btn(m.module, modName(m.module), m.templates)).join('');
