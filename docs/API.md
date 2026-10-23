@@ -1,19 +1,17 @@
 # logai2 — API cảnh báo theo module (hướng dẫn cho service gọi vào)
 
-Tài liệu cho các team/service muốn hỏi logai2: **"Trong khoảng thời gian T1 → T2, module M của
-tôi có những log template nào đang bị cảnh báo?"**
+Tài liệu cho các team/service muốn hỏi logai2: **"Trong khoảng thời gian T1 → T2, module M của 
+có những log template nào đang bị cảnh báo?"**
 
-- Chỉ đọc (GET), không ghi gì vào logai2.
+- Chỉ đọc (GET), không ghi gì vào logai.
 - Dữ liệu tính theo **từng phút**, giữ được **90 ngày** gần nhất.
-- Hợp đồng chi tiết (cho người bảo trì logai2): [`docs/specs/2026-10-22-module-alert-api.md`](specs/2026-10-22-module-alert-api.md).
 
 ---
 
 ## 1. Gọi nhanh
 
 ```bash
-curl -s -H "Authorization: Bearer $LOGAI_TOKEN" \
-  "http://logai-web:5555/api/module-alerts?module_code=VTN_CNTT_VAS_066_301&from=2026-09-30T07:00:00Z&to=2026-09-30T07:15:00Z"
+curl -s "http://logai-web:5555/api/module-alerts?module_code=VTN_CNTT_VAS_066_301&from=2026-10-22T07:00:00Z&to=2026-10-22T07:15:00Z"
 ```
 
 | Môi trường | Base URL |
@@ -22,7 +20,7 @@ curl -s -H "Authorization: Bearer $LOGAI_TOKEN" \
 | Kubernetes (khác namespace) | `http://logai-web.<namespace>.svc.cluster.local:5555` |
 | Ngoài cluster (qua NodePort) | `http://<IP-node-bất-kỳ>:8080` |
 
-Web logai2 trên k8s được mở ra ngoài bằng một **NodePort 8080**: từ ngoài cluster gọi vào
+Web logai trên k8s được mở ra ngoài bằng một **NodePort 8080**: từ ngoài cluster gọi vào
 `http://<IP của node bất kỳ>:8080` với cùng đường dẫn và tham số, ví dụ
 `http://<IP-node>:8080/api/module-alerts?module_code=...&from=...&to=...`.
 
@@ -58,7 +56,7 @@ Chấp nhận cả ba kiểu, kết quả như nhau:
 
 ### Làm tròn: độ phân giải 1 phút, mở rộng ra ngoài
 
-logai2 đếm và đánh giá theo phút, nên khoảng gửi được **nới ra cho phủ đủ các phút** chứa nó:
+logai đếm và đánh giá theo phút, nên khoảng gửi được **nới ra cho phủ đủ các phút** chứa nó:
 `from` làm tròn **xuống** đầu phút, `to` làm tròn **lên** đầu phút kế tiếp. Khoảng thực đọc là
 `[effective_from, effective_to)` và được trả lại trong response.
 
@@ -113,7 +111,7 @@ Mọi thời gian trả về là **UTC giờ chuẩn, đuôi `Z`**; phần mili-
 
 | Trường | Kiểu | Ý nghĩa |
 |---|---|---|
-| `module_code` | string | module đã hỏi (đã trim) |
+| `module_code` | string | module đã hỏi  |
 | `from`, `to` | string | thời điểm bạn gửi, chuẩn hoá về ISO UTC |
 | `effective_from`, `effective_to` | string | khoảng thực đọc (đã làm tròn, đã kẹp) |
 | `resolution` | `"minute"` | luôn là phút |
@@ -140,42 +138,12 @@ Mọi thời gian trả về là **UTC giờ chuẩn, đuôi `Z`**; phần mili-
 | `template` | object | như `module` nhưng tính trên **mọi module** (không có `series`) — để so module của bạn chiếm bao nhiêu phần |
 
 ## 5. Khi nào một template được trả về
-
-logai2 học mức bình thường của từng template theo giờ trong ngày, rồi theo dõi từng phút:
-
-| Phút | Trạng thái | Có tính |
-|---|---|---|
-| phút cao đầu tiên | (bắt đầu chuỗi) | **có** |
-| phút cao thứ 2 | WARMING | có |
-| từ phút cao thứ 3 | ALERTING | có |
-| các phút đã hạ xuống | COOLING | không |
-| trở lại bình thường | NORMAL | không |
-
 Một template xuất hiện khi **cả hai** điều sau đúng:
-1. nó ở WARMING hoặc ALERTING trong khoảng hỏi, và
-2. module của bạn có ghi ít nhất một dòng của nó trong các phút đó.
+1. nó ở WARMING hoặc ALERTING trong khoảng hỏi
+2. module_code có ghi ít nhất một dòng của nó trong các phút đó.
 
-Lưu ý:
-- **Chỉ log ERROR/FATAL/CRITICAL và WARN/WARNING** mới có thể cảnh báo. DEBUG/INFO không bao giờ
-  xuất hiện.
-- Một `module_code` có ở nhiều service → trả template của tất cả các service đó.
-- `module_code` chưa từng thấy → `200` với `templates: []` (không phải 404). Kiểm tra lại chính tả
-  nếu luôn nhận rỗng.
-- Chỉ có template. Cảnh báo cấp runbook/service chưa có trong API này.
 
-## 6. `data_until`: rỗng chưa chắc là "không có lỗi"
-
-logai2 xử lý trễ khoảng 1–2 phút. Nếu `effective_to > data_until`, phần cuối khoảng hỏi **chưa được
-đánh giá**: danh sách rỗng ở đó có nghĩa là "chưa biết", không phải "ổn". Cách xử lý:
-
-```python
-if r["data_until"] is None or r["effective_to"] > r["data_until"]:
-    # phần cuối chưa có kết quả: gọi lại sau 1–2 phút
-```
-
-(So sánh chuỗi được vì cùng định dạng ISO UTC.)
-
-## 7. Lỗi
+## 6. Lỗi
 
 | HTTP | Body | Khi nào |
 |---|---|---|
@@ -185,7 +153,7 @@ if r["data_until"] is None or r["effective_to"] > r["data_until"]:
 | 400 | `{"error": "from is after to"}` | `from > to` |
 | 5xx | — | logai2 hoặc database đang lỗi: thử lại có backoff |
 
-## 8. Ví dụ code
+## 7. Ví dụ code
 
 **Python (requests)**
 
@@ -196,7 +164,6 @@ def module_alerts(module_code, start, end):
     r = requests.get(
         "http://logai-web:5555/api/module-alerts",
         params={"module_code": module_code, "from": start, "to": end},   # requests tự URL-encode
-        headers={"Authorization": f"Bearer {os.environ['LOGAI_TOKEN']}"},
         timeout=10,
     )
     r.raise_for_status()
@@ -216,9 +183,7 @@ const qs = new URLSearchParams({
   from: new Date(Date.now() - 15 * 60_000).toISOString(),
   to: new Date().toISOString(),
 });
-const res = await fetch(`http://logai-web:5555/api/module-alerts?${qs}`, {
-  headers: { Authorization: `Bearer ${process.env.LOGAI_TOKEN}` },
-});
+const res = await fetch(`http://logai-web:5555/api/module-alerts?${qs}`);
 if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
 const { templates } = await res.json();
 ```
@@ -230,7 +195,6 @@ String q = "module_code=" + URLEncoder.encode("VTN_CNTT_VAS_066_301", UTF_8)
          + "&from=" + URLEncoder.encode("2026-09-30T07:00:00Z", UTF_8)
          + "&to="   + URLEncoder.encode("2026-09-30T07:15:00Z", UTF_8);
 HttpRequest req = HttpRequest.newBuilder(URI.create("http://logai-web:5555/api/module-alerts?" + q))
-        .header("Authorization", "Bearer " + System.getenv("LOGAI_TOKEN"))
         .timeout(Duration.ofSeconds(10)).GET().build();
 HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
 ```
@@ -239,7 +203,6 @@ HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.Bo
 
 ```bash
 curl -sG "http://logai-web:5555/api/module-alerts" \
-  -H "Authorization: Bearer $LOGAI_TOKEN" \
   --data-urlencode "module_code=APP/066 é" \
   --data-urlencode "from=2026-09-30T14:00:00+07:00" \
   --data-urlencode "to=2026-09-30T14:15:00+07:00"
