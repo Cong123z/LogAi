@@ -198,26 +198,39 @@
         </div>
         <div class="stats-row" id="pl-tiles"></div>
         <div class="rv-panel">
-          <div class="rv-head"><h3>Volume vs expected, today</h3><button type="button" class="btn" id="pl-multiples-more" hidden></button></div>
-          <p class="sync-status">Per service, today's hourly rate (line) against its expected band (gray) and the same hour last week (dashed). Worst first; click one to open Baseline.</p>
-          <div class="pl-multiples" id="pl-multiples"></div>
-          <p class="empty-state" id="pl-multiples-empty" hidden>No service has reported volume yet.</p>
+          <div class="rv-head"><h3>Throughput, last 60 min</h3>
+            <div class="toggle-group" id="pl-tp-mode" role="group" aria-label="One chart or one per service">
+              <button type="button" class="toggle-btn" data-mode="combined" aria-pressed="true">Combined</button>
+              <button type="button" class="toggle-btn" data-mode="multiples" aria-pressed="false">One per service</button>
+            </div>
+          </div>
+          <p class="sync-status" id="pl-tp-note">Events per closed minute for the services ticked in the table (at most 8).</p>
+          <p class="ins-toast ins-toast-error" id="pl-tp-msg" role="status" hidden></p>
+          <div class="pl-multiples" id="pl-tp"></div>
+          <p class="empty-state" id="pl-tp-empty" hidden>No throughput yet: the engine reports it after its first closed minute.</p>
         </div>
-        <h3>Services</h3>
+        <div class="rv-head"><h3>Services</h3>
+          <div class="search-wrap doc-search-wrap">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="search" class="search-input" id="pl-search" placeholder="Filter services…" aria-label="Filter services" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
         <div class="table-wrap">
           <table id="pl-services">
             <thead><tr>
+              <th><span class="visually-hidden">Show in chart</span></th>
               <th aria-sort="none"><button type="button" class="pl-sort" data-sort="service">Service</button></th>
-              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="rate">Events/min (this hour)</button></th>
-              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="vs_week">vs last week</button></th>
-              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="z">vs expected (z)</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="last">Last min</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="avg15">15-min avg</button></th>
+              <th>60 min</th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="delta_1h">vs 1 h ago</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="miss_ratio">Miss ratio 5 min</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="templates">Templates</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="new_24h">New 24 h</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="unparsed_1h">Unparsed 1 h</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="not_normal">Keys not NORMAL</button></th>
             </tr></thead>
-            <tbody id="pl-services-tbody"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody>
+            <tbody id="pl-services-tbody"><tr><td colspan="11" class="loading">Loading...</td></tr></tbody>
           </table>
         </div>
         <h3>Indices being read</h3>
