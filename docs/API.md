@@ -183,7 +183,6 @@ if r["data_until"] is None or r["effective_to"] > r["data_until"]:
 | 400 | `{"error": "from and to are required"}` | thiếu `from` hoặc `to` |
 | 400 | `{"error": "cannot parse time '...'"}` | thời gian không phải ISO-8601 hay số |
 | 400 | `{"error": "from is after to"}` | `from > to` |
-| 401 | `{"error": "unauthorized"}` | token bật mà header thiếu/sai |
 | 5xx | — | logai2 hoặc database đang lỗi: thử lại có backoff |
 
 ## 8. Ví dụ code
