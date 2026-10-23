@@ -30,7 +30,9 @@ class Linker:
         self.now = now
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
-        return self.embed_fn(self.cfg.embedding.url, self.cfg.embedding.model, texts, self.cfg.embedding.api_key)
+        e = self.cfg.embedding
+        return self.embed_fn(e.url, e.model, texts, e.api_key, e.timeout_seconds, e.max_retries,
+                             e.retry_backoff_seconds, e.dimension)
 
     def cycle(self) -> dict:
         status = {"heartbeat": self.now(), "embedded_templates": 0, "embedded_documents": 0,

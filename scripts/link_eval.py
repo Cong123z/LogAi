@@ -68,7 +68,8 @@ def whole_doc_top2(conn, cfg, templates: list[dict]) -> dict:
                         "ORDER BY doc_id").fetchall()
     vectors = embed(cfg.embedding.url, cfg.embedding.model,
                     ["\n".join(filter(None, (d["title"], d["error"], d["handling"]))) for d in docs],
-                    cfg.embedding.api_key)
+                    cfg.embedding.api_key, cfg.embedding.timeout_seconds, cfg.embedding.max_retries,
+                    cfg.embedding.retry_backoff_seconds, cfg.embedding.dimension)
     out = {}
     for t in templates:
         tv = [float(x) for x in t["vec"].strip("[]").split(",")]

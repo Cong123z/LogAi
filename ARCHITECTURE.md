@@ -137,6 +137,8 @@ this order, later layers overriding earlier ones:
 | `LOGAI2_DOC_SEED_PATH` | `documentation.seed_path` | engine |
 | `LOGAI2_EMBEDDING_URL` | `embedding.url` | linker |
 | `LOGAI2_EMBEDDING_MODEL` | `embedding.model` | linker |
+| `LOGAI2_EMBEDDING_TIMEOUT_SECONDS` / `_MAX_RETRIES` / `_RETRY_BACKOFF_SECONDS` | `embedding.timeout_seconds` / `max_retries` / `retry_backoff_seconds` | linker |
+| `LOGAI2_EMBEDDING_BATCH_SIZE` / `_DIMENSION` | `embedding.batch` / `dimension` | linker |
 | `LOGAI2_EMBEDDING_API_KEY` | `embedding.api_key`; sent as `Authorization: Bearer` | linker |
 
 Compose-only variables: `LOGAI2_NETWORK` (external network name, default
@@ -188,6 +190,8 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `embedding.url` / `model` | `http://bge-m3:8080` / `bge-m3` | OpenAI-style `/v1/embeddings`: a base URL gets it added, a URL already ending in it is used as is; empty url = nothing is embedded |
 | `embedding.api_key` | `""` | Bearer key for a gateway in front of the model; no redirects are followed |
 | `embedding.batch` / `cycle_seconds` | 32 / 30 | texts per request; linker cycle |
+| `embedding.timeout_seconds` / `max_retries` / `retry_backoff_seconds` | 30 / 2 / 1 | per request; network errors, timeouts, 5xx and 429 are retried, waiting backoff × attempt; other 4xx fail at once |
+| `embedding.dimension` | 1024 | checked on every reply; the DB columns are `vector(1024)`, so another value needs a migration |
 | `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
 | `llm.per_service_hour` / `daily_max` | 0 / 0 | LLM results per service per hour, in all per day; 0 = no limit |
 | `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |

@@ -26,6 +26,13 @@ data:
   LOGAI_EMBEDDING_URL: "http://bge-m3.embedding.svc.cluster.local:8080"
   # model name sent in each request; it must be a bge-m3 (1024 dimensions)
   LOGAI_EMBEDDING_MODEL: "bge-m3"
+  LOGAI_EMBEDDING_TIMEOUT_SECONDS: "30"
+  # network errors, timeouts, 5xx and 429 are retried; wait backoff x attempt between tries
+  LOGAI_EMBEDDING_MAX_RETRIES: "2"
+  LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS: "1"
+  LOGAI_EMBEDDING_BATCH_SIZE: "32"
+  # checked on every reply; the DB columns are vector(1024), so keep 1024
+  LOGAI_EMBEDDING_DIMENSION: "1024"
 ---
 apiVersion: apps/v1
 kind: Deployment

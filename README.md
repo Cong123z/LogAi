@@ -138,6 +138,8 @@ connection and index selection saved on the **Data sources** page.
 | `LOGAI2_API_TOKEN` | optional shared bearer token for `GET /api/module-alerts` (web only; empty = open) |
 | `LOGAI2_EMBEDDING_URL` | embeddings service: base URL (`/v1/embeddings` is added) or the full `…/v1/embeddings` endpoint, e.g. TEI; default `http://bge-m3:8080` |
 | `LOGAI2_EMBEDDING_MODEL` | model name sent to the embeddings service (default `bge-m3`; must be a 1024-dim bge-m3) |
+| `LOGAI2_EMBEDDING_TIMEOUT_SECONDS`, `LOGAI2_EMBEDDING_MAX_RETRIES`, `LOGAI2_EMBEDDING_RETRY_BACKOFF_SECONDS` | per-request timeout (30), retries of network errors / timeouts / 5xx / 429 (2), wait backoff × attempt (1) |
+| `LOGAI2_EMBEDDING_BATCH_SIZE`, `LOGAI2_EMBEDDING_DIMENSION` | texts per request (32); vector size checked on replies (1024, the DB columns' size) |
 | `LOGAI2_EMBEDDING_API_KEY` | optional key for the embeddings service, sent as `Authorization: Bearer` (linker) |
 
 Every `config.yaml` key and default (floors, k, commit time, retention,

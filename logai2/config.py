@@ -117,6 +117,11 @@ class EmbeddingConfig:
     model: str = "bge-m3"
     api_key: str = ""                 # sent as Authorization: Bearer (a gateway in front of the model)
     batch: int = 32
+    # ponytail: dimension only checks the replies; the DB columns are vector(1024), so another value needs a migration
+    dimension: int = 1024
+    timeout_seconds: float = 30.0
+    max_retries: int = 2              # network errors, timeouts, 5xx and 429; other 4xx fail at once
+    retry_backoff_seconds: float = 1.0   # wait backoff × attempt between tries
     cycle_seconds: float = 30.0
 
 
@@ -198,6 +203,10 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.embedding.url = env("LOGAI2_EMBEDDING_URL")
     if env("LOGAI2_EMBEDDING_MODEL"):
         cfg.embedding.model = env("LOGAI2_EMBEDDING_MODEL")
+    for name, attr, cast in [("TIMEOUT_SECONDS", "timeout_seconds", float), ("RETRY_BACKOFF_SECONDS", "retry_backoff_seconds", float),
+                             ("BATCH_SIZE", "batch", int), ("DIMENSION", "dimension", int), ("MAX_RETRIES", "max_retries", int)]:
+        if env("LOGAI2_EMBEDDING_" + name):
+            setattr(cfg.embedding, attr, cast(env("LOGAI2_EMBEDDING_" + name)))
     if env("LOGAI2_EMBEDDING_API_KEY"):
         cfg.embedding.api_key = env("LOGAI2_EMBEDDING_API_KEY")
     return cfg
