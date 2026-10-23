@@ -206,11 +206,13 @@ Two modes, a toggle at the left of the filter bar:
   ERROR > WARN > INFO, then newest `last_seen`. N follows the service,
   level and search filters. The page opens here when N > 0, else on All
   templates (the choice is not kept across reloads).
-- **All templates**: every template, newest `last_seen` first, with a
+- **All templates**: every template, newest `last_seen` first (the
+  **First seen** and **Last seen** headers sort, `aria-sort`), with a
   **link** filter (not linked, or one link source); hidden and cleared in
   To review.
 
-Both modes: service, level (every level present in the data with its
+Both modes: service (a text box with a suggestion list of the known
+services; an exact name filters, empty = all), level (every level present in the data with its
 count, "ERROR (12)"; follows the service) and a text search (case-insensitive substring,
 debounced 300 ms); 100 per page by default (50, 100 or 200; server cap
 500). To review with nothing left says so and offers All templates.
@@ -223,7 +225,7 @@ in red with "▲ above normal"; under it the band as `normal ≤ X/min` or
 **document** (`DOC-007 · title`, or "Not linked" / "No document (set by
 hand)"; under it how it was linked: `manual`, `inherited 0.91`,
 `auto-matched 0.87`, `AI-confirmed`, `AI suggestion · unverified`, `AI
-result rejected`, and SAFE), **last seen** (relative, full time on
+result rejected`, and SAFE), **first seen** and **last seen** (relative, full time on
 hover), and a button: **Review** for an automatic link, else **Link…** /
 **Change**. A click anywhere on the row opens the same drawer.
 
@@ -604,7 +606,9 @@ Authorization: Bearer <token>
   substring of the text; `link_source`: `none` (no row), `review` (an
   automatic link: `inherited`, `corpus`, `llm`, `draft`) or one of
   `manual`, `inherited`, `corpus`, `llm`, `draft`, `rejected` (else 400).
-- Order: newest `last_seen` first, then `template_id`; with
+- `sort`: `last_seen` (default) or `first_seen`, newest first, then
+  `template_id`; anything else is 400; ignored with `link_source=review`.
+- Order: by `sort`; with
   `link_source=review`, ALERTING first, then level class ERROR > WARN >
   INFO, then the same.
 - `review_total`: templates with an automatic link that match `service`,

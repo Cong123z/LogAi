@@ -604,6 +604,9 @@ def create_app(cfg: AppConfig) -> Flask:
         status = request.args.get("status") or None
         if status not in (None, "known", "unknown"):
             raise BadRequest("status must be known or unknown")
+        sort = request.args.get("sort") or "last_seen"
+        if sort not in ("first_seen", "last_seen"):
+            raise BadRequest("sort must be first_seen or last_seen")
         where, args = ["true"], []   # every filter but link_source: review_total counts within these
         for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
                               ("l.doc_id", request.args.get("doc_id")),
@@ -627,10 +630,10 @@ def create_app(cfg: AppConfig) -> Flask:
             where.append(f"{'' if status == 'known' else 'NOT '}{KNOWN_SQL}")
             args.append(list(ALERTING_SOURCES))
         where_sql = " AND ".join(where)
-        order = "t.last_seen DESC, t.template_id"
+        order = f"t.{sort} DESC, t.template_id"
         if link_source == "review":   # what needs a decision first: alerting, then the worst level
             order = (f"(a.state = 'ALERTING') IS TRUE DESC, CASE {class_sql('t.level')} WHEN 'ERROR' THEN 0 "
-                     f"WHEN 'WARN' THEN 1 ELSE 2 END, {order}")
+                     f"WHEN 'WARN' THEN 1 ELSE 2 END, t.last_seen DESC, t.template_id")   # sort is ignored here
         c = conn()
         count_sql = ("SELECT count(*) AS n FROM templates t LEFT JOIN template_doc_links l "
                      "ON l.service = t.service AND l.template_id = t.template_id WHERE ")
