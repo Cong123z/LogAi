@@ -23,6 +23,7 @@ from logai2.links import ALERTING_SOURCES, LEVEL_ORDER, class_sql, cluster_edges
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
+from logai2.web import modules_view
 from logai2.web.baseline_view import UnknownKey, incident, inspect, left_days, matrix, series
 from logai2.web.pipeline_view import stage_states, throughput
 from logai2.web.pipeline_view import services as service_rows
@@ -633,6 +634,11 @@ def create_app(cfg: AppConfig) -> Flask:
         if request.args.get("q"):
             where.append("strpos(lower(t.text), lower(%s)) > 0")   # substring, no LIKE wildcards to escape
             args.append(request.args["q"])
+        module = request.args.get("module")
+        if module is not None:   # '' = "(no module)"; narrows total, stats and the items alike
+            where.append("EXISTS (SELECT 1 FROM template_modules m WHERE m.service = t.service "
+                         "AND m.template_id = t.template_id AND m.module_code = %s)")
+            args.append(module)
         base_sql, base_args = " AND ".join(where), list(args)   # the stats cards count within these too
         review_sql, review_args = " AND ".join([*where, "l.source = ANY(%s)"]), [*args, list(AUTOMATIC_SOURCES)]
         if link_source == "none":
@@ -650,6 +656,12 @@ def create_app(cfg: AppConfig) -> Flask:
         if link_source == "review":   # what needs a decision first: alerting, then the worst level
             order = (f"(a.state = 'ALERTING') IS TRUE DESC, CASE {class_sql('t.level')} WHEN 'ERROR' THEN 0 "
                      f"WHEN 'WARN' THEN 1 ELSE 2 END, t.last_seen DESC, t.template_id")   # sort is ignored here
+        order_args = []
+        if module is not None:   # lines in the window in that module first, then the usual order
+            days, bdays, bhours = modules_view.window_args(modules_view.clock())
+            order = ("EXISTS (SELECT 1 FROM template_module_hours h WHERE h.service = t.service AND h.template_id = "
+                     f"t.template_id AND h.module_code = %s AND {modules_view.WINDOW_SQL}) DESC, " + order)
+            order_args = [module, days, bdays, bhours]
         c = conn()
         count_sql = ("SELECT count(*) AS n FROM templates t LEFT JOIN template_doc_links l "
                      "ON l.service = t.service AND l.template_id = t.template_id WHERE ")
@@ -672,7 +684,7 @@ def create_app(cfg: AppConfig) -> Flask:
             "LEFT JOIN documents d ON d.doc_id = l.doc_id "
             "LEFT JOIN alert_state a ON a.service = t.service AND a.key = t.template_id "
             f"WHERE {where_sql} ORDER BY {order} LIMIT %s OFFSET %s",
-            [list(ALERTING_SOURCES), *args, size, (page - 1) * size]).fetchall()
+            [list(ALERTING_SOURCES), *args, *order_args, size, (page - 1) * size]).fetchall()
 
         # Rate and band for the current local hour, judged exactly as detection does.
         day, hour = day_hour(minute_of(time.time()))
@@ -685,14 +697,32 @@ def create_app(cfg: AppConfig) -> Flask:
             "SELECT service, key, sum FROM hourly_counts WHERE day = %s AND hour = %s "
             "AND (service, key) IN (SELECT * FROM unnest(%s::text[], %s::text[]))", (day, hour, svcs, tids))}
         baseline = Baseline.load(c, keys)
+        modules = modules_view.modules_for(c, keys, modules_view.clock())
         for i in items:
             svc, tid = i["service"], i["template_id"]
+            i["modules"] = modules[(svc, tid)]
             n = minutes.get(svc)
             i["rate"] = sums.get((svc, tid), 0) / n if n else None
             verdict = judge(0, tid, i["level"], baseline.lookup(svc, tid, day, hour), cfg)
             i["band_low"], i["band_high"] = verdict.band_low, verdict.band_high
             i["first_seen"], i["last_seen"] = i["first_seen"].timestamp(), i["last_seen"].timestamp()
         return jsonify({"total": total, "review_total": review_total, "stats": stats, "items": items})
+
+    @app.get("/api/modules")
+    def modules():
+        """A service's modules: templates ever seen in each and its lines over the last 24 h."""
+        service = request.args.get("service")
+        if not service:
+            raise BadRequest("service is required")
+        days, bdays, bhours = modules_view.window_args(modules_view.clock())
+        rows = conn().execute(
+            "SELECT m.module_code AS module, count(*) AS templates, COALESCE(sum(w.n), 0)::bigint AS lines_24h "
+            "FROM template_modules m LEFT JOIN (SELECT template_id, module_code, sum(count) AS n "
+            f"FROM template_module_hours h WHERE service = %s AND {modules_view.WINDOW_SQL} GROUP BY 1, 2) w "
+            "ON w.template_id = m.template_id AND w.module_code = m.module_code "
+            "WHERE m.service = %s GROUP BY m.module_code ORDER BY templates DESC, module",
+            (service, days, bdays, bhours, service)).fetchall()
+        return jsonify(rows)
 
     def known_template(c, service: str, template_id: str) -> None:
         if not c.execute("SELECT 1 FROM templates WHERE service = %s AND template_id = %s",
