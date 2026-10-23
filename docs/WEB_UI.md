@@ -38,8 +38,8 @@ theme).
 | Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
 | LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
-| Baseline | `/#baseline/<service>/<key>/<days>` | on entry and after each change; no timers | `GET /api/services`, `/api/templates`, `/api/baseline/series`, `/api/baseline/matrix`, `/api/baseline/incident` |
-| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
+| Baseline | `/#baseline/<service>/<key>/<days>` | on entry and after each change; no timers | `GET /api/services`, `/api/templates`, `/api/baseline/groups`, `/api/baseline/series`, `/api/baseline/matrix`, `/api/baseline/incident` |
+| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline/groups`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
 (Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline, Review). The top
@@ -360,9 +360,9 @@ Review page.
   with counts, All events, then Level (ERROR, WARN, INFO) and Documentation
   (ERROR docs, SAFE docs); a click shows the group's combined series
   (`*total`, `*error`, `*warn`, `*info`, `verdict:action`, `verdict:safe`).
-  A group with nothing in it for the service is disabled. A documentation group's count is the active documents with a linked template (manual, inherited, auto-matched, AI-confirmed) in this service; a verdict series is the sum of those templates. The Errors incident list shows modules of ERROR templates only. **Show** opens a
+  Counts are exact, from `GET /api/baseline/groups` (not capped by the 500 templates the page loads). A group with nothing in it for the service is disabled. A documentation group's count is the active documents with a linked template (manual, inherited, auto-matched, AI-confirmed) in this service; a verdict series is the sum of those templates. The Errors incident list shows modules of ERROR templates only. **Show** opens a
   searchable list: the combined key, then documents, then templates (newest
-  first). Keys: Up / Down, Enter, Esc. A line under it says how the series is
+  first). When the service has more templates than the page holds, typing searches the server (`/api/templates?q=`, 50 rows, 300 ms debounce) and the list ends with "Showing N of M". Keys: Up / Down, Enter, Esc. A line under it says how the series is
   counted (stored key, new stored key with a young baseline, derived from
   linked templates, single template). The group follows the key, so old
   links keep working. A template belongs to the group of its stored level
@@ -417,6 +417,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` | `{name, revision}` | 400, 409 | — |
 | `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
 | `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
+| `GET /api/baseline/groups` | query `service` (required) | `{all, ERROR, WARN, INFO, action, safe}`: templates per level class; active documents per verdict with a template of this service linked by manual, inherited, corpus or llm | 400 | — |
 | `GET /api/baseline/matrix` | query `service`, `key` (default `*total`; also `*error`, `*warn`, `*info`, `verdict:action`, `verdict:safe`, `doc:<id>`, a template id; same for the other `/api/baseline/*` routes), `days` (1–28, default 14) | `{service, key, k, baseline_state, days, coverage, profiles}` | 400, 404 | — |
 | `GET /api/baseline/inspect` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{sentence, day, increased, new, keys, left_days}` | 400, 404 | — |
 | `GET /api/baseline/series` | query `service`, `key`, `days` (1, 7 or 14, default 14) | `{key, baseline_state, points, incidents, profile}` | 400, 404 | — |

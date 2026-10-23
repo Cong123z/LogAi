@@ -2,7 +2,7 @@
 // Group buttons (All events / level / documentation verdict) pick a combined series; the Show popover
 // lists that group's combined key, documents and templates. Pure view: keys are served by /api/baseline/*.
 const KP_ERROR = ['ERROR', 'FATAL', 'CRITICAL'], KP_WARN = ['WARN', 'WARNING'];   // same sets as links.level_class
-const KP_LINKED = ['manual', 'inherited', 'corpus', 'llm'];                        // links that drive alerts
+const KP_LINKED = ['manual', 'inherited', 'corpus', 'llm'];                        // links that drive alerts (links.ALERTING_SOURCES)
 const KP_GROUPS = [
   {id: 'all', label: 'All events', key: '*total', combined: 'All events'},
   {sep: 'Level'},
@@ -14,7 +14,6 @@ const KP_GROUPS = [
   {id: 'safe', label: 'SAFE docs', dot: 'safe', key: 'verdict:safe', combined: 'All templates of SAFE documents', derived: true},
 ];
 const kpIsDocGroup = id => id === 'action' || id === 'safe';
-const KP_CAP = 500;   // the pages fetch /api/templates?size=500
 const kpLinked = t => KP_LINKED.includes(t.link_source);
 
 function levelClass(level) {
@@ -46,7 +45,7 @@ function keyLabel(key, templates, docs) {
 let kpSeq = 0;
 function createKeyPicker(root, {onPick}) {
   const uid = `kp${++kpSeq}`;
-  const st = {service: '', key: '*total', templates: [], docs: [], baselineState: null, docIds: new Set(), group: 'all', open: false, active: 0, opts: []};
+  const st = {service: '', key: '*total', templates: [], groups: {}, remote: null, rseq: 0, timer: 0, docs: [], baselineState: null, docIds: new Set(), group: 'all', open: false, active: 0, opts: []};
   root.innerHTML = `
     <div class="kp-bar"><div class="kp-groups" role="group" aria-label="Group"></div></div>
     <div class="kp-bar">
@@ -82,16 +81,14 @@ function createKeyPicker(root, {onPick}) {
     const ids = new Set(st.templates.filter(t => kpLinked(t) && inGroup(t, id)).map(t => t.doc_id));
     return ds.filter(d => ids.has(d.doc_id));
   };
-  const groupCount = id => kpIsDocGroup(id) ? groupDocs(id).length : st.templates.filter(t => inGroup(t, id)).length;
+  const groupCount = id => st.groups[id] || 0;   // exact, from /api/baseline/groups
 
   function renderGroups() {
     groupsEl.innerHTML = KP_GROUPS.map(g => {
       if (g.sep) return `<span class="kp-gl">${g.sep}</span>`;
       const n = groupCount(g.id), on = g.id === st.group;
-      // The template list is capped at KP_CAP: its counts are lower bounds, so never disable on them.
-      const cut = st.templates.length >= KP_CAP && !kpIsDocGroup(g.id);
-      return `<button type="button" class="toggle-btn${on ? ' active' : ''}" aria-pressed="${on}" data-g="${g.id}"${n || cut ? '' : ` disabled title="Nothing in this group for ${escapeHtml(st.service)}"`}>`
-        + `${g.dot ? `<span class="kp-dot ${g.dot}" aria-hidden="true"></span>` : ''}${g.label}<span class="kp-n">${n}${cut ? '+' : ''}</span></button>`;
+      return `<button type="button" class="toggle-btn${on ? ' active' : ''}" aria-pressed="${on}" data-g="${g.id}"${n ? '' : ` disabled title="Nothing in this group for ${escapeHtml(st.service)}"`}>`
+        + `${g.dot ? `<span class="kp-dot ${g.dot}" aria-hidden="true"></span>` : ''}${g.label}<span class="kp-n">${n}</span></button>`;
     }).join('');
   }
 
@@ -99,15 +96,17 @@ function createKeyPicker(root, {onPick}) {
   function options(q) {
     const g = group(), ql = q.trim().toLowerCase();
     const hit = (...xs) => !ql || xs.some(x => String(x || '').toLowerCase().includes(ql));
-    const tpls = st.templates.filter(t => inGroup(t, g.id)).sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
+    const tpls = (st.remote || st.templates).filter(t => inGroup(t, g.id)).sort((a, b) => (b.last_seen || 0) - (a.last_seen || 0));
     const out = [];
     if (hit(g.combined, g.key)) out.push({sec: 'Combined'}, {key: g.key, html: `<strong>${escapeHtml(g.combined)}</strong><span class="kp-txt">${escapeHtml(g.key)}</span>`});
     const ds = groupDocs(g.id).filter(d => hit(d.doc_id, d.title));
     if (ds.length) out.push({sec: `Documents (${ds.length})`}, ...ds.map(d => ({key: `doc:${d.doc_id}`,
       html: `<span class="tmpl-id">${escapeHtml(d.doc_id)}</span>${verdictBadge(d.verdict)}<span class="kp-txt">${escapeHtml(d.title)} · ${linkedIn(d.doc_id)} templates</span>`})));
-    const ts = tpls.filter(t => hit(t.template_id, t.text, t.doc_id));
+    const ts = st.remote ? tpls : tpls.filter(t => hit(t.template_id, t.text, t.doc_id));   // the server already matched a remote list
     if (ts.length) out.push({sec: `Templates (${ts.length})`}, ...ts.map(t => ({key: t.template_id,
       html: `<span class="tmpl-id">${escapeHtml(t.template_id)}</span>${levelBadge(levelClass(t.level))}<span class="kp-txt">${escapeHtml(t.text)}</span>`})));
+    // The pages load at most 500 templates; the rest is reached by typing (server search).
+    if (st.groups.all > st.templates.length) out.push({sec: `Showing ${ts.length} of ${groupCount(g.id)}`});
     return out;
   }
   function renderList() {
@@ -126,12 +125,12 @@ function createKeyPicker(root, {onPick}) {
     st.open = open;
     pop.hidden = !open;
     trigger.setAttribute('aria-expanded', String(open));
-    if (open) { search.value = ''; st.active = 0; renderList(); search.focus(); }
+    if (open) { search.value = ''; st.remote = null; st.active = 0; renderList(); search.focus(); }
   }
   function choose(key) { setOpen(false); trigger.focus(); onPick(key); }
 
-  function render({service, key, templates, docs, baselineState}) {
-    Object.assign(st, {service, key, templates: templates || [], docs: docs || [], baselineState: baselineState || null});
+  function render({service, key, templates, groups, docs, baselineState}) {
+    Object.assign(st, {service, key, templates: templates || [], groups: groups || {}, docs: docs || [], baselineState: baselineState || null});
     st.docIds = new Set(svcDocs().map(d => d.doc_id));
     st.group = keyGroup(key, st.templates, st.docs);
     renderGroups();
@@ -150,7 +149,20 @@ function createKeyPicker(root, {onPick}) {
     if (b && !b.disabled) onPick(KP_GROUPS.find(g => g.id === b.dataset.g).key);   // a group opens on its combined series
   });
   trigger.addEventListener('click', () => setOpen(!st.open));
-  search.addEventListener('input', () => { st.active = 0; renderList(); });
+  search.addEventListener('input', () => {
+    st.active = 0; renderList();
+    clearTimeout(st.timer);
+    const q = search.value.trim();
+    if (!q || !(st.groups.all > st.templates.length)) { st.remote = null; renderList(); return; }
+    const seq = ++st.rseq;
+    st.timer = setTimeout(async () => {
+      try {
+        const r = await getJson(`/api/templates?service=${encodeURIComponent(st.service)}&q=${encodeURIComponent(q)}&size=50`, 'Unable to search templates');
+        if (seq !== st.rseq || !st.open) return;
+        st.remote = r.items; st.active = 0; renderList();
+      } catch (err) { /* keep the local list */ }
+    }, 300);
+  });
   search.addEventListener('keydown', e => {
     const pick = st.opts.filter(o => o.key);
     if (e.key === 'ArrowDown') { st.active = Math.min(st.active + 1, pick.length - 1); renderList(); e.preventDefault(); }
