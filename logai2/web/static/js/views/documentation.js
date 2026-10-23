@@ -7,7 +7,7 @@
 // the All / ERROR / SAFE buttons filter the list.
 // Documents belong to a service. The filter shows one service's documents, or all of them; "All
 // services" groups documents with the same ERROR line into one row, with a version per service.
-const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: '',
+const docs = {mode: 'active', items: [], drafts: new Map(), selected: null, editing: false, query: '', kind: '', level: '', levelOrder: [],
               service: '', services: []};
 const $docService = document.getElementById('doc-service');
 const svcLabel = service => service || 'shared';
@@ -56,6 +56,7 @@ async function loadDocumentation() {
     isDraftMode() ? getJson('/api/templates?link_source=draft&size=500', 'Unable to load AI suggestions') : null,
   ]);
   docs.items = items;
+  if (isDraftMode()) docs.levelOrder = (await getJson('/api/template-levels', 'Unable to load levels')).map(l => l.level);
   docs.services = await getJson('/api/services', 'Unable to load services');
   renderServiceOptions();
   if (draftLinks) docs.drafts = new Map(draftLinks.items.map(t => [t.doc_id, t]));
@@ -80,6 +81,7 @@ function renderServiceOptions() {
 
 function docMatches(doc) {
   if (docs.kind && doc.verdict !== docs.kind) return false;
+  if (docs.level && doc.template_level !== docs.level) return false;
   if (docs.service && doc.service !== docs.service) return false;
   const q = docs.query.toLowerCase();
   if (!q) return true;
@@ -107,6 +109,20 @@ function renderKindCounts() {
   document.querySelectorAll('#doc-kind-toggle .kind-count').forEach(el => { el.textContent = n(el.dataset.count); });
 }
 
+// AI suggestions: one button per level of the templates the drafts were written for.
+function renderLevelToggle() {
+  const $box = document.getElementById('doc-level-toggle');
+  const counts = new Map();
+  if (isDraftMode()) docs.items.filter(d => (!docs.service || d.service === docs.service) && d.template_level)
+    .forEach(d => counts.set(d.template_level, (counts.get(d.template_level) || 0) + 1));
+  if (docs.level && !counts.has(docs.level)) docs.level = '';
+  $box.hidden = !counts.size;
+  const rank = l => docs.levelOrder.indexOf(l) < 0 ? docs.levelOrder.length : docs.levelOrder.indexOf(l);   // server order (LEVEL_ORDER)
+  const levels = [...counts.keys()].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  $box.innerHTML = [['', 'Any level', [...counts.values()].reduce((a, b) => a + b, 0)], ...levels.map(l => [l, l, counts.get(l)])]
+    .map(([v, label, n]) => `<button class="toggle-btn${v === docs.level ? ' active' : ''}" data-doc-level="${escapeHtml(v)}" aria-pressed="${v === docs.level}">${escapeHtml(label)} <span class="kind-count">${n}</span></button>`).join('');
+}
+
 function renderDocumentation() {
   const drafting = isDraftMode();
   document.getElementById('add-document-btn').hidden = drafting;
@@ -118,6 +134,7 @@ function renderDocumentation() {
     ? `${plural(inService.length, 'suggestion')} to review. Unverified: check commands before running them.`
     : `${plural(inService.length, 'document')} · ${linked} linked to templates`;
   renderKindCounts();
+  renderLevelToggle();
   renderDocList();
   renderDocPane();
 }
@@ -452,6 +469,17 @@ document.querySelectorAll('#doc-kind-toggle .toggle-btn').forEach(button => butt
   renderDocList();
   renderDocPane();
 }));
+
+document.getElementById('doc-level-toggle').addEventListener('click', event => {
+  const button = event.target.closest('[data-doc-level]');
+  if (!button) return;
+  docs.level = button.dataset.docLevel;
+  renderLevelToggle();
+  const shown = docs.items.filter(docMatches);
+  if (!shown.some(d => d.doc_id === docs.selected)) { docs.selected = shown.length ? shown[0].doc_id : null; docs.editing = false; }
+  renderDocList();
+  renderDocPane();
+});
 
 document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(button => button.addEventListener('click', () => {
   document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(b => {

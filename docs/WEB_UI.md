@@ -34,7 +34,7 @@ theme).
 |---|---|---|---|
 | Alerting | `/#alerting` | every 5 s | `GET /api/alerts` |
 | Pipeline | `/#pipeline` (also the fallback for unknown hashes) | every 2 s | `GET /api/pipeline` |
-| Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/services`, `/api/documents` |
+| Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/template-levels`, `/api/services`, `/api/documents` |
 | Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
 | LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
@@ -210,7 +210,8 @@ Two modes, a toggle at the left of the filter bar:
   **link** filter (not linked, or one link source); hidden and cleared in
   To review.
 
-Both modes: service, level and a text search (case-insensitive substring,
+Both modes: service, level (every level present in the data with its
+count, "ERROR (12)"; follows the service) and a text search (case-insensitive substring,
 debounced 300 ms); 100 per page by default (50, 100 or 200; server cap
 500). To review with nothing left says so and offers All templates.
 
@@ -294,6 +295,8 @@ the list in both tabs.
   approves), **Reject** (asks first; the template is never sent to the LLM
   again); the next suggestion is selected after each decision. **Approve
   all SAFE** approves every normal-operation suggestion after listing them.
+  A second button group ("Any level · ERROR 3 …") filters by the level of
+  the template each was written for; it combines with the kind buttons.
 
 On the first engine start, an empty table is seeded from
 `documentation.seed_path` (ARCHITECTURE §4.4).
@@ -396,6 +399,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `GET /api/alerts` | — | `[alert row]` | — | — |
 | `GET /api/services` | — | `[service]` sorted | — | — |
+| `GET /api/template-levels` | query `service` (optional) | `[{level, n}]`: every level present, FATAL … TRACE then others A-Z | — | — |
 | `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `template_id`, `link_source`, `q` | `{total, review_total, items}` | 400 | — |
 | `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null, also?: [template_id]}` | `{doc_id, linked}` | 400, 404 | `reload_links` |
 | `DELETE /api/templates/<service>/<template_id>/link` | — | `{doc_id: null}` | 404 | `reload_links` |
@@ -650,10 +654,11 @@ template has no vector (then the list is empty).
 
 - `GET /api/documents?status=active`: `[{doc_id, service, level, based_on, title, error_code, error,
   handling, status, source, verdict, confidence, revision, embedded,
-  error_lines, linked_templates}]` sorted by `doc_id`. `error_lines` = the
+  error_lines, linked_templates, template_level}]` sorted by `doc_id`. `error_lines` = the
   ERROR field normalized as the linker embeds it; `embedded` = the linker
   has embedded this revision; `linked_templates` counts links that drive
-  alerts.
+  alerts; `template_level` = level of the template a draft was written
+  for (its `draft` link), else null.
 - `POST`: `title` (≤ 200) required, and `error` (≤ 5000, ≤ 50 lines) or
   `handling` (≤ 20000) non-empty after trimming; `error_code` optional (≤
   100); `verdict` `action` (ERROR, the default) or `safe` (SAFE), else 400
