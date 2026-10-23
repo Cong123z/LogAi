@@ -30,7 +30,7 @@ Script: `scripts/stress_pipeline.py`; `tests/test_stress_pipeline.py` runs it at
   events arrive (as in production), so live ticks are small.
 - **Disk guard:** rows x 150 B x 2 (WAL) per scenario against half the free space on `/` (or `--max-bytes`);
   refused above (exit 2). A scenario also stops if `/` drops below 600 MB free. Free space stayed at
-  2,122-2,151 MB through all runs.
+  2,115-2,151 MB through all runs.
 
 ## Machine
 
@@ -130,7 +130,10 @@ services, counts exact.
 | Detection | false `*total` drop on svc02: ALERTING after 3 min |
 
 The silent loss: when the delay ended, newer docs became visible first; the reader's position passed the
-older ones still hidden, and it never reads behind its position. See docs/BUGS.md B4.
+older ones still hidden, and it never reads behind its position. They fall in minutes already closed, so the
+count loss is the same 120k; the defect is that `late_counts` misses them. The model is a whole-index delay
+ending abruptly; a partial delay (one late shipper among several into one index) would skip hidden docs during
+the whole delay, so real never-read loss can be larger. See docs/BUGS.md B4.
 
 ### I5 Postgres outage (both connections closed, reconnect refused for 2 simulated minutes)
 
@@ -148,7 +151,7 @@ older ones still hidden, and it never reads behind its position. See docs/BUGS.m
 | Case | Tick failures | Flush failures | Result |
 |---|---|---|---|
 | NUL in message / service / module | 0 | 0 | stripped by `hit_to_line` (F1), counts exact |
-| Lone surrogate in message | 6 | 0 | `UnicodeEncodeError` in `hit_to_line`; 20,010 of 840,006 events lost (rest of each poll), lag max 211 s |
+| Lone surrogate in message | 6 | 0 | `UnicodeEncodeError` in `hit_to_line`; 20,010 of 840,006 events lost (the part of the failing index's page read before the bad doc, ids already in `seen` and position moved, plus anything already aggregated in that poll), lag max 211 s |
 | Lone surrogate in service | 5 | 19 | tick fails in `Owner._see` (`crc32(service.encode())`); Drain3 already dirtied the bad service, its `drain3_state` row fails every flush: **stalled** (B1) |
 | Lone surrogate in moduleCode | 0 | 24 | flush fails in the psycopg dumper: **stalled** (B1) |
 
@@ -188,10 +191,13 @@ after the minute ends, and the next flush (<= 2 s) writes it and its alert.
    plus ~30 s for minute closing. No false alerts in 30-minute normal runs at both rates.
 3. Exactness: every run without injected bad data matched the generator's ground truth to the event, including
    the outage (I5).
-4. **Write amplification (B12):** ~70 % of row writes are `templates_seen` UPDATEs rewriting the same
-   minute-resolution `last_seen` on every 2 s flush: ~370 MB WAL per hour at 2,000/s, ~660 MB at 10,000/s.
-5. **Late data (B4):** beyond the counted late docs, out-of-order late arrival loses docs silently; detection
-   raises a false `*total` drop.
+4. **Write amplification (B12):** total pipeline WAL is ~370 MB per hour at 2,000/s (~660 MB at 10,000/s),
+   of which `templates_seen` UPDATEs are ~70 % of row writes: they rewrite the minute-resolution `last_seen`
+   on every 2 s flush (up to ~30 times per template per minute, measured average ~11). Its WAL share
+   was not measured separately.
+5. **Late data (B4):** out-of-order late docs behind the reader's position are never read and `late_counts`
+   misses them (here they fell in closed minutes, so the count loss is the same); a partial delay could lose
+   more. Detection raises a false `*total` drop.
 6. **Bad data (B2/B1):** lone surrogates still fail ticks (message) or stall the engine (service, module).
 7. Flush with a closed minute stays under 0.35 s in normal runs; incidents push it to 0.5 s (module spike)
    and 0.84 s (template storm), well under the 2 s cadence.
@@ -206,3 +212,6 @@ after the minute ends, and the next flush (<= 2 s) writes it and its alert.
   (or a remote cluster) is slower. One index per service; B5's uneven indices were not exercised.
 - Generator rates are flat over the day; real diurnal shape and over-dispersed (bursty) traffic were not
   modelled, so the false-alert result holds for Poisson-like noise only.
+- I5's outage is fail-fast: connections are closed and reconnects refused at once. Hanging connections,
+  half-open TCP sessions and TCP or statement timeouts were not modelled; they would block a tick or flush
+  for the timeout instead of failing it.

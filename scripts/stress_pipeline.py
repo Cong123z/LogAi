@@ -725,7 +725,8 @@ def run_e1(a, cfg, world) -> dict:
     index = f"stress-pipeline-{uuid.uuid4().hex[:8]}"
     now = time.time()
     clock = Clock(now)
-    rpm = max(1, a.e1_docs // 10 // a.services)   # the docs spread over the last 10 minutes
+    # the docs spread over the last 10 minutes; 250k docs = 32 MB, so the cap keeps the index under ~100 MB
+    rpm = max(1, min(a.e1_docs, 750_000) // 10 // a.services)
     streams = [Stream(f"e1-{svc}", svc, int((now - 660) * 1000), int((now - 60) * 1000), rpm, world[svc])
                for svc in world]
     res: dict = {"index": index}

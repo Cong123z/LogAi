@@ -26,7 +26,8 @@ Open items to fix, newest findings included. When one is fixed, move it to
     `source.page`, so the tick fails. The hits already in `seen` are skipped on retry:
     the counts of that poll (up to a page) are lost silently.
   - Stress test 2026-10-24 (`scripts/stress_pipeline.py`, I6): in `message`, 6 bad docs failed 6
-    ticks and lost 20,010 of 840,006 events (the rest of each poll). In `service`, the tick fails
+    ticks and lost 20,010 of 840,006 events (the part of the failing index's page read before the bad doc, whose ids are
+    already in `seen` with the position moved, plus anything already aggregated in that poll). In `service`, the tick fails
     first in `Owner._see` (`zlib.crc32(service.encode())`), but `Miners.match` has already created
     and dirtied a miner for the bad service, so its `drain3_state` row stalls every flush (B1) even
     after the bad docs stop. `moduleCode`: flush stall. NUL in any field: no effect (F1 holds).
@@ -53,8 +54,11 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Measured** (stress test I4, 2026-10-24): one of 10 indices 3 min late for 10 min at 200 events/s:
   90,006 events dropped as late, plus 29,994 **never read and not counted anywhere**: when the delay
   ended, newer docs became visible first, the position passed the still-hidden older ones, and the
-  reader never goes back (`late_counts` undercounts the loss). The service raised a false `*total`
-  drop alert (ALERTING after 3 minutes).
+  reader never goes back. Those docs fall in minutes already closed, so the count loss is the same
+  120k either way; the defect is that `late_counts` misses them. The service raised a false `*total`
+  drop alert (ALERTING after 3 minutes). The model is a whole-index delay that ends abruptly; a
+  partial delay (one late shipper among several writing into one index) would let on-time docs move
+  the position past hidden ones during the whole delay, so real never-read loss can be larger.
 - **Fix idea:** raise `upper_bound_seconds` (e.g. 120; alerts come later by the same amount).
 - **Likelihood:** likely under load.
 
@@ -90,7 +94,8 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Likelihood:** low (setup mistake).
 
 ### B9. Two web tests fail at some local times of day
-- **Where:** `tests/test_web.py::test_alerts_grouped_by_document`, `::test_templates_rate_and_band`.
+- **Where:** `tests/test_web_alerts_templates.py::test_alerts_grouped_by_document` (~line 38),
+  `::test_templates_rate_and_band` (~line 69).
 - **What:** time-dependent test data; seen failing at 00:09, 02:01 and 05:34 local, also on master.
 - **Fix idea:** build the test data relative to a fixed clock, not the wall clock.
 - **Likelihood:** certain at those hours; test-only.
@@ -112,8 +117,8 @@ Open items to fix, newest findings included. When one is fixed, move it to
 ### B12. Every flush rewrites `last_seen` of every template seen in the last 2 s
 - **Where:** `SQL["templates_seen"]` in `Owner.flush` (`logai2/owner/owner.py`).
 - **What:** `last_seen` has minute resolution, but the UPDATE runs at every 2 s flush for each
-  template seen since the last one, even when the value does not change (~30 identical rewrites
-  per template per minute). Stress test 2026-10-24: ~70 % of all row writes (1.0M of 1.45M per 30
+  template seen since the last one, even when the value does not change (up to ~30 rewrites per
+  template per minute, measured average ~11). Stress test 2026-10-24: ~70 % of all row writes (1.0M of 1.45M per 30
   simulated minutes at 2,000 events/s; 2.0M at 10,000/s); with the rest, ~370 MB of WAL per hour at
   2,000 events/s and ~660 MB at 10,000/s (9-16 GB a day). Mostly HOT, so tables stay small, but the
   WAL volume costs I/O and checkpoints (`max_wal_size` 1 GB on a nearly full disk here).
