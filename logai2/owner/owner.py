@@ -15,6 +15,7 @@ from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from typing import Callable
 
+from psycopg import sql
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
@@ -31,7 +32,8 @@ logger = logging.getLogger("logai2.owner")
 
 SAMPLES_KEPT = 20
 
-# ponytail: executemany per table; switch to COPY into temp tables (spec section 4) when flush time shows in the Pipeline stats.
+# ponytail: executemany per table but the two module tables (COPY, copy_upsert: ~2x faster at 20k-60k rows, see
+# docs/perf/2026-10-23-template-modules.md); move the others when flush time shows in the Pipeline stats.
 SQL = {
     "services": "INSERT INTO services (service, partition) VALUES (%s, %s) ON CONFLICT DO NOTHING",
     "modules": "INSERT INTO modules (module_code, service) VALUES (%s, %s) ON CONFLICT DO NOTHING",
@@ -52,13 +54,14 @@ SQL = {
     "service_hours": (
         "INSERT INTO service_hours (service, day, hour, n_minutes) VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (service, day, hour) DO UPDATE SET n_minutes = service_hours.n_minutes + EXCLUDED.n_minutes"),
+    # these two read the rows copy_upsert COPYs into tmp_<table> (keys unique: they come from dicts)
     "template_module_hours": (
         "INSERT INTO template_module_hours (service, template_id, module_code, day, hour, count) "
-        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (service, template_id, module_code, day, hour) "
+        "SELECT * FROM tmp_template_module_hours ON CONFLICT (service, template_id, module_code, day, hour) "
         "DO UPDATE SET count = template_module_hours.count + EXCLUDED.count"),
     "template_modules": (
         "INSERT INTO template_modules (service, template_id, module_code, first_seen, last_seen) "
-        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (service, template_id, module_code) DO UPDATE SET "
+        "SELECT * FROM tmp_template_modules ON CONFLICT (service, template_id, module_code) DO UPDATE SET "
         "first_seen = LEAST(template_modules.first_seen, EXCLUDED.first_seen), "
         "last_seen = GREATEST(template_modules.last_seen, EXCLUDED.last_seen)"),
     "hourly_counts": (
@@ -87,6 +90,18 @@ SQL = {
         "INSERT INTO worker_status (worker, status) VALUES (%s, %s) ON CONFLICT (worker) DO UPDATE "
         "SET status = EXCLUDED.status, updated_at = now()"),
 }
+
+
+def copy_upsert(cur, table: str, rows: list[tuple]) -> None:
+    """COPY rows into a session temp table emptied at each commit, then upsert them with SQL[table]."""
+    if not rows:   # most 2 s flushes carry no closed minute
+        return
+    cur.execute(sql.SQL("CREATE TEMP TABLE IF NOT EXISTS {} (LIKE {}) ON COMMIT DELETE ROWS").format(
+        sql.Identifier(f"tmp_{table}"), sql.Identifier(table)))
+    with cur.copy(sql.SQL("COPY {} FROM STDIN").format(sql.Identifier(f"tmp_{table}"))) as cp:
+        for row in rows:
+            cp.write_row(row)
+    cur.execute(SQL[table])
 
 
 def _ts(seconds: float) -> datetime:
@@ -250,8 +265,8 @@ class Owner:
             cur.executemany(SQL["drain3_state"], list(self._blobs.items()))
             cur.executemany(SQL["service_hours"], [(*k, n) for k, n in self._hours.items()])
             cur.executemany(SQL["hourly_counts"], [(*k, s, sq) for k, (s, sq) in self._sums.items()])
-            cur.executemany(SQL["template_module_hours"], [(*k, n) for k, n in self._mod_hours.items()])
-            cur.executemany(SQL["template_modules"], [(*k, _ts(a * 60), _ts(b * 60)) for k, (a, b) in self._pairs.items()])
+            copy_upsert(cur, "template_module_hours", [(*k, n) for k, n in self._mod_hours.items()])
+            copy_upsert(cur, "template_modules", [(*k, _ts(a * 60), _ts(b * 60)) for k, (a, b) in self._pairs.items()])
             cur.executemany(SQL["alert_minutes"], self._alert_minutes)
             cur.executemany(SQL["alert_state"], [
                 (r.service, r.key, r.state, _ts(r.since), r.streak, r.score, r.count, r.band_low, r.band_high)

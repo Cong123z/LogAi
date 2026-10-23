@@ -510,7 +510,9 @@ Everything goes in **one** transaction, in this order:
 4. `service_hours` (`n_minutes +=`), `hourly_counts` (`sum +=, sumsq +=`)
 5. `template_module_hours` (`count +=`), `template_modules` (`first_seen` LEAST,
    `last_seen` GREATEST); filled for every closed minute, also before detection
-   is enabled; `:unparsed` templates skipped; no module is `''`
+   is enabled; `:unparsed` templates skipped; no module is `''`. Both are
+   `COPY`ed into session temp tables (`ON COMMIT DELETE ROWS`) and upserted
+   with one `INSERT … SELECT` each (`owner.copy_upsert`)
 6. `alert_minutes` (insert, ignore conflicts)
 7. `alert_state` (upsert every key stepped since the last flush, so streaks
    survive a restart), `alert_changes` (insert)
@@ -887,7 +889,8 @@ No DLQ.
 | Baseline | Review suggestions step hours in epoch seconds | correct only for a whole-hour offset without DST (`Asia/Ho_Chi_Minh` is +07) |
 | Config | `baseline.timezone` and `metrics.host` are unused | the zone is fixed in `timeutil.py`; metrics bind all interfaces |
 | Drain3 | A plain match (cluster size only) does not mark the tree dirty | persisted cluster sizes lag; template ids and texts are exact |
-| Flush | `executemany` per table, not `COPY` | switch when flush time shows on the Pipeline page |
+| Flush | `executemany` per table, not `COPY`, except the two module tables | switch the others when flush time shows on the Pipeline page |
+| Template modules | Measured at 50 services x 2,000 templates x 3 modules, 30 % active per hour (90k `template_module_hours` rows per hour), warm cache ([perf](docs/perf/2026-10-23-template-modules.md)): module flush 0.43-0.56 s for 20k pairs, 1.27 s for 60k; `/api/templates` p95 25 ms (100 items), 50 ms (500), 37 ms with a 1,800-template module; `/api/modules` 31 ms; retention drop 6 ms; migration 007 seed ~9.5 s per 1M `alert_minutes` rows | 7 days of hours is ~2 GB (137 B/row x 15M rows). The module filter probes the window once per template of the service and `/api/modules` aggregates a service's window rows (~0.5 us/row): both grow linearly with one service's size; past ~50k templates in one service, add a per-service window rollup. The full 7-day load was not run (needs >= 5 GB free) |
 | Flush | **Open bug.** A failed flush is retried with the same pending rows until it succeeds; a value Postgres can never store fails it forever (seen 2026-10-23 with a NUL byte, now stripped in `hit_to_line`) | the engine stops reading and alerting, heartbeat goes stale; nothing is lost (cursors did not move). The liveness probe (metrics port) still passes, so Kubernetes does not restart it. See docs/BUGS.md B1 |
 | Commit | The rebuild recomputes every key nightly | restrict to keys touched since the last commit if it gets slow |
 | Commands | Polled every tick, no `LISTEN`; `recompute_baseline` is not deduplicated | a burst of recompute clicks runs the commit several times |
@@ -910,7 +913,7 @@ No DLQ.
 | Weekend full after `full_after_days` (5) | weekend full at its 4-day cap |
 | Score scaled so the band edge equals `score_high` | `count / band_high`, display only |
 | `LISTEN commands` / `NOTIFY baseline` | commands polled per tick; the engine reloads the baseline itself |
-| `COPY` into temp tables | `executemany` |
+| `COPY` into temp tables | `executemany`; `COPY` only for `template_module_hours`, `template_modules` |
 | `alert_minutes` partitioned by `minute` | partitioned by `day` (and `day` is in the key) |
 | `review_exclusions` without a decision | `decision` `exclude`/`keep` |
 | settings `baseline.commit_time`, `bootstrap_until` | `bootstrap {since, until}`, `last_commit`, `detection_enabled`; commit time only in config |
