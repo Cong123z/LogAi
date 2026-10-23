@@ -34,8 +34,18 @@ spec:
               value: "postgresql://logai:$(POSTGRES_PASSWORD)@logai-postgres:5432/logai"
             - name: LOGAI2_EMBEDDING_URL
               valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_URL}}
-            - name: LOGAI2_EMBEDDING_MODEL   # the model name the server or gateway expects
+            - name: LOGAI2_EMBEDDING_MODEL
               valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_MODEL, optional: true}}
+            - name: LOGAI2_EMBEDDING_TIMEOUT_SECONDS
+              valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_TIMEOUT_SECONDS, optional: true}}
+            - name: LOGAI2_EMBEDDING_RETRY_BACKOFF_SECONDS
+              valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS, optional: true}}
+            - name: LOGAI2_EMBEDDING_BATCH_SIZE
+              valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_BATCH_SIZE, optional: true}}
+            - name: LOGAI2_EMBEDDING_DIMENSION
+              valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_DIMENSION, optional: true}}
+            - name: LOGAI2_EMBEDDING_MAX_RETRIES
+              valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_MAX_RETRIES, optional: true}}
             - name: LOGAI2_EMBEDDING_API_KEY   # only when a gateway in front of bge-m3 needs a key
               valueFrom: {secretKeyRef: {name: logai-env, key: LOGAI_EMBEDDING_API_KEY, optional: true}}
           resources:

@@ -30,3 +30,11 @@ def test_embedding_model_from_env(monkeypatch):
     assert load_config(None).embedding.model == "bge-m3"
     monkeypatch.setenv("LOGAI2_EMBEDDING_MODEL", "BAAI/bge-m3")
     assert load_config(None).embedding.model == "BAAI/bge-m3"
+
+
+def test_embedding_settings_from_env(monkeypatch):
+    for k, v in {"TIMEOUT_SECONDS": "12.5", "RETRY_BACKOFF_SECONDS": "3", "BATCH_SIZE": "8",
+                 "DIMENSION": "1024", "MAX_RETRIES": "4"}.items():
+        monkeypatch.setenv("LOGAI2_EMBEDDING_" + k, v)
+    e = load_config(None).embedding
+    assert (e.timeout_seconds, e.retry_backoff_seconds, e.batch, e.dimension, e.max_retries) == (12.5, 3.0, 8, 1024, 4)

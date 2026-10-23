@@ -47,3 +47,22 @@ def test_401_message_has_no_key(server):
     with pytest.raises(EmbeddingError) as e:
         embed(s.url, "m", ["a"], api_key="secret-key")
     assert "401" in str(e.value) and "secret-key" not in str(e.value)
+
+
+def test_retries_server_errors_not_client_errors(server):
+    n = {"calls": 0}
+
+    def flaky(p, b):
+        n["calls"] += 1
+        return (503, {"error": "busy"}) if n["calls"] < 3 else embeddings_handler({})(p, b)
+    s = server(flaky)
+    assert len(embed(s.url, "m", ["a"], max_retries=2, backoff_seconds=0)) == 1 and n["calls"] == 3
+    denied = server(lambda p, b: (403, {"error": "forbidden"}))
+    assert pytest.raises(EmbeddingError, embed, denied.url, "m", ["a"], max_retries=3, backoff_seconds=0)
+    assert len(denied.calls) == 1
+
+
+def test_dimension_checked(server):
+    s = server(lambda p, b: (200, {"data": [{"index": 0, "embedding": [1.0, 0.0]}]}))
+    assert embed(s.url, "m", ["a"], dims=2) == [[1.0, 0.0]]
+    assert pytest.raises(EmbeddingError, embed, s.url, "m", ["a"], dims=1024)
