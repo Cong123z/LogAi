@@ -12,7 +12,7 @@ import logging
 import time
 import zlib
 from collections import Counter, defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from psycopg import sql
@@ -27,6 +27,7 @@ from logai2.owner.counts import ERROR_LEVELS, SEVERITY, OpenMinutes
 from logai2.owner.detect import AlertRow, Detector
 from logai2.owner.miners import Miners
 from logai2.reader.reader import MinuteBatch
+from logai2.timeutil import day_hour
 
 logger = logging.getLogger("logai2.owner")
 
@@ -195,6 +196,8 @@ class Owner:
                 self._open_samples[minute].append((service, template_id, c["sample"]))
             self.minutes.add(service, template_id, level, c["module"], minute, c["n"])
 
+        today = day_hour(int(self.now() // 60))[0]
+        mod_cutoff = today - timedelta(days=self.cfg.retention.module_hours_days)
         for cm in self.minutes.close_before(batch["watermark_ms"] // 60_000, self.services):
             for service, template_id, sample in self._open_samples.pop(cm.minute, ()):
                 if self.levels[(service, template_id)].upper() in ERROR_LEVELS:
@@ -211,7 +214,8 @@ class Owner:
                 if template_id.endswith(":unparsed"):
                     continue
                 k = (service, template_id, module, cm.day, cm.hour)
-                self._mod_hours[k] = self._mod_hours.get(k, 0) + n
+                if cm.day >= mod_cutoff:   # older days have no partition (commit dropped it): keep the pair only
+                    self._mod_hours[k] = self._mod_hours.get(k, 0) + n
                 pair = self._pairs.setdefault(k[:3], [cm.minute, cm.minute])
                 pair[0], pair[1] = min(pair[0], cm.minute), max(pair[1], cm.minute)
             if not self.detection_enabled:

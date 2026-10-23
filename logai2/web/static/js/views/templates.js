@@ -72,7 +72,7 @@ function tplModulesHtml(t) {
 function tplModulesDrawerHtml(t) {
   const mods = t.modules || [];
   const live = mods.filter(m => m.share != null).length;
-  return `<section class="pane-section"><h3>Last 24 h · ${live} modules</h3>${mods.map(m => `
+  return `<section class="pane-section"><h3>Last 24 h · ${live} ${live === 1 ? 'module' : 'modules'}</h3>${mods.map(m => `
     <div class="mod-row"><div><strong class="mono">${escapeHtml(modName(m.module))}</strong>
       <span class="link-meta">${m.share == null ? 'not in the last 24 h' : `${m.lines.toLocaleString()} lines · ${Math.round(m.share * 100)}%`}
         · last seen <span title="${escapeHtml(formatFullTs(m.last_seen))}">${escapeHtml(formatTs(m.last_seen))}</span></span></div>
@@ -254,6 +254,8 @@ function applyTplRoute() {
   tpl.docId = new URLSearchParams(query).get('doc_id') || '';
   tpl.search = $tplSearch.value = '';
   tpl.level = $tplLevel.value = '';
+  tpl.link = $tplLink.value = '';
+  setTplStatus('');
   tpl.page = 1;
   setTplMode('all');   // the To review list would hide a template that has no automatic link
   return template ? {service: tpl.service, template_id: template} : null;

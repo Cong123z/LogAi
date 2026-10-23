@@ -366,3 +366,15 @@ def test_module_hours_written_before_detection_enabled(conn, cfg):
     _, owner = run_minutes(conn, cfg, lines(0, 2, moduleCode="A"), T0 + 60_000)
     assert not owner.detection_enabled
     assert _mod_rows(conn) == [("s:T00001", "A", 2)]
+
+
+def test_module_hours_skipped_past_retention_but_pair_kept(conn, cfg):
+    # catch-up after a long downtime: the day is older than module_hours_days, its partition is gone
+    hits = lines(0, 2, moduleCode="A")
+    now_s = T0 / 1000 + (cfg.retention.module_hours_days + 3) * 86400
+    reader, owner = make(conn, cfg, FakeSource({"a": hits}), now_s)
+    for _ in range(20):
+        if tick(reader, owner)["watermark_ms"] >= T0 + 60_000:
+            break
+    assert _mod_rows(conn) == []
+    assert [r["module_code"] for r in rows(conn, "SELECT module_code FROM template_modules")] == ["A"]

@@ -15,3 +15,9 @@ def test_stress_tiny_runs(capsys):
 def test_stress_refuses_a_load_over_the_disk_limit(capsys):
     assert main(["--dsn", TEST_DSN, "--max-bytes", "1000"]) == 2
     assert "REFUSED" in capsys.readouterr().err
+
+
+def test_stress_refuses_a_database_with_a_migrated_public_schema(capsys, monkeypatch):
+    monkeypatch.setattr("scripts.stress_modules.public_is_migrated", lambda dsn: True)
+    assert main(["--dsn", TEST_DSN, "--scale", "tiny"]) == 3
+    assert "migrated public schema" in capsys.readouterr().err

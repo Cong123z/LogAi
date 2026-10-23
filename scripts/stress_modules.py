@@ -240,6 +240,11 @@ def measure(a, schema: str, now: float, pairs: list[tuple], results: dict) -> li
     return plans
 
 
+def public_is_migrated(dsn: str) -> bool:
+    with connect(dsn) as c:
+        return c.execute("SELECT to_regclass('public.schema_migrations') AS t").fetchone()["t"] is not None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dsn", required=True)
@@ -260,8 +265,12 @@ def main(argv: list[str] | None = None) -> int:
     if a.scale == "tiny":
         vars(a).update(TINY)
 
+    if public_is_migrated(a.dsn):   # search_path is <schema>,public: migrate() would skip and the load would hit public
+        print("REFUSED: this database has a migrated public schema (real data); use an empty database", file=sys.stderr)
+        return 3
+
     need, free = estimate(a), shutil.disk_usage("/").free
-    limit = a.max_bytes or free // 2
+    limit = min(a.max_bytes, free // 2) if a.max_bytes else free // 2
     print(f"estimated write {need / 2**20:,.0f} MB, limit {limit / 2**20:,.0f} MB (free on / {free / 2**20:,.0f} MB)")
     if need > limit:
         print(f"REFUSED: the load would write ~{need / 2**20:,.0f} MB, over the {limit / 2**20:,.0f} MB limit "

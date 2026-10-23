@@ -422,7 +422,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `GET /api/alerts` | — | `[alert row]` | — | — |
 | `GET /api/services` | — | `[service]` sorted | — | — |
 | `GET /api/template-levels` | query `service` (optional) | `[{level, n}]`: every level present, FATAL … TRACE then others A-Z | — | — |
-| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `template_id`, `link_source`, `q`, `module` | `{total, review_total, stats, items}`; each item has `modules: [{module, lines, share, last_seen}]` | 400 | — |
+| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `template_id`, `link_source`, `q`, `module`, `sort`, `status` | `{total, review_total, stats, items}`; each item has `modules: [{module, lines, share, last_seen}]` | 400 | — |
 | `GET /api/modules` | query `service` (required) | `[{module, templates, lines_24h}]` by `templates` desc | 400 | — |
 | | | `modules` are over the last 24 hourly buckets (current local hour - 23 .. current hour): in-window modules by `lines` desc with `share` (fraction of the template's window lines), then older ones by `last_seen` desc with `lines` 0 and `share` null. `module` (`""` = no module) keeps templates ever seen in that module, those with window lines in it first, and narrows `total` and `stats` too. | | |
 | `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null, also?: [template_id]}` | `{doc_id, linked}` | 400, 404 | `reload_links` |

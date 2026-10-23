@@ -786,7 +786,7 @@ service-scoped primary key.
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
 | `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
-| `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | flush (seeded by migration 007 from all `alert_minutes`; keys `*…` and `doc:…` skipped) |
+| `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | flush (seeded by migration 007 from all `alert_minutes`; keys `*…` and `doc:…`, and `…:unparsed` templates, skipped) |
 | `day_status` | `service, day` | `committed`, `daytype` | commit |
 | `review_exclusions` | `id` | `service`, `day`, `hour_from`, `hour_to` (`[from, to)`), `decision` (`exclude`/`keep`), `created_by` (unused, `''`), `created_at` | web |
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |

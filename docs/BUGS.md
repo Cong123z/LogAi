@@ -79,6 +79,26 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Fix idea:** a status warning when the selection resolves to no index.
 - **Likelihood:** low (setup mistake).
 
+### B9. Two web tests fail at some local times of day
+- **Where:** `tests/test_web.py::test_alerts_grouped_by_document`, `::test_templates_rate_and_band`.
+- **What:** time-dependent test data; seen failing at 00:09 and 02:01 local, also on master.
+- **Fix idea:** build the test data relative to a fixed clock, not the wall clock.
+- **Likelihood:** certain at those hours; test-only.
+
+### B10. Open UI tabs keep running old JS after a deploy
+- **Where:** `logai2/web/static/js/`.
+- **What:** until reloaded, a tab runs the old code against the new API (the old Pipeline
+  view expects removed fields and loops on "connection lost").
+- **Fix idea:** a build id in `/api/pipeline?lite=1`; the UI asks for a reload when it changes.
+- **Likelihood:** every deploy that changes an API shape.
+
+### B11. An LLM profile named `order` cannot be created or edited
+- **Where:** `PUT /api/llm/profiles/<name>` in `logai2/web/app.py`.
+- **What:** `PUT /api/llm/profiles/order` is the reorder route, so a profile with that name
+  is unreachable.
+- **Fix idea:** reject the name `order` with a 400 in the profile-name validation.
+- **Likelihood:** low.
+
 ## Fixed
 
 ### F1. NUL byte in an ES field stalled the flush
