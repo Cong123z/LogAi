@@ -109,5 +109,6 @@ def test_commit_drops_module_hours_after_7_days(conn, cfg):
     tables = {r["tablename"] for r in conn.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
     assert "template_module_hours_20261012" not in tables       # today-8
+    assert "template_module_hours_20261013" in tables           # today-7 (boundary)
     assert "template_module_hours_20261014" in tables           # today-6
     assert "hourly_counts_20261012" in tables
