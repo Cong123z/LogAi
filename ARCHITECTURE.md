@@ -508,12 +508,15 @@ Everything goes in **one** transaction, in this order:
    then a `last_seen`/`level` update for templates known only from the cache
 3. `drain3_state` (changed services only, `version + 1`)
 4. `service_hours` (`n_minutes +=`), `hourly_counts` (`sum +=, sumsq +=`)
-5. `alert_minutes` (insert, ignore conflicts)
-6. `alert_state` (upsert every key stepped since the last flush, so streaks
+5. `template_module_hours` (`count +=`), `template_modules` (`first_seen` LEAST,
+   `last_seen` GREATEST); filled for every closed minute, also before detection
+   is enabled; `:unparsed` templates skipped; no module is `''`
+6. `alert_minutes` (insert, ignore conflicts)
+7. `alert_state` (upsert every key stepped since the last flush, so streaks
    survive a restart), `alert_changes` (insert)
-7. `error_samples` (insert, then trim to the newest 20 per template)
-8. `es_cursors` (upsert per selected index; delete rows of unselected ones)
-9. `worker_status` (`engine` row)
+8. `error_samples` (insert, then trim to the newest 20 per template)
+9. `es_cursors` (upsert per selected index; delete rows of unselected ones)
+10. `worker_status` (`engine` row)
 
 The connection must be idle (`Owner.flush` raises otherwise: inside an open
 transaction the block would only be a savepoint). Pending rows are cleared
@@ -780,8 +783,8 @@ service-scoped primary key.
 | `service_hours` * | `service, day, hour` | `n_minutes` | flush |
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
-| `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | migration 007 seed (last 7 days of `alert_minutes`) |
-| `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | migration 007 seed (all `alert_minutes`; keys `*…` and `doc:…` skipped) |
+| `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
+| `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | flush (seeded by migration 007 from all `alert_minutes`; keys `*…` and `doc:…` skipped) |
 | `day_status` | `service, day` | `committed`, `daytype` | commit |
 | `review_exclusions` | `id` | `service`, `day`, `hour_from`, `hour_to` (`[from, to)`), `decision` (`exclude`/`keep`), `created_by` (unused, `''`), `created_at` | web |
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |

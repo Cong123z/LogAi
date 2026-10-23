@@ -52,6 +52,15 @@ SQL = {
     "service_hours": (
         "INSERT INTO service_hours (service, day, hour, n_minutes) VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (service, day, hour) DO UPDATE SET n_minutes = service_hours.n_minutes + EXCLUDED.n_minutes"),
+    "template_module_hours": (
+        "INSERT INTO template_module_hours (service, template_id, module_code, day, hour, count) "
+        "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (service, template_id, module_code, day, hour) "
+        "DO UPDATE SET count = template_module_hours.count + EXCLUDED.count"),
+    "template_modules": (
+        "INSERT INTO template_modules (service, template_id, module_code, first_seen, last_seen) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (service, template_id, module_code) DO UPDATE SET "
+        "first_seen = LEAST(template_modules.first_seen, EXCLUDED.first_seen), "
+        "last_seen = GREATEST(template_modules.last_seen, EXCLUDED.last_seen)"),
     "hourly_counts": (
         "INSERT INTO hourly_counts (service, key, day, hour, sum, sumsq) VALUES (%s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (service, key, day, hour) DO UPDATE SET "
@@ -128,6 +137,8 @@ class Owner:
         self._hours: Counter = Counter()
         self._sums: dict[tuple, list[int]] = {}
         self._alert_minutes: list[tuple] = []
+        self._mod_hours: dict[tuple, int] = {}                 # (service, template_id, module, day, hour) -> n
+        self._pairs: dict[tuple[str, str, str], list[int]] = {}  # (service, template_id, module) -> [first, last] minute
         self._changes: list = []
         self._samples: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=SAMPLES_KEPT))
 
@@ -181,6 +192,13 @@ class Owner:
                     acc = self._sums.setdefault((service, key, cm.day, cm.hour), [0, 0])
                     acc[0] += n
                     acc[1] += n * n
+            for (service, template_id, module), n in cm.modules.items():
+                if template_id.endswith(":unparsed"):
+                    continue
+                k = (service, template_id, module, cm.day, cm.hour)
+                self._mod_hours[k] = self._mod_hours.get(k, 0) + n
+                pair = self._pairs.setdefault(k[:3], [cm.minute, cm.minute])
+                pair[0], pair[1] = min(pair[0], cm.minute), max(pair[1], cm.minute)
             if not self.detection_enabled:
                 continue
             historic = self.now() - (cm.minute + 1) * 60 > self.cfg.baseline.historic_after_minutes * 60
@@ -232,6 +250,8 @@ class Owner:
             cur.executemany(SQL["drain3_state"], list(self._blobs.items()))
             cur.executemany(SQL["service_hours"], [(*k, n) for k, n in self._hours.items()])
             cur.executemany(SQL["hourly_counts"], [(*k, s, sq) for k, (s, sq) in self._sums.items()])
+            cur.executemany(SQL["template_module_hours"], [(*k, n) for k, n in self._mod_hours.items()])
+            cur.executemany(SQL["template_modules"], [(*k, _ts(a * 60), _ts(b * 60)) for k, (a, b) in self._pairs.items()])
             cur.executemany(SQL["alert_minutes"], self._alert_minutes)
             cur.executemany(SQL["alert_state"], [
                 (r.service, r.key, r.state, _ts(r.since), r.streak, r.score, r.count, r.band_low, r.band_high)
