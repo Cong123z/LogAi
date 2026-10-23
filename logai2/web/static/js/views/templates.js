@@ -3,7 +3,7 @@
 // person, alerting first; "All templates" lists every template. Each row shows this hour's rate
 // against its normal band and the linked document; the drawer holds the decision.
 // mode null = not chosen yet: the first answer picks "review" when anything waits for review.
-const tpl = {mode: null, search: '', service: '', level: '', link: '', status: '', sort: 'last_seen', docId: '', routeSub: null, page: 1, size: 100, refreshTimer: null,
+const tpl = {mode: null, search: '', service: '', module: null, level: '', link: '', status: '', sort: 'last_seen', docId: '', routeSub: null, page: 1, size: 100, refreshTimer: null,
              items: new Map(), order: [], docs: [], drawerItem: null};
 const $tplModeToggle = document.getElementById('tpl-mode-toggle');
 const $tplReviewCount = document.getElementById('tpl-review-count');
@@ -24,6 +24,7 @@ function fetchTemplates() {
   const params = new URLSearchParams({page: tpl.page, size: tpl.size});
   if (tpl.search) params.set('q', tpl.search);
   if (tpl.service) params.set('service', tpl.service);
+  if (tpl.module !== null) params.set('module', tpl.module);   // '' is the "(no module)" module
   if (tpl.docId) params.set('doc_id', tpl.docId);
   if (tpl.level) params.set('level', tpl.level);
   if (tpl.mode === 'review') params.set('link_source', 'review');
@@ -34,6 +35,9 @@ function fetchTemplates() {
 }
 function fetchLevels() {
   return getJson(`/api/template-levels${tpl.service ? `?service=${encodeURIComponent(tpl.service)}` : ''}`, 'Unable to load levels');
+}
+function fetchModules() {
+  return tpl.service ? getJson(`/api/modules?service=${encodeURIComponent(tpl.service)}`, 'Unable to load modules') : Promise.resolve([]);
 }
 function fetchServices() { return getJson('/api/services', 'Unable to load services'); }
 function fetchDocuments() { return getJson('/api/documents', 'Unable to load documents'); }
@@ -49,6 +53,48 @@ function levelBadgeClass(level) {
   if (l === 'INFO') return 'badge-info';
   return 'badge-debug';
 }
+
+const modName = m => (m === '' ? '(no module)' : m);
+
+// Every module of the template: in the last 24 h with its share, then the grey dashed older ones;
+// the filtered module first.
+function tplModulesHtml(t) {
+  const mods = [...(t.modules || [])];
+  const i = tpl.module === null ? -1 : mods.findIndex(m => m.module === tpl.module);
+  if (i > 0) mods.unshift(...mods.splice(i, 1));
+  return `<div class="tpl-mods">${mods.map(m => m.share == null
+    ? `<span class="mod-chip old" title="last seen ${escapeHtml(formatFullTs(m.last_seen))}">${escapeHtml(modName(m.module))}</span>`
+    : `<span class="mod-chip${m.module === tpl.module ? ' hit' : ''}" title="${m.lines.toLocaleString()} lines in the last 24 h">${escapeHtml(modName(m.module))} <span class="p">${Math.round(m.share * 100)}%</span></span>`).join('')}</div>`;
+}
+
+// Drawer section: lines, share bar and last seen per module.
+function tplModulesDrawerHtml(t) {
+  const mods = t.modules || [];
+  const live = mods.filter(m => m.share != null).length;
+  return `<section class="pane-section"><h3>Last 24 h · ${live} module${live === 1 ? '' : 's'}</h3>${mods.map(m => `
+    <div class="mod-row"><div><strong class="mono">${escapeHtml(modName(m.module))}</strong>
+      <span class="link-meta">${m.share == null ? 'not in the last 24 h' : `${m.lines.toLocaleString()} lines · ${Math.round(m.share * 100)}%`}
+        · last seen <span title="${escapeHtml(formatFullTs(m.last_seen))}">${escapeHtml(formatTs(m.last_seen))}</span></span></div>
+      ${m.share == null ? '' : `<div class="mod-bar"><span style="width:${Math.round(m.share * 100)}%"></span></div>`}</div>`).join('')
+    || '<p class="prose-empty">No module recorded yet.</p>'}</section>`;
+}
+
+// Module filter row: only for a single service; one button per module with its template count.
+function renderModuleFilter(modules) {
+  const $row = document.getElementById('tpl-module-row');
+  $row.hidden = !tpl.service;
+  if (!tpl.service) return;
+  const btn = (value, label, n) => `<button type="button" class="mod-chip" data-tpl-module="${value === null ? '' : `m${escapeHtml(value)}`}"
+    aria-pressed="${tpl.module === value}">${escapeHtml(label)}${n == null ? '' : ` <span class="p">${n}</span>`}</button>`;
+  $row.innerHTML = btn(null, 'All modules') + modules.map(m => btn(m.module, modName(m.module), m.templates)).join('');
+}
+document.getElementById('tpl-module-row').addEventListener('click', event => {
+  const b = event.target.closest('[data-tpl-module]');
+  if (!b) return;
+  const v = b.dataset.tplModule === '' ? null : b.dataset.tplModule.slice(1);   // 'm' prefix: '' stays the no-module module
+  if (v === tpl.module) return;
+  tpl.module = v; tpl.page = 1; loadData();
+});
 
 const tplNum = n => (Math.round(n * 10) / 10).toLocaleString();
 
@@ -133,13 +179,13 @@ function renderLevelFilter(levels) {
 function renderTemplates(data) {
   if (!data.items.length && tpl.mode === 'review') {
     $tplTbody.innerHTML = `
-      <tr><td colspan="7" class="empty-state">
+      <tr><td colspan="8" class="empty-state">
         <p>Nothing to review${tpl.search || tpl.service || tpl.level ? ' for these filters' : ''}.</p>
         <button type="button" class="btn" data-tpl-goto="all">Show all templates</button>
       </td></tr>`;
   } else if (!data.items.length) {
     $tplTbody.innerHTML = `
-      <tr><td colspan="7" class="empty-state">
+      <tr><td colspan="8" class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
           <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
         </svg>
@@ -153,6 +199,7 @@ function renderTemplates(data) {
           <span class="badge ${levelBadgeClass(t.level)}">${escapeHtml(t.level)}</span>
           <span class="badge ${t.known ? 'badge-known' : 'badge-unknown'}">${t.known ? 'Known' : 'Unknown'}</span></span>
           <div class="tmpl-text">${highlightWildcards(escapeHtml(t.text))}</div></div></td>
+        <td>${tplModulesHtml(t)}</td>
         <td>${tplRateHtml(t)}</td>
         <td>${tplDocCell(t)}</td>
         <td class="tpl-num" title="${escapeHtml(formatFullTs(t.first_seen))}">${escapeHtml(formatTs(t.first_seen))}</td>
@@ -202,6 +249,7 @@ function applyTplRoute() {
   let service, template;
   try { [service, template] = path.split('/').map(decodeURIComponent); } catch (e) { return null; }
   tpl.service = service || '';
+  tpl.module = null;
   tpl.docId = new URLSearchParams(query).get('doc_id') || '';
   tpl.search = $tplSearch.value = '';
   tpl.level = $tplLevel.value = '';
@@ -226,7 +274,7 @@ let tplPendingOpen = null;
 async function loadTemplates() {
   const seq = ++tplSeq;
   tplPendingOpen = applyTplRoute() || tplPendingOpen;
-  const [data, services, docs, levels] = await Promise.all([fetchTemplates(), fetchServices(), fetchDocuments(), fetchLevels()]);
+  const [data, services, docs, levels, modules] = await Promise.all([fetchTemplates(), fetchServices(), fetchDocuments(), fetchLevels(), fetchModules()]);
   if (seq !== tplSeq) return;   // a newer request (filter, page) is in flight: drop this answer
   if (tpl.mode === null) {      // first load: open on To review when anything waits for a decision
     setTplMode(data.review_total > 0 ? 'review' : 'all');
@@ -239,6 +287,7 @@ async function loadTemplates() {
   }
   renderServiceFilter(services);
   renderLevelFilter(levels);
+  renderModuleFilter(modules);
   tpl.items = new Map(data.items.map(t => [tplKey(t), t]));
   tpl.order = data.items.map(tplKey);
   tpl.docs = docs;
@@ -360,6 +409,7 @@ async function openTemplateDrawer(t) {
       <div class="drawer-facts">${tplRateHtml(t)}
         <span class="link-meta">first seen <span title="${escapeHtml(formatFullTs(t.first_seen))}">${escapeHtml(formatTs(t.first_seen))}</span>
           · last seen <span title="${escapeHtml(formatFullTs(t.last_seen))}">${escapeHtml(formatTs(t.last_seen))}</span></span></div></section>
+    ${tplModulesDrawerHtml(t)}
     <section class="pane-section"><h3>${automatic ? 'Proposed document' : 'Document'}</h3>
       <p class="hint">Template</p><div class="code-block">${highlightWildcards(escapeHtml(t.text))}</div>
       <div id="tpl-drawer-doc">${t.doc_id ? '<p class="loading">Loading the document…</p>' : ''}</div>
@@ -482,7 +532,7 @@ $tplSearch.addEventListener('input', () => {
 $tplService.addEventListener('input', () => {
   const v = $tplService.value.trim();
   if (v === tpl.service || (v && ![...$tplServiceList.options].some(o => o.value === v))) return;
-  tpl.service = v; tpl.docId = ''; tpl.page = 1; loadData();
+  tpl.service = v; tpl.module = null; tpl.docId = ''; tpl.page = 1; loadData();
 });
 $tplService.addEventListener('change', () => { $tplService.value = tpl.service; });   // leaving it half-typed restores the applied one
 document.querySelector('thead [data-tpl-sort]').closest('tr').addEventListener('click', event => {

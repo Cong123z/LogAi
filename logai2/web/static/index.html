@@ -123,11 +123,14 @@
           </select>
           <label class="chip-toggle chip-push"><input type="checkbox" id="auto-refresh"><span>Auto-refresh</span></label>
         </div>
+        <div class="module-filter" id="tpl-module-row" role="group" aria-label="Module" hidden></div>
+        <p class="module-note" role="note"><strong>Modules = last 24 h.</strong> Each chip is a module that logged this template in the last 24 hours; % is its share of the template's lines in that window. A grey dashed chip logged it earlier but not in the last 24 h (hover for last seen).</p>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>State</th><th>Template</th>
+                <th>Modules · last 24 h</th>
                 <th title="Average events per minute this hour, against the normal band (mean ± kσ)">Rate</th>
                 <th>Document</th>
                 <th id="tpl-th-first" aria-sort="none"><button type="button" class="pl-sort" data-tpl-sort="first_seen">First seen</button></th>
@@ -135,7 +138,7 @@
               </tr>
             </thead>
             <tbody id="template-tbody">
-              <tr><td colspan="6" class="loading">Loading templates...</td></tr>
+              <tr><td colspan="8" class="loading">Loading templates...</td></tr>
             </tbody>
           </table>
           <div class="pagination" id="pagination">
