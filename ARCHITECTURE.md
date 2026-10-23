@@ -725,6 +725,7 @@ The engine writes `worker_status['engine'].status` at every flush:
 | `events_per_second` | pending events / time since the last flush |
 | `cache_hit_ratio` | lifetime known-line hits / lookups |
 | `miss_ratio` | per service, misses / events over the last 5 min |
+| `service_minutes` | per service, `[[minute_start_epoch_s, n], ...]` oldest first: events per closed minute (`*total`, zero minutes included), last 60 kept in memory (lost on restart) |
 | `detection_enabled` | first catch-up done |
 | `bootstrap` | `{since, until}` |
 | `last_commit` | `{at, today}` or null |

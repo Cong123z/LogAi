@@ -113,6 +113,7 @@ class Owner:
         self.miners = Miners(cfg.drain3, blobs)
         self.minutes = OpenMinutes(start_minute)
         self.detector = Detector(cfg, baseline, links, self.levels, states)
+        self.service_minutes: dict[str, deque[tuple[int, int]]] = defaultdict(lambda: deque(maxlen=60))
         self._unparsed_logged: dict[str, int] = {}  # service -> minute last logged
         # samples of open minutes, queued only when their minute closes: open minutes are
         # re-read after a crash, so queuing earlier would insert their samples twice
@@ -174,6 +175,7 @@ class Owner:
                     self._samples[(service, template_id)].append((cm.minute, sample))
             for (service, key), n in cm.keys.items():
                 if key == "*total":  # close_before gives every service a *total key
+                    self.service_minutes[service].append((cm.minute, n))
                     self._hours[(service, cm.day, cm.hour)] += 1
                 if n:
                     acc = self._sums.setdefault((service, key, cm.day, cm.hour), [0, 0])

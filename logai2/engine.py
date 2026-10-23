@@ -333,6 +333,7 @@ class Engine:
             "events_per_second": self._pending_events / elapsed if elapsed > 0 else 0.0,
             "cache_hit_ratio": cache.hits / lookups if lookups else None,
             "miss_ratio": ratios,
+            "service_minutes": {s: [[m * 60, n] for m, n in d] for s, d in self.owner.service_minutes.items()},
             "detection_enabled": self.owner.detection_enabled,
             "bootstrap": self.bootstrap,
             "last_commit": self.last_commit,
