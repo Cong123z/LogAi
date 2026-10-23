@@ -34,7 +34,7 @@ theme).
 |---|---|---|---|
 | Alerting | `/#alerting` | every 5 s | `GET /api/alerts` |
 | Pipeline | `/#pipeline` (also the fallback for unknown hashes) | every 2 s | `GET /api/pipeline` |
-| Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/template-levels`, `/api/services`, `/api/documents` |
+| Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/template-levels`, `/api/modules`, `/api/services`, `/api/documents` |
 | Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
 | LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
@@ -223,9 +223,20 @@ count, "ERROR (12)"; follows the service) and a text search (case-insensitive su
 debounced 300 ms); 100 per page by default (50, 100 or 200; server cap
 500). To review with nothing left says so and offers All templates.
 
+**Module** filter row (only with one service selected; hidden for All services; cleared
+when the service changes): "All modules" and a button per module with its template count
+(`GET /api/modules?service=`). A module shows the templates ever seen in it (`?module=`;
+`""` = "(no module)" is sent as an explicit empty value), those with lines in the last
+24 h first; its chip is highlighted and listed first in each row. A note line above the
+table explains the chips. The drawer has a **Last 24 h · N modules** section: lines,
+share bar and last seen per module.
+
 Columns: **state** (WARMING / ALERTING / COOLING badge; NORMAL as muted
 text), **template** (id and level, then the full text, `<*>`
-highlighted), **rate** (average per minute this local hour; above the band
+highlighted), **modules · last 24 h** (one chip per module that ever logged
+the template, `name share%`; in the last 24 h by lines, then grey dashed chips without %
+that logged it earlier, last seen on hover; no module = "(no module)"; every chip
+is shown), **rate** (average per minute this local hour; above the band
 in red with "▲ above normal"; under it the band as `normal ≤ X/min` or
 `normal A–B/min`, judged exactly as detection does; "—" without data),
 **document** (`DOC-007 · title`, or "Not linked" / "No document (set by

@@ -1125,3 +1125,19 @@ a.btn { display: inline-flex; align-items: center; text-decoration: none; }
 .pl-mini .pl-tp-chart { height: 150px; }
 .pl-spark { width: 96px; height: 20px; display: block; color: var(--accent); }
 #pl-services-tbody input[type=checkbox] { cursor: pointer; }
+
+/* Templates: module chips (last 24 h), module filter row, note */
+.module-filter { display:flex; flex-wrap:wrap; gap:6px; margin:0 0 8px; }
+.module-filter[hidden] { display:none; }
+.module-note { font-size:12.5px; color:var(--text-dim); margin:0 0 8px; }
+.mod-chip { display:inline-flex; gap:4px; align-items:baseline; font-size:11.5px; padding:2px 8px; border-radius:999px;
+  border:1px solid var(--border); color:var(--text); background:transparent; font-family:var(--font-mono); }
+button.mod-chip { cursor:pointer; font-family:inherit; }
+.mod-chip .p { color:var(--text-dim); font-size:10.5px; }
+.mod-chip.old { color:var(--text-dim); border-style:dashed; opacity:.75; }
+.mod-chip.hit, button.mod-chip[aria-pressed="true"] { border-color:var(--accent); background:var(--bg-row-hover); color:var(--accent); }
+.tpl-mods { display:flex; gap:5px; flex-wrap:wrap; min-width:200px; }
+.mod-row { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
+.mod-row > div:first-child { display:flex; justify-content:space-between; gap:8px; font-size:13px; }
+.mod-bar { height:6px; border-radius:3px; background:var(--bg-row-hover); overflow:hidden; }
+.mod-bar span { display:block; height:100%; background:var(--accent-solid); }
