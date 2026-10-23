@@ -76,6 +76,13 @@ def test_counts_exact(conn, cfg):
     assert rows(conn, "SELECT count(*) AS n FROM drain3_state")[0]["n"] == 1
 
 
+def test_service_minutes_keeps_last_60_closed_minutes(conn, cfg):
+    hits = [h for m in range(61) for h in lines(m, m % 50 + 1)]
+    _, owner = run_minutes(conn, cfg, hits, T0 + 61 * 60_000)
+    sm = list(owner.service_minutes["s"])
+    assert len(sm) == 60 and sm[0] == (M + 1, 2) and sm[-1] == (M + 60, 11)
+
+
 def test_crash_between_flushes_is_exact(conn, cfg):
     src = FakeSource({"a": lines(0, 3) + lines(1, 1)})
     reader, owner = make(conn, cfg, src, T0 / 1000 + 120)        # upper = T0 + 90 s
