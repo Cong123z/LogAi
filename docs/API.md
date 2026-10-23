@@ -20,7 +20,6 @@ curl -s -H "Authorization: Bearer $LOGAI_TOKEN" \
 |---|---|
 | Kubernetes (trong cluster, cùng namespace) | `http://logai-web:5555` |
 | Kubernetes (khác namespace) | `http://logai-web.<namespace>.svc.cluster.local:5555` |
-| Docker Compose trên máy dev | `http://localhost:5565` |
 | Ngoài cluster (qua NodePort) | `http://<IP-node-bất-kỳ>:8080` |
 
 Web logai2 trên k8s được mở ra ngoài bằng một **NodePort 8080**: từ ngoài cluster gọi vào
@@ -31,11 +30,7 @@ API chỉ mở trong mạng nội bộ; không public ra Internet.
 
 ## 2. Xác thực
 
-- Nếu logai2 được cấu hình token (`LOGAI2_API_TOKEN`), mọi request phải có header
-  `Authorization: Bearer <token>`. Xin token từ người vận hành logai2; **không commit token vào code**,
-  để nó trong secret/env của service gọi.
-- Nếu chưa bật token thì header bị bỏ qua — gửi kèm sẵn cũng không sao, nên **luôn gửi**.
-- Thiếu hoặc sai token → `401 {"error": "unauthorized"}` (kiểm tra trước cả tham số).
+- Hiện không để xác thực
 
 ## 3. Request
 
@@ -63,7 +58,7 @@ Chấp nhận cả ba kiểu, kết quả như nhau:
 
 ### Làm tròn: độ phân giải 1 phút, mở rộng ra ngoài
 
-logai2 đếm và đánh giá theo phút, nên khoảng bạn gửi được **nới ra cho phủ đủ các phút** chứa nó:
+logai2 đếm và đánh giá theo phút, nên khoảng gửi được **nới ra cho phủ đủ các phút** chứa nó:
 `from` làm tròn **xuống** đầu phút, `to` làm tròn **lên** đầu phút kế tiếp. Khoảng thực đọc là
 `[effective_from, effective_to)` và được trả lại trong response.
 
@@ -112,7 +107,7 @@ logai2 đếm và đánh giá theo phút, nên khoảng bạn gửi được **n
 }
 ```
 
-Mọi thời gian trả về là **UTC, đuôi `Z`**; phần mili-giây chỉ xuất hiện khi khác 0.
+Mọi thời gian trả về là **UTC giờ chuẩn, đuôi `Z`**; phần mili-giây chỉ xuất hiện khi khác 0.
 
 ### Trường cấp gốc
 
@@ -251,31 +246,4 @@ curl -sG "http://logai-web:5555/api/module-alerts" \
   --data-urlencode "to=2026-09-30T14:15:00+07:00"
 ```
 
-## 9. Cách dùng khuyến nghị
 
-| Mục đích | Cách gọi |
-|---|---|
-| Kiểm tra định kỳ "module tôi có đang lỗi không" | mỗi 1–5 phút, `from = now − 15 phút`, `to = now`; lọc `periods[].end == null` để lấy đợt còn đang mở |
-| Tra cứu sau sự cố | gửi đúng khoảng thời gian sự cố; đọc `periods`, `module.series`, `doc_title` |
-| Báo cáo ngày/tuần | khoảng dài thoải mái; `series` tự gộp theo giờ |
-| Chỉ quan tâm sự cố thật | lọc `peak_state == "ALERTING"` |
-
-- Đừng gọi dày hơn 1 lần/phút cho cùng một module: dữ liệu chỉ đổi mỗi phút.
-- Đặt timeout phía client (khuyên 10 giây).
-- Số liệu tính theo dòng log **đã đọc vào logai2**; log chưa đẩy lên Elasticsearch sẽ không có.
-
-## 10. Hỏi đáp
-
-**Vì sao tôi gửi `07:00:30` mà nhận `effective_from` là `07:00:00`?** Độ phân giải là 1 phút, khoảng
-được nới ra để phủ trọn các phút (mục 3).
-
-**Vì sao `periods[].start` sớm hơn `from` của tôi?** Đợt cảnh báo bắt đầu trước khoảng hỏi;
-`periods` không bị cắt. Số đếm (`alerting_minutes`, `module`, `template`) thì chỉ tính trong khoảng hỏi.
-
-**Template có `peak_state: "WARMING"` có đáng lo?** Đó là tăng ngắn 1–2 phút rồi tự hết, chưa thành
-sự cố. Bỏ qua nếu bạn chỉ cần sự cố đã xác nhận.
-
-**Module của tôi luôn trả rỗng?** Kiểm tra (1) `module_code` đúng hoa/thường như trường `moduleCode`
-trong log, (2) log của bạn có mức ERROR/WARN, (3) `data_until` không phải `null`.
-
-**Giờ trả về là giờ gì?** Luôn UTC (`Z`). Giờ VN = UTC + 7.
