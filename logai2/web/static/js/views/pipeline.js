@@ -255,13 +255,13 @@ function plApplyRoute() {
   pl.routeSub = sub;
   let list = new URLSearchParams(sub.startsWith('?') ? sub : '').get('services');
   if (list == null) list = plStore.get('pl.services');
-  pl.pick = list ? list.split(',').filter(Boolean).map(decodeURIComponent).slice(0, PL_MAX) : null;
+  pl.pick = list ? list.split(',').filter(Boolean).slice(0, PL_MAX) : null;
   pl.mode = plStore.get('pl.mode') === 'multiples' ? 'multiples' : 'combined';
 }
 function plSavePick() {
-  const list = pl.pick.map(encodeURIComponent).join(',');
+  const list = pl.pick.join(',');
   plStore.set('pl.services', list);
-  pl.routeSub = `?services=${list}`;
+  pl.routeSub = `?services=${encodeURIComponent(list)}`;   // URLSearchParams decodes it on the way back
   history.replaceState(null, '', `#pipeline${pl.routeSub}`);
   state.subView = pl.routeSub;
 }
@@ -274,8 +274,8 @@ function plTpOption(d, names, t, single) {
     xAxis: {type: 'time', axisLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10, hideOverlap: true}},
     yAxis: {type: 'value', min: 0, splitNumber: 3, splitLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10}},
     tooltip: {...baseOption().tooltip, trigger: 'axis', valueFormatter: v => `${plInt(v)}/min`},
-    series: names.map(n => ({name: n, type: 'line', symbol: 'none', lineStyle: {width: 2},
-      color: single ? t.line : PL_COLORS[Math.max(0, (pl.pick || []).indexOf(n)) % PL_COLORS.length],
+    series: names.map((n, i) => ({name: n, type: 'line', symbol: 'none', lineStyle: {width: 2},
+      color: single ? t.line : PL_COLORS[i % PL_COLORS.length],
       data: tp[n].points.map(([ts, v]) => [ts * 1000, v])})),
   };
 }

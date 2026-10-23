@@ -94,6 +94,12 @@ def test_throughput_short_history_has_no_delta():
     assert throughput({}) == {}
 
 
+@pytest.mark.parametrize("minutes, expected", [(54, None), (55, 1.0), (60, 1.0), (61, None)])
+def test_throughput_delta_age_boundaries(minutes, expected):
+    t = throughput({"service_minutes": {"a": [[NOW - 60 * minutes, 10], [NOW, 20]]}})["a"]
+    assert t["delta_1h"] == expected
+
+
 def test_services_rows_have_throughput_not_rate(conn, cfg):
     seed(conn)
     eng = {**ENGINE_OK, "service_minutes": {"recharge": [[NOW - 60 * (59 - i), 10] for i in range(60)]}}
