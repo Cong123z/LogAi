@@ -24,6 +24,8 @@ data:
   # base URL (logai2 adds /v1/embeddings) or the full …/v1/embeddings endpoint; a key goes in
   # Secret logai-env, key LOGAI_EMBEDDING_API_KEY
   LOGAI_EMBEDDING_URL: "http://bge-m3.embedding.svc.cluster.local:8080"
+  # model name sent in each request; it must be a bge-m3 (1024 dimensions)
+  LOGAI_EMBEDDING_MODEL: "bge-m3"
 ---
 apiVersion: apps/v1
 kind: Deployment

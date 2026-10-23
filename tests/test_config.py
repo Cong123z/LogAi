@@ -23,3 +23,10 @@ def test_embedding_api_key_from_env(monkeypatch):
     assert load_config(None).embedding.api_key == ""
     monkeypatch.setenv("LOGAI2_EMBEDDING_API_KEY", "k")
     assert load_config(None).embedding.api_key == "k"
+
+
+def test_embedding_model_from_env(monkeypatch):
+    monkeypatch.delenv("LOGAI2_EMBEDDING_MODEL", raising=False)
+    assert load_config(None).embedding.model == "bge-m3"
+    monkeypatch.setenv("LOGAI2_EMBEDDING_MODEL", "BAAI/bge-m3")
+    assert load_config(None).embedding.model == "BAAI/bge-m3"

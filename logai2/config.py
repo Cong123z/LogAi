@@ -196,6 +196,8 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.documentation.seed_path = env("LOGAI2_DOC_SEED_PATH")
     if env("LOGAI2_EMBEDDING_URL"):
         cfg.embedding.url = env("LOGAI2_EMBEDDING_URL")
+    if env("LOGAI2_EMBEDDING_MODEL"):
+        cfg.embedding.model = env("LOGAI2_EMBEDDING_MODEL")
     if env("LOGAI2_EMBEDDING_API_KEY"):
         cfg.embedding.api_key = env("LOGAI2_EMBEDDING_API_KEY")
     return cfg
