@@ -34,6 +34,8 @@ spec:
               value: "postgresql://logai:$(POSTGRES_PASSWORD)@logai-postgres:5432/logai"
             - name: LOGAI2_EMBEDDING_URL
               valueFrom: {configMapKeyRef: {name: logai-embedding, key: LOGAI_EMBEDDING_URL}}
+            - name: LOGAI2_EMBEDDING_API_KEY   # only when a gateway in front of bge-m3 needs a key
+              valueFrom: {secretKeyRef: {name: logai-env, key: LOGAI_EMBEDDING_API_KEY, optional: true}}
           resources:
             requests:
               cpu: 100m

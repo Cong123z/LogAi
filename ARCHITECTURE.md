@@ -136,6 +136,7 @@ this order, later layers overriding earlier ones:
 | `LOGAI2_API_TOKEN` | `web.api_token`; set = `GET /api/module-alerts` needs `Authorization: Bearer <token>` | web |
 | `LOGAI2_DOC_SEED_PATH` | `documentation.seed_path` | engine |
 | `LOGAI2_EMBEDDING_URL` | `embedding.url` | linker |
+| `LOGAI2_EMBEDDING_API_KEY` | `embedding.api_key`; sent as `Authorization: Bearer` | linker |
 
 Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 `aiops-net`) and `LOGAI2_DOC_SEED_VOLUME` (volume holding logai-engine's
@@ -183,7 +184,8 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `documentation.corpus_margin` | 0.05 | layer 2: best document over the next one |
 | `documentation.suggest_similarity` | 0.80 | "apply to similar" list |
 | `documentation.cluster_similarity` | 0.85 | undocumented alerting templates joined into one row |
-| `embedding.url` / `model` | `http://bge-m3:8080` / `bge-m3` | OpenAI-style `/v1/embeddings`; empty url = nothing is embedded |
+| `embedding.url` / `model` | `http://bge-m3:8080` / `bge-m3` | OpenAI-style `/v1/embeddings`: a base URL gets it added, a URL already ending in it is used as is; empty url = nothing is embedded |
+| `embedding.api_key` | `""` | Bearer key for a gateway in front of the model; no redirects are followed |
 | `embedding.batch` / `cycle_seconds` | 32 / 30 | texts per request; linker cycle |
 | `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
 | `llm.per_service_hour` / `daily_max` | 0 / 0 | LLM results per service per hour, in all per day; 0 = no limit |

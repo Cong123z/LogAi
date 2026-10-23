@@ -44,7 +44,7 @@ def test_cycle_embeds_links_and_asks_the_engine_to_reload(conn, cfg, server):
 def test_a_text_changed_meanwhile_is_not_overwritten(conn, cfg, server):
     cfg.embedding.url = server.url
 
-    def embed_then_change(url, model, texts):
+    def embed_then_change(url, model, texts, api_key=""):
         conn.execute("UPDATE templates SET text = 'pool <*>' WHERE template_id = 's:T1'")   # the engine's write
         return embed(url, model, texts)
 

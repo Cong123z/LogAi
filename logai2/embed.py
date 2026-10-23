@@ -5,6 +5,8 @@ import json
 import math
 import urllib.request
 
+from logai2.llm import _OPENER   # no redirects: urllib would re-send the API key to the new location
+
 DIMS = 1024   # bge-m3; the vector(1024) columns of 002_doc_links.sql
 TIMEOUT_SECONDS = 30
 
@@ -13,13 +15,18 @@ class EmbeddingError(RuntimeError):
     pass
 
 
-def embed(url: str, model: str, texts: list[str]) -> list[list[float]]:
-    """Unit-length vectors in input order. Raises EmbeddingError on any failure."""
+def embed(url: str, model: str, texts: list[str], api_key: str = "") -> list[list[float]]:
+    """Unit-length vectors in input order. Raises EmbeddingError on any failure.
+    url is the base (…/v1/embeddings is added) or already the full endpoint."""
+    url = url.rstrip("/")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
-        url.rstrip("/") + "/v1/embeddings", data=json.dumps({"input": texts, "model": model}).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
+        url if url.endswith("/v1/embeddings") else url + "/v1/embeddings",
+        data=json.dumps({"input": texts, "model": model}).encode(), headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
             data = json.load(response)["data"]
     except Exception as exc:  # noqa: BLE001 - HTTP, network, JSON and shape errors alike
         raise EmbeddingError(f"{type(exc).__name__}: {exc}") from exc

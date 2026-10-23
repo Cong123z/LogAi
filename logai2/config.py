@@ -115,6 +115,7 @@ class DocumentationConfig:
 class EmbeddingConfig:
     url: str = "http://bge-m3:8080"   # OpenAI-style /v1/embeddings (TEI); empty = the linker does not embed
     model: str = "bge-m3"
+    api_key: str = ""                 # sent as Authorization: Bearer (a gateway in front of the model)
     batch: int = 32
     cycle_seconds: float = 30.0
 
@@ -195,4 +196,6 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.documentation.seed_path = env("LOGAI2_DOC_SEED_PATH")
     if env("LOGAI2_EMBEDDING_URL"):
         cfg.embedding.url = env("LOGAI2_EMBEDDING_URL")
+    if env("LOGAI2_EMBEDDING_API_KEY"):
+        cfg.embedding.api_key = env("LOGAI2_EMBEDDING_API_KEY")
     return cfg

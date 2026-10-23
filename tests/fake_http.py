@@ -10,12 +10,14 @@ class FakeHttp:
     def __init__(self, handler):
         self.handler = handler
         self.calls: list[tuple[str, dict]] = []
+        self.auth: list[str | None] = []   # Authorization header of each call
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.calls.append((self.path, body))
+                outer.auth.append(self.headers.get("Authorization"))
                 status, payload = outer.handler(self.path, body)
                 raw = payload.encode() if isinstance(payload, str) else json.dumps(payload).encode()
                 self.send_response(status)
