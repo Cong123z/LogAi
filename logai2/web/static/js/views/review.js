@@ -81,8 +81,9 @@ async function loadReview() {
   const svc = encodeURIComponent(rv.service);
   if (rv.tplService !== rv.service) {
     const t = await getJson(`/api/templates?service=${svc}&size=500`, 'Unable to load templates');
-    rv.tplService = rv.service;
-    rv.templates = t.items;
+    const groups = await getJson(`/api/baseline/groups?service=${svc}`, 'Unable to load group counts');
+    rv.templates = t.items; rv.groups = groups;
+    rv.tplService = rv.service;   // cached only once both fetches have succeeded
   }
   rv.docs = await getJson('/api/documents', 'Unable to load documents');
   rvRenderControls();
@@ -119,7 +120,7 @@ function rvShowLoadError(message) {
 }
 
 function rvRenderControls() {
-  rvPicker.render({service: rv.service, key: rv.key, templates: rv.templates, docs: rv.docs, baselineState: rv.matrix?.baseline_state});
+  rvPicker.render({service: rv.service, key: rv.key, templates: rv.templates, groups: rv.groups, docs: rv.docs, baselineState: rv.matrix?.baseline_state});
   $rv('rv-days').querySelectorAll('button').forEach(b => {
     const on = Number(b.dataset.days) === rv.days;
     b.classList.toggle('active', on);

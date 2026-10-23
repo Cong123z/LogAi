@@ -189,3 +189,31 @@ def test_document_level_any_by_default_validated_and_kept(client):
     assert client.post("/api/documents", json={"title": "t", "error": "e", "level": "DEBUG"}).status_code == 400
     plain = client.post("/api/documents", json={"title": "t", "error": "e"}).get_json()
     assert listed()[plain["doc_id"]]["level"] is None
+
+
+def add_tpl(conn, tid, level):
+    conn.execute("INSERT INTO templates VALUES ('pay', %s, %s, 'boom', now(), now())", (tid, level))
+
+
+def test_baseline_groups_exact_over_500(client, conn):
+    conn.execute("INSERT INTO services VALUES ('pay', 0)")
+    for n in range(520):
+        add_tpl(conn, f"pay:E{n}", "ERROR")
+    add_tpl(conn, "pay:W1", "WARNING")
+    conn.commit()
+    g = client.get("/api/baseline/groups?service=pay").get_json()
+    assert g["all"] == 521 and g["ERROR"] == 520 and g["WARN"] == 1 and g["INFO"] == 0
+    assert client.get("/api/baseline/groups").status_code == 400
+
+
+def test_baseline_groups_verdict_counts_linked_active_docs(client, conn):
+    conn.execute("INSERT INTO services VALUES ('pay', 0)")
+    add_tpl(conn, "pay:T1", "ERROR")
+    add_tpl(conn, "pay:T2", "ERROR")
+    conn.execute("INSERT INTO documents (doc_id, title, handling, revision, verdict, status) VALUES "
+                 "('D-SAFE', 's', 'x', 'r', 'safe', 'active'), ('D-ACT', 'a', 'x', 'r', 'action', 'active')")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES "
+                 "('pay', 'pay:T1', 'D-SAFE', 'manual'), ('pay', 'pay:T2', 'D-ACT', 'draft')")
+    conn.commit()
+    g = client.get("/api/baseline/groups?service=pay").get_json()
+    assert g["safe"] == 1 and g["action"] == 0

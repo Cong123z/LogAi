@@ -484,6 +484,23 @@ def create_app(cfg: AppConfig) -> Flask:
             abort(404, "Unknown service")
         return service
 
+    @app.get("/api/baseline/groups")
+    def baseline_groups():
+        """Exact key picker counts: templates per level class, and active documents per verdict with a linked template here."""
+        service = request.args.get("service")
+        if not service:
+            raise BadRequest("service is required")
+        c = conn()
+        cls = class_sql("level")
+        row = c.execute(
+            "SELECT count(*) AS n, " + ", ".join(f"count(*) FILTER (WHERE {cls} = '{k}') AS \"{k}\"" for k in LEVEL_CLASSES)
+            + " FROM templates WHERE service = %s", (service,)).fetchone()
+        docs = {r["verdict"]: r["n"] for r in c.execute(
+            "SELECT d.verdict, count(DISTINCT d.doc_id) AS n FROM documents d JOIN template_doc_links l ON l.doc_id = d.doc_id "
+            "WHERE d.status = 'active' AND (d.service IS NULL OR d.service = %s) AND l.service = %s AND l.source = ANY(%s) "
+            "GROUP BY d.verdict", (service, service, list(ALERTING_SOURCES)))}
+        return jsonify({"all": row["n"], **{k: row[k] for k in LEVEL_CLASSES}, **{v: docs.get(v, 0) for v in VERDICTS}})
+
     @app.get("/api/baseline/matrix")
     def baseline_matrix():
         service = known_service(request.args.get("service"))
