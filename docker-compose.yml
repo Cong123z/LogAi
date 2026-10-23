@@ -81,6 +81,7 @@ services:
     environment:
       <<: *logai2-env
       LOGAI2_EMBEDDING_URL: ${LOGAI2_EMBEDDING_URL:-http://bge-m3:8080}
+      LOGAI2_EMBEDDING_MODEL: ${LOGAI2_EMBEDDING_MODEL:-bge-m3}
       LOGAI2_EMBEDDING_API_KEY: ${LOGAI2_EMBEDDING_API_KEY:-}
     networks: [default, aiops-net]
     depends_on:

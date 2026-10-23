@@ -137,6 +137,7 @@ connection and index selection saved on the **Data sources** page.
 | `LOGAI2_DOC_SEED_PATH` | documentation corpus to seed |
 | `LOGAI2_API_TOKEN` | optional shared bearer token for `GET /api/module-alerts` (web only; empty = open) |
 | `LOGAI2_EMBEDDING_URL` | embeddings service: base URL (`/v1/embeddings` is added) or the full `…/v1/embeddings` endpoint, e.g. TEI; default `http://bge-m3:8080` |
+| `LOGAI2_EMBEDDING_MODEL` | model name sent to the embeddings service (default `bge-m3`; must be a 1024-dim bge-m3) |
 | `LOGAI2_EMBEDDING_API_KEY` | optional key for the embeddings service, sent as `Authorization: Bearer` (linker) |
 
 Every `config.yaml` key and default (floors, k, commit time, retention,

@@ -136,6 +136,7 @@ this order, later layers overriding earlier ones:
 | `LOGAI2_API_TOKEN` | `web.api_token`; set = `GET /api/module-alerts` needs `Authorization: Bearer <token>` | web |
 | `LOGAI2_DOC_SEED_PATH` | `documentation.seed_path` | engine |
 | `LOGAI2_EMBEDDING_URL` | `embedding.url` | linker |
+| `LOGAI2_EMBEDDING_MODEL` | `embedding.model` | linker |
 | `LOGAI2_EMBEDDING_API_KEY` | `embedding.api_key`; sent as `Authorization: Bearer` | linker |
 
 Compose-only variables: `LOGAI2_NETWORK` (external network name, default
