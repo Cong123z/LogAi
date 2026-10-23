@@ -24,17 +24,28 @@ const docUrl = id => `/api/documents/${encodeURIComponent(id)}`;
 const draftLinkUrl = (t, decision) =>
   `/api/templates/${encodeURIComponent(t.service)}/${encodeURIComponent(t.template_id)}/link/${decision}`;
 
-// #documentation/suggestions opens the AI suggestions tab (links from the LLM and Pipeline pages).
+// #documentation/suggestions opens the AI suggestions tab (links from the LLM and Pipeline pages);
+// #documentation/<doc_id> and #documentation/suggestions/<doc_id> also select that document (links from Alerting).
+let docLastSub = null;
 function syncDocModeFromRoute() {
-  const mode = state.subView === 'suggestions' ? 'draft' : 'active';
-  if (mode === docs.mode) return;
-  docs.mode = mode;
-  docs.selected = null;
-  docs.editing = false;
-  document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.docMode === mode);
-    b.setAttribute('aria-selected', String(b.dataset.docMode === mode));
-  });
+  const sub = state.subView || '';
+  const [head, ...rest] = sub.split('/');
+  const suggestions = head === 'suggestions';
+  const mode = suggestions ? 'draft' : 'active';
+  if (mode !== docs.mode) {
+    docs.mode = mode;
+    docs.selected = null;
+    docs.editing = false;
+    document.querySelectorAll('#doc-mode-toggle .toggle-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.docMode === mode);
+      b.setAttribute('aria-selected', String(b.dataset.docMode === mode));
+    });
+  }
+  if (sub === docLastSub) return;   // later loads (after an edit) keep the user's selection
+  docLastSub = sub;
+  let id = suggestions ? rest.join('/') : sub;
+  try { id = decodeURIComponent(id); } catch (e) { id = ''; }
+  if (id) { docs.selected = id; docs.editing = false; }
 }
 
 async function loadDocumentation() {

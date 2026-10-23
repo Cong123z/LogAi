@@ -328,8 +328,19 @@ def create_app(cfg: AppConfig) -> Flask:
             "WHERE (l.service, l.template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
             ([s for s, _ in pairs], [k for _, k in pairs]))}
         rows = alert_rows(states, links, titles, texts, edges)
+        handling = {r["doc_id"]: r["handling"] for r in c.execute(
+            "SELECT doc_id, handling FROM documents WHERE doc_id = ANY(%s)", (doc_ids,))}
+        drafts = {(r["service"], r["template_id"]): r["doc_id"] for r in c.execute(
+            "SELECT service, template_id, doc_id FROM template_doc_links WHERE source = 'draft' AND doc_id IS NOT NULL "
+            "AND (service, template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+            ([s for s, _ in pairs], [k for _, k in pairs]))}
         for r in rows:
             r["since"] = r["since"].timestamp()
+            if r["kind"] == "document":   # the first step of Handling, without its list marker
+                lines = [re.sub(r"^(\d+[.)]|-)\s*", "", ln.strip()) for ln in (handling.get(r["doc_id"]) or "").splitlines()]
+                r["handling_step"] = next((ln for ln in lines if ln), None)
+            elif r["kind"] in ("template", "cluster"):
+                r["draft_doc_id"] = next((drafts[(r["service"], k)] for k in r["keys"] if (r["service"], k) in drafts), None)
             for t in r["templates"]:
                 t.update(normal(r["service"], t["template_id"]))
                 info = link_info.get((r["service"], t["template_id"])) or {}
@@ -584,7 +595,8 @@ def create_app(cfg: AppConfig) -> Flask:
             raise BadRequest("status must be known or unknown")
         where, args = ["true"], []   # every filter but link_source: review_total counts within these
         for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
-                              ("l.doc_id", request.args.get("doc_id"))):
+                              ("l.doc_id", request.args.get("doc_id")),
+                              ("t.template_id", request.args.get("template_id"))):
             if value:
                 where.append(f"{column} = %s")
                 args.append(value)

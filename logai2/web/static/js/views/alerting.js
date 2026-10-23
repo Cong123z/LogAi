@@ -31,11 +31,34 @@ function alLink(link) {
   return tag || safe ? ` <span class="link-meta">${tag}${safe}</span>` : '';
 }
 
-function alLine(label, item, mono) {
+// Links out of a card are plain anchors to hash routes (main.js), so they open in a new tab too.
+const alBaseline = (service, key) => `#baseline/${encodeURIComponent(service)}/${encodeURIComponent(key)}/1`;
+const alAnchor = (href, label, title) => `<a class="btn" href="${escapeHtml(href)}"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(label)}</a>`;
+
+function alLine(service, label, item, mono) {
   return `<li class="alert-line">
     <div class="${mono ? 'tmpl-text' : 'alert-line-label'}" title="${escapeHtml(label)}">${escapeHtml(label)}</div>
     <span class="alert-rate">${alNum(item.count)}/min</span>${alNormal(item)}${alLink(item.link)}
+    <a class="alert-chart" href="${escapeHtml(alBaseline(service, item.key || item.template_id))}" title="Baseline chart for this line">chart</a>
   </li>`;
+}
+
+// The buttons under a card's header, by kind of row.
+function alActions(row) {
+  const svc = row.service;
+  if (row.kind === 'document') {
+    const n = row.templates.length;
+    return [alAnchor(`#documentation/${encodeURIComponent(row.doc_id)}`, 'Open document'),
+      alAnchor(alBaseline(svc, `doc:${row.doc_id}`), 'Baseline'),
+      alAnchor(`#templates/${encodeURIComponent(svc)}?doc_id=${encodeURIComponent(row.doc_id)}`, `${n} template${n === 1 ? '' : 's'}`,
+        'Templates of this service linked to the document')].join('');
+  }
+  if (row.kind === 'service') {
+    return alAnchor(alBaseline(svc, '*total'), 'Baseline') + alAnchor('#pipeline', 'Pipeline');
+  }
+  return [alAnchor(`#templates/${encodeURIComponent(svc)}/${encodeURIComponent(row.keys[0])}`, 'Link a document'),
+    row.draft_doc_id ? alAnchor(`#documentation/suggestions/${encodeURIComponent(row.draft_doc_id)}`, 'AI suggestion') : '',
+    alAnchor(alBaseline(svc, '*error'), 'Baseline')].join('');
 }
 
 function alTitle(row) {
@@ -61,14 +84,16 @@ function renderAlerts(rows) {
   // Rows arrive ranked (ALERTING first, then oldest); keep that order.
   $alertCards.innerHTML = shown.map(row => {
     const st = row.state.toLowerCase();
-    const lines = row.totals.map(t => alLine(TOTAL_LABELS[t.key] || 'Linked templates combined', t, false))
-      .concat(row.templates.map(t => alLine(t.text || t.template_id, t, true)));
+    const lines = row.totals.map(t => alLine(row.service, TOTAL_LABELS[t.key] || 'Linked templates combined', t, false))
+      .concat(row.templates.map(t => alLine(row.service, t.text || t.template_id, t, true)));
     return `<article class="alert-card alert-card-${escapeHtml(st)}">
       <header class="alert-card-head">
         <span class="badge alert-state-${escapeHtml(st)}">${escapeHtml(row.state)}</span>
         <h3 class="alert-card-title">${escapeHtml(row.service)} · ${escapeHtml(alTitle(row))}</h3>
         <span class="alert-card-since" title="${escapeHtml(formatFullTs(row.since))}">since ${escapeHtml(formatTs(row.since))}</span>
       </header>
+      <div class="btn-row alert-actions">${alActions(row)}</div>
+      ${row.handling_step ? `<p class="alert-step" title="First step of the document's Handling">${escapeHtml(row.handling_step)}</p>` : ''}
       <ul class="alert-lines">${lines.join('')}</ul>
     </article>`;
   }).join('');

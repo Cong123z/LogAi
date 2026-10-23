@@ -67,6 +67,17 @@ and `since`. Its lines are:
 Each line shows the last closed minute's count per minute and "(normal mean
 ± σ)" of the **current local hour** from the committed baseline, with the
 alert band (`mean ± kσ`) on hover; "(no baseline yet)" means floor-only.
+Every line ends with a "chart" link to Baseline for its key. Under the
+header, buttons (plain `<a href>` links) by kind of row: a document has
+**Open document** (`#documentation/<doc_id>`), **Baseline** (`doc:<doc_id>`)
+and **N templates** (`#templates/<service>?doc_id=<id>`), plus the first
+step of its Handling; an undocumented template or cluster has **Link a
+document** (`#templates/<service>/<template_id>`, opens its drawer), **AI
+suggestion** when a draft exists (`#documentation/suggestions/<doc_id>`) and
+**Baseline** (`*error`); the whole service has **Baseline** (`*total`) and
+**Pipeline**. Documentation also takes `#documentation/<doc_id>` to select a
+document; Templates parses `?doc_id=` itself from the part after the first `/`.
+
 A template line also shows how it got its document when that was not by
 hand: `inherited`, `auto 0.87` (matched on the document's ERROR lines),
 `AI-confirmed`, or `AI suggestion: <title>` (a draft: shown, drives
@@ -385,7 +396,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `GET /api/alerts` | — | `[alert row]` | — | — |
 | `GET /api/services` | — | `[service]` sorted | — | — |
-| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `link_source`, `q` | `{total, review_total, items}` | 400 | — |
+| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `template_id`, `link_source`, `q` | `{total, review_total, items}` | 400 | — |
 | `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null, also?: [template_id]}` | `{doc_id, linked}` | 400, 404 | `reload_links` |
 | `DELETE /api/templates/<service>/<template_id>/link` | — | `{doc_id: null}` | 404 | `reload_links` |
 | `POST /api/templates/<service>/<template_id>/link/confirm` | — | `{doc_id, source}` | 404, 409 | `reload_links` |
@@ -518,7 +529,10 @@ fields come from the engine's status and are null until it reports.
 ```
 
 `kind` is `document`, `template`, `cluster` or `service`; `doc_id` and
-`title` are null except for documents. Each template line has `link`:
+`title` are null except for documents. Document rows also have
+`handling_step` (first non-empty line of the Handling without its `1.`, `1)`
+or `-` marker, or null); template and cluster rows have `draft_doc_id` (a
+`draft` link of any of their templates, or null). Each template line has `link`:
 null, or `{doc_id, source, similarity, note, title, verdict}` of its
 `template_doc_links` row, drafts and rejected ones included (badges only:
 grouping uses only the links that drive alerts). `templates` holds the template members, `totals` the
@@ -582,7 +596,7 @@ Authorization: Bearer <token>
 
 - `page` (default 1) and `size` (default 100) are clamped to 1..10⁶ and
   1..500; a non-integer is 400 `"<name> must be an integer"`.
-- `service`, `level`, `doc_id`: exact match; `q`: case-insensitive
+- `service`, `level`, `doc_id`, `template_id`: exact match; `q`: case-insensitive
   substring of the text; `link_source`: `none` (no row), `review` (an
   automatic link: `inherited`, `corpus`, `llm`, `draft`) or one of
   `manual`, `inherited`, `corpus`, `llm`, `draft`, `rejected` (else 400).
