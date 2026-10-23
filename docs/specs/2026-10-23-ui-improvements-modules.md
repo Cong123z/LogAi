@@ -9,7 +9,7 @@ suggestions (the existing "Approve all SAFE" button stays as is).
 
 ## 1. Alerting: links out of each card
 - Document row: buttons **Open document** (`#documentation/<doc_id>`), **Baseline**
-  (`#baseline/<service>/doc:<doc_id>/1`), **N templates** (`#templates?service=<s>&doc_id=<id>`), and
+  (`#baseline/<service>/doc:<doc_id>/1`), **N templates** (`#templates/<service>?doc_id=<id>`), and
   the first step of the document's Handling under the header.
 - Undocumented template / cluster row: **Link a document** (`#templates/<service>/<template_id>`, opens
   its drawer), **AI suggestion** when a draft exists (`#documentation/suggestions/<doc_id>`), **Baseline**

@@ -27,7 +27,10 @@ function setView(route, updateHash = true) {
   const previousIndex = viewOrder.indexOf(previousView);
   const nextIndex = viewOrder.indexOf(view);
   const direction = nextIndex > previousIndex ? 'slide-from-right' : 'slide-from-left';
-  if (previousView !== view) disposeCharts();
+  if (previousView !== view) {
+    disposeCharts();
+    tpl.routeSub = docLastSub = null;   // entering a view applies its route again, even the same one as last time
+  }
   state.activeView = view;
   document.querySelectorAll('.view').forEach(section => {
     const active = section.id === `view-${view}`;
