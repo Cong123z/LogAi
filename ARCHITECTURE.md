@@ -177,6 +177,7 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `drop.min_mean` | 20.0 | `*total` drop alerts only where the mean is at least this |
 | `retention.counts_days` | 90 | partitions of `service_hours`, `hourly_counts`, `alert_minutes` |
 | `retention.alert_changes_days` | 365 | rows of `alert_changes` |
+| `retention.module_hours_days` | 7 | partitions of `template_module_hours` |
 | `alert.warm_consecutive` / `alert_consecutive` / `cool_consecutive` | 2 / 3 / 3 | hysteresis, in minutes (§8.5) |
 | `drain3.sim_threshold` / `depth` / `max_children` | 0.6 / 4 / 100 | Drain3 tree |
 | `metrics.port` | 9108 | Prometheus endpoint (`metrics.host` exists but is unused: the exporter binds all interfaces) |
@@ -763,7 +764,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level, 006 modules per service), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service, 007 template modules), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -779,6 +780,8 @@ service-scoped primary key.
 | `service_hours` * | `service, day, hour` | `n_minutes` | flush |
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
+| `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | migration 007 seed (last 7 days of `alert_minutes`) |
+| `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | migration 007 seed (all `alert_minutes`; keys `*…` and `doc:…` skipped) |
 | `day_status` | `service, day` | `committed`, `daytype` | commit |
 | `review_exclusions` | `id` | `service`, `day`, `hour_from`, `hour_to` (`[from, to)`), `decision` (`exclude`/`keep`), `created_by` (unused, `''`), `created_at` | web |
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |
@@ -802,6 +805,7 @@ day), at every local midnight and at every commit, always through today + 2.
 | Data | Kept |
 |---|---|
 | `service_hours`, `hourly_counts`, `alert_minutes` | 90 days (whole partitions dropped at commit) |
+| `template_module_hours` | 7 days (whole partitions dropped at commit) |
 | `alert_changes` | 365 days (rows deleted at commit) |
 | `error_samples` | newest 20 per template (trimmed at every flush) |
 | everything else (`templates`, `alert_state`, `commands`, `day_status`, `review_exclusions`, `documents`) | never pruned |
@@ -912,7 +916,7 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service), `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service, 007 template modules), `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.
