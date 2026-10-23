@@ -81,9 +81,9 @@ async function loadReview() {
   const svc = encodeURIComponent(rv.service);
   if (rv.tplService !== rv.service) {
     const t = await getJson(`/api/templates?service=${svc}&size=500`, 'Unable to load templates');
-    rv.tplService = rv.service;
-    rv.groups = await getJson(`/api/baseline/groups?service=${svc}`, 'Unable to load group counts');
-    rv.templates = t.items;
+    const groups = await getJson(`/api/baseline/groups?service=${svc}`, 'Unable to load group counts');
+    rv.templates = t.items; rv.groups = groups;
+    rv.tplService = rv.service;   // cached only once both fetches have succeeded
   }
   rv.docs = await getJson('/api/documents', 'Unable to load documents');
   rvRenderControls();

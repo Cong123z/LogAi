@@ -105,6 +105,7 @@ function createKeyPicker(root, {onPick}) {
     const ts = st.remote ? tpls : tpls.filter(t => hit(t.template_id, t.text, t.doc_id));   // the server already matched a remote list
     if (ts.length) out.push({sec: `Templates (${ts.length})`}, ...ts.map(t => ({key: t.template_id,
       html: `<span class="tmpl-id">${escapeHtml(t.template_id)}</span>${levelBadge(levelClass(t.level))}<span class="kp-txt">${escapeHtml(t.text)}</span>`})));
+    if (st.failed) out.push({sec: 'Search failed: showing the loaded templates only'});
     // The pages load at most 500 templates; the rest is reached by typing (server search).
     if (st.groups.all > st.templates.length) out.push({sec: `Showing ${ts.length} of ${groupCount(g.id)}`});
     return out;
@@ -125,7 +126,8 @@ function createKeyPicker(root, {onPick}) {
     st.open = open;
     pop.hidden = !open;
     trigger.setAttribute('aria-expanded', String(open));
-    if (open) { search.value = ''; st.remote = null; st.active = 0; renderList(); search.focus(); }
+    clearTimeout(st.timer); st.rseq++;
+    if (open) { search.value = ''; st.remote = null; st.failed = false; st.active = 0; renderList(); search.focus(); }
   }
   function choose(key) { setOpen(false); trigger.focus(); onPick(key); }
 
@@ -150,17 +152,17 @@ function createKeyPicker(root, {onPick}) {
   });
   trigger.addEventListener('click', () => setOpen(!st.open));
   search.addEventListener('input', () => {
-    st.active = 0; renderList();
     clearTimeout(st.timer);
+    const seq = ++st.rseq;   // any in-flight search is now stale
+    st.remote = null; st.failed = false; st.active = 0; renderList();
     const q = search.value.trim();
-    if (!q || !(st.groups.all > st.templates.length)) { st.remote = null; renderList(); return; }
-    const seq = ++st.rseq;
+    if (!q || !(st.groups.all > st.templates.length)) return;
     st.timer = setTimeout(async () => {
       try {
         const r = await getJson(`/api/templates?service=${encodeURIComponent(st.service)}&q=${encodeURIComponent(q)}&size=50`, 'Unable to search templates');
         if (seq !== st.rseq || !st.open) return;
         st.remote = r.items; st.active = 0; renderList();
-      } catch (err) { /* keep the local list */ }
+      } catch (err) { if (seq === st.rseq && st.open) { st.failed = true; renderList(); } }
     }, 300);
   });
   search.addEventListener('keydown', e => {
