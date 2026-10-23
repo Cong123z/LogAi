@@ -136,7 +136,8 @@ connection and index selection saved on the **Data sources** page.
 | `LOGAI2_METRICS_PORT`, `LOGAI2_WEB_PORT` | container ports |
 | `LOGAI2_DOC_SEED_PATH` | documentation corpus to seed |
 | `LOGAI2_API_TOKEN` | optional shared bearer token for `GET /api/module-alerts` (web only; empty = open) |
-| `LOGAI2_EMBEDDING_URL` | embeddings service (OpenAI `/v1/embeddings`, e.g. TEI); default `http://bge-m3:8080` |
+| `LOGAI2_EMBEDDING_URL` | embeddings service: base URL (`/v1/embeddings` is added) or the full `…/v1/embeddings` endpoint, e.g. TEI; default `http://bge-m3:8080` |
+| `LOGAI2_EMBEDDING_API_KEY` | optional key for the embeddings service, sent as `Authorization: Bearer` (linker) |
 
 Every `config.yaml` key and default (floors, k, commit time, retention,
 flush, Drain3) is listed in [ARCHITECTURE §3](ARCHITECTURE.md#3-configuration).

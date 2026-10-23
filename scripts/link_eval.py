@@ -67,7 +67,8 @@ def whole_doc_top2(conn, cfg, templates: list[dict]) -> dict:
     docs = conn.execute("SELECT doc_id, title, error, handling FROM documents WHERE status = 'active' "
                         "ORDER BY doc_id").fetchall()
     vectors = embed(cfg.embedding.url, cfg.embedding.model,
-                    ["\n".join(filter(None, (d["title"], d["error"], d["handling"]))) for d in docs])
+                    ["\n".join(filter(None, (d["title"], d["error"], d["handling"]))) for d in docs],
+                    cfg.embedding.api_key)
     out = {}
     for t in templates:
         tv = [float(x) for x in t["vec"].strip("[]").split(",")]

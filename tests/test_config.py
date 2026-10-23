@@ -16,3 +16,10 @@ def test_api_token_from_env(monkeypatch):
     assert load_config(None).web.api_token == ""
     monkeypatch.setenv("LOGAI2_API_TOKEN", "tok")
     assert load_config(None).web.api_token == "tok"
+
+
+def test_embedding_api_key_from_env(monkeypatch):
+    monkeypatch.delenv("LOGAI2_EMBEDDING_API_KEY", raising=False)
+    assert load_config(None).embedding.api_key == ""
+    monkeypatch.setenv("LOGAI2_EMBEDDING_API_KEY", "k")
+    assert load_config(None).embedding.api_key == "k"
