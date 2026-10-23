@@ -126,12 +126,13 @@ def hit_to_line(hit: Dict[str, Any], module_field: str, max_line_bytes: int) -> 
     # Byte cut can split a multibyte char; "ignore" drops the partial tail.
     ts = _sort_seconds(hit)
     message = _coerce_message(src.get("message")).encode("utf-8")[:max_line_bytes].decode("utf-8", "ignore")
+    nul = lambda s: s.replace("\x00", "")   # Postgres text refuses NUL; every stored field comes from here
     return Line(
         ts=ts if ts is not None else _parse_timestamp(src.get("@timestamp")),
-        service=_extract_service(src),
-        level=_extract_level({**src, "message": message}),
-        message=message,
-        module=_coerce_message(src.get(module_field)),
+        service=nul(_extract_service(src)),
+        level=nul(_extract_level({**src, "message": message})),
+        message=nul(message),
+        module=nul(_coerce_message(src.get(module_field))),
         doc_id=str(doc_id),
     )
 

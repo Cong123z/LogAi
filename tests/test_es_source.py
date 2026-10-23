@@ -52,6 +52,13 @@ def test_multibyte_truncation_is_safe():
     assert msg.startswith(line.message)
 
 
+def test_nul_bytes_are_dropped():
+    # Postgres text refuses NUL: one such line failed every flush and stalled the engine
+    line = hit_to_line(hit("a", 1, service="s\x00vc", level="ERR\x00OR", message="conn\x00 failed",
+                           moduleCode="M\x00"), "moduleCode", 8192)
+    assert (line.service, line.level, line.message, line.module) == ("svc", "ERROR", "conn failed", "M")
+
+
 def test_module_field_is_configurable():
     line = hit_to_line(hit("a", 1, groupModule="G", moduleCode="M"), "groupModule", 8192)
     assert line.module == "G"
