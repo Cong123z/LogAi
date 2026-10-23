@@ -76,6 +76,13 @@ def test_counts_exact(conn, cfg):
     assert rows(conn, "SELECT count(*) AS n FROM drain3_state")[0]["n"] == 1
 
 
+def test_service_minutes_keeps_last_60_closed_minutes(conn, cfg):
+    hits = [h for m in range(61) for h in lines(m, m % 50 + 1)]
+    _, owner = run_minutes(conn, cfg, hits, T0 + 61 * 60_000)
+    sm = list(owner.service_minutes["s"])
+    assert len(sm) == 60 and sm[0] == (M + 1, 2) and sm[-1] == (M + 60, 11)
+
+
 def test_crash_between_flushes_is_exact(conn, cfg):
     src = FakeSource({"a": lines(0, 3) + lines(1, 1)})
     reader, owner = make(conn, cfg, src, T0 / 1000 + 120)        # upper = T0 + 90 s
@@ -300,3 +307,74 @@ def test_single_high_minute_writes_one_row_and_no_change(conn, cfg):
     run_minutes(conn, cfg, None, T0 + 3 * 60_000, src=FakeSource({"a": hits}))
     assert len(_alert_minutes(conn)) == 1
     assert rows(conn, "SELECT 1 FROM alert_changes") == []
+
+
+def _mod_rows(conn):
+    return [(r["template_id"], r["module_code"], r["count"]) for r in rows(
+        conn, "SELECT template_id, module_code, count FROM template_module_hours ORDER BY template_id, module_code")]
+
+
+def test_module_hours_and_pairs_written(conn, cfg):
+    hits = lines(0, 2, moduleCode="A") + lines(0, 1, start=2, moduleCode="B")
+    run_minutes(conn, cfg, hits, T0 + 60_000)
+    assert _mod_rows(conn) == [("s:T00001", "A", 2), ("s:T00001", "B", 1)]
+    got = rows(conn, "SELECT module_code, first_seen, last_seen FROM template_modules ORDER BY module_code")
+    assert [r["module_code"] for r in got] == ["A", "B"]
+    assert got[0]["first_seen"] == got[0]["last_seen"] == datetime.fromtimestamp(M * 60, timezone.utc)
+
+
+def test_module_hours_exact_across_failed_flush(conn, cfg, monkeypatch):
+    hits = lines(0, 2, moduleCode="A") + lines(1, 3, moduleCode="A") + lines(1, 1, start=3, moduleCode="B")
+    real = psycopg.Cursor.executemany
+
+    def boom(self, query, params, **kw):
+        if "es_cursors" in str(query):
+            raise RuntimeError("disk full")
+        return real(self, query, params, **kw)
+
+    reader, owner = make(conn, cfg, FakeSource({"a": hits}), T0 / 1000 + 240)
+    tick(reader, owner, flush=False)
+    tick(reader, owner, flush=False)
+    with monkeypatch.context() as mp:
+        mp.setattr(psycopg.Cursor, "executemany", boom)
+        with pytest.raises(RuntimeError, match="disk full"):
+            owner.flush(reader.cursors(owner.boundary_ms), {})
+    assert _mod_rows(conn) == []
+    owner.flush(reader.cursors(owner.boundary_ms), {})
+    assert _mod_rows(conn) == [("s:T00001", "A", 5), ("s:T00001", "B", 1)]
+    run_minutes(conn, cfg, hits, T0 + 180_000)      # restart: nothing is counted twice
+    assert _mod_rows(conn) == [("s:T00001", "A", 5), ("s:T00001", "B", 1)]
+
+
+def test_missing_module_stored_as_empty(conn, cfg):
+    run_minutes(conn, cfg, lines(0, 2), T0 + 60_000)
+    assert _mod_rows(conn) == [("s:T00001", "", 2)]
+
+
+def test_unparsed_not_stored(conn, cfg, monkeypatch):
+    from logai2.reader import reader as reader_mod
+    real = reader_mod.normalize
+    monkeypatch.setattr(reader_mod, "normalize",
+                        lambda m: (_ for _ in ()).throw(ValueError("bad")) if "poison" in m else real(m))
+    hits = lines(0, 1, moduleCode="A") + [hit("x", T0 + 5000, service="s", message="poison pill", moduleCode="A")]
+    run_minutes(conn, cfg, hits, T0 + 60_000)
+    assert rows(conn, "SELECT 1 FROM hourly_counts WHERE key = 's:unparsed'")
+    assert _mod_rows(conn) == [("s:T00001", "A", 1)]
+
+
+def test_module_hours_written_before_detection_enabled(conn, cfg):
+    _, owner = run_minutes(conn, cfg, lines(0, 2, moduleCode="A"), T0 + 60_000)
+    assert not owner.detection_enabled
+    assert _mod_rows(conn) == [("s:T00001", "A", 2)]
+
+
+def test_module_hours_skipped_past_retention_but_pair_kept(conn, cfg):
+    # catch-up after a long downtime: the day is older than module_hours_days, its partition is gone
+    hits = lines(0, 2, moduleCode="A")
+    now_s = T0 / 1000 + (cfg.retention.module_hours_days + 3) * 86400
+    reader, owner = make(conn, cfg, FakeSource({"a": hits}), now_s)
+    for _ in range(20):
+        if tick(reader, owner)["watermark_ms"] >= T0 + 60_000:
+            break
+    assert _mod_rows(conn) == []
+    assert [r["module_code"] for r in rows(conn, "SELECT module_code FROM template_modules")] == ["A"]

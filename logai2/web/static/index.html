@@ -112,7 +112,8 @@
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
             <input type="text" class="search-input" id="search-input" placeholder="Search templates..." aria-label="Search template text" autocomplete="off" spellcheck="false">
           </div>
-          <select class="filter-select" id="filter-service" aria-label="Service"><option value="">All services</option></select>
+          <input class="filter-select" id="filter-service" list="service-options" placeholder="All services" aria-label="Service" autocomplete="off" spellcheck="false">
+          <datalist id="service-options"></datalist>
           <select class="filter-select" id="filter-level" aria-label="Level"></select>
           <select class="filter-select" id="filter-link" aria-label="Link">
             <option value="">All links</option><option value="none">Not linked</option>
@@ -122,17 +123,22 @@
           </select>
           <label class="chip-toggle chip-push"><input type="checkbox" id="auto-refresh"><span>Auto-refresh</span></label>
         </div>
+        <div class="module-filter" id="tpl-module-row" role="group" aria-label="Module" hidden></div>
+        <p class="module-note" role="note"><strong>Modules = last 24 h.</strong> Each chip is a module that logged this template in the last 24 hours; % is its share of the template's lines in that window. A grey dashed chip logged it earlier but not in the last 24 h (hover for last seen).</p>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>State</th><th>Template</th>
+                <th>Modules · last 24 h</th>
                 <th title="Average events per minute this hour, against the normal band (mean ± kσ)">Rate</th>
-                <th>Document</th><th>Last seen</th><th><span class="visually-hidden">Action</span></th>
+                <th>Document</th>
+                <th id="tpl-th-first" aria-sort="none"><button type="button" class="pl-sort" data-tpl-sort="first_seen">First seen</button></th>
+                <th id="tpl-th-last" aria-sort="descending"><button type="button" class="pl-sort" data-tpl-sort="last_seen">Last seen</button></th><th><span class="visually-hidden">Action</span></th>
               </tr>
             </thead>
             <tbody id="template-tbody">
-              <tr><td colspan="6" class="loading">Loading templates...</td></tr>
+              <tr><td colspan="8" class="loading">Loading templates...</td></tr>
             </tbody>
           </table>
           <div class="pagination" id="pagination">
@@ -155,6 +161,7 @@
             <button class="toggle-btn" data-doc-kind="action" aria-pressed="false" title="Documents for errors: something to fix">ERROR <span class="kind-count" data-count="action"></span></button>
             <button class="toggle-btn" data-doc-kind="safe" aria-pressed="false" title="Normal operation: no action needed">SAFE <span class="kind-count" data-count="safe"></span></button>
           </div>
+          <div class="toggle-group" id="doc-level-toggle" role="group" aria-label="Filter by level of the template" hidden></div>
           <div class="search-wrap doc-search-wrap">
             <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
             <input type="search" class="search-input" id="doc-search" placeholder="Search title, ERROR, Handling…" aria-label="Search documents" autocomplete="off" spellcheck="false">
@@ -194,26 +201,39 @@
         </div>
         <div class="stats-row" id="pl-tiles"></div>
         <div class="rv-panel">
-          <div class="rv-head"><h3>Volume vs expected, today</h3><button type="button" class="btn" id="pl-multiples-more" hidden></button></div>
-          <p class="sync-status">Per service, today's hourly rate (line) against its expected band (gray) and the same hour last week (dashed). Worst first; click one to open Baseline.</p>
-          <div class="pl-multiples" id="pl-multiples"></div>
-          <p class="empty-state" id="pl-multiples-empty" hidden>No service has reported volume yet.</p>
+          <div class="rv-head"><h3>Throughput, last 60 min</h3>
+            <div class="toggle-group" id="pl-tp-mode" role="group" aria-label="One chart or one per service">
+              <button type="button" class="toggle-btn" data-mode="combined" aria-pressed="true">Combined</button>
+              <button type="button" class="toggle-btn" data-mode="multiples" aria-pressed="false">One per service</button>
+            </div>
+          </div>
+          <p class="sync-status" id="pl-tp-note">Events per closed minute for the services ticked in the table (at most 8).</p>
+          <p class="ins-toast ins-toast-error" id="pl-tp-msg" role="status" hidden></p>
+          <div class="pl-multiples" id="pl-tp"></div>
+          <p class="empty-state" id="pl-tp-empty" hidden>No throughput yet: the engine reports it after its first closed minute.</p>
         </div>
-        <h3>Services</h3>
+        <div class="rv-head"><h3>Services</h3>
+          <div class="search-wrap doc-search-wrap">
+            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+            <input type="search" class="search-input" id="pl-search" placeholder="Filter services…" aria-label="Filter services" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
         <div class="table-wrap">
           <table id="pl-services">
             <thead><tr>
+              <th><span class="visually-hidden">Show in chart</span></th>
               <th aria-sort="none"><button type="button" class="pl-sort" data-sort="service">Service</button></th>
-              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="rate">Events/min (this hour)</button></th>
-              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="vs_week">vs last week</button></th>
-              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="z">vs expected (z)</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="last">Last min</button></th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="avg15">15-min avg</button></th>
+              <th>60 min</th>
+              <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="delta_1h">vs 1 h ago</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="miss_ratio">Miss ratio 5 min</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="templates">Templates</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="new_24h">New 24 h</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="unparsed_1h">Unparsed 1 h</button></th>
               <th class="r" aria-sort="none"><button type="button" class="pl-sort" data-sort="not_normal">Keys not NORMAL</button></th>
             </tr></thead>
-            <tbody id="pl-services-tbody"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody>
+            <tbody id="pl-services-tbody"><tr><td colspan="11" class="loading">Loading...</td></tr></tbody>
           </table>
         </div>
         <h3>Indices being read</h3>
@@ -279,21 +299,18 @@
       </section>
       <section class="view groups-section" id="view-llm" aria-label="LLM profiles">
         <div class="llm-banner" id="llm-banner" role="status" hidden></div>
-        <div class="stats-row" id="llm-stats"></div>
         <div class="section-heading">
-          <p class="sync-status">The linker sends templates no document matches to the <strong>active</strong> profiles,
-            lowest priority first (OpenAI-compatible <code>…/v1/chat/completions</code>); a profile that fails is skipped
-            for 5 minutes and the next one answers. It confirms one of the nearest documents, or writes a
-            suggestion that waits in <a href="#documentation/suggestions">Documentation → AI suggestions</a>. Only the template text
-            and candidate documents are sent, never raw log lines.</p>
+          <p class="sync-status"><strong>Call order.</strong> The linker sends templates no document matches to #1. If it cannot
+            answer (network, HTTP error, timeout) it calls the next one; a failing profile is skipped for 5 minutes.
+            It confirms one of the nearest documents, or writes a suggestion that waits in
+            <a href="#documentation/suggestions">Documentation → AI suggestions</a>. Only the template text and candidate
+            documents are sent, never raw log lines.</p>
           <button type="button" class="btn btn-primary" id="llm-add-btn">Add profile</button>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th title="Active profiles are tried lowest first">Order</th><th>Name</th><th>Endpoint</th><th>Model</th><th>Timeout</th><th>API key</th><th>Status</th><th title="Answers since the linker started">Answers</th><th></th></tr></thead>
-            <tbody id="llm-tbody"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody>
-          </table>
-        </div>
+        <div class="llm-list" id="llm-order"><p class="loading">Loading...</p></div>
+        <h3 class="llm-h">Not used</h3>
+        <div class="llm-list" id="llm-unused"></div>
+        <p class="sync-status llm-usage" id="llm-usage"></p>
       </section>
       <section class="view groups-section" id="view-baseline" aria-label="Baseline">
         <div class="section-heading">
@@ -424,7 +441,6 @@
         <div class="form-field"><label for="llm-model">Model</label><input id="llm-model" maxlength="500" required spellcheck="false"></div>
         <div class="form-field"><label for="llm-api-key">API key</label><input id="llm-api-key" type="password" maxlength="500" autocomplete="new-password" placeholder="leave empty to keep the saved key"></div>
         <div class="form-field"><label for="llm-timeout">Timeout (seconds)</label><input id="llm-timeout" type="number" min="5" max="600" value="120" required></div>
-        <div class="form-field"><label for="llm-priority">Priority (lower is tried first)</label><input id="llm-priority" type="number" min="0" max="1000" value="100" required></div>
         <div class="form-error" id="llm-error" aria-live="polite"></div>
         <div class="form-actions"><button type="button" class="btn" data-close="llm-modal">Cancel</button><button type="submit" class="btn btn-primary">Save</button></div>
       </form>

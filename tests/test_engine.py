@@ -371,6 +371,20 @@ def test_status_history_and_flush_fields(conn, cfg, make):
     assert s["flush_seconds"] >= 0 and s["flush_seconds_max"] >= s["flush_seconds"] and s["late_counts"] == 0
 
 
+def test_status_has_service_minutes(conn, cfg, make):
+    cfg.start.days_back = 0
+    cfg.flush.seconds = 0
+    clock = Clock(NOON)
+    hits = []
+    engine = make(FakeSource({"a": hits}), clock)
+    engine.start()
+    _run_minutes(engine, clock, hits, 3)
+    sm = q(conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]["service_minutes"]
+    (points,) = sm.values()
+    assert points and all(t % 60 == 0 and n > 0 for t, n in points)
+    assert [t for t, _ in points] == sorted(t for t, _ in points)
+
+
 def test_history_keeps_60_minutes(conn, cfg, make):
     cfg.start.days_back = 0
     cfg.flush.seconds = 0

@@ -67,6 +67,7 @@ class DropConfig:
 class RetentionConfig:
     counts_days: int = 90
     alert_changes_days: int = 365
+    module_hours_days: int = 7
 
 
 @dataclass

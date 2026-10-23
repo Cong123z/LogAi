@@ -19,12 +19,13 @@ from logai2.alerts import alert_rows
 from logai2.commands import enqueue
 from logai2.config import AppConfig
 from logai2.module_alerts import data_until, module_alerts, parse_window
-from logai2.links import ALERTING_SOURCES, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
+from logai2.links import ALERTING_SOURCES, LEVEL_ORDER, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
+from logai2.web import modules_view
 from logai2.web.baseline_view import UnknownKey, incident, inspect, left_days, matrix, series
-from logai2.web.pipeline_view import service_data, stage_states, volume
+from logai2.web.pipeline_view import stage_states, throughput
 from logai2.web.pipeline_view import services as service_rows
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -204,10 +205,9 @@ def create_app(cfg: AppConfig) -> Flask:
             return jsonify(light)
         now = time.time()
         day, hour = day_hour(minute_of(now))
-        data = service_data(conn(), cfg, day)
-        rows = service_rows(conn(), cfg, status, day, hour, data)
+        rows = service_rows(conn(), cfg, status, day, hour)
         return jsonify({**light, "services": rows, "llm_daily_max": cfg.llm.daily_max,
-                        "volume": volume(conn(), cfg, day, hour, data),
+                        "throughput": throughput(status),
                         "stages": stage_states(status, stale, linker, linker_stale,
                                                sum(r["unparsed_1h"] for r in rows), now)})
 
@@ -328,8 +328,19 @@ def create_app(cfg: AppConfig) -> Flask:
             "WHERE (l.service, l.template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
             ([s for s, _ in pairs], [k for _, k in pairs]))}
         rows = alert_rows(states, links, titles, texts, edges)
+        handling = {r["doc_id"]: r["handling"] for r in c.execute(
+            "SELECT doc_id, handling FROM documents WHERE doc_id = ANY(%s)", (doc_ids,))}
+        drafts = {(r["service"], r["template_id"]): r["doc_id"] for r in c.execute(
+            "SELECT service, template_id, doc_id FROM template_doc_links WHERE source = 'draft' AND doc_id IS NOT NULL "
+            "AND (service, template_id) IN (SELECT * FROM unnest(%s::text[], %s::text[]))",
+            ([s for s, _ in pairs], [k for _, k in pairs]))}
         for r in rows:
             r["since"] = r["since"].timestamp()
+            if r["kind"] == "document":   # the first step of Handling, without its list marker
+                lines = [re.sub(r"^(\d+[.)]|-)\s*", "", ln.strip()) for ln in (handling.get(r["doc_id"]) or "").splitlines()]
+                r["handling_step"] = next((ln for ln in lines if ln), None)
+            elif r["kind"] in ("template", "cluster"):
+                r["draft_doc_id"] = next((drafts[(r["service"], k)] for k in r["keys"] if (r["service"], k) in drafts), None)
             for t in r["templates"]:
                 t.update(normal(r["service"], t["template_id"]))
                 info = link_info.get((r["service"], t["template_id"])) or {}
@@ -347,6 +358,15 @@ def create_app(cfg: AppConfig) -> Flask:
     def services():
         return jsonify([r["service"] for r in conn().execute("SELECT service FROM services ORDER BY service")])
 
+    @app.get("/api/template-levels")
+    def template_levels():
+        # every level present in the data (levels are stored as read from the logs), with its template count
+        service = request.args.get("service")
+        rows = conn().execute("SELECT level, count(*) AS n FROM templates WHERE %s::text IS NULL OR service = %s "
+                              "GROUP BY level", (service, service)).fetchall()
+        rows.sort(key=lambda r: (LEVEL_ORDER.index(r["level"]) if r["level"] in LEVEL_ORDER else len(LEVEL_ORDER), r["level"]))
+        return jsonify(rows)
+
     @app.get("/api/documents")
     def documents():
         # Also feeds the Templates link select (doc_id, title). Drafts and rejected ones: ?status=draft|rejected.
@@ -356,8 +376,10 @@ def create_app(cfg: AppConfig) -> Flask:
         rows = conn().execute(
             "SELECT d.doc_id, d.service, d.level, d.based_on, d.title, d.error_code, d.error, d.handling, d.status, d.source, d.verdict, "
             "d.confidence, d.revision, d.embedded_revision IS NOT DISTINCT FROM d.revision AS embedded, "
-            "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates "
-            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) WHERE d.status = %s "
+            "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates, "
+            "max(t.level) FILTER (WHERE l.source = 'draft') AS template_level "   # level of the template a draft was written for
+            "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) "
+            "LEFT JOIN templates t ON t.service = l.service AND t.template_id = l.template_id WHERE d.status = %s "
             "GROUP BY d.doc_id ORDER BY d.doc_id", (list(ALERTING_SOURCES), status)).fetchall()
         for r in rows:
             r["error_lines"] = error_lines(r["error"])   # what the linker embeds; empty = never auto-matched
@@ -461,6 +483,23 @@ def create_app(cfg: AppConfig) -> Flask:
         if not service or not conn().execute("SELECT 1 FROM services WHERE service = %s", (service,)).fetchone():
             abort(404, "Unknown service")
         return service
+
+    @app.get("/api/baseline/groups")
+    def baseline_groups():
+        """Exact key picker counts: templates per level class, and active documents per verdict with a linked template here."""
+        service = request.args.get("service")
+        if not service:
+            raise BadRequest("service is required")
+        c = conn()
+        cls = class_sql("level")
+        row = c.execute(
+            "SELECT count(*) AS n, " + ", ".join(f"count(*) FILTER (WHERE {cls} = '{k}') AS \"{k}\"" for k in LEVEL_CLASSES)
+            + " FROM templates WHERE service = %s", (service,)).fetchone()
+        docs = {r["verdict"]: r["n"] for r in c.execute(
+            "SELECT d.verdict, count(DISTINCT d.doc_id) AS n FROM documents d JOIN template_doc_links l ON l.doc_id = d.doc_id "
+            "WHERE d.status = 'active' AND (d.service IS NULL OR d.service = %s) AND l.service = %s AND l.source = ANY(%s) "
+            "GROUP BY d.verdict", (service, service, list(ALERTING_SOURCES)))}
+        return jsonify({"all": row["n"], **{k: row[k] for k in LEVEL_CLASSES}, **{v: docs.get(v, 0) for v in VERDICTS}})
 
     @app.get("/api/baseline/matrix")
     def baseline_matrix():
@@ -582,15 +621,24 @@ def create_app(cfg: AppConfig) -> Flask:
         status = request.args.get("status") or None
         if status not in (None, "known", "unknown"):
             raise BadRequest("status must be known or unknown")
+        sort = request.args.get("sort") or "last_seen"
+        if sort not in ("first_seen", "last_seen"):
+            raise BadRequest("sort must be first_seen or last_seen")
         where, args = ["true"], []   # every filter but link_source: review_total counts within these
         for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
-                              ("l.doc_id", request.args.get("doc_id"))):
+                              ("l.doc_id", request.args.get("doc_id")),
+                              ("t.template_id", request.args.get("template_id"))):
             if value:
                 where.append(f"{column} = %s")
                 args.append(value)
         if request.args.get("q"):
             where.append("strpos(lower(t.text), lower(%s)) > 0")   # substring, no LIKE wildcards to escape
             args.append(request.args["q"])
+        module = request.args.get("module")
+        if module is not None:   # '' = "(no module)"; narrows total, stats and the items alike
+            where.append("EXISTS (SELECT 1 FROM template_modules m WHERE m.service = t.service "
+                         "AND m.template_id = t.template_id AND m.module_code = %s)")
+            args.append(module)
         base_sql, base_args = " AND ".join(where), list(args)   # the stats cards count within these too
         review_sql, review_args = " AND ".join([*where, "l.source = ANY(%s)"]), [*args, list(AUTOMATIC_SOURCES)]
         if link_source == "none":
@@ -604,10 +652,16 @@ def create_app(cfg: AppConfig) -> Flask:
             where.append(f"{'' if status == 'known' else 'NOT '}{KNOWN_SQL}")
             args.append(list(ALERTING_SOURCES))
         where_sql = " AND ".join(where)
-        order = "t.last_seen DESC, t.template_id"
+        order = f"t.{sort} DESC, t.template_id"
         if link_source == "review":   # what needs a decision first: alerting, then the worst level
             order = (f"(a.state = 'ALERTING') IS TRUE DESC, CASE {class_sql('t.level')} WHEN 'ERROR' THEN 0 "
-                     f"WHEN 'WARN' THEN 1 ELSE 2 END, {order}")
+                     f"WHEN 'WARN' THEN 1 ELSE 2 END, t.last_seen DESC, t.template_id")   # sort is ignored here
+        order_args = []
+        if module is not None:   # lines in the window in that module first, then the usual order
+            days, bdays, bhours = modules_view.window_args(modules_view.clock())
+            order = ("EXISTS (SELECT 1 FROM template_module_hours h WHERE h.service = t.service AND h.template_id = "
+                     f"t.template_id AND h.module_code = %s AND {modules_view.WINDOW_SQL}) DESC, " + order)
+            order_args = [module, days, bdays, bhours]
         c = conn()
         count_sql = ("SELECT count(*) AS n FROM templates t LEFT JOIN template_doc_links l "
                      "ON l.service = t.service AND l.template_id = t.template_id WHERE ")
@@ -630,7 +684,7 @@ def create_app(cfg: AppConfig) -> Flask:
             "LEFT JOIN documents d ON d.doc_id = l.doc_id "
             "LEFT JOIN alert_state a ON a.service = t.service AND a.key = t.template_id "
             f"WHERE {where_sql} ORDER BY {order} LIMIT %s OFFSET %s",
-            [list(ALERTING_SOURCES), *args, size, (page - 1) * size]).fetchall()
+            [list(ALERTING_SOURCES), *args, *order_args, size, (page - 1) * size]).fetchall()
 
         # Rate and band for the current local hour, judged exactly as detection does.
         day, hour = day_hour(minute_of(time.time()))
@@ -643,14 +697,32 @@ def create_app(cfg: AppConfig) -> Flask:
             "SELECT service, key, sum FROM hourly_counts WHERE day = %s AND hour = %s "
             "AND (service, key) IN (SELECT * FROM unnest(%s::text[], %s::text[]))", (day, hour, svcs, tids))}
         baseline = Baseline.load(c, keys)
+        modules = modules_view.modules_for(c, keys, modules_view.clock())
         for i in items:
             svc, tid = i["service"], i["template_id"]
+            i["modules"] = modules[(svc, tid)]
             n = minutes.get(svc)
             i["rate"] = sums.get((svc, tid), 0) / n if n else None
             verdict = judge(0, tid, i["level"], baseline.lookup(svc, tid, day, hour), cfg)
             i["band_low"], i["band_high"] = verdict.band_low, verdict.band_high
             i["first_seen"], i["last_seen"] = i["first_seen"].timestamp(), i["last_seen"].timestamp()
         return jsonify({"total": total, "review_total": review_total, "stats": stats, "items": items})
+
+    @app.get("/api/modules")
+    def modules():
+        """A service's modules: templates ever seen in each and its lines over the last 24 h."""
+        service = request.args.get("service")
+        if not service:
+            raise BadRequest("service is required")
+        days, bdays, bhours = modules_view.window_args(modules_view.clock())
+        rows = conn().execute(
+            "SELECT m.module_code AS module, count(*) AS templates, COALESCE(sum(w.n), 0)::bigint AS lines_24h "
+            "FROM template_modules m LEFT JOIN (SELECT template_id, module_code, sum(count) AS n "
+            f"FROM template_module_hours h WHERE service = %s AND {modules_view.WINDOW_SQL} GROUP BY 1, 2) w "
+            "ON w.template_id = m.template_id AND w.module_code = m.module_code "
+            "WHERE m.service = %s GROUP BY m.module_code ORDER BY templates DESC, module",
+            (service, days, bdays, bhours, service)).fetchall()
+        return jsonify(rows)
 
     def known_template(c, service: str, template_id: str) -> None:
         if not c.execute("SELECT 1 FROM templates WHERE service = %s AND template_id = %s",
@@ -789,6 +861,22 @@ def create_app(cfg: AppConfig) -> Flask:
             "profiles": linker.get("llm_profiles") or {},
             "warnings": linker.get("warnings") or []})
 
+    @app.put("/api/llm/profiles/order")
+    def put_llm_order():
+        """The call order: the listed profiles are active with priority 1..n, all others inactive."""
+        order = body().get("order")
+        if not isinstance(order, list) or not all(isinstance(n, str) for n in order) or len(set(order)) != len(order):
+            raise BadRequest("order must be a list of distinct profile names")
+        c = conn()
+        known = {r["name"] for r in c.execute("SELECT name FROM llm_profiles FOR UPDATE").fetchall()}
+        if not set(order) <= known:
+            raise BadRequest("order names an unknown profile")
+        c.execute("UPDATE llm_profiles SET active = false WHERE name <> ALL(%s)", (order,))
+        for i, name in enumerate(order, 1):
+            c.execute("UPDATE llm_profiles SET active = true, priority = %s WHERE name = %s", (i, name))
+        c.commit()
+        return jsonify({"order": order})
+
     @app.put("/api/llm/profiles/<name>")
     def put_llm_profile(name: str):
         payload = body()
@@ -800,18 +888,21 @@ def create_app(cfg: AppConfig) -> Flask:
             raise BadRequest("base_url must be an http(s) URL without credentials")
         if not model:
             raise BadRequest("model is required")
-        timeout, priority = payload.get("timeout_seconds", 120), payload.get("priority", 100)
+        timeout, priority = payload.get("timeout_seconds", 120), payload.get("priority")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
             raise BadRequest("timeout_seconds must be an integer from 5 to 600")
-        if not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 1000:
+        if priority is not None and (not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 1000):
             raise BadRequest("priority must be an integer from 0 to 1000")
         api_key = _text(payload.get("api_key"), "api_key")   # no control characters: it goes into a header
         if not api_key.isascii():
             raise BadRequest("api_key must be ASCII")
         c = conn()
-        row = c.execute("SELECT revision, api_key FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
+        row = c.execute("SELECT revision, api_key, priority FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
         if (row["revision"] if row else None) != payload.get("revision"):
             raise db.StaleRevision(row["revision"] if row else None)
+        if priority is None:   # an edit keeps its place; a new profile goes after the active ones
+            priority = row["priority"] if row else c.execute(
+                "SELECT coalesce(max(priority), 0) + 1 AS p FROM llm_profiles WHERE active").fetchone()["p"]
         revision = uuid.uuid4().hex
         # a create (no row read) must not overwrite one created meanwhile: DO UPDATE only on an update
         written = c.execute(

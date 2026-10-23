@@ -50,3 +50,27 @@ def test_module_can_belong_to_two_services(conn):
     conn.execute("INSERT INTO services VALUES ('a', 1), ('b', 2)")
     conn.execute("INSERT INTO modules (module_code, service) VALUES ('M1', 'a'), ('M1', 'b')")
     assert conn.execute("SELECT count(*) AS n FROM modules WHERE module_code = 'M1'").fetchone()["n"] == 2
+
+
+def test_migration_007_seeds_from_alert_minutes(conn):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Ho_Chi_Minh")
+    now = datetime.now(tz)
+    m1 = (now - timedelta(days=2)).replace(hour=10, minute=5, second=0, microsecond=0)
+    m2 = m1.replace(minute=40)
+    old = now - timedelta(days=20)
+    m3 = (m1 + timedelta(days=1)).replace(hour=0, minute=30)     # 17:30 UTC, next local day, hour 0
+    for m in (m1, m3, old):
+        ensure_partitions(conn, m.date(), m.date())
+    conn.execute("DROP TABLE template_module_hours, template_modules")
+    conn.execute("DELETE FROM schema_migrations WHERE version = 7")
+    for key, m, n in (("s:T1", m1, 3), ("s:T1", m2, 4), ("s:T1", m3, 2), ("s:unparsed", m1, 8), ("s:T1", old, 5), ("*total", m1, 9), ("doc:x", m1, 9)):
+        conn.execute("INSERT INTO alert_minutes (service, key, module_code, day, minute, count) "
+                     "VALUES ('s', %s, 'M1', %s, %s, %s)", (key, m.date(), m, n))
+    assert migrate(conn) == [7]
+    hours = conn.execute("SELECT template_id, module_code, day, hour, count FROM template_module_hours ORDER BY day").fetchall()
+    assert hours == [{"template_id": "s:T1", "module_code": "M1", "day": m1.date(), "hour": 10, "count": 7},
+                     {"template_id": "s:T1", "module_code": "M1", "day": m3.date(), "hour": 0, "count": 2}]
+    pairs = conn.execute("SELECT template_id, first_seen, last_seen FROM template_modules").fetchall()
+    assert pairs == [{"template_id": "s:T1", "first_seen": old, "last_seen": m3}]

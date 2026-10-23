@@ -64,6 +64,8 @@ def commit(conn, cfg: AppConfig, today: date) -> dict:
         cutoff = today - timedelta(days=cfg.retention.counts_days)
         for table in ("service_hours", "hourly_counts", "alert_minutes"):
             drop_partitions_before(conn, table, cutoff)
+        drop_partitions_before(conn, "template_module_hours",
+                               today - timedelta(days=cfg.retention.module_hours_days))
         conn.execute("DELETE FROM alert_changes WHERE at < now() - make_interval(days => %s)",
                      (cfg.retention.alert_changes_days,))
         put_setting(conn, "last_commit", {"at": datetime.now(timezone.utc).isoformat(),

@@ -153,6 +153,16 @@ Một template xuất hiện khi **cả hai** điều sau đúng:
 | 400 | `{"error": "from is after to"}` | `from > to` |
 | 5xx | — | logai2 hoặc database đang lỗi: thử lại có backoff |
 
+## Phụ lục: liệt kê module của một service
+
+`GET /api/modules?service=<service>` (thiếu `service` → 400) trả danh sách module của service, nhiều template nhất trước:
+
+```json
+[{"module": "RechargeService", "templates": 12, "lines_24h": 3400}]
+```
+
+`templates` là số template từng được module này ghi; `lines_24h` là số dòng trong 24 giờ gần nhất (theo giờ địa phương). Module không có module_code là `""`.
+
 ## 7. Ví dụ code
 
 **Python (requests)**

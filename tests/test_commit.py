@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from logai2.db import get_setting
+from logai2.db import ensure_partitions, get_setting
 from logai2.jobs.commit import commit
 
 
@@ -100,3 +100,15 @@ def test_new_level_key_baseline_starts_at_its_first_day(conn, cfg):
     rows = {r["key"]: r for r in conn.execute("SELECT key, mean, days FROM baseline WHERE hour = 10")}
     assert rows["*warn"]["mean"] == pytest.approx(1.0) and rows["*warn"]["days"] == 1
     assert rows["k"]["mean"] == pytest.approx(0.2) and rows["k"]["days"] == 5     # absent days were really 0
+
+
+def test_commit_drops_module_hours_after_7_days(conn, cfg):
+    ensure_partitions(conn, date(2026, 10, 1), date(2026, 10, 31))
+    seed(conn, "s", date(2026, 10, 12), 10, 60, {"k": (1, 1)})
+    commit(conn, cfg, today=date(2026, 10, 20))
+    tables = {r["tablename"] for r in conn.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
+    assert "template_module_hours_20261012" not in tables       # today-8
+    assert "template_module_hours_20261013" in tables           # today-7 (boundary)
+    assert "template_module_hours_20261014" in tables           # today-6
+    assert "hourly_counts_20261012" in tables

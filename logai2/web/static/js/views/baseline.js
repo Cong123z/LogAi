@@ -53,6 +53,8 @@ async function loadBaseline() {
       if (seq !== bl.seq) return;
       const docs = await getJson('/api/documents', 'Unable to load documents');
       if (seq !== bl.seq) return;
+      bl.groups = await getJson(`/api/baseline/groups?service=${svc}`, 'Unable to load group counts');
+      if (seq !== bl.seq) return;
       bl.templates = t.items; bl.docs = docs;
       bl.tplService = bl.service;   // cached only once both fetches have succeeded
     }
@@ -85,7 +87,7 @@ function blClear() {
 
 const blKeyName = (key = bl.key) => keyLabel(key, bl.templates, bl.docs);
 function blRenderControls() {
-  blPicker.render({service: bl.service, key: bl.key, templates: bl.templates, docs: bl.docs, baselineState: bl.series?.baseline_state});
+  blPicker.render({service: bl.service, key: bl.key, templates: bl.templates, groups: bl.groups, docs: bl.docs, baselineState: bl.series?.baseline_state});
   $bl('bl-days').querySelectorAll('button').forEach(b => {
     const on = Number(b.dataset.days) === bl.days;
     b.classList.toggle('active', on);

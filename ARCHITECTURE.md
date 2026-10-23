@@ -177,6 +177,7 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `drop.min_mean` | 20.0 | `*total` drop alerts only where the mean is at least this |
 | `retention.counts_days` | 90 | partitions of `service_hours`, `hourly_counts`, `alert_minutes` |
 | `retention.alert_changes_days` | 365 | rows of `alert_changes` |
+| `retention.module_hours_days` | 7 | partitions of `template_module_hours` |
 | `alert.warm_consecutive` / `alert_consecutive` / `cool_consecutive` | 2 / 3 / 3 | hysteresis, in minutes (§8.5) |
 | `drain3.sim_threshold` / `depth` / `max_children` | 0.6 / 4 / 100 | Drain3 tree |
 | `metrics.port` | 9108 | Prometheus endpoint (`metrics.host` exists but is unused: the exporter binds all interfaces) |
@@ -411,8 +412,8 @@ JSON object of the reply, retries once on a timeout only, and never follows
 a redirect (it would carry the API key elsewhere). A base URL without a
 path gets `/v1` (`https://host` → `https://host/v1/chat/completions`).
 
-**Failover.** Every active profile is used, lowest `priority` first, then
-by name. A profile that fails with a network or HTTP error or a timeout
+**Failover.** Every active profile is used in call order: `priority` 1 first
+(the web page keeps the active ones numbered 1..n), then by name. A profile that fails with a network or HTTP error or a timeout
 (`LlmUnavailable`) is skipped for 5 minutes and the next one answers the
 same question; the failed call counts in the 3 per cycle. A reply that is
 not a JSON object fails the template, not the profile. When no active
@@ -507,12 +508,17 @@ Everything goes in **one** transaction, in this order:
    then a `last_seen`/`level` update for templates known only from the cache
 3. `drain3_state` (changed services only, `version + 1`)
 4. `service_hours` (`n_minutes +=`), `hourly_counts` (`sum +=, sumsq +=`)
-5. `alert_minutes` (insert, ignore conflicts)
-6. `alert_state` (upsert every key stepped since the last flush, so streaks
+5. `template_module_hours` (`count +=`), `template_modules` (`first_seen` LEAST,
+   `last_seen` GREATEST); filled for every closed minute, also before detection
+   is enabled; `:unparsed` templates skipped; no module is `''`. Both are
+   `COPY`ed into session temp tables (`ON COMMIT DELETE ROWS`) and upserted
+   with one `INSERT … SELECT` each (`owner.copy_upsert`)
+6. `alert_minutes` (insert, ignore conflicts)
+7. `alert_state` (upsert every key stepped since the last flush, so streaks
    survive a restart), `alert_changes` (insert)
-7. `error_samples` (insert, then trim to the newest 20 per template)
-8. `es_cursors` (upsert per selected index; delete rows of unselected ones)
-9. `worker_status` (`engine` row)
+8. `error_samples` (insert, then trim to the newest 20 per template)
+9. `es_cursors` (upsert per selected index; delete rows of unselected ones)
+10. `worker_status` (`engine` row)
 
 The connection must be idle (`Owner.flush` raises otherwise: inside an open
 transaction the block would only be a savepoint). Pending rows are cleared
@@ -725,6 +731,7 @@ The engine writes `worker_status['engine'].status` at every flush:
 | `events_per_second` | pending events / time since the last flush |
 | `cache_hit_ratio` | lifetime known-line hits / lookups |
 | `miss_ratio` | per service, misses / events over the last 5 min |
+| `service_minutes` | per service, `[[minute_start_epoch_s, n], ...]` oldest first: events per closed minute (`*total`, zero minutes included), last 60 kept in memory (lost on restart) |
 | `detection_enabled` | first catch-up done |
 | `bootstrap` | `{since, until}` |
 | `last_commit` | `{at, today}` or null |
@@ -762,7 +769,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level, 006 modules per service), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service, 007 template modules), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -778,6 +785,8 @@ service-scoped primary key.
 | `service_hours` * | `service, day, hour` | `n_minutes` | flush |
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
+| `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
+| `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | flush (seeded by migration 007 from all `alert_minutes`; keys `*…` and `doc:…`, and `…:unparsed` templates, skipped) |
 | `day_status` | `service, day` | `committed`, `daytype` | commit |
 | `review_exclusions` | `id` | `service`, `day`, `hour_from`, `hour_to` (`[from, to)`), `decision` (`exclude`/`keep`), `created_by` (unused, `''`), `created_at` | web |
 | `baseline` | `service, key, daytype, hour` | `mean`, `std`, `days` | commit |
@@ -801,6 +810,7 @@ day), at every local midnight and at every commit, always through today + 2.
 | Data | Kept |
 |---|---|
 | `service_hours`, `hourly_counts`, `alert_minutes` | 90 days (whole partitions dropped at commit) |
+| `template_module_hours` | 7 days (whole partitions dropped at commit) |
 | `alert_changes` | 365 days (rows deleted at commit) |
 | `error_samples` | newest 20 per template (trimmed at every flush) |
 | everything else (`templates`, `alert_state`, `commands`, `day_status`, `review_exclusions`, `documents`) | never pruned |
@@ -879,7 +889,8 @@ No DLQ.
 | Baseline | Review suggestions step hours in epoch seconds | correct only for a whole-hour offset without DST (`Asia/Ho_Chi_Minh` is +07) |
 | Config | `baseline.timezone` and `metrics.host` are unused | the zone is fixed in `timeutil.py`; metrics bind all interfaces |
 | Drain3 | A plain match (cluster size only) does not mark the tree dirty | persisted cluster sizes lag; template ids and texts are exact |
-| Flush | `executemany` per table, not `COPY` | switch when flush time shows on the Pipeline page |
+| Flush | `executemany` per table, not `COPY`, except the two module tables | switch the others when flush time shows on the Pipeline page |
+| Template modules | Measured at 50 services x 2,000 templates x 3 modules, 30 % active per hour (90k `template_module_hours` rows per hour), warm cache ([perf](docs/perf/2026-10-23-template-modules.md)): module flush 0.43-0.56 s for 20k pairs, 1.27 s for 60k; `/api/templates` p95 25 ms (100 items), 50 ms (500), 37 ms with a 1,800-template module; `/api/modules` 31 ms; retention drop 6 ms; migration 007 seed ~9.5 s per 1M `alert_minutes` rows | 7 days of hours is ~2 GB (137 B/row x 15M rows). The module filter probes the window once per template of the service and `/api/modules` aggregates a service's window rows (~0.5 us/row): both grow linearly with one service's size; past ~50k templates in one service, add a per-service window rollup. The full 7-day load was not run (needs >= 5 GB free) |
 | Flush | **Open bug.** A failed flush is retried with the same pending rows until it succeeds; a value Postgres can never store fails it forever (seen 2026-10-23 with a NUL byte, now stripped in `hit_to_line`) | the engine stops reading and alerting, heartbeat goes stale; nothing is lost (cursors did not move). The liveness probe (metrics port) still passes, so Kubernetes does not restart it. See docs/BUGS.md B1 |
 | Commit | The rebuild recomputes every key nightly | restrict to keys touched since the last commit if it gets slow |
 | Commands | Polled every tick, no `LISTEN`; `recompute_baseline` is not deduplicated | a burst of recompute clicks runs the commit several times |
@@ -902,7 +913,7 @@ No DLQ.
 | Weekend full after `full_after_days` (5) | weekend full at its 4-day cap |
 | Score scaled so the band edge equals `score_high` | `count / band_high`, display only |
 | `LISTEN commands` / `NOTIFY baseline` | commands polled per tick; the engine reloads the baseline itself |
-| `COPY` into temp tables | `executemany` |
+| `COPY` into temp tables | `executemany`; `COPY` only for `template_module_hours`, `template_modules` |
 | `alert_minutes` partitioned by `minute` | partitioned by `day` (and `day` is in the key) |
 | `review_exclusions` without a decision | `decision` `exclude`/`keep` |
 | settings `baseline.commit_time`, `bootstrap_until` | `bootstrap {since, until}`, `last_commit`, `detection_enabled`; commit time only in config |
@@ -911,7 +922,7 @@ No DLQ.
 
 ## 16. Reading the code
 
-1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service), `logai2/db.py`.
+1. `logai2/config.py`, `logai2/timeutil.py`, `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service, 007 template modules), `logai2/db.py`.
 2. `logai2/reader/es_source.py`, `normalize.py`, `cache.py`, `reader.py`: input and the watermark.
 3. `logai2/owner/miners.py`, `counts.py`: templates and minute closing.
 4. `logai2/owner/baseline.py`, `detect.py`, `logai2/alerts.py`: bands, hysteresis, alert rows.
@@ -919,7 +930,7 @@ No DLQ.
 6. `logai2/jobs/commit.py`, `logai2/review.py`: the daily commit and suggestions.
 7. `logai2/engine.py`, `logai2/commands.py`, `logai2/metrics.py`: the loop.
 8. `logai2/links.py`, `logai2/embed.py`, `logai2/linker.py`, `logai2/llm.py`, `logai2/resolver.py`: document links (§5.1).
-9. `logai2/web/app.py`, `logai2/web/baseline_view.py` (Review matrix, inspector, Baseline series and incidents), `logai2/web/pipeline_view.py` (services, volume, stage states) and [`docs/WEB_UI.md`](docs/WEB_UI.md).
+9. `logai2/web/app.py`, `logai2/web/baseline_view.py` (Review matrix, inspector, Baseline series and incidents), `logai2/web/pipeline_view.py` (services, throughput, stage states) and [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
 Tests under `tests/` are executable examples of these contracts. Good starting
 points: `test_owner.py` (exact counts across a crash), `test_reader.py`

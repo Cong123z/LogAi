@@ -100,6 +100,16 @@ docker compose exec logai2-linker python scripts/split_doc_errors.py docs/plans/
 (the file is not in the image; copy it in with `docker compose cp` first,
 or run the script from a checkout with `LOGAI2_DATABASE_DSN` set).
 
+### Upgrading to migration 007
+
+1. Deploy the **engine** first: it runs migration 007 (the seed takes about
+   10 s per 1M `alert_minutes` rows).
+2. Confirm `schema_migrations` has version 7 (or read it in the engine log).
+3. Then deploy the **web**: it reads `template_modules` and would answer 500
+   on `/api/templates` and `/api/modules` before the migration.
+4. Reload open UI tabs: a tab keeps its old JS, and the old Pipeline view
+   expects removed fields and loops on "connection lost".
+
 ### First start
 
 1. The engine migrates the schema and records `bootstrap = {since: now − 2

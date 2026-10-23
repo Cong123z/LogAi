@@ -34,12 +34,12 @@ theme).
 |---|---|---|---|
 | Alerting | `/#alerting` | every 5 s | `GET /api/alerts` |
 | Pipeline | `/#pipeline` (also the fallback for unknown hashes) | every 2 s | `GET /api/pipeline` |
-| Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/services`, `/api/documents` |
+| Templates | `/#templates` | only with Auto-refresh (10 s) | `GET /api/templates`, `/api/template-levels`, `/api/modules`, `/api/services`, `/api/documents` |
 | Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
 | LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
-| Baseline | `/#baseline/<service>/<key>/<days>` | on entry and after each change; no timers | `GET /api/services`, `/api/templates`, `/api/baseline/series`, `/api/baseline/matrix`, `/api/baseline/incident` |
-| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
+| Baseline | `/#baseline/<service>/<key>/<days>` | on entry and after each change; no timers | `GET /api/services`, `/api/templates`, `/api/baseline/groups`, `/api/baseline/series`, `/api/baseline/matrix`, `/api/baseline/incident` |
+| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline/groups`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
 (Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline, Review). The top
@@ -67,6 +67,18 @@ and `since`. Its lines are:
 Each line shows the last closed minute's count per minute and "(normal mean
 ± σ)" of the **current local hour** from the committed baseline, with the
 alert band (`mean ± kσ`) on hover; "(no baseline yet)" means floor-only.
+Every line ends with a "chart" link to Baseline for its key. Under the
+header, buttons (plain `<a href>` links) by kind of row: a document has
+**Open document** (`#documentation/<doc_id>`), **Baseline** (`doc:<doc_id>`)
+and **N templates** (`#templates/<service>?doc_id=<id>`), plus the first
+step of its Handling; an undocumented template or cluster has **Link a
+document** (`#templates/<service>/<template_id>`, opens its drawer), **AI
+suggestion** when a draft exists (`#documentation/suggestions/<doc_id>`) and
+**Baseline** (`*error`); the whole service has **Baseline** (`*total`) and
+**Pipeline**. Documentation also takes `#documentation/<doc_id>` to select a
+document; Templates parses `?doc_id=` itself from the part after the first `/`;
+`#pipeline?services=a,b` keeps the query in the sub-view too.
+
 A template line also shows how it got its document when that was not by
 hand: `inherited`, `auto 0.87` (matched on the document's ERROR lines),
 `AI-confirmed`, or `AI suggestion: <title>` (a draft: shown, drives
@@ -112,12 +124,17 @@ updates the existing chart instances.
 - **Lag, last 60 min** and **Events/s, last 60 min**: one point per minute
   from the engine's `history`; a dashed line at 5 min marks where lag turns
   Degraded;
-- **Volume vs expected, today**: small multiples per service (worst first, 6
-  shown, "Show all N" for the rest): today's hourly rate, the `*total`
-  expected band, the same hour last week (dashed), out-of-band hours as dots.
-  Click one to open Baseline for that service, today;
-- **Services** table (sortable): events/min this hour, change vs last week,
-  z against the expected band (a badge beyond 3), 5-min miss ratio,
+- **Throughput, last 60 min**: events per closed minute (engine status
+  `service_minutes`, in memory: empty right after an engine restart) for the
+  services ticked in the table. Default the 5 busiest by 15-min average; at
+  most 8 (a 9th tick is refused with a short message). **Combined** draws one
+  line per service in one chart, **One per service** one small chart each.
+  The choice is kept in the URL (`#pipeline?services=a,b`) and in
+  `localStorage` (`pl.services`, `pl.mode`); the URL wins. With a stale
+  engine the last numbers stay; with no points an empty state is shown;
+- **Services** table (sortable, filtered by a search box): a checkbox per
+  row (the chart), last minute, 15-min average, 60-min sparkline, change vs
+  1 h ago (only when the oldest point is 55-60 min old), 5-min miss ratio,
   templates, new in 24 h, unparsed in 1 h, keys not NORMAL. A row click
   filters the Reader and Templates details to that service;
 - a table of indices: position, floor, and `failing` / `caught up` /
@@ -195,23 +212,37 @@ Two modes, a toggle at the left of the filter bar:
   ERROR > WARN > INFO, then newest `last_seen`. N follows the service,
   level and search filters. The page opens here when N > 0, else on All
   templates (the choice is not kept across reloads).
-- **All templates**: every template, newest `last_seen` first, with a
+- **All templates**: every template, newest `last_seen` first (the
+  **First seen** and **Last seen** headers sort, `aria-sort`), with a
   **link** filter (not linked, or one link source); hidden and cleared in
   To review.
 
-Both modes: service, level and a text search (case-insensitive substring,
+Both modes: service (a text box with a suggestion list of the known
+services; an exact name filters, empty = all), level (every level present in the data with its
+count, "ERROR (12)"; follows the service) and a text search (case-insensitive substring,
 debounced 300 ms); 100 per page by default (50, 100 or 200; server cap
 500). To review with nothing left says so and offers All templates.
 
+**Module** filter row (only with one service selected; hidden for All services; cleared
+when the service changes): "All modules" and a button per module with its template count
+(`GET /api/modules?service=`). A module shows the templates ever seen in it (`?module=`;
+`""` = "(no module)" is sent as an explicit empty value), those with lines in the last
+24 h first; its chip is highlighted and listed first in each row. A note line above the
+table explains the chips. The drawer has a **Last 24 h · N modules** section: lines,
+share bar and last seen per module.
+
 Columns: **state** (WARMING / ALERTING / COOLING badge; NORMAL as muted
 text), **template** (id and level, then the full text, `<*>`
-highlighted), **rate** (average per minute this local hour; above the band
+highlighted), **modules · last 24 h** (one chip per module that ever logged
+the template, `name share%`; in the last 24 h by lines, then grey dashed chips without %
+that logged it earlier, last seen on hover; no module = "(no module)"; every chip
+is shown), **rate** (average per minute this local hour; above the band
 in red with "▲ above normal"; under it the band as `normal ≤ X/min` or
 `normal A–B/min`, judged exactly as detection does; "—" without data),
 **document** (`DOC-007 · title`, or "Not linked" / "No document (set by
 hand)"; under it how it was linked: `manual`, `inherited 0.91`,
 `auto-matched 0.87`, `AI-confirmed`, `AI suggestion · unverified`, `AI
-result rejected`, and SAFE), **last seen** (relative, full time on
+result rejected`, and SAFE), **first seen** and **last seen** (relative, full time on
 hover), and a button: **Review** for an automatic link, else **Link…** /
 **Change**. A click anywhere on the row opens the same drawer.
 
@@ -283,6 +314,8 @@ the list in both tabs.
   approves), **Reject** (asks first; the template is never sent to the LLM
   again); the next suggestion is selected after each decision. **Approve
   all SAFE** approves every normal-operation suggestion after listing them.
+  A second button group ("Any level · ERROR 3 …") filters by the level of
+  the template each was written for; it combines with the kind buttons.
 
 On the first engine start, an empty table is seeded from
 `documentation.seed_path` (ARCHITECTURE §4.4).
@@ -314,20 +347,23 @@ the password again. The engine reconnects on the `reload_sources` command.
 A page of its own (Settings → LLM profiles, polled every 5 s), as in
 logai-engine. A banner says when nothing is sent to an LLM (no active
 profile, linker not running) or shows the last LLM error or the daily
-limit. Cards: the active profile, results in the last hour and 24 h
-(confirmed / suggested / rejected, with the limits), suggestions waiting
-for review, and the linker's last cycle. Then the profiles table with Add,
-Edit, Activate / Deactivate and Delete. Every active profile is used,
-lowest **priority** first: when one fails (network, HTTP error, timeout)
-the next one answers and the failing one is skipped for 5 minutes; its
-row shows "failing" with the error, and the banner says whether another
-profile is answering. **Answers** counts each active profile's answers
-since the linker started.
+limit. The **Call order** list shows the active profiles as 1, 2, 3: a
+badge says IN USE (the first one not failing), STANDBY, or FAILING ·
+skipped until hh:mm (with the error); each has ↑ / ↓ (real buttons, disabled
+at the ends), Edit and Stop using, and "if it fails, call #n+1" sits between
+items. Every move saves the whole order (`PUT /api/llm/profiles/order`).
+**Not used** lists the other profiles with Add as #n, Edit and Delete. A
+last line gives the 24 h calls (of `llm.daily_max`), results and the
+suggestions waiting. When one profile fails (network, HTTP error,
+timeout) the next one answers and the failing one is skipped for 5
+minutes; the banner says whether another profile is answering. IN USE
+shows the answers counted since the linker started.
 
 Each profile, as in logai-engine: name, OpenAI-compatible base URL
 (`…/v1`, or a bare host which gets `/v1`; the linker posts to
 `…/chat/completions`), model, API key, timeout (5–600 s, default 120) and
-priority (0–1000, default 100). With no active profile, templates are not
+no priority field: the order is set by the list (a new profile gets the
+next number after the active ones; an edit keeps its place). With no active profile, templates are not
 sent to an LLM. The API key is
 write-only: the list shows only whether one is saved, and a save with an
 empty key keeps the saved one.
@@ -344,9 +380,9 @@ Review page.
   with counts, All events, then Level (ERROR, WARN, INFO) and Documentation
   (ERROR docs, SAFE docs); a click shows the group's combined series
   (`*total`, `*error`, `*warn`, `*info`, `verdict:action`, `verdict:safe`).
-  A group with nothing in it for the service is disabled. A documentation group's count is the active documents with a linked template (manual, inherited, auto-matched, AI-confirmed) in this service; a verdict series is the sum of those templates. The Errors incident list shows modules of ERROR templates only. **Show** opens a
+  Counts are exact, from `GET /api/baseline/groups` (not capped by the 500 templates the page loads). A group with nothing in it for the service is disabled. A documentation group's count is the active documents with a linked template (manual, inherited, auto-matched, AI-confirmed) in this service; a verdict series is the sum of those templates. The Errors incident list shows modules of ERROR templates only. **Show** opens a
   searchable list: the combined key, then documents, then templates (newest
-  first). Keys: Up / Down, Enter, Esc. A line under it says how the series is
+  first). When the service has more templates than the page holds, typing searches the server (`/api/templates?q=`, 50 rows, 300 ms debounce) and the list ends with "Showing N of M". Keys: Up / Down, Enter, Esc. A line under it says how the series is
   counted (stored key, new stored key with a young baseline, derived from
   linked templates, single template). The group follows the key, so old
   links keep working. A template belongs to the group of its stored level
@@ -379,13 +415,16 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 |---|---|---|---|---|
 | `GET /` | — | `index.html` | — | — |
 | `GET /static/<path>` | — | static file | 404 | — |
-| `GET /api/pipeline` | query `lite=1` (only `status, cursors, stale, linker, linker_stale`: the header pill's poll) | `{status, cursors, stale, linker, linker_stale, services, llm_daily_max, volume, stages}` | — | — |
+| `GET /api/pipeline` | query `lite=1` (only `status, cursors, stale, linker, linker_stale`: the header pill's poll) | `{status, cursors, stale, linker, linker_stale, services, llm_daily_max, throughput, stages}` | — | — |
 | `GET /api/sources` | — | `{selection, connection, available_indices, resolution, indices}` | — | — |
 | `PUT /api/sources/selection` | `{patterns: [str], revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `GET /api/alerts` | — | `[alert row]` | — | — |
 | `GET /api/services` | — | `[service]` sorted | — | — |
-| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `link_source`, `q` | `{total, review_total, items}` | 400 | — |
+| `GET /api/template-levels` | query `service` (optional) | `[{level, n}]`: every level present, FATAL … TRACE then others A-Z | — | — |
+| `GET /api/templates` | query `page`, `size`, `service`, `level`, `doc_id`, `template_id`, `link_source`, `q`, `module`, `sort`, `status` | `{total, review_total, stats, items}`; each item has `modules: [{module, lines, share, last_seen}]` | 400 | — |
+| `GET /api/modules` | query `service` (required) | `[{module, templates, lines_24h}]` by `templates` desc | 400 | — |
+| | | `modules` are over the last 24 hourly buckets (current local hour - 23 .. current hour): in-window modules by `lines` desc with `share` (fraction of the template's window lines), then older ones by `last_seen` desc with `lines` 0 and `share` null. `module` (`""` = no module) keeps templates ever seen in that module, those with window lines in it first, and narrows `total` and `stats` too. | | |
 | `PUT /api/templates/<service>/<template_id>/link` | `{doc_id: str \| null, also?: [template_id]}` | `{doc_id, linked}` | 400, 404 | `reload_links` |
 | `DELETE /api/templates/<service>/<template_id>/link` | — | `{doc_id: null}` | 404 | `reload_links` |
 | `POST /api/templates/<service>/<template_id>/link/confirm` | — | `{doc_id, source}` | 404, 409 | `reload_links` |
@@ -397,9 +436,11 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
 | `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
 | `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, profiles, warnings}` | — | — |
-| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` | `{name, revision}` | 400, 409 | — |
+| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` (no `priority`: an edit keeps it, a new profile gets max(active)+1, 1 if none) | `{name, revision}` | 400, 409 | — |
+| `PUT /api/llm/profiles/order` | `{order: [name, ...]}` | `{order}`: the listed profiles are active with priority 1..n, every other one inactive (one transaction) | 400 (not a list of distinct names, unknown profile) | — |
 | `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
 | `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
+| `GET /api/baseline/groups` | query `service` (required) | `{all, ERROR, WARN, INFO, action, safe}`: templates per level class; active documents per verdict with a template of this service linked by manual, inherited, corpus or llm | 400 | — |
 | `GET /api/baseline/matrix` | query `service`, `key` (default `*total`; also `*error`, `*warn`, `*info`, `verdict:action`, `verdict:safe`, `doc:<id>`, a template id; same for the other `/api/baseline/*` routes), `days` (1–28, default 14) | `{service, key, k, baseline_state, days, coverage, profiles}` | 400, 404 | — |
 | `GET /api/baseline/inspect` | query `service`, `key`, `day`, `hour_from`, `hour_to` | `{sentence, day, increased, new, keys, left_days}` | 400, 404 | — |
 | `GET /api/baseline/series` | query `service`, `key`, `days` (1, 7 or 14, default 14) | `{key, baseline_state, points, incidents, profile}` | 400, 404 | — |
@@ -436,18 +477,18 @@ heartbeat is missing or older than 30 s. `linker` is
 `warnings`, `last_error`, `llm`, `llm_today`, `llm_profiles`) or null;
 `linker_stale` is true when it is missing or older than 90 s.
 
-`services` has one row per service, worst `|z|` first and services without a
-baseline last; `volume` and `stages` follow. `rate` and `last_week` are
-events per minute in the current hour and the same hour a week earlier,
-`z` is against the `*total` expected band (null without a baseline),
-`unparsed_1h` is the `<service>:unparsed` count of the current hour:
+`services` has one row per service, by name; `throughput` and `stages` follow.
+`last`, `avg15` (mean of the last 15 minutes) and `delta_1h` (last / first
+point - 1, only when the first point is 55-60 min older and above 0) come
+from `throughput` and are null without points. `unparsed_1h` is the
+`<service>:unparsed` count of the current hour:
 
 ```json
-{"services": [{"service": "recharge", "rate": 412.0, "last_week": 380.5, "z": 1.4,
+{"services": [{"service": "recharge", "last": 412, "avg15": 405.2, "delta_1h": 0.08,
                "miss_ratio": 0.02, "templates": 87, "new_24h": 3,
                "unparsed_1h": 0, "not_normal": 1}],
- "volume": [{"service": "recharge",
-             "hours": [{"hour": 0, "rate": 120.0, "band_low": 80.0, "band_high": 170.0, "last_week": 118.2, "out": false}]}],
+ "throughput": {"recharge": {"points": [[1792381080, 398], [1792381140, 412]], "last": 412,
+                             "avg15": 405.2, "delta_1h": 0.08}},
  "stages": {"elasticsearch": {"status": "ok", "reason": null},
             "reader": {"status": "ok", "reason": null},
             "templates": {"status": "warn", "reason": "4 unparsed lines in the last hour"},
@@ -458,8 +499,9 @@ events per minute in the current hour and the same hour a week earlier,
             "llm": {"status": "bad", "reason": "no active LLM profile"}}}
 ```
 
-`volume[].hours` runs from hour 0 to the current hour; `rate` is null for
-an hour with no `service_hours` row, whose band is still given. `stages`
+`throughput[service].points` is `[minute_start_epoch_s, events]`, oldest
+first, up to 60 closed minutes, zero minutes included; a service with no
+points is absent. `stages`
 status is `ok`, `warn` (Degraded) or `bad` (Down); the rules are in the
 Pipeline section. The `status` object also carries `flush_seconds`,
 `flush_seconds_max`, `late_counts`, `events_per_second_15m` and `history`
@@ -518,7 +560,10 @@ fields come from the engine's status and are null until it reports.
 ```
 
 `kind` is `document`, `template`, `cluster` or `service`; `doc_id` and
-`title` are null except for documents. Each template line has `link`:
+`title` are null except for documents. Document rows also have
+`handling_step` (first non-empty line of the Handling without its `1.`, `1)`
+or `-` marker, or null); template and cluster rows have `draft_doc_id` (a
+`draft` link of any of their templates, or null). Each template line has `link`:
 null, or `{doc_id, source, similarity, note, title, verdict}` of its
 `template_doc_links` row, drafts and rejected ones included (badges only:
 grouping uses only the links that drive alerts). `templates` holds the template members, `totals` the
@@ -582,11 +627,13 @@ Authorization: Bearer <token>
 
 - `page` (default 1) and `size` (default 100) are clamped to 1..10⁶ and
   1..500; a non-integer is 400 `"<name> must be an integer"`.
-- `service`, `level`, `doc_id`: exact match; `q`: case-insensitive
+- `service`, `level`, `doc_id`, `template_id`: exact match; `q`: case-insensitive
   substring of the text; `link_source`: `none` (no row), `review` (an
   automatic link: `inherited`, `corpus`, `llm`, `draft`) or one of
   `manual`, `inherited`, `corpus`, `llm`, `draft`, `rejected` (else 400).
-- Order: newest `last_seen` first, then `template_id`; with
+- `sort`: `last_seen` (default) or `first_seen`, newest first, then
+  `template_id`; anything else is 400; ignored with `link_source=review`.
+- Order: by `sort`; with
   `link_source=review`, ALERTING first, then level class ERROR > WARN >
   INFO, then the same.
 - `review_total`: templates with an automatic link that match `service`,
@@ -636,10 +683,11 @@ template has no vector (then the list is empty).
 
 - `GET /api/documents?status=active`: `[{doc_id, service, level, based_on, title, error_code, error,
   handling, status, source, verdict, confidence, revision, embedded,
-  error_lines, linked_templates}]` sorted by `doc_id`. `error_lines` = the
+  error_lines, linked_templates, template_level}]` sorted by `doc_id`. `error_lines` = the
   ERROR field normalized as the linker embeds it; `embedded` = the linker
   has embedded this revision; `linked_templates` counts links that drive
-  alerts.
+  alerts; `template_level` = level of the template a draft was written
+  for (its `draft` link), else null.
 - `POST`: `title` (≤ 200) required, and `error` (≤ 5000, ≤ 50 lines) or
   `handling` (≤ 20000) non-empty after trimming; `error_code` optional (≤
   100); `verdict` `action` (ERROR, the default) or `safe` (SAFE), else 400
@@ -828,7 +876,7 @@ returned.
 | Shell, routing, polling, health pill | `static/index.html`, `static/js/main.js`, `core.js`, `ui.js` |
 | Views | `static/js/views/{alerting,pipeline,templates,documentation,sources,baseline,review,llm}.js` |
 | Charts | `static/js/charts.js` (ECharts helpers, colour tokens); `static/vendor/echarts.min.js` (ECharts 5.5.1, Apache-2.0, `ECHARTS-LICENSE`, self-hosted) |
-| Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, volume, stage states) |
+| Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, throughput, stage states) |
 | Styles | `static/css/tokens.css`, `app.css` (copied from logai-engine) |
 | Shared with the engine | `logai2/alerts.py` (alert rows), `logai2/owner/baseline.py` (bands), `logai2/review.py` (suggestions; minutes and keys per hour), `logai2/commands.py` |
 | Tests | `tests/test_web_sources.py`, `test_web_alerts_templates.py`, `test_web_docs_baseline.py` |

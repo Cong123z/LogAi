@@ -20,9 +20,10 @@ def client(app):
     return app.test_client()
 
 
-def add_template(conn, tid, text="user <*> logged in", level="INFO", service="pay", last_seen="2026-10-20 10:00Z"):
-    conn.execute("INSERT INTO templates VALUES (%s, %s, %s, %s, '2026-10-19 10:00Z', %s)",
-                 (service, tid, level, text, last_seen))
+def add_template(conn, tid, text="user <*> logged in", level="INFO", service="pay", last_seen="2026-10-20 10:00Z",
+                 first_seen="2026-10-19 10:00Z"):
+    conn.execute("INSERT INTO templates VALUES (%s, %s, %s, %s, %s, %s)",
+                 (service, tid, level, text, first_seen, last_seen))
 
 
 def add_doc(conn, doc_id, title="Card gateway down"):
@@ -86,6 +87,19 @@ def test_templates_rate_and_band(client, conn):
     assert (items["pay:T00001"]["rate"], items["pay:T00001"]["band_low"], items["pay:T00001"]["band_high"]) == (5.0, 1.0, 7.0)
     assert (items["young:T00001"]["band_low"], items["young:T00001"]["band_high"]) == (0.0, 8.0)
     assert items["idle:T00001"]["rate"] is None and items["idle:T00001"]["band_high"] is None
+
+
+def test_templates_sort_first_seen(client, conn):
+    add_template(conn, "pay:A", first_seen="2026-10-19 10:00Z", last_seen="2026-10-22 10:00Z")
+    add_template(conn, "pay:B", first_seen="2026-10-21 10:00Z", last_seen="2026-10-20 10:00Z")
+    conn.commit()
+    ids = lambda q: [i["template_id"] for i in client.get(f"/api/templates{q}").get_json()["items"]]
+    assert ids("?sort=first_seen") == ["pay:B", "pay:A"]
+    assert ids("") == ids("?sort=last_seen") == ["pay:A", "pay:B"]
+
+
+def test_templates_sort_rejects_unknown(client):
+    assert client.get("/api/templates?sort=rate").status_code == 400
 
 
 def test_templates_paginated_and_filtered(client, conn):
@@ -208,3 +222,54 @@ def test_verify_certs_must_be_boolean(client):
 def test_echarts_is_served_locally(client):
     r = client.get("/static/vendor/echarts.min.js")
     assert r.status_code == 200 and b"echarts" in r.data[:4096]
+
+
+def test_alert_document_row_has_handling_step(client, conn):
+    add_doc(conn, "D1")
+    conn.execute("UPDATE documents SET handling = %s WHERE doc_id = 'D1'", ("\n1. Check gateway status\n2. Switch route",))
+    add_template(conn, "pay:T1", level="ERROR")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('pay', 'pay:T1', 'D1', 'manual')")
+    add_state(conn, "pay:T1", "ALERTING", 9)
+    conn.commit()
+    row = client.get("/api/alerts").get_json()[0]
+    assert row["handling_step"] == "Check gateway status"
+
+
+def test_alert_template_row_has_draft_doc_id(client, conn):
+    add_doc(conn, "D9")
+    conn.execute("UPDATE documents SET status = 'draft' WHERE doc_id = 'D9'")
+    add_template(conn, "pay:T2", level="ERROR")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('pay', 'pay:T2', 'D9', 'draft')")
+    add_state(conn, "pay:T2", "ALERTING", 9)
+    conn.commit()
+    row = client.get("/api/alerts").get_json()[0]
+    assert row["kind"] == "template" and row["draft_doc_id"] == "D9"
+
+
+def test_templates_filter_by_template_id(client, conn):
+    add_template(conn, "pay:T1")
+    add_template(conn, "pay:T2")
+    conn.commit()
+    items = client.get("/api/templates?service=pay&template_id=pay:T2").get_json()["items"]
+    assert [t["template_id"] for t in items] == ["pay:T2"]
+
+
+def test_template_levels_includes_unknown_last(client, conn):
+    for tid, lvl in (("pay:A", "INFO"), ("pay:B", "ERROR"), ("pay:C", "ALERT"), ("pay:D", "DEBUG"), ("pay:E", "ERROR")):
+        add_template(conn, tid, level=lvl)
+    add_template(conn, "web:A", level="TRACE", service="web")
+    conn.commit()
+    assert client.get("/api/template-levels?service=pay").get_json() == [
+        {"level": "ERROR", "n": 2}, {"level": "INFO", "n": 1}, {"level": "DEBUG", "n": 1}, {"level": "ALERT", "n": 1}]
+    assert client.get("/api/template-levels").get_json()[-2:] == [{"level": "TRACE", "n": 1}, {"level": "ALERT", "n": 1}]
+
+
+def test_draft_documents_carry_template_level(client, conn):
+    add_doc(conn, "D5")
+    add_doc(conn, "D6")
+    conn.execute("UPDATE documents SET status = 'draft' WHERE doc_id IN ('D5', 'D6')")
+    add_template(conn, "pay:W", level="WARNING")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('pay', 'pay:W', 'D5', 'draft')")
+    conn.commit()
+    drafts = {d["doc_id"]: d for d in client.get("/api/documents?status=draft").get_json()}
+    assert drafts["D5"]["template_level"] == "WARNING" and drafts["D6"]["template_level"] is None
