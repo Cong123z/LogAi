@@ -411,8 +411,8 @@ JSON object of the reply, retries once on a timeout only, and never follows
 a redirect (it would carry the API key elsewhere). A base URL without a
 path gets `/v1` (`https://host` → `https://host/v1/chat/completions`).
 
-**Failover.** Every active profile is used, lowest `priority` first, then
-by name. A profile that fails with a network or HTTP error or a timeout
+**Failover.** Every active profile is used in call order: `priority` 1 first
+(the web page keeps the active ones numbered 1..n), then by name. A profile that fails with a network or HTTP error or a timeout
 (`LlmUnavailable`) is skipped for 5 minutes and the next one answers the
 same question; the failed call counts in the 3 per cycle. A reply that is
 not a JSON object fails the template, not the profile. When no active

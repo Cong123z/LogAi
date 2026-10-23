@@ -832,6 +832,22 @@ def create_app(cfg: AppConfig) -> Flask:
             "profiles": linker.get("llm_profiles") or {},
             "warnings": linker.get("warnings") or []})
 
+    @app.put("/api/llm/profiles/order")
+    def put_llm_order():
+        """The call order: the listed profiles are active with priority 1..n, all others inactive."""
+        order = body().get("order")
+        if not isinstance(order, list) or not all(isinstance(n, str) for n in order) or len(set(order)) != len(order):
+            raise BadRequest("order must be a list of distinct profile names")
+        c = conn()
+        known = {r["name"] for r in c.execute("SELECT name FROM llm_profiles FOR UPDATE").fetchall()}
+        if not set(order) <= known:
+            raise BadRequest("order names an unknown profile")
+        c.execute("UPDATE llm_profiles SET active = false WHERE name <> ALL(%s)", (order,))
+        for i, name in enumerate(order, 1):
+            c.execute("UPDATE llm_profiles SET active = true, priority = %s WHERE name = %s", (i, name))
+        c.commit()
+        return jsonify({"order": order})
+
     @app.put("/api/llm/profiles/<name>")
     def put_llm_profile(name: str):
         payload = body()
@@ -843,18 +859,21 @@ def create_app(cfg: AppConfig) -> Flask:
             raise BadRequest("base_url must be an http(s) URL without credentials")
         if not model:
             raise BadRequest("model is required")
-        timeout, priority = payload.get("timeout_seconds", 120), payload.get("priority", 100)
+        timeout, priority = payload.get("timeout_seconds", 120), payload.get("priority")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 5 <= timeout <= 600:
             raise BadRequest("timeout_seconds must be an integer from 5 to 600")
-        if not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 1000:
+        if priority is not None and (not isinstance(priority, int) or isinstance(priority, bool) or not 0 <= priority <= 1000):
             raise BadRequest("priority must be an integer from 0 to 1000")
         api_key = _text(payload.get("api_key"), "api_key")   # no control characters: it goes into a header
         if not api_key.isascii():
             raise BadRequest("api_key must be ASCII")
         c = conn()
-        row = c.execute("SELECT revision, api_key FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
+        row = c.execute("SELECT revision, api_key, priority FROM llm_profiles WHERE name = %s FOR UPDATE", (name,)).fetchone()
         if (row["revision"] if row else None) != payload.get("revision"):
             raise db.StaleRevision(row["revision"] if row else None)
+        if priority is None:   # an edit keeps its place; a new profile goes after the active ones
+            priority = row["priority"] if row else c.execute(
+                "SELECT coalesce(max(priority), 0) + 1 AS p FROM llm_profiles WHERE active").fetchone()["p"]
         revision = uuid.uuid4().hex
         # a create (no row read) must not overwrite one created meanwhile: DO UPDATE only on an update
         written = c.execute(

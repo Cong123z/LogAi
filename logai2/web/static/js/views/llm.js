@@ -1,8 +1,9 @@
 // ── LLM profiles (as in logai-engine) ──
-// The linker's resolver uses the one active profile; the API key is write-only. The banner and the
-// cards show the resolver's state and what it produced (polled every 5 s).
-const llm = {items: [], editing: null};
-const $llmTbody = document.getElementById('llm-tbody');
+// The linker's resolver calls the active profiles in order (1, 2, 3...); the API key is write-only.
+// The banner and the usage line show the resolver's state and what it produced (polled every 5 s).
+const llm = {items: [], editing: null, health: {}};
+const $llmOrder = document.getElementById('llm-order');
+const $llmUnused = document.getElementById('llm-unused');
 const $llmModal = document.getElementById('llm-modal');
 
 function llmBanner(usage, active) {
@@ -31,21 +32,40 @@ function llmBanner(usage, active) {
   $b.textContent = text;
 }
 
-function llmStats(usage, actives) {
-  const active = actives[0];
+function llmUsageLine(usage) {
   const count = (period, ...sources) => sources.reduce((n, s) => n + (usage[period][s] || 0), 0);
-  const last = usage.last_cycle;
-  document.getElementById('llm-stats').innerHTML = [
-    plCard('Active profiles', active ? String(actives.length) : 'None',
-      active ? actives.map(p => p.name).join(' → ') : 'nothing is sent', active ? '' : 'warn'),
-    plCard('Last hour', String(count('hour', 'llm', 'draft', 'rejected')),
-      usage.limits.per_service_hour ? `limit ${usage.limits.per_service_hour} per service` : 'no limit'),
-    plCard('Last 24 h', String(count('day', 'llm', 'draft', 'rejected')),
-      `${count('day', 'llm')} confirmed · ${count('day', 'draft')} suggested · ${count('day', 'rejected')} rejected · ${usage.limits.daily_max ? `limit ${usage.limits.daily_max}` : 'no limit'}`),
-    plCard('Suggestions waiting', String(usage.drafts_waiting), 'review in Documentation → AI suggestions', usage.drafts_waiting ? 'warn' : ''),
-    plCard('Last cycle', last ? `${last.confirmed + last.suggested} done` : '—',
-      last ? `${last.failed} failed · ${last.none} none` : 'no LLM call yet'),
-  ].join('');
+  const limit = usage.limits.daily_max ? ` / ${usage.limits.daily_max}` : '';
+  document.getElementById('llm-usage').innerHTML = `Last 24 h: ${count('day', 'llm', 'draft', 'rejected')}${limit} calls · `
+    + `${count('day', 'llm')} confirmed · ${count('day', 'draft')} suggested · ${count('day', 'rejected')} rejected · `
+    + `<a href="#documentation/suggestions">${usage.drafts_waiting} waiting for review</a>`;
+}
+
+const llmKey = p => (p.has_api_key ? 'saved' : 'none');
+const llmMeta = p => `${escapeHtml(p.model)} · ${escapeHtml(p.base_url)} · key ${llmKey(p)}`;
+
+function llmSlot(p, i, order, inUse) {
+  const h = llm.health[p.name] || {};
+  const failing = h.down_until && h.down_until * 1000 > Date.now();
+  const use = p.name === inUse;
+  const [cls, badge, text] = failing
+    ? ['fail', 'badge-red', `FAILING · skipped until ${new Date(h.down_until * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`]
+    : use ? ['use', 'badge-blue', 'IN USE'] : ['', 'badge-gray', 'STANDBY'];
+  const note = failing ? h.error || '' : use ? `${h.answers || 0} answers since start` : 'Answers only when the ones above fail';
+  const name = escapeHtml(p.name);
+  return `<div class="llm-slot ${cls}" data-profile="${name}">
+      <div class="llm-num" aria-label="Order ${i + 1}">${i + 1}</div>
+      <div class="llm-main">
+        <div><strong>${name}</strong> <span class="hint">priority ${i + 1}</span> <span class="badge ${badge}">${text}</span></div>
+        <div class="tmpl-id">${llmMeta(p)}</div>
+        <div class="hint" style="overflow-wrap:anywhere">${escapeHtml(note)}</div>
+      </div>
+      <div class="btn-row">
+        <button type="button" class="btn llm-move" data-dir="-1" aria-label="Move ${name} up"${i === 0 ? ' disabled' : ''}>↑</button>
+        <button type="button" class="btn llm-move" data-dir="1" aria-label="Move ${name} down"${i === order.length - 1 ? ' disabled' : ''}>↓</button>
+        <button type="button" class="btn llm-edit">Edit</button>
+        <button type="button" class="btn llm-stop">Stop using</button>
+      </div>
+    </div>${i < order.length - 1 ? `<div class="llm-arrow">↓ if it fails, call #${i + 2}</div>` : ''}`;
 }
 
 async function loadLlmPage() {
@@ -53,38 +73,26 @@ async function loadLlmPage() {
     getJson('/api/llm/profiles', 'Unable to load LLM profiles'),
     getJson('/api/llm/usage', 'Unable to load LLM usage'),
   ]);
-  const actives = items.filter(p => p.active);
+  const actives = items.filter(p => p.active);   // the API lists them by priority
   llmBanner(usage, actives.length ? actives : null);
-  llmStats(usage, actives);
+  llmUsageLine(usage);
   llm.health = usage.profiles || {};
-  if ($llmTbody.contains(document.activeElement)) return;   // do not swap the table under a click
+  if ($llmOrder.contains(document.activeElement) || $llmUnused.contains(document.activeElement)) return;   // do not swap the lists under a click
   llm.items = items;
-  $llmTbody.innerHTML = llm.items.length ? llm.items.map(p => `
-    <tr data-profile="${escapeHtml(p.name)}">
-      <td>${p.priority}</td>
-      <td>${escapeHtml(p.name)}</td>
-      <td><span class="tmpl-id">${escapeHtml(p.base_url)}</span></td>
-      <td>${escapeHtml(p.model)}</td>
-      <td>${p.timeout_seconds}s</td>
-      <td>${p.has_api_key ? 'saved' : '—'}</td>
-      <td>${llmStatusBadge(p)}</td>
-      <td>${p.active ? ((llm.health[p.name] || {}).answers || 0) : '—'}</td>
-      <td><div class="btn-row">
-        <button type="button" class="btn llm-activate">${p.active ? 'Deactivate' : 'Activate'}</button>
+  const inUse = (actives.find(p => !(llm.health[p.name] || {}).down_until
+    || llm.health[p.name].down_until * 1000 <= Date.now()) || {}).name;
+  $llmOrder.innerHTML = actives.length ? actives.map((p, i) => llmSlot(p, i, actives, inUse)).join('')
+    : '<p class="empty-state">No profile in the call order: templates are not sent to an LLM.</p>';
+  const unused = items.filter(p => !p.active);
+  $llmUnused.innerHTML = unused.length ? unused.map(p => `
+    <div class="llm-slot off" data-profile="${escapeHtml(p.name)}">
+      <div class="llm-main"><strong>${escapeHtml(p.name)}</strong><div class="tmpl-id">${llmMeta(p)}</div></div>
+      <div class="btn-row">
+        <button type="button" class="btn llm-add-order">Add as #${actives.length + 1}</button>
         <button type="button" class="btn llm-edit">Edit</button>
         <button type="button" class="btn btn-danger llm-delete">Delete</button>
-      </div></td>
-    </tr>`).join('')
-    : '<tr><td colspan="9" class="empty-state">No profile: templates are not sent to an LLM.</td></tr>';
-}
-
-function llmStatusBadge(p) {
-  if (!p.active) return '<span class="badge badge-gray">inactive</span>';
-  const h = (llm.health || {})[p.name];
-  return h && h.down_until
-    ? `<span class="badge badge-red">failing, skipped until ${escapeHtml(new Date(h.down_until * 1000).toLocaleTimeString())}</span>
-       <div class="hint" style="max-width:40ch;overflow-wrap:anywhere">${escapeHtml(h.error || '')}</div>`
-    : '<span class="badge badge-green">active</span>';
+      </div></div>`).join('')
+    : '<p class="hint">Every profile is in the call order.</p>';
 }
 
 function openLlmEditor(name = null) {
@@ -97,31 +105,43 @@ function openLlmEditor(name = null) {
   document.getElementById('llm-model').value = p ? p.model : '';
   document.getElementById('llm-api-key').value = '';
   document.getElementById('llm-timeout').value = p ? p.timeout_seconds : 120;
-  document.getElementById('llm-priority').value = p ? p.priority : 100;
   document.getElementById('llm-error').textContent = '';
   $llmModal.classList.add('open');
 }
 
 document.getElementById('llm-add-btn').addEventListener('click', () => openLlmEditor());
 
-$llmTbody.addEventListener('click', async event => {
-  const row = event.target.closest('tr[data-profile]');
-  if (!row) return;
+async function onLlmClick(event) {
+  const row = event.target.closest('[data-profile]');
+  const btn = event.target.closest('button');
+  if (!row || !btn) return;
   const name = row.dataset.profile;
-  const p = llm.items.find(item => item.name === name);
+  const order = llm.items.filter(p => p.active).map(p => p.name);
+  const i = order.indexOf(name);
+  let next = null, focus = null;
+  if (btn.classList.contains('llm-edit')) return openLlmEditor(name);
+  if (btn.classList.contains('llm-move')) {
+    const j = i + Number(btn.dataset.dir);
+    [order[i], order[j]] = [order[j], order[i]];
+    next = order;
+    focus = `[data-profile="${CSS.escape(name)}"] [data-dir="${btn.dataset.dir}"]`;
+  } else if (btn.classList.contains('llm-stop')) next = order.filter(n => n !== name);
+  else if (btn.classList.contains('llm-add-order')) next = [...order, name];
   try {
-    if (event.target.closest('.llm-edit')) return openLlmEditor(name);
-    if (event.target.closest('.llm-activate')) {
-      await apiMutation(`/api/llm/profiles/${encodeURIComponent(name)}/activate`, 'POST', {active: !p.active});
-    } else if (event.target.closest('.llm-delete')) {
+    if (btn.classList.contains('llm-delete')) {
       if (!(await confirmDialog(`The LLM profile ${name} will be deleted.`, {title: 'Delete this profile?', confirmLabel: 'Delete'}))) return;
       await apiMutation(`/api/llm/profiles/${encodeURIComponent(name)}`, 'DELETE', {});
-    } else return;
+    } else if (next) await apiMutation('/api/llm/profiles/order', 'PUT', {order: next});   // the whole order, every time
+    else return;
   } catch (err) {
     notifyDialog(err.message, 'Unable to update the profile');
   }
-  loadLlmPage();
-});
+  document.activeElement.blur();
+  await loadLlmPage();
+  if (focus) { const el = document.querySelector(focus); if (el && !el.disabled) el.focus(); }
+}
+$llmOrder.addEventListener('click', onLlmClick);
+$llmUnused.addEventListener('click', onLlmClick);
 
 document.getElementById('llm-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -131,7 +151,6 @@ document.getElementById('llm-form').addEventListener('submit', async event => {
     model: document.getElementById('llm-model').value.trim(),
     api_key: document.getElementById('llm-api-key').value,
     timeout_seconds: Number(document.getElementById('llm-timeout').value),
-    priority: Number(document.getElementById('llm-priority').value),
     revision: llm.editing ? llm.editing.revision : null,
   };
   const submit = event.submitter;
