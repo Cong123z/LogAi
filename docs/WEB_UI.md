@@ -330,20 +330,23 @@ the password again. The engine reconnects on the `reload_sources` command.
 A page of its own (Settings → LLM profiles, polled every 5 s), as in
 logai-engine. A banner says when nothing is sent to an LLM (no active
 profile, linker not running) or shows the last LLM error or the daily
-limit. Cards: the active profile, results in the last hour and 24 h
-(confirmed / suggested / rejected, with the limits), suggestions waiting
-for review, and the linker's last cycle. Then the profiles table with Add,
-Edit, Activate / Deactivate and Delete. Every active profile is used,
-lowest **priority** first: when one fails (network, HTTP error, timeout)
-the next one answers and the failing one is skipped for 5 minutes; its
-row shows "failing" with the error, and the banner says whether another
-profile is answering. **Answers** counts each active profile's answers
-since the linker started.
+limit. The **Call order** list shows the active profiles as 1, 2, 3: a
+badge says IN USE (the first one not failing), STANDBY, or FAILING ·
+skipped until hh:mm (with the error); each has ↑ / ↓ (real buttons, disabled
+at the ends), Edit and Stop using, and "if it fails, call #n+1" sits between
+items. Every move saves the whole order (`PUT /api/llm/profiles/order`).
+**Not used** lists the other profiles with Add as #n, Edit and Delete. A
+last line gives the 24 h calls (of `llm.daily_max`), results and the
+suggestions waiting. When one profile fails (network, HTTP error,
+timeout) the next one answers and the failing one is skipped for 5
+minutes; the banner says whether another profile is answering. IN USE
+shows the answers counted since the linker started.
 
 Each profile, as in logai-engine: name, OpenAI-compatible base URL
 (`…/v1`, or a bare host which gets `/v1`; the linker posts to
 `…/chat/completions`), model, API key, timeout (5–600 s, default 120) and
-priority (0–1000, default 100). With no active profile, templates are not
+no priority field: the order is set by the list (a new profile gets the
+next number after the active ones; an edit keeps its place). With no active profile, templates are not
 sent to an LLM. The API key is
 write-only: the list shows only whether one is saved, and a save with an
 empty key keeps the saved one.
@@ -414,7 +417,8 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
 | `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
 | `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, profiles, warnings}` | — | — |
-| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` | `{name, revision}` | 400, 409 | — |
+| `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` (no `priority`: an edit keeps it, a new profile gets max(active)+1, 1 if none) | `{name, revision}` | 400, 409 | — |
+| `PUT /api/llm/profiles/order` | `{order: [name, ...]}` | `{order}`: the listed profiles are active with priority 1..n, every other one inactive (one transaction) | 400 (not a list of distinct names, unknown profile) | — |
 | `POST /api/llm/profiles/<name>/activate` | `{active: bool}` | `{name, active}` | 400, 404 | — |
 | `DELETE /api/llm/profiles/<name>` | — | `{name}` | 404 | — |
 | `GET /api/baseline/groups` | query `service` (required) | `{all, ERROR, WARN, INFO, action, safe}`: templates per level class; active documents per verdict with a template of this service linked by manual, inherited, corpus or llm | 400 | — |
