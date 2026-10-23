@@ -21,6 +21,11 @@ curl -s -H "Authorization: Bearer $LOGAI_TOKEN" \
 | Kubernetes (trong cluster, cùng namespace) | `http://logai-web:5555` |
 | Kubernetes (khác namespace) | `http://logai-web.<namespace>.svc.cluster.local:5555` |
 | Docker Compose trên máy dev | `http://localhost:5565` |
+| Ngoài cluster (qua NodePort) | `http://<IP-node-bất-kỳ>:8080` |
+
+Web logai2 trên k8s được mở ra ngoài bằng một **NodePort 8080**: từ ngoài cluster gọi vào
+`http://<IP của node bất kỳ>:8080` với cùng đường dẫn và tham số, ví dụ
+`http://<IP-node>:8080/api/module-alerts?module_code=...&from=...&to=...`.
 
 API chỉ mở trong mạng nội bộ; không public ra Internet.
 
