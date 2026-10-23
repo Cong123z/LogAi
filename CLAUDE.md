@@ -1,7 +1,8 @@
 # logai2 — instructions for Claude sessions
 
 Docs: README.md (run), ARCHITECTURE.md (how it works, as implemented),
-docs/WEB_UI.md (pages + HTTP API), docs/specs/ and docs/plans/ (designs).
+docs/WEB_UI.md (pages + HTTP API), docs/specs/ and docs/plans/ (designs),
+docs/BUGS.md (open bugs and risks: add new ones, move fixed ones down).
 The code and tests are the source of truth; fix a doc that disagrees.
 
 ## Project rules
