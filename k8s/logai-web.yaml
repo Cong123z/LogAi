@@ -1,8 +1,7 @@
 # logai2 web console on 5555. Talks only to Postgres (never to Elasticsearch or the engine);
 # the LOGAI_ES_* values are shown on the Data sources page until a connection is saved there.
 # Secret logai-env comes from logai-engine.yaml. No authentication except the optional
-# LOGAI2_API_TOKEN on /api/module-alerts. The Service is a NodePort (8080 on every node): the
-# whole web, write routes included, is open to whoever reaches a node, so firewall it.
+# LOGAI2_API_TOKEN on /api/module-alerts: keep the Service internal.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,11 +69,9 @@ kind: Service
 metadata:
   name: logai-web
 spec:
-  type: NodePort   # reachable from outside the cluster at <any node IP>:8080
   selector:
     app: logai-web
   ports:
     - name: http
       port: 5555
       targetPort: 5555
-      nodePort: 8080   # outside the default 30000-32767: needs the cluster's --service-node-port-range to include it
