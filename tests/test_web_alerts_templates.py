@@ -208,3 +208,33 @@ def test_verify_certs_must_be_boolean(client):
 def test_echarts_is_served_locally(client):
     r = client.get("/static/vendor/echarts.min.js")
     assert r.status_code == 200 and b"echarts" in r.data[:4096]
+
+
+def test_alert_document_row_has_handling_step(client, conn):
+    add_doc(conn, "D1")
+    conn.execute("UPDATE documents SET handling = %s WHERE doc_id = 'D1'", ("\n1. Check gateway status\n2. Switch route",))
+    add_template(conn, "pay:T1", level="ERROR")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('pay', 'pay:T1', 'D1', 'manual')")
+    add_state(conn, "pay:T1", "ALERTING", 9)
+    conn.commit()
+    row = client.get("/api/alerts").get_json()[0]
+    assert row["handling_step"] == "Check gateway status"
+
+
+def test_alert_template_row_has_draft_doc_id(client, conn):
+    add_doc(conn, "D9")
+    conn.execute("UPDATE documents SET status = 'draft' WHERE doc_id = 'D9'")
+    add_template(conn, "pay:T2", level="ERROR")
+    conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('pay', 'pay:T2', 'D9', 'draft')")
+    add_state(conn, "pay:T2", "ALERTING", 9)
+    conn.commit()
+    row = client.get("/api/alerts").get_json()[0]
+    assert row["kind"] == "template" and row["draft_doc_id"] == "D9"
+
+
+def test_templates_filter_by_template_id(client, conn):
+    add_template(conn, "pay:T1")
+    add_template(conn, "pay:T2")
+    conn.commit()
+    items = client.get("/api/templates?service=pay&template_id=pay:T2").get_json()["items"]
+    assert [t["template_id"] for t in items] == ["pay:T2"]

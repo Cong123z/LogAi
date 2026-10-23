@@ -3,7 +3,7 @@
 // person, alerting first; "All templates" lists every template. Each row shows this hour's rate
 // against its normal band and the linked document; the drawer holds the decision.
 // mode null = not chosen yet: the first answer picks "review" when anything waits for review.
-const tpl = {mode: null, search: '', service: '', level: '', link: '', status: '', page: 1, size: 100, refreshTimer: null,
+const tpl = {mode: null, search: '', service: '', level: '', link: '', status: '', docId: '', routeSub: null, page: 1, size: 100, refreshTimer: null,
              items: new Map(), order: [], docs: [], drawerItem: null};
 const $tplModeToggle = document.getElementById('tpl-mode-toggle');
 const $tplReviewCount = document.getElementById('tpl-review-count');
@@ -24,6 +24,7 @@ function fetchTemplates() {
   const params = new URLSearchParams({page: tpl.page, size: tpl.size});
   if (tpl.search) params.set('q', tpl.search);
   if (tpl.service) params.set('service', tpl.service);
+  if (tpl.docId) params.set('doc_id', tpl.docId);
   if (tpl.level) params.set('level', tpl.level);
   if (tpl.mode === 'review') params.set('link_source', 'review');
   else if (tpl.link) params.set('link_source', tpl.link);
@@ -104,7 +105,7 @@ function tplStateCell(t) {
 }
 
 function renderServiceFilter(services) {
-  const current = $tplService.value;
+  const current = tpl.service;
   $tplService.innerHTML = '<option value="">All services</option>';
   services.forEach(s => {
     const opt = document.createElement('option');
@@ -173,9 +174,42 @@ function getPageRange(current, total) {
   return pages;
 }
 
+// Routes from Alerting: #templates/<service>?doc_id=<id> lists that document's templates,
+// #templates/<service>/<template_id> also opens that template's drawer. Applied once per route.
+// The router has no query support, so the ?doc_id part is parsed here from state.subView.
+function applyTplRoute() {
+  const sub = state.subView || '';
+  if (sub === tpl.routeSub) return null;
+  tpl.routeSub = sub;
+  if (!sub) { tpl.docId = ''; return null; }
+  const [path, query = ''] = sub.split('?');
+  let service, template;
+  try { [service, template] = path.split('/').map(decodeURIComponent); } catch (e) { return null; }
+  tpl.service = service || '';
+  tpl.docId = new URLSearchParams(query).get('doc_id') || '';
+  tpl.search = $tplSearch.value = '';
+  tpl.level = $tplLevel.value = '';
+  tpl.page = 1;
+  setTplMode('all');   // the To review list would hide a template that has no automatic link
+  return template ? {service: tpl.service, template_id: template} : null;
+}
+
+// The template may be off the page (other page, filtered out): ask for it by id.
+async function openRouteTemplate({service, template_id: id}) {
+  let t = tpl.items.get(tplKey({service, template_id: id}));
+  if (!t) {
+    const found = await getJson(`/api/templates?service=${encodeURIComponent(service)}&template_id=${encodeURIComponent(id)}`,
+      'Unable to load the template');
+    t = found.items[0];
+  }
+  if (t) openTemplateDrawer(t);
+}
+
 let tplSeq = 0;
+let tplPendingOpen = null;
 async function loadTemplates() {
   const seq = ++tplSeq;
+  tplPendingOpen = applyTplRoute() || tplPendingOpen;
   const [data, services, docs] = await Promise.all([fetchTemplates(), fetchServices(), fetchDocuments()]);
   if (seq !== tplSeq) return;   // a newer request (filter, page) is in flight: drop this answer
   if (tpl.mode === null) {      // first load: open on To review when anything waits for a decision
@@ -197,6 +231,11 @@ async function loadTemplates() {
     .setAttribute('aria-label', `To review, ${data.review_total} template${data.review_total === 1 ? '' : 's'}`);
   for (const [k, n] of Object.entries(data.stats)) document.getElementById(`tpl-stat-${k}`).textContent = n.toLocaleString();
   renderTemplates(data);
+  if (tplPendingOpen) {
+    const target = tplPendingOpen;
+    tplPendingOpen = null;
+    openRouteTemplate(target).catch(err => showToast(err.message, true));
+  }
 }
 
 // Known / Unknown: the toggle and the stat cards set the same filter; the cards show it only in All templates.
@@ -423,7 +462,7 @@ $tplSearch.addEventListener('input', () => {
   }, 300);
 });
 
-$tplService.addEventListener('change', () => { tpl.service = $tplService.value; tpl.page = 1; loadData(); });
+$tplService.addEventListener('change', () => { tpl.service = $tplService.value; tpl.docId = ''; tpl.page = 1; loadData(); });
 $tplLevel.addEventListener('change', () => { tpl.level = $tplLevel.value; tpl.page = 1; loadData(); });
 $tplLink.addEventListener('change', () => { tpl.link = $tplLink.value; tpl.page = 1; loadData(); });
 document.getElementById('page-size').addEventListener('change', event => {

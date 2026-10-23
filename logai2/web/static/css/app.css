@@ -1101,3 +1101,9 @@ button.stat-card:disabled { cursor: default; }
 .kp-empty { padding:16px 8px; color:var(--text-muted); font-size:13px; }
 .kp-crumb { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:13px; color:var(--text-dim); margin-bottom:14px; }
 .kp-crumb code { font-size:12px; padding:1px 6px; border-radius:var(--radius-sm); background:var(--bg-row-hover); color:var(--text); }
+
+/* Alerting: links out of a card. */
+a.btn { display: inline-flex; align-items: center; text-decoration: none; }
+.alert-actions { flex-wrap: wrap; margin-top: 8px; }
+.alert-step { margin: 8px 0 0; font-size: 13px; color: var(--text-dim); overflow-wrap: anywhere; }
+.alert-chart { font-size: 12px; white-space: nowrap; }
