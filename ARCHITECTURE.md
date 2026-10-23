@@ -920,7 +920,7 @@ No DLQ.
 6. `logai2/jobs/commit.py`, `logai2/review.py`: the daily commit and suggestions.
 7. `logai2/engine.py`, `logai2/commands.py`, `logai2/metrics.py`: the loop.
 8. `logai2/links.py`, `logai2/embed.py`, `logai2/linker.py`, `logai2/llm.py`, `logai2/resolver.py`: document links (§5.1).
-9. `logai2/web/app.py`, `logai2/web/baseline_view.py` (Review matrix, inspector, Baseline series and incidents), `logai2/web/pipeline_view.py` (services, volume, stage states) and [`docs/WEB_UI.md`](docs/WEB_UI.md).
+9. `logai2/web/app.py`, `logai2/web/baseline_view.py` (Review matrix, inspector, Baseline series and incidents), `logai2/web/pipeline_view.py` (services, throughput, stage states) and [`docs/WEB_UI.md`](docs/WEB_UI.md).
 
 Tests under `tests/` are executable examples of these contracts. Good starting
 points: `test_owner.py` (exact counts across a crash), `test_reader.py`

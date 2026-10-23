@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 from logai2.web.app import create_app
-from logai2.web.pipeline_view import services, stage_states, volume
+from logai2.web.pipeline_view import services, stage_states, throughput
 from tests.conftest import TEST_DSN
 from tests.test_web_baseline_view import base, committed, hours, service
 
@@ -71,32 +71,51 @@ def seed(conn):
     conn.commit()
 
 
-def test_services_rate_last_week_z_and_order(conn, cfg):
+def test_services_counts_and_order(conn, cfg):
     seed(conn)
     rows = services(conn, cfg, ENGINE_OK, date(2026, 10, 21), 14)
-    assert [r["service"] for r in rows] == ["notify", "recharge", "quiet"]   # |z| desc, null last
-    r = rows[1]
-    assert r["rate"] == 30.0 and r["last_week"] == 25.0 and r["unparsed_1h"] == 2
+    assert [r["service"] for r in rows] == ["notify", "quiet", "recharge"]   # by name
+    r = rows[2]
+    assert r["unparsed_1h"] == 2
     assert (r["templates"], r["new_24h"], r["not_normal"], r["miss_ratio"]) == (2, 1, 1, 0.004)
-    assert round(r["z"], 1) == -8.9 and rows[2]["z"] is None and rows[2]["rate"] is None
 
 
-def test_volume_today_hours_with_band(conn, cfg):
+def test_throughput_last_avg_delta():
+    pts = [[NOW - 60 * (59 - i), 100 + i] for i in range(60)]
+    t = throughput({"service_minutes": {"a": pts}})["a"]
+    assert t["points"] == pts and t["last"] == 159 and t["avg15"] == sum(range(145, 160)) / 15
+    assert t["delta_1h"] == 159 / 100 - 1
+
+
+def test_throughput_short_history_has_no_delta():
+    t = throughput({"service_minutes": {"a": [[NOW - 60 * (9 - i), 5 + i] for i in range(10)], "z": [[NOW, 0]] * 2}})
+    assert t["a"]["delta_1h"] is None and t["a"]["last"] == 14
+    assert t["z"]["delta_1h"] is None   # a zero first point cannot give a ratio
+    assert throughput({}) == {}
+
+
+def test_services_rows_have_throughput_not_rate(conn, cfg):
     seed(conn)
-    v = {x["service"]: x for x in volume(conn, cfg, date(2026, 10, 21), 14)}["recharge"]["hours"]
-    assert len(v) == 15 and v[14]["band_high"] == 711.0 and v[3]["rate"] is None
-    assert v[14]["rate"] == 30.0 and v[14]["last_week"] == 25.0 and v[3]["band_high"] is None
+    eng = {**ENGINE_OK, "service_minutes": {"recharge": [[NOW - 60 * (59 - i), 10] for i in range(60)]}}
+    rows = {r["service"]: r for r in services(conn, cfg, eng, date(2026, 10, 21), 14)}
+    assert (rows["recharge"]["last"], rows["recharge"]["avg15"], rows["recharge"]["delta_1h"]) == (10, 10.0, 0.0)
+    assert rows["quiet"]["last"] is None and not {"rate", "last_week", "z"} & set(rows["quiet"])
+
+
+def test_pipeline_api_has_no_volume(client):
+    body = client.get("/api/pipeline").get_json()
+    assert "volume" not in body and body["throughput"] == {}
 
 
 def test_pipeline_route_has_new_fields(client):
     body = client.get("/api/pipeline").get_json()
-    assert {"services", "volume", "stages", "status", "cursors", "stale", "linker", "linker_stale"} <= set(body)
+    assert {"services", "throughput", "stages", "status", "cursors", "stale", "linker", "linker_stale"} <= set(body)
 
 
 def test_pipeline_lite_and_llm_cap(client):
     lite = client.get("/api/pipeline?lite=1").get_json()
     assert {"status", "cursors", "stale", "linker", "linker_stale"} <= set(lite)
-    assert not {"services", "volume", "stages"} & set(lite)
+    assert not {"services", "throughput", "stages"} & set(lite)
     assert client.get("/api/pipeline").get_json()["llm_daily_max"] == 0
 
 

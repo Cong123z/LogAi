@@ -1,8 +1,14 @@
 // ── Pipeline: live engine and linker status (worker_status) ──
-// Stage states, numbers, history and per-service volume all come from /api/pipeline; nothing here recomputes
+// Stage states, numbers, history and per-service throughput all come from /api/pipeline; nothing here recomputes
 // a stage's status. Every poll calls setOption on the existing chart instances (chartFor returns them).
-const pl = {data: null, sel: 'llm', svc: null, showAll: false, sort: {key: null, dir: 1}, minis: new Map()};
-const PL_MINI_CAP = 6;
+const pl = {data: null, sel: 'llm', svc: null, sort: {key: null, dir: 1}, cards: new Map(), routeSub: null,
+            pick: null, mode: 'combined', filter: ''};   // pick: chosen services, null until chosen (then the 5 busiest)
+const PL_MAX = 8, PL_DEFAULT = 5;
+const PL_COLORS = ['#4f8ef7', '#f59e0b', '#10b981', '#ef4444', '#a855f7', '#14b8a6', '#ec4899', '#84cc16'];
+const plStore = {   // localStorage can be blocked or full: the page works without it
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* kept for this visit only */ } },
+};
 const $pl = id => document.getElementById(id);
 
 async function fetchPipeline() {
@@ -20,9 +26,7 @@ function plDuration(seconds) {
 }
 const plPercent = ratio => (ratio == null ? '—' : `${(ratio * 100).toFixed(1)}%`);
 const plInt = n => (n == null ? '—' : Math.round(n).toLocaleString());
-const plZ = z => (z == null ? 'n/a' : `${z >= 0 ? '+' : ''}${z.toFixed(1)}`);
 const plFlush = s => (s == null ? '—' : s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(1)} s`);
-const plVsWeek = r => (r.rate == null || !r.last_week ? null : (r.rate / r.last_week - 1) * 100);
 const plPct = v => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Math.round(v)} %`);
 const plHm = t => new Date(t * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
 const ST_WORD = {ok: 'OK', warn: 'Degraded', bad: 'Down'};
@@ -235,76 +239,95 @@ function plRenderTiles(d) {
   ].join('');
 }
 
-// ── Volume small multiples ──
-function plMiniOption(v, row, t) {
-  const hrs = v.hours, hh = hrs.map(h => String(h.hour).padStart(2, '0'));
-  const out = hrs.map(h => h.out ? h.rate : null);       // the API decides (a drop counts only for a full *total profile)
-  const lo = h => (h.band_low == null ? null : Math.max(0, h.band_low));
+// ── Throughput: the services ticked in the table, last 60 closed minutes ──
+function plBusiest(d) {
+  return [...(d.services || [])].filter(r => r.avg15 != null).sort((a, b) => b.avg15 - a.avg15 || a.service.localeCompare(b.service))
+    .slice(0, PL_DEFAULT).map(r => r.service);
+}
+function plChosen(d) {
+  const known = new Set(Object.keys(d.throughput || {}));
+  return (pl.pick || plBusiest(d)).filter(s => known.has(s));
+}
+// Selection comes from the URL (#pipeline?services=a,b) when the route changes, else from localStorage.
+function plApplyRoute() {
+  const sub = state.subView || '';
+  if (sub === pl.routeSub) return;
+  pl.routeSub = sub;
+  let list = new URLSearchParams(sub.startsWith('?') ? sub : '').get('services');
+  if (list == null) list = plStore.get('pl.services');
+  pl.pick = list ? list.split(',').filter(Boolean).map(decodeURIComponent).slice(0, PL_MAX) : null;
+  pl.mode = plStore.get('pl.mode') === 'multiples' ? 'multiples' : 'combined';
+}
+function plSavePick() {
+  const list = pl.pick.map(encodeURIComponent).join(',');
+  plStore.set('pl.services', list);
+  pl.routeSub = `?services=${list}`;
+  history.replaceState(null, '', `#pipeline${pl.routeSub}`);
+  state.subView = pl.routeSub;
+}
+
+function plTpOption(d, names, t, single) {
+  const tp = d.throughput || {};
   return {
-    ...baseOption(), grid: {left: 44, right: 8, top: 8, bottom: 20},
-    xAxis: {type: 'category', data: hh, boundaryGap: false, axisLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10, interval: 5}},
-    yAxis: {type: 'value', splitNumber: 3, splitLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10}},
-    tooltip: {...baseOption().tooltip, trigger: 'axis', formatter: ps => {
-      const h = hrs[ps[0].dataIndex];
-      return `<b>${escapeHtml(v.service)} ${hh[ps[0].dataIndex]}:00</b><br>today ${plInt(h.rate)}/min<br>expected ${plInt(lo(h))}–${plInt(h.band_high)}<br>last week ${plInt(h.last_week)}`;
-    }},
-    series: [
-      {type: 'line', data: hrs.map(lo), stack: 'b', symbol: 'none', lineStyle: {opacity: 0}, silent: true},
-      {type: 'line', data: hrs.map(h => (h.band_high != null && h.band_low != null ? h.band_high - lo(h) : null)), stack: 'b', symbol: 'none', lineStyle: {opacity: 0}, areaStyle: {color: t.band}, silent: true},
-      {type: 'line', data: hrs.map(h => h.last_week), symbol: 'none', lineStyle: {type: 'dashed', width: 1.2, color: t.lastweek}},
-      {type: 'line', data: hrs.map(h => h.rate), symbol: 'none', lineStyle: {width: 2, color: t.line}},
-      {type: 'scatter', data: out, symbolSize: 8, itemStyle: {color: t.cls.up2}},
-    ],
+    ...baseOption(), grid: {left: 44, right: 12, top: single ? 8 : 28, bottom: 24},
+    legend: single ? undefined : {top: 0, textStyle: {color: t.dim, fontSize: 11}},
+    xAxis: {type: 'time', axisLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10, hideOverlap: true}},
+    yAxis: {type: 'value', min: 0, splitNumber: 3, splitLine: {lineStyle: {color: t.grid}}, axisLabel: {color: t.dim, fontSize: 10}},
+    tooltip: {...baseOption().tooltip, trigger: 'axis', valueFormatter: v => `${plInt(v)}/min`},
+    series: names.map(n => ({name: n, type: 'line', symbol: 'none', lineStyle: {width: 2},
+      color: single ? t.line : PL_COLORS[Math.max(0, (pl.pick || []).indexOf(n)) % PL_COLORS.length],
+      data: tp[n].points.map(([ts, v]) => [ts * 1000, v])})),
   };
 }
-function plMiniTitle(row, v) {
-  const last = v.hours[v.hours.length - 1] || {};
-  const w = plVsWeek(row || {});
-  const state = !last.out ? '' : last.rate > last.band_high ? '▲ above expected' : '▼ below expected';
-  return `<b>${escapeHtml(v.service)}</b><span>now ${plInt(row && row.rate)}/min · expected ${plInt(last.band_low == null ? null : Math.max(0, last.band_low))}–${plInt(last.band_high)} · ${w == null ? 'no last week' : `${plPct(w)} vs last week`}${state ? ` · ${state}` : ''}</span>`;
+function plDisposeCard(el) {
+  const chart = el.querySelector('.pl-tp-chart');
+  _chartObservers.get(chart)?.disconnect(); _chartObservers.delete(chart);
+  echarts.getInstanceByDom(chart)?.dispose();
+  el.remove();
 }
-function plDisposeMini(el) {
-  _chartObservers.get(el)?.disconnect(); _chartObservers.delete(el);
-  echarts.getInstanceByDom(el)?.dispose();
-}
-function plRenderMultiples(d) {
-  const t = chartTokens(), vols = d.volume || [];
-  const order = (d.services || []).map(r => r.service);
-  const rank = s => { const i = order.indexOf(s); return i < 0 ? order.length : i; };
-  const sorted = [...vols].sort((a, b) => rank(a.service) - rank(b.service));
-  const shown = pl.showAll ? sorted : sorted.slice(0, PL_MINI_CAP);
-  const host = $pl('pl-multiples');
-  $pl('pl-multiples-empty').hidden = vols.length > 0;
-  const more = $pl('pl-multiples-more');
-  more.hidden = vols.length <= PL_MINI_CAP;
-  more.textContent = pl.showAll ? `Show worst ${PL_MINI_CAP}` : `Show all ${vols.length}`;
-  const want = new Set(shown.map(v => v.service));
-  for (const [svc, el] of pl.minis) if (!want.has(svc)) { plDisposeMini(el.querySelector('.pl-mini-chart')); el.remove(); pl.minis.delete(svc); }
-  for (const v of shown) {
-    let card = pl.minis.get(v.service);
+function plRenderThroughput(d) {
+  const t = chartTokens(), names = plChosen(d), host = $pl('pl-tp'), multi = pl.mode === 'multiples';
+  document.querySelectorAll('#pl-tp-mode .toggle-btn').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === pl.mode)));
+  $pl('pl-tp-empty').hidden = names.length > 0;
+  $pl('pl-tp-empty').textContent = Object.keys(d.throughput || {}).length
+    ? `No service ticked. Tick up to ${PL_MAX} services in the table below.`
+    : 'No throughput yet: the engine reports it after its first closed minute.';
+  host.classList.toggle('combined', !multi);
+  const keys = !names.length ? [] : multi ? names : ['*'];
+  for (const [k, el] of pl.cards) if (!keys.includes(k)) { plDisposeCard(el); pl.cards.delete(k); }
+  for (const k of keys) {
+    let card = pl.cards.get(k);
     if (!card) {
       card = document.createElement('div');
-      card.className = 'pl-mini'; card.tabIndex = 0; card.setAttribute('role', 'link');
-      card.innerHTML = '<div class="pl-mini-title"></div><div class="pl-mini-chart" role="img"></div>';
-      const go = () => { location.hash = `#baseline/${encodeURIComponent(v.service)}/*total/1`; };
-      card.addEventListener('click', go);
-      card.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
-      pl.minis.set(v.service, card);
+      card.className = multi ? 'pl-mini' : '';
+      card.innerHTML = `${multi ? '<div class="pl-mini-title"></div>' : ''}<div class="pl-tp-chart" role="img"></div>`;
+      pl.cards.set(k, card);
     }
-    card.setAttribute('aria-label', `${v.service}: open Baseline for today`);
-    card.classList.toggle('sel', pl.svc === v.service);
-    card.querySelector('.pl-mini-title').innerHTML = plMiniTitle((d.services || []).find(r => r.service === v.service), v);
-    chartFor(card.querySelector('.pl-mini-chart'), 'svg').setOption(plMiniOption(v, null, t));
+    if (multi) {
+      const tp = d.throughput[k];
+      card.querySelector('.pl-mini-title').innerHTML = `<b>${escapeHtml(k)}</b><span>last ${plInt(tp.last)}/min · avg ${plInt(tp.avg15)}</span>`;
+    }
+    const chart = card.querySelector('.pl-tp-chart');
+    chart.setAttribute('aria-label', multi ? `${k}: events per minute, last 60 minutes` : 'Events per minute per service, last 60 minutes');
+    chartFor(chart).setOption(plTpOption(d, multi ? [k] : names, t, multi), {notMerge: true});
   }
-  // Keep worst-first order in the DOM without recreating the charts.
-  const cards = shown.map(v => pl.minis.get(v.service));
+  const cards = keys.map(k => pl.cards.get(k));
   if (cards.some((c, i) => host.children[i] !== c)) host.append(...cards);
 }
 
+// Inline sparkline: one polyline scaled to the service's own maximum.
+function plSpark(pts) {
+  if (!pts || pts.length < 2) return '';
+  const max = Math.max(...pts.map(p => p[1])) || 1, t0 = pts[0][0], span = pts[pts.length - 1][0] - t0 || 1;
+  const xy = pts.map(([ts, n]) => `${((ts - t0) / span * 96).toFixed(1)},${(19 - n / max * 18).toFixed(1)}`).join(' ');
+  return `<svg class="pl-spark" viewBox="0 0 96 20" preserveAspectRatio="none" aria-hidden="true"><polyline points="${xy}" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+}
+const plDelta = r => (r.delta_1h == null ? '—' : plPct(r.delta_1h * 100));
+
 // ── Services table ──
 function plRenderServices(d) {
-  const {key, dir} = pl.sort;
-  let rows = (d.services || []).map(r => ({...r, vs_week: plVsWeek(r)}));
+  const {key, dir} = pl.sort, chosen = new Set(plChosen(d)), q = pl.filter.trim().toLowerCase();
+  const rows = (d.services || []).filter(r => !q || r.service.toLowerCase().includes(q));
   if (key) rows.sort((a, b) => {
     const x = a[key], y = b[key];
     if (x == null || y == null) return (x == null) - (y == null);
@@ -314,27 +337,48 @@ function plRenderServices(d) {
     const b = th.querySelector('.pl-sort');
     th.setAttribute('aria-sort', b && b.dataset.sort === key ? (dir > 0 ? 'ascending' : 'descending') : 'none');
   });
-  plSetHtml($pl('pl-services-tbody'), rows.length ? rows.map(r => {
-    const out = r.z != null && Math.abs(r.z) > 3;
-    return `<tr data-svc="${escapeHtml(r.service)}" tabindex="0" class="${pl.svc === r.service ? 'sel' : ''}">
-      <td><span class="tmpl-id">${escapeHtml(r.service)}</span></td><td class="r">${plInt(r.rate)}</td><td class="r">${plPct(r.vs_week)}</td>
-      <td class="r">${out ? `<span class="badge ${r.z < 0 ? 'badge-red' : 'badge-yellow'}">${r.z < 0 ? '▼' : '▲'} ${plZ(r.z)}</span>` : plZ(r.z)}</td>
+  const tp = d.throughput || {};
+  plSetHtml($pl('pl-services-tbody'), rows.length ? rows.map(r => `<tr data-svc="${escapeHtml(r.service)}" tabindex="0" class="${pl.svc === r.service ? 'sel' : ''}">
+      <td><input type="checkbox" data-pick="${escapeHtml(r.service)}" aria-label="Show ${escapeHtml(r.service)} in the chart"${chosen.has(r.service) ? ' checked' : ''}${tp[r.service] ? '' : ' disabled'}></td>
+      <td><span class="tmpl-id">${escapeHtml(r.service)}</span></td><td class="r">${plInt(r.last)}</td><td class="r">${plInt(r.avg15)}</td>
+      <td>${plSpark((tp[r.service] || {}).points)}</td><td class="r">${plDelta(r)}</td>
       <td class="r">${plPercent(r.miss_ratio)}</td><td class="r">${plInt(r.templates)}</td><td class="r">${plInt(r.new_24h)}</td>
-      <td class="r">${plInt(r.unparsed_1h)}</td><td class="r">${plInt(r.not_normal)}</td></tr>`;
-  }).join('') : '<tr><td colspan="9" class="empty-state">No service yet.</td></tr>');
+      <td class="r">${plInt(r.unparsed_1h)}</td><td class="r">${plInt(r.not_normal)}</td></tr>`).join('')
+    : `<tr><td colspan="11" class="empty-state">${(d.services || []).length ? 'No service matches.' : 'No service yet.'}</td></tr>`);
 }
 
 function plSelectService(svc) {
   pl.svc = pl.svc === svc ? null : svc;
   if (pl.svc && !['reader', 'templates'].includes(pl.sel)) pl.sel = 'reader';
-  if (pl.svc && !pl.minis.has(pl.svc)) pl.showAll = true;
   plRenderAll(pl.data);
 }
+$pl('pl-services-tbody').addEventListener('change', e => {
+  const box = e.target.closest('input[data-pick]'); if (!box || !pl.data) return;
+  const msg = $pl('pl-tp-msg'), cur = plChosen(pl.data), svc = box.dataset.pick;
+  msg.hidden = true;
+  if (box.checked && cur.length >= PL_MAX) {
+    box.checked = false;
+    msg.textContent = `At most ${PL_MAX} services in the chart: untick one first.`; msg.hidden = false;
+    return;
+  }
+  pl.pick = box.checked ? [...cur, svc] : cur.filter(x => x !== svc);
+  plSavePick();
+  plRenderThroughput(pl.data);
+});
+$pl('pl-tp-mode').addEventListener('click', e => {
+  const mode = e.target.closest('[data-mode]')?.dataset.mode; if (!mode || !pl.data) return;
+  pl.mode = mode; plStore.set('pl.mode', mode);
+  for (const [, el] of pl.cards) plDisposeCard(el);   // the card shape differs between the two modes
+  pl.cards.clear();
+  plRenderThroughput(pl.data);
+});
+$pl('pl-search').addEventListener('input', e => { pl.filter = e.target.value; if (pl.data) plRenderServices(pl.data); });
 $pl('pl-services-tbody').addEventListener('click', e => {
+  if (e.target.closest('input')) return;
   const tr = e.target.closest('tr[data-svc]'); if (tr) plSelectService(tr.dataset.svc);
 });
 $pl('pl-services-tbody').addEventListener('keydown', e => {
-  const tr = e.target.closest('tr[data-svc]'); if (tr && e.key === 'Enter') plSelectService(tr.dataset.svc);
+  const tr = e.target.closest('tr[data-svc]'); if (tr && e.key === 'Enter' && !e.target.closest('input')) plSelectService(tr.dataset.svc);
 });
 document.querySelector('#pl-services thead').addEventListener('click', e => {
   const key = e.target.closest('.pl-sort')?.dataset.sort; if (!key) return;
@@ -342,7 +386,6 @@ document.querySelector('#pl-services thead').addEventListener('click', e => {
   pl.sort = {key, dir: pl.sort.key === key ? -pl.sort.dir : 1};
   plRenderServices(pl.data);
 });
-$pl('pl-multiples-more').addEventListener('click', () => { if (!pl.data) return; pl.showAll = !pl.showAll; plRenderMultiples(pl.data); });
 
 function plRenderIndices(d) {
   const rows = plIndexRows(d);
@@ -354,7 +397,7 @@ function plRenderAll(d) {
   plRenderStage(d);
   plRenderHistory(d);
   plRenderTiles(d);
-  plRenderMultiples(d);
+  plRenderThroughput(d);
   plRenderServices(d);
   plRenderIndices(d);
 }
@@ -363,10 +406,8 @@ function plRenderAll(d) {
 function plClear() {
   pl.data = null;
   ['pl-topology', 'pl-lag', 'pl-eps'].forEach(id => echarts.getInstanceByDom($pl(id))?.clear());
-  for (const [, card] of pl.minis) plDisposeMini(card.querySelector('.pl-mini-chart'));
-  pl.minis.clear();
-  $pl('pl-multiples-more').hidden = true;
-  $pl('pl-multiples').innerHTML = '';
+  for (const [, el] of pl.cards) plDisposeCard(el);
+  pl.cards.clear();
   $pl('pl-stage')._plHtml = $pl('pl-services-tbody')._plHtml = null;
   $pl('pl-stage').innerHTML = $pl('pl-tiles').innerHTML = $pl('pl-warnings').innerHTML = '';
   $pl('pl-services-tbody').innerHTML = $pl('pl-indices-tbody').innerHTML = '';
@@ -388,6 +429,7 @@ function renderPipeline(d) {
     ? `The engine is not running (last heartbeat ${formatTs(status.heartbeat)}). Showing its last numbers.${linkerNote}`
     : `Engine running · heartbeat ${formatTs(status.heartbeat)}${linkerNote}`;
   $pl('pl-warnings').innerHTML = (status.warnings || []).map(w => `<p class="ins-toast ins-toast-error">${escapeHtml(w)}</p>`).join('');
+  plApplyRoute();
   pl.data = d;
   plRenderAll(d);
 }

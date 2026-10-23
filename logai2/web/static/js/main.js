@@ -18,9 +18,9 @@ const viewOrder = Object.keys(viewTitles);
 // A route may carry a sub-view after the first slash (#documentation/suggestions, #review/svc/key/14); the view reads state.subView.
 function setView(route, updateHash = true) {
   route = String(route);
-  const slash = route.indexOf('/');
+  const slash = route.search(/[/?]/);       // "#pipeline?services=a,b": the query stays in state.subView, with its "?"
   let view = slash < 0 ? route : route.slice(0, slash);
-  const sub = slash < 0 ? '' : route.slice(slash + 1);
+  const sub = slash < 0 ? '' : route[slash] === '?' ? route.slice(slash) : route.slice(slash + 1);
   if (!viewTitles[view]) view = 'pipeline';
   state.subView = sub || '';
   const previousView = state.activeView;
@@ -29,7 +29,7 @@ function setView(route, updateHash = true) {
   const direction = nextIndex > previousIndex ? 'slide-from-right' : 'slide-from-left';
   if (previousView !== view) {
     disposeCharts();
-    tpl.routeSub = docLastSub = null;   // entering a view applies its route again, even the same one as last time
+    tpl.routeSub = docLastSub = pl.routeSub = null;   // entering a view applies its route again, even the same one as last time
   }
   state.activeView = view;
   document.querySelectorAll('.view').forEach(section => {
@@ -50,7 +50,7 @@ function setView(route, updateHash = true) {
     }
   });
   document.getElementById('page-title').textContent = viewTitles[view];
-  const hash = `#${view}${sub ? `/${sub}` : ''}`;
+  const hash = `#${view}${sub && sub[0] !== '?' ? '/' : ''}${sub}`;
   if (updateHash && window.location.hash !== hash) history.pushState(null, '', hash);
   if (state.alertRefreshTimer) {
     clearInterval(state.alertRefreshTimer);

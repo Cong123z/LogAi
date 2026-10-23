@@ -1,39 +1,39 @@
-"""Pipeline page data: per-service rate against the expected band, and the status of each pipeline stage."""
+"""Pipeline page data: per-service throughput, and the status of each pipeline stage."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from logai2.config import AppConfig
-from logai2.owner.baseline import Baseline
-from logai2.web.baseline_view import _cells, _lookup
 
 LAG_WARN_SECONDS = 300            # minutes & detection: lag above this is Degraded
 FLUSH_WARN_SECONDS = 10           # Postgres flush: the slowest flush of the last 15 min above this is Degraded
 COMMIT_OVERDUE_SECONDS = 26 * 3600
 READER_IDLE_POINTS = 5            # reader Down: this many history points (minutes) with 0 events/s ...
 INDEX_BEHIND_MS = 300_000         # ... while an index is not caught up; an index this far behind is Degraded
-TOTAL = "*total"
 
 
 def _by_service(conn, sql: str, *args) -> dict[str, int]:
     return {r["service"]: r["n"] for r in conn.execute(sql, args)}
 
 
-def service_data(conn, cfg: AppConfig, day: date) -> dict[str, tuple[Baseline, dict]]:
-    """Per service: its *total Baseline and cells for `day` and the same weekday a week earlier (4 queries each)."""
-    # ponytail: one set of queries per service per poll; batch all services into fixed queries (or memo per engine
-    # flush) once there are ~50+ services
+def throughput(engine: dict) -> dict[str, dict]:
+    """Per service from the engine's `service_minutes` (events per closed minute, oldest first): the points, the
+    last minute, the mean of the last 15 and the change against the first point when that is 55-60 minutes old."""
     out = {}
-    for r in conn.execute("SELECT service FROM services ORDER BY service").fetchall():
-        bl = Baseline.load(conn, [(r["service"], TOTAL)])
-        out[r["service"]] = (bl, _cells(conn, cfg, r["service"], [TOTAL], "total", [day, day - timedelta(days=7)], bl))
+    for service, pts in (engine.get("service_minutes") or {}).items():
+        if not pts:
+            continue
+        last = pts[-1][1]
+        tail = [n for _, n in pts[-15:]]
+        first_t, first_n = pts[0]
+        delta = last / first_n - 1 if 55 * 60 <= pts[-1][0] - first_t <= 60 * 60 and first_n > 0 else None
+        out[service] = {"points": pts, "last": last, "avg15": sum(tail) / len(tail), "delta_1h": delta}
     return out
 
 
-def services(conn, cfg: AppConfig, engine: dict, day: date, hour: int, data=None) -> list[dict]:
-    """One row per service, worst |z| first, services without a baseline last."""
-    data = data or service_data(conn, cfg, day)
-    last = day - timedelta(days=7)
+def services(conn, cfg: AppConfig, engine: dict, day: date, hour: int) -> list[dict]:
+    """One row per service, by name."""
+    tp = throughput(engine)
     templates = _by_service(conn, "SELECT service, count(*) AS n FROM templates GROUP BY 1")
     new = _by_service(conn, "SELECT service, count(*) AS n FROM templates "
                             "WHERE first_seen > now() - interval '24 hours' GROUP BY 1")
@@ -41,32 +41,14 @@ def services(conn, cfg: AppConfig, engine: dict, day: date, hour: int, data=None
     unparsed = {r["key"]: r["sum"] for r in conn.execute(
         "SELECT key, sum FROM hourly_counts WHERE day = %s AND hour = %s AND key LIKE '%%:unparsed'", (day, hour))}
     rows = []
-    for service, (_, cells) in data.items():
-        now, then = cells.get((day, hour)), cells.get((last, hour))
-        rows.append({"service": service, "rate": now and now["rate"], "last_week": then and then["rate"],
-                     "z": now and now["z"], "miss_ratio": (engine.get("miss_ratio") or {}).get(service),
+    for r in conn.execute("SELECT service FROM services ORDER BY service").fetchall():
+        service, t = r["service"], tp.get(r["service"], {})
+        rows.append({"service": service, "last": t.get("last"), "avg15": t.get("avg15"), "delta_1h": t.get("delta_1h"),
+                     "miss_ratio": (engine.get("miss_ratio") or {}).get(service),
                      "templates": templates.get(service, 0), "new_24h": new.get(service, 0),
                      "unparsed_1h": unparsed.get(f"{service}:unparsed", 0),
                      "not_normal": not_normal.get(service, 0)})
-    return sorted(rows, key=lambda r: (r["z"] is None, -abs(r["z"] or 0), r["service"]))
-
-
-def volume(conn, cfg: AppConfig, day: date, hour: int, data=None) -> list[dict]:
-    """Per service, hours 0..hour of the day: rate (null without a service_hours row), *total band, same hour last
-    week, and whether the hour is outside the band the way the detector counts it (above, or a drop)."""
-    last = day - timedelta(days=7)
-    out = []
-    for service, (bl, cells) in (data or service_data(conn, cfg, day)).items():
-        hrs = []
-        for h in range(hour + 1):
-            c, lw = cells.get((day, h)), cells.get((last, h))
-            band = c or _lookup(bl, cfg, service, [TOTAL], "total", day, h)[1]._asdict()   # an hour without a row still has its band
-            r, lo, hi = c and c["rate"], band["band_low"], band["band_high"]
-            above = c is not None and hi is not None and (r > hi or (c["low_alerts"] and r < lo))
-            hrs.append({"hour": h, "rate": r, "band_low": lo, "band_high": hi, "last_week": lw and lw["rate"],
-                        "out": above})
-        out.append({"service": service, "hours": hrs})
-    return out
+    return rows
 
 
 def _age(iso: str, now: float) -> float | None:

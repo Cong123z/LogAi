@@ -76,7 +76,8 @@ document** (`#templates/<service>/<template_id>`, opens its drawer), **AI
 suggestion** when a draft exists (`#documentation/suggestions/<doc_id>`) and
 **Baseline** (`*error`); the whole service has **Baseline** (`*total`) and
 **Pipeline**. Documentation also takes `#documentation/<doc_id>` to select a
-document; Templates parses `?doc_id=` itself from the part after the first `/`.
+document; Templates parses `?doc_id=` itself from the part after the first `/`;
+`#pipeline?services=a,b` keeps the query in the sub-view too.
 
 A template line also shows how it got its document when that was not by
 hand: `inherited`, `auto 0.87` (matched on the document's ERROR lines),
@@ -123,12 +124,17 @@ updates the existing chart instances.
 - **Lag, last 60 min** and **Events/s, last 60 min**: one point per minute
   from the engine's `history`; a dashed line at 5 min marks where lag turns
   Degraded;
-- **Volume vs expected, today**: small multiples per service (worst first, 6
-  shown, "Show all N" for the rest): today's hourly rate, the `*total`
-  expected band, the same hour last week (dashed), out-of-band hours as dots.
-  Click one to open Baseline for that service, today;
-- **Services** table (sortable): events/min this hour, change vs last week,
-  z against the expected band (a badge beyond 3), 5-min miss ratio,
+- **Throughput, last 60 min**: events per closed minute (engine status
+  `service_minutes`, in memory: empty right after an engine restart) for the
+  services ticked in the table. Default the 5 busiest by 15-min average; at
+  most 8 (a 9th tick is refused with a short message). **Combined** draws one
+  line per service in one chart, **One per service** one small chart each.
+  The choice is kept in the URL (`#pipeline?services=a,b`) and in
+  `localStorage` (`pl.services`, `pl.mode`); the URL wins. With a stale
+  engine the last numbers stay; with no points an empty state is shown;
+- **Services** table (sortable, filtered by a search box): a checkbox per
+  row (the chart), last minute, 15-min average, 60-min sparkline, change vs
+  1 h ago (only when the oldest point is 55-60 min old), 5-min miss ratio,
   templates, new in 24 h, unparsed in 1 h, keys not NORMAL. A row click
   filters the Reader and Templates details to that service;
 - a table of indices: position, floor, and `failing` / `caught up` /
@@ -398,7 +404,7 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 |---|---|---|---|---|
 | `GET /` | — | `index.html` | — | — |
 | `GET /static/<path>` | — | static file | 404 | — |
-| `GET /api/pipeline` | query `lite=1` (only `status, cursors, stale, linker, linker_stale`: the header pill's poll) | `{status, cursors, stale, linker, linker_stale, services, llm_daily_max, volume, stages}` | — | — |
+| `GET /api/pipeline` | query `lite=1` (only `status, cursors, stale, linker, linker_stale`: the header pill's poll) | `{status, cursors, stale, linker, linker_stale, services, llm_daily_max, throughput, stages}` | — | — |
 | `GET /api/sources` | — | `{selection, connection, available_indices, resolution, indices}` | — | — |
 | `PUT /api/sources/selection` | `{patterns: [str], revision}` | `{revision}` | 400, 409 | `reload_sources` |
 | `PUT /api/sources/connection` | `{hosts: [url], username, password, verify_certs, revision}` | `{revision}` | 400, 409 | `reload_sources` |
@@ -458,18 +464,18 @@ heartbeat is missing or older than 30 s. `linker` is
 `warnings`, `last_error`, `llm`, `llm_today`, `llm_profiles`) or null;
 `linker_stale` is true when it is missing or older than 90 s.
 
-`services` has one row per service, worst `|z|` first and services without a
-baseline last; `volume` and `stages` follow. `rate` and `last_week` are
-events per minute in the current hour and the same hour a week earlier,
-`z` is against the `*total` expected band (null without a baseline),
-`unparsed_1h` is the `<service>:unparsed` count of the current hour:
+`services` has one row per service, by name; `throughput` and `stages` follow.
+`last`, `avg15` (mean of the last 15 minutes) and `delta_1h` (last / first
+point - 1, only when the first point is 55-60 min older and above 0) come
+from `throughput` and are null without points. `unparsed_1h` is the
+`<service>:unparsed` count of the current hour:
 
 ```json
-{"services": [{"service": "recharge", "rate": 412.0, "last_week": 380.5, "z": 1.4,
+{"services": [{"service": "recharge", "last": 412, "avg15": 405.2, "delta_1h": 0.08,
                "miss_ratio": 0.02, "templates": 87, "new_24h": 3,
                "unparsed_1h": 0, "not_normal": 1}],
- "volume": [{"service": "recharge",
-             "hours": [{"hour": 0, "rate": 120.0, "band_low": 80.0, "band_high": 170.0, "last_week": 118.2, "out": false}]}],
+ "throughput": {"recharge": {"points": [[1792381080, 398], [1792381140, 412]], "last": 412,
+                             "avg15": 405.2, "delta_1h": 0.08}},
  "stages": {"elasticsearch": {"status": "ok", "reason": null},
             "reader": {"status": "ok", "reason": null},
             "templates": {"status": "warn", "reason": "4 unparsed lines in the last hour"},
@@ -480,8 +486,9 @@ events per minute in the current hour and the same hour a week earlier,
             "llm": {"status": "bad", "reason": "no active LLM profile"}}}
 ```
 
-`volume[].hours` runs from hour 0 to the current hour; `rate` is null for
-an hour with no `service_hours` row, whose band is still given. `stages`
+`throughput[service].points` is `[minute_start_epoch_s, events]`, oldest
+first, up to 60 closed minutes, zero minutes included; a service with no
+points is absent. `stages`
 status is `ok`, `warn` (Degraded) or `bad` (Down); the rules are in the
 Pipeline section. The `status` object also carries `flush_seconds`,
 `flush_seconds_max`, `late_counts`, `events_per_second_15m` and `history`
@@ -856,7 +863,7 @@ returned.
 | Shell, routing, polling, health pill | `static/index.html`, `static/js/main.js`, `core.js`, `ui.js` |
 | Views | `static/js/views/{alerting,pipeline,templates,documentation,sources,baseline,review,llm}.js` |
 | Charts | `static/js/charts.js` (ECharts helpers, colour tokens); `static/vendor/echarts.min.js` (ECharts 5.5.1, Apache-2.0, `ECHARTS-LICENSE`, self-hosted) |
-| Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, volume, stage states) |
+| Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, throughput, stage states) |
 | Styles | `static/css/tokens.css`, `app.css` (copied from logai-engine) |
 | Shared with the engine | `logai2/alerts.py` (alert rows), `logai2/owner/baseline.py` (bands), `logai2/review.py` (suggestions; minutes and keys per hour), `logai2/commands.py` |
 | Tests | `tests/test_web_sources.py`, `test_web_alerts_templates.py`, `test_web_docs_baseline.py` |
