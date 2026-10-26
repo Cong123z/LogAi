@@ -166,6 +166,10 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `reader.upper_bound_seconds` | 30 | only docs with `@timestamp <= now - 30 s` are read |
 | `flush.seconds` | 2.0 | flush at least this often |
 | `flush.max_events` | 50000 | flush when this many events are pending |
+| `retrain.tick_seconds` | 1.0 | re-read lane: reading time per engine tick |
+| `retrain.es_timeout_seconds` | 30 | re-read lane: request timeout of one page |
+| `retrain.max_live_lag_seconds` | 60 | the lane waits while live lags more than this |
+| `retrain.default_rate` | 25000 | docs/s the estimate assumes before a lane has measured one |
 | `start.days_back` | 7 | first start reads from `now - days_back` days |
 | `baseline.timezone` | `Asia/Ho_Chi_Minh` | **unused**: the zone is hard-coded in `logai2/timeutil.py` |
 | `baseline.commit_time` | `"02:00"` | default local time of the daily commit (the `retrain_schedule` setting overrides it, §12.1) |
@@ -300,6 +304,8 @@ read-only for this.
 | `Count` | `reader/reader.py` | `service`, `template_id` (set on a cache hit) or `text` (normalized, on a miss), `level`, `module`, `minute`, `n`, `sample` (first raw line of the aggregate) |
 | `MinuteBatch` | `reader/reader.py` | `counts: [Count]`, `watermark_ms`, `events`, `positions: {index: {pos_ms, caught_up, failing}}`, `sources: [(pattern, service)]` (distinct pairs of the lines read in the poll; the owner records new ones in `index_services`) |
 | `ClosedMinute` | `owner/counts.py` | `minute` (epoch s // 60), local `day`, `hour`, `keys {(service, key): n}`, `modules {(service, template_id, module): n}`, `levels {(service, template_id): worst level}` |
+| `Scope`, `Plan`, `Window` | `jobs/reread.py` | a re-read's choice (`services` or all, local `days`, `hour_from` < `hour_to`), its time-ordered local-hour windows (patterns to read, services to replace) and counts (`hours_chosen`, `hours_not_in_es`, `hours_live`, `hours_to_read`) |
+| `LaneHour` | `jobs/reread.py` | one closed (service, day, hour) of a re-read: `n_minutes`, `sums {key: (sum, sumsq)}`, `module_hours`, `pairs`, `samples`, `templates`; what `Owner.add_lane` replaces the stored hour with |
 | `Stat` | `owner/baseline.py` | `mean`, `std` |
 | `Lookup` | `owner/baseline.py` | `this`, `next` (Stat or None for this and the next hour), `days` (committed days of the profile used, capped), `upper_only`, `daytype` (profile used) |
 | `Verdict` | `owner/baseline.py` | `high`, `score`, `band_low`, `band_high` |
@@ -531,8 +537,13 @@ Everything goes in **one** transaction, in this order:
 7. `alert_state` (upsert every key stepped since the last flush, so streaks
    survive a restart), `alert_changes` (insert)
 8. `error_samples` (insert, then trim to the newest 20 per template)
-9. `es_cursors` (upsert per selected index; delete rows of unselected ones)
-10. `worker_status` (`engine` row)
+9. **Re-read hours** (`Owner.add_lane`, §9): per queued `LaneHour`, delete its
+   (service, day, hour) from `service_hours`, `hourly_counts` and
+   `template_module_hours` and insert the lane's rows (after every live write, so a
+   live minute pending for that hour is replaced too); `error_samples` only when the
+   hour had no `service_hours` row; then `retrain_runs.pos_ms` and `steps`
+10. `es_cursors` (upsert per selected index; delete rows of unselected ones)
+11. `worker_status` (`engine` row)
 
 The connection must be idle (`Owner.flush` raises otherwise: inside an open
 transaction the block would only be a savepoint). Pending rows are cleared
@@ -672,6 +683,39 @@ alone. The `recompute_baseline` command result is the commit result plus `run_id
 The engine then reloads the baseline into the detector (no `NOTIFY`: the
 commit runs in the engine process).
 
+**Re-read** (`kind='reread'`, `logai2/jobs/reread.py`; commands `retrain_run`,
+`retrain_cancel`, `retrain_estimate`, §12.2). The operator picks services, local days and
+an hour range; the engine reads those hours again from ES, replaces their stored counts
+one whole hour at a time, then rebuilds the baseline.
+- `plan()` clamps the scope: a service-hour before the oldest doc of any of its patterns
+  (asked fresh at the start) is *not in ES*, one at or after the owner's hour (the hour of
+  the oldest open minute) is *live*; neither is written. A service fed by two patterns
+  reads both.
+- The `Lane` runs inside the engine tick, after the live poll and flush, only when live is
+  caught up and `lag_seconds <= retrain.max_live_lag_seconds`, for `retrain.tick_seconds`
+  a tick. It pages each window like the live reader (position = max sort ms, re-read docs
+  dropped by `(_index, _id)`, only the ids at the position ms kept), matches with the
+  owner's Drain3 miners and the reader's known-line cache, and counts into its **own**
+  `OpenMinutes` (so old minutes are not late). A line learned in a window enters the shared
+  cache only when the window is complete and its templates are queued in the owner. A
+  window closes into one `LaneHour` per service; a service is zero-filled from
+  `max(window start, min(first minute in the DB, first minute the lane saw))`.
+- `Owner.add_lane` queues the hours and the run's `pos_ms` / `steps`; the flush (§7.3) writes
+  both in one transaction, so a crash resumes from `pos_ms` with no half-replaced hour.
+  The lane never touches `Owner.services` or the live `OpenMinutes`.
+- If a window returns nothing for a pattern and ES's oldest doc is now after the window (an
+  index deleted by retention), that pattern's services are skipped for the window with a
+  WARNING in the run log; zeros are never written.
+- End: the lane done and flushed, `commit(rebuild=True)` with its steps (`rebuild`, `mark`,
+  `housekeeping`) recorded on this run, baseline reloaded, `succeeded`. Cancel drops the
+  lane (hours already flushed stay, no rebuild). A window whose `page()` fails 3 ticks in a
+  row fails the run (`failed_step='read'`). An engine restart resumes a `running` re-read
+  from `pos_ms` (a `resumed_at` in the read step). One re-read at a time.
+- Steps: `scope` and `partitions` (done at start), `read` (detail keys `docs_read`,
+  `docs_target`, `hours_done`, `hours_total`, `new_templates`, `rate`, `position_ms`,
+  `live_lag_s`, `paused`, `pct`, `eta_s`), then the rebuild's. Result: `docs_read`,
+  `hours_replaced`, `hours_not_in_es`, `new_templates`, `baseline_rows`.
+
 **`today` is the owner's day**, the local date of the oldest open minute,
 not the wall clock, so a lagging engine never commits a day whose minutes
 are still open.
@@ -725,6 +769,8 @@ status and `commit()`, each unit of work in its own transaction.
    `detection_enabled = true`, enable detection and flush. Before that,
    nothing alerts, not even the floors.
 7. Otherwise run the daily commit when due.
+8. **Re-read lane:** if a re-read is active and live is caught up and not lagging
+   (§9), read for `retrain.tick_seconds` and queue the finished hours for the next flush.
 
 A tick that raises is logged; the engine sleeps 30 s, reconnects `db` if it
 was closed and continues. Open minutes stay in memory.
@@ -888,6 +934,9 @@ continues.
 | `reload_sources` | `PUT /api/sources/selection`, `PUT /api/sources/connection` | re-apply the saved connection, re-resolve the selection | `{"resolution": {...}}` |
 | `reload_links` | the web's link routes (`PUT`/`DELETE …/link`, `…/link/confirm`, `…/link/reject`), the linker when `apply_links` changed a link | reload the links that drive alerts into the detector | `{}` |
 | `recompute_baseline` | `POST /api/baseline/recompute` | flush, then the daily commit for the owner's day | `{"days_committed", "baseline_rows"}` |
+| `retrain_run` | the Retrain page (later task) | payload `Scope.to_json()`; start a re-read (§9) | `{"run_id"}`, or `{"error": "a retrain is running"}`, or `{"error": "nothing to re-read", <plan counts>}` |
+| `retrain_cancel` | the Retrain page | payload `{"run_id"}`; drop the lane | `{}` or `{"error": ...}` |
+| `retrain_estimate` | the Retrain page | payload scope; plan + ES `_count`, no run row | `{services, patterns, hours_to_read, hours_not_in_es, hours_live, docs, eta_s, indices}` (counts; `indices` = concrete indices of the plan's patterns) |
 
 Any other kind fails with `unknown command kind`.
 
@@ -920,7 +969,10 @@ No DLQ.
 | Area | Limit | Impact |
 |---|---|---|
 | Reader | One millisecond with more than 20k docs in one index: the whole-ms read (10k) plus one `search_after` page | docs beyond that are lost or the index stalls; use PIT + `_shard_doc` if a source ever logs that much in one ms |
-| Reader | The ES request timeout is a hard-coded 30 s | a black-holed host blocks one poll up to 30 s per failing pattern; lower it or make it config if hung hosts appear |
+| Re-read | After a restart the resumed run's `hours_not_in_es` counts only the plan's, not the hours skipped before the restart; a lane error count and a window's partial read are not kept (the window is read again) | the result's skipped count can be short after a restart |
+| Re-read | A sample is kept for an ERROR+ *line* (live keeps it for a template whose worst level is ERROR+); one sample per (template, level, module, minute) like live | a template promoted to ERROR later can lack samples in re-read hours |
+| Re-read | The lane matches per line (live per aggregate) and the Drain3 miners are shared | a template tree can differ slightly from a live-only history; ids already learned never change |
+| Reader | The ES request timeout is a hard-coded 30 s (live reads; a re-read page uses `retrain.es_timeout_seconds`) | a black-holed host blocks one poll up to 30 s per failing pattern; lower it or make it config if hung hosts appear |
 | Reader | A failing index gets the boundary cursor like the others | its docs for minutes closed while it failed are lost (they would be late counts anyway); saving its older position would re-open closed minutes on restart |
 | Reader | The cursor is `@timestamp` (event time), not an ingest-time field | docs indexed later than `upper_bound_seconds` + the open-minute window after their timestamp are late and dropped (sub-project 0) |
 | Reader | The seen-id set holds every `(_index, _id)` of the open minutes per pattern in memory | fine for one or two minutes of traffic; one page per pattern bounds catch-up memory (B5) |
