@@ -855,7 +855,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs, 009 index services), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -934,7 +934,7 @@ continues.
 | `reload_sources` | `PUT /api/sources/selection`, `PUT /api/sources/connection` | re-apply the saved connection, re-resolve the selection | `{"resolution": {...}}` |
 | `reload_links` | the web's link routes (`PUT`/`DELETE …/link`, `…/link/confirm`, `…/link/reject`), the linker when `apply_links` changed a link | reload the links that drive alerts into the detector | `{}` |
 | `recompute_baseline` | `POST /api/baseline/recompute` | flush, then the daily commit for the owner's day | `{"days_committed", "baseline_rows"}` |
-| `retrain_run` | the Retrain page (later task) | payload `Scope.to_json()`; start a re-read (§9) | `{"run_id"}`, or `{"error": "a retrain is running"}`, or `{"error": "nothing to re-read", <plan counts>}` |
+| `retrain_run` | the Retrain page | payload `Scope.to_json()`; start a re-read (§9) | `{"run_id"}`, or `{"error": "a retrain is running"}`, or `{"error": "nothing to re-read", <plan counts>}` |
 | `retrain_cancel` | the Retrain page | payload `{"run_id"}`; drop the lane | `{}` or `{"error": ...}` |
 | `retrain_estimate` | the Retrain page | payload scope; plan + ES `_count`, no run row | `{services, patterns, hours_to_read, hours_not_in_es, hours_live, docs, eta_s, indices}` (counts; `indices` = concrete indices of the plan's patterns) |
 
@@ -990,6 +990,7 @@ No DLQ.
 | Flush | `executemany` per table, not `COPY`, except the two module tables | switch the others when flush time shows on the Pipeline page |
 | Template modules | Measured at 50 services x 2,000 templates x 3 modules, 30 % active per hour (90k `template_module_hours` rows per hour), warm cache ([perf](docs/perf/2026-10-23-template-modules.md)): module flush 0.43-0.56 s for 20k pairs, 1.27 s for 60k; `/api/templates` p95 25 ms (100 items), 50 ms (500), 37 ms with a 1,800-template module; `/api/modules` 31 ms; retention drop 6 ms; migration 007 seed ~9.5 s per 1M `alert_minutes` rows | 7 days of hours is ~2 GB (137 B/row x 15M rows). The module filter probes the window once per template of the service and `/api/modules` aggregates a service's window rows (~0.5 us/row): both grow linearly with one service's size; past ~50k templates in one service, add a per-service window rollup. The full 7-day load was not run (needs >= 5 GB free) |
 | Pipeline | Measured whole-engine ([perf](docs/perf/2026-10-24-pipeline-stress.md), 10 services x 300 templates, synthetic source, ES latency modelled from a real 10k page = 104 ms): 2,000 events/s costs ~10 % of a core, 10,000/s ~27 % (live capacity ~35-40k/s); catch-up ~55k events/s engine-only, ~35k/s with ES, 2 h of backlog at 2,000/s caught up in ~7 min; RSS 130-280 MB; flush with a closed minute p95 0.27 s (2k/s), 0.33 s (10k/s), max 0.84 s in a 5,000-template storm | lag floor is `upper_bound_seconds` (30 s); a burst or drop alerts 3 minutes after it starts (+30 s); counts matched ground truth exactly, a 2-minute Postgres outage included |
+| Re-read | Proven on the whole engine ([perf](docs/perf/2026-10-26-retrain.md), synthetic source): a re-read of day 1 stores the same rows as live reading (0 mismatches of 15,599, baseline 0 of 5,760; templates compared by text), survives two engine kills (`pos_ms` never back) and a deleted index (hours skipped with a warning, no false zeros); 43.2M docs re-read while live runs at 10k events/s: live lag p50/p95/max 30.6/31.0/35.2 s, late 0, counts exact, lane ~19,750 docs/s | one earlier run with a second engine on the same Postgres and CPU peaked at 188 s lag (not reproduced alone); run big re-reads at quiet hours |
 | Flush | `templates_seen` rewrites `last_seen` of every template seen since the last 2 s flush, value unchanged or not | ~70 % of row writes (measured); total pipeline WAL is ~370 MB per hour at 2,000 events/s, ~660 MB at 10,000/s, of which this UPDATE is the largest row-write share (docs/BUGS.md B12) |
 | Flush | **Open bug.** A failed flush is retried with the same pending rows until it succeeds; a value Postgres can never store fails it forever (seen 2026-10-23 with a NUL byte, now stripped in `hit_to_line`) | the engine stops reading and alerting, heartbeat goes stale; nothing is lost (cursors did not move). The liveness probe (metrics port) still passes, so Kubernetes does not restart it. See docs/BUGS.md B1 |
 | Commit | The rebuild recomputes every key nightly | restrict to keys touched since the last commit if it gets slow |

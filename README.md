@@ -110,6 +110,18 @@ or run the script from a checkout with `LOGAI2_DATABASE_DSN` set).
 4. Reload open UI tabs: a tab keeps its old JS, and the old Pipeline view
    expects removed fields and loops on "connection lost".
 
+### Upgrading to migrations 008 and 009 (Retrain)
+
+1. Deploy the **engine** first: it runs 008 (`retrain_runs`) and 009
+   (`index_services`); both are new empty tables, so they apply in seconds.
+2. Confirm `schema_migrations` has version 9 (or read it in the engine log).
+3. Then deploy the **web**: the Retrain page and `/api/retrain*` read
+   `retrain_runs`. Reload open UI tabs (new nav: Retrain under Settings,
+   Baseline and Review under Catalog).
+4. To fill the 7 days ES still holds: Retrain → Run retrain → Re-read, all
+   services, all days. Live detection keeps running; the re-read pauses while
+   live lags more than `retrain.max_live_lag_seconds`.
+
 ### First start
 
 1. The engine migrates the schema and records `bootstrap = {since: now − 2
@@ -219,11 +231,13 @@ baseline.
 ```
 logai2/
   config.py, timeutil.py, db.py      config layers, local time, Postgres (migrate, partitions, settings)
-  migrations/                        001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service
+  migrations/                        001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service,
+                                     007 template modules, 008 retrain runs, 009 index services
   reader/                            es_source.py (ES query, hit → Line), normalize.py, cache.py, reader.py (watermark)
   owner/                             miners.py (Drain3 per service), counts.py (open minutes), baseline.py (bands),
                                      detect.py (hysteresis), owner.py (flush transaction)
   jobs/commit.py                     daily commit / recompute
+  jobs/runs.py, jobs/reread.py       retrain run rows and log; the re-read lane (scope, plan, windows)
   alerts.py, review.py               alert rows, baseline review suggestions
   commands.py, metrics.py, engine.py the engine loop
   embed.py, links.py, linker.py      embeddings client, layered links (SQL), the linker loop
