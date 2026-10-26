@@ -418,3 +418,24 @@ def test_empty_pattern_caught_up_with_warning(conn, cfg, make):
     engine.tick()
     assert engine._caught_up()
     assert "no index matches nope-*" in engine._status()["warnings"]
+
+
+def test_status_es_oldest(conn, cfg, make):
+    cfg.start.days_back = 0
+    clock = Clock(NOON)
+    src = FakeSource({"a": [hit("1", 5_000, service="s", message="x")]})
+    engine = make(src, clock)
+    engine.start()
+    engine.tick()
+    assert engine._status()["es_oldest"] == {"a": 5_000}
+    src.hits["a"] = [hit("0", 1_000, service="s", message="x")]
+    clock.t += 599
+    engine.tick()
+    assert engine._status()["es_oldest"] == {"a": 5_000} and len(src.oldest_calls) == 1
+    clock.t += 2
+    engine.tick()
+    assert engine._status()["es_oldest"] == {"a": 1_000}
+    src.oldest_failing = True
+    clock.t += 601
+    engine.tick()
+    assert engine._status()["es_oldest"] == {"a": 1_000}

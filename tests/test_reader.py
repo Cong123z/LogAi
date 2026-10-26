@@ -231,3 +231,11 @@ def test_overlapping_patterns_read_once(cfg):
     r.set_sources({"app-*": T0, "app-pay-*": T0}, {}, {"app-*": "app-*", "app-pay-*": "app-pay-*,-app-*"})
     assert r.poll()["events"] == 3
     assert src.calls == ["app-*", "app-pay-*,-app-*"]
+
+
+def test_batch_sources_pairs(cfg):
+    src, r = make(cfg, {"a": [hit("1", T0, service="s1", message="x"), hit("2", T0 + 1, service="s1", message="y"),
+                              hit("3", T0 + 2, service="s2", message="z"), {"_id": "4", "sort": [T0 + 3]}]},
+                  {"a": T0})
+    b = r.poll()
+    assert sorted(b["sources"]) == [("a", "s1"), ("a", "s2")]
