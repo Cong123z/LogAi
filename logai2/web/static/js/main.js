@@ -7,12 +7,13 @@ const viewTitles = {
   documentation: 'Documentation',
   sources: 'Data sources',
   llm: 'LLM profiles',
+  retrain: 'Retrain',
   baseline: 'Baseline',
   review: 'Review',
 };
 // Templates polls only through its Auto-refresh toggle; Documentation, Baseline and
 // Review load on entry and after each change (Review polls a running recompute).
-const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000};
+const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000, retrain: 15000};   // retrain: 2 s while a run is running (loadRetrain adjusts it)
 const viewOrder = Object.keys(viewTitles);
 
 // A route may carry a sub-view after the first slash (#documentation/suggestions, #review/svc/key/14); the view reads state.subView.
@@ -29,7 +30,7 @@ function setView(route, updateHash = true) {
   const direction = nextIndex > previousIndex ? 'slide-from-right' : 'slide-from-left';
   if (previousView !== view) {
     disposeCharts();
-    tpl.routeSub = docLastSub = pl.routeSub = null;   // entering a view applies its route again, even the same one as last time
+    tpl.routeSub = docLastSub = pl.routeSub = rt.routeSub = null;   // entering a view applies its route again, even the same one as last time
   }
   state.activeView = view;
   document.querySelectorAll('.view').forEach(section => {
@@ -168,6 +169,8 @@ async function loadData() {
       await loadDocumentation();
     } else if (state.activeView === 'llm') {
       await loadLlmPage();
+    } else if (state.activeView === 'retrain') {
+      await loadRetrain();
     } else if (state.activeView === 'baseline') {
       await loadBaseline();
     } else if (state.activeView === 'review') {

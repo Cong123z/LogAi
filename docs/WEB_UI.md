@@ -38,11 +38,12 @@ theme).
 | Documentation | `/#documentation`, `/#documentation/suggestions` | on entry and after each change | `GET /api/documents`, `/api/services`, `/api/templates?link_source=draft` |
 | Data sources | `/#sources` | every 2 s | `GET /api/sources` |
 | LLM profiles | `/#llm` | every 5 s | `GET /api/llm/profiles`, `/api/llm/usage` |
+| Retrain | `/#retrain`, `/#retrain/<run id>` | every 2 s while a run is running, else every 15 s | `GET /api/retrain`, `/api/retrain/runs/<id>`; `PUT /api/retrain/schedule`; `POST /api/retrain/runs`, `/estimate`, `/runs/<id>/cancel`; `GET /api/commands/<id>` |
 | Baseline | `/#baseline/<service>/<key>/<days>` | on entry and after each change; no timers | `GET /api/services`, `/api/templates`, `/api/baseline/groups`, `/api/baseline/series`, `/api/baseline/matrix`, `/api/baseline/incident` |
-| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline/groups`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
+| Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change | `GET /api/baseline/matrix`, `/api/baseline/groups`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
-(Templates, Documentation, Baseline, Review) and Settings (Data sources, LLM profiles). The top
+(Templates, Documentation, Baseline, Review) and Settings (Data sources, LLM profiles, Retrain). The top
 bar has an **engine health pill**, refreshed every 5 s from `/api/pipeline`:
 red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 (degraded) when the engine reports warnings, green otherwise.
@@ -160,9 +161,8 @@ Route `#review/<service>/<key>/<days>[/<day>/<hour_from>/<hour_to>]` (the
 selection part is optional; `main.js` keeps everything after the first `/`
 in `state.subView`). This is the only page that records decisions.
 
-- header: a service select, 14 / 28 days, the same **key picker** (below), **Recompute baseline** (queues
-  `recompute_baseline` and polls the command every second until it reports
-  `days_committed` and `baseline_rows`, or an error);
+- header: a service select, 14 / 28 days, the same **key picker** (below), a **Retrain…** link to the
+  Retrain page (the page no longer queues a recompute itself);
 - Decisions are per service, day and hours, so excluding or keeping a period
   while looking at `*warn` works as for any key; the **To review** list is
   service-wide;
@@ -367,6 +367,29 @@ next number after the active ones; an edit keeps its place). With no active prof
 sent to an LLM. The API key is
 write-only: the list shows only whether one is saved, and a save with an
 empty key keeps the saved one.
+
+## Retrain
+
+Settings → Retrain (`#retrain`; `#retrain/<run id>` opens that run). Polled every 2 s while a run is
+`running`, else every 15 s (`loadRetrain` adjusts `POLL_MS.retrain`). Times are shown in the server's
+timezone (`timezone` of `GET /api/retrain`).
+
+- **Status line** (`#rt-status`, polite live region): running ("Re-reading (manual) for 12m 40s · now:
+  <step>…"), last succeeded / failed (red, "failed at <step>") / cancelled, engine stale (red), schedule off
+  (yellow), each with "Next retrain: <time>".
+- **Run retrain** button: disabled while a re-read runs or the engine is stale.
+- **Run details** (hidden when there is nothing to show): the run picked in the history or in the URL, else
+  the running run, else the last run if it failed, until Close. Kind, scope, run id, patterns, live lag;
+  **Cancel** while a re-read runs; an error box for a failed run; a step list (✓ done, ● current with a
+  progress bar and eta, ✕ failed, ○ waiting) with one detail line per step; the engine log's warnings and
+  errors in a `<details>` (open for a failed run; a running run has none yet). A finished run is fetched once
+  from `GET /api/retrain/runs/<id>`.
+- **Schedule**: switch, time, seven day toggles, Save / Discard (enabled when changed). No day ticked is
+  refused inline; a 409 keeps the draft and says it was changed elsewhere.
+- **History**: the last 50 runs; a row (click or Enter) opens its details.
+- **Run retrain dialog**: Rebuild, or Re-read (services chips, the last 7 days as tiles, hour range). The
+  estimate (`POST /api/retrain/estimate`, polled as a command) refreshes 0.4 s after each change. Start posts the
+  run, polls the command, shows its `error` in the dialog, and on success opens the new run.
 
 ## Baseline
 
