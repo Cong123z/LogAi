@@ -298,7 +298,7 @@ read-only for this.
 |---|---|---|
 | `Line` | `reader/es_source.py` | `ts` (epoch s), `service`, `level`, `message`, `module`, `doc_id` (ES `_id`) |
 | `Count` | `reader/reader.py` | `service`, `template_id` (set on a cache hit) or `text` (normalized, on a miss), `level`, `module`, `minute`, `n`, `sample` (first raw line of the aggregate) |
-| `MinuteBatch` | `reader/reader.py` | `counts: [Count]`, `watermark_ms`, `events`, `positions: {index: {pos_ms, caught_up, failing}}` |
+| `MinuteBatch` | `reader/reader.py` | `counts: [Count]`, `watermark_ms`, `events`, `positions: {index: {pos_ms, caught_up, failing}}`, `sources: [(pattern, service)]` (distinct pairs of the lines read in the poll; the owner records new ones in `index_services`) |
 | `ClosedMinute` | `owner/counts.py` | `minute` (epoch s // 60), local `day`, `hour`, `keys {(service, key): n}`, `modules {(service, template_id, module): n}`, `levels {(service, template_id): worst level}` |
 | `Stat` | `owner/baseline.py` | `mean`, `std` |
 | `Lookup` | `owner/baseline.py` | `this`, `next` (Stat or None for this and the next hour), `days` (committed days of the profile used, capped), `upper_only`, `daytype` (profile used) |
@@ -763,6 +763,7 @@ The engine writes `worker_status['engine'].status` at every flush:
 | `indices` | `{pattern: {pos_ms, caught_up, failing, floor}}` |
 | `available_indices` | `[{index, docs_count, health, status}]` |
 | `resolution` | `{pattern: [index, ...]}` |
+| `es_oldest` | `{pattern: epoch ms of its oldest ES doc \| null}`, refreshed every 600 s (`EsSource.oldest_ms`; a failed refresh keeps the old values) |
 | `warnings` | `"high miss ratio: <service> NN%"` when a service's 5-min miss ratio > 50% on ≥ 100 events, once 5 min of data exist; or the ES-unreachable warning at start |
 
 The status is built before a flush runs, so it reports the previous completed
@@ -804,6 +805,7 @@ service-scoped primary key.
 | `schema_migrations` | `version` | `applied_at` | engine |
 | `services` | `service` | `partition` (crc32 % 60) | flush |
 | `modules` | `service, module_code` (index on `module_code`) | — (a module may belong to several services) | flush |
+| `index_services` | `pattern, service` | | flush (insert once per new pair; never deleted) |
 | `es_cursors` | `index` | `since_ms`, `floor_ms`, `updated_at` | flush |
 | `templates` | `service, template_id` | `level`, `text`, `first_seen`, `last_seen`, `embedding` (vector(1024), NULL until embedded; cleared when the text changes) | flush; linker (`embedding`) |
 | `drain3_state` | `service` | `blob` (bytea), `version` | flush |

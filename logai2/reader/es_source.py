@@ -196,6 +196,14 @@ class EsSource:
             hits = hits + hits_of(self._search({**body, "search_after": hits[-1]["sort"]}, target))
         return hits
 
+    def oldest_ms(self, target: str) -> int | None:
+        """Epoch ms of the oldest @timestamp under `target` (same expression as page), None when empty."""
+        body = {"size": 0, "aggs": {"oldest": {"min": {"field": "@timestamp"}}}}
+        response = self.client.search(index=target, body=body, ignore_unavailable=True, allow_no_indices=True,
+                                      filter_path="aggregations.oldest.value")
+        value = ((response or {}).get("aggregations") or {}).get("oldest", {}).get("value")
+        return None if value is None else int(value)
+
     def resolve(self, patterns: List[str]) -> Dict[str, List[str]]:
         """pattern -> sorted concrete open indices (data-stream backing indices
         included, hidden ones not). A pattern matching nothing maps to [].

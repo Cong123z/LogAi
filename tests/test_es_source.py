@@ -254,3 +254,14 @@ def test_search_fails_fast(retry, exc):
     with pytest.raises(exc):
         source._search({"query": {}}, "idx")
     assert source.client.search.call_count == 1 and sleep.call_count == 0
+
+
+def test_oldest_ms_query_shape():
+    source = make_source([{"aggregations": {"oldest": {"value": 1.5e12, "value_as_string": "x"}}},
+                          {"aggregations": {"oldest": {"value": None}}}])
+    assert source.oldest_ms("idx-a*,-idx-ab*") == 1_500_000_000_000
+    call = source.client.search.call_args
+    assert call.kwargs["index"] == "idx-a*,-idx-ab*"
+    assert call.kwargs["ignore_unavailable"] is True and call.kwargs["allow_no_indices"] is True
+    assert call.kwargs["body"] == {"size": 0, "aggs": {"oldest": {"min": {"field": "@timestamp"}}}}
+    assert source.oldest_ms("idx") is None

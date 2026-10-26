@@ -16,6 +16,8 @@ class FakeSource:
         self.failing: set[str] = set()
         self.calls: list[str] = []
         self.size = 10_000   # EsSource's page size (cfg.elasticsearch.batch_size)
+        self.oldest_failing = False
+        self.oldest_calls: list[str] = []
 
     def fail(self, target: str) -> None:
         self.failing.add(target)
@@ -36,6 +38,12 @@ class FakeSource:
 
     def resolve(self, patterns: list[str]) -> dict[str, list[str]]:
         return {p: sorted(fnmatch.filter(self.hits, p)) for p in patterns}
+
+    def oldest_ms(self, target: str) -> int | None:
+        self.oldest_calls.append(target)
+        if self.oldest_failing:
+            raise ConnectionError("oldest down")
+        return min((h["sort"][0] for i in self._match(target) for h in self.hits[i]), default=None)
 
     def list_indices(self) -> list[dict]:
         return [{"index": i} for i in sorted(self.hits)]
