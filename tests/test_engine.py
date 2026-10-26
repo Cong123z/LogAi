@@ -174,6 +174,58 @@ def test_recompute_command(conn, cfg, make):
     assert conn.execute("SELECT result FROM commands").fetchone()["result"]["days_committed"] >= 0
 
 
+def runs_of(conn, trigger=None):
+    return q(conn, "SELECT * FROM retrain_runs WHERE %s::text IS NULL OR trigger = %s ORDER BY id",
+             trigger, trigger)
+
+
+def test_rebuild_run_recorded(conn, cfg, make):
+    cfg.start.days_back = 0
+    engine = make(FakeSource({"a": []}), Clock(NOON))
+    engine.start()
+    commands.enqueue(conn, "recompute_baseline")
+    engine.tick()
+    (run,) = runs_of(conn, "manual")
+    assert (run["kind"], run["trigger"], run["state"]) == ("rebuild", "manual", "succeeded")
+    assert [s["key"] for s in run["steps"]] == ["mark", "rebuild", "housekeeping"]
+    assert all(s["finished_at"] for s in run["steps"]) and run["finished_at"]
+    assert "baseline_rows" in run["result"]
+    res = q(conn, "SELECT result FROM commands")[0]["result"]
+    assert res["run_id"] == run["id"] and "days_committed" in res and "baseline_rows" in res
+
+
+def test_failed_rebuild_records_error_and_step(conn, cfg, make, monkeypatch):
+    cfg.start.days_back = 0
+    put_setting(conn, "detection_enabled", True)
+    put_setting(conn, "last_commit", {"today": "2026-10-15"})
+    engine = make(FakeSource({"a": []}), Clock(NOON))
+    engine.start()
+    monkeypatch.setattr("logai2.jobs.commit.REBUILD", "SELECT * FROM no_such_table")
+    commands.enqueue(conn, "recompute_baseline")
+    engine.tick()
+    (run,) = runs_of(conn, "manual")
+    assert (run["state"], run["failed_step"], run["trigger"]) == ("failed", "rebuild", "manual")
+    assert run["error_type"] and run["error"] and run["finished_at"]
+    assert "error" in q(conn, "SELECT result FROM commands")[0]["result"]
+
+
+def test_triggers_recorded(conn, cfg, make):
+    cfg.start.days_back = 2
+    clock = Clock(NOON)
+    engine = make(FakeSource({"a": history(NOON - 2 * 86400, NOON - 60, 1)}), clock)
+    engine.start()
+    catch_up(engine, clock)
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start"]
+    clock.t = datetime(2026, 10, 16, 2, 1, tzinfo=TZ).timestamp()
+    engine.tick()
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start", "schedule"]
+    cfg.start.days_back = 0
+    put_setting(conn, "last_commit", {"today": "2026-10-13"})
+    e2 = make(FakeSource({"a": []}), Clock(datetime(2026, 10, 17, 3, 0, tzinfo=TZ).timestamp()))
+    e2.start()
+    assert [r["trigger"] for r in runs_of(conn)][-1] == "startup"
+
+
 def test_bad_command_records_error_and_engine_continues(conn, cfg, make):
     cfg.start.days_back = 0
     engine = make(FakeSource({"a": []}), Clock(NOON))

@@ -36,7 +36,7 @@ def test_commit_keeps_last_5_weekdays_and_skips_today(conn, cfg):
         seed(conn, "s", day, 10, 60, {"k": (60, 60)})             # mean 1, std 0
     seed(conn, "s", date(2026, 10, 14), 10, 60, {"k": (6000, 600000)})   # today, still staging
     out = commit(conn, cfg, today=date(2026, 10, 14))
-    assert out == {"days_committed": 7, "baseline_rows": 1}
+    assert out == {"days_committed": 7, "baseline_rows": 1, "rows_before": 0}
     row = conn.execute("SELECT * FROM baseline").fetchone()
     assert (row["daytype"], row["mean"], row["std"], row["days"]) == ("weekday", 1.0, 0.0, 5)
     assert conn.execute("SELECT count(*) AS n FROM day_status WHERE day = '2026-10-14'").fetchone()["n"] == 0
@@ -66,10 +66,10 @@ def test_commit_is_idempotent_and_catches_up_missed_days(conn, cfg):
     for d in (27, 28, 29):
         seed(conn, "s", date(2026, 10, d), 10, 60, {"k": (60 * d, 60 * d * d)})
     first = commit(conn, cfg, today=date(2026, 10, 30))
-    assert first == {"days_committed": 3, "baseline_rows": 1}
+    assert first == {"days_committed": 3, "baseline_rows": 1, "rows_before": 0}
     rows = baseline_rows(conn)
     assert rows[0]["days"] == 3 and rows[0]["mean"] == pytest.approx(28)
-    assert commit(conn, cfg, today=date(2026, 10, 30)) == {"days_committed": 0, "baseline_rows": 1}
+    assert commit(conn, cfg, today=date(2026, 10, 30)) == {"days_committed": 0, "baseline_rows": 1, "rows_before": 1}
     assert baseline_rows(conn) == rows
     assert conn.execute("SELECT to_regclass('hourly_counts_20261101') AS t").fetchone()["t"]
     assert get_setting(conn, "last_commit")["today"] == "2026-10-30"
@@ -112,3 +112,36 @@ def test_commit_drops_module_hours_after_7_days(conn, cfg):
     assert "template_module_hours_20261013" in tables           # today-7 (boundary)
     assert "template_module_hours_20261014" in tables           # today-6
     assert "hourly_counts_20261012" in tables
+
+
+def test_rebuild_false_keeps_baseline(conn, cfg):
+    seed(conn, "s", date(2026, 10, 12), 10, 60, {"k": (60, 60)})
+    commit(conn, cfg, today=date(2026, 10, 13))
+    before = baseline_rows(conn)
+    seed(conn, "s", date(2026, 10, 13), 10, 60, {"k": (600, 6000)})
+    steps = []
+    out = commit(conn, cfg, today=date(2026, 10, 14), rebuild=False, on_step=lambda *a: steps.append(a[0]))
+    assert out["days_committed"] == 1 and out["baseline_rows"] == out["rows_before"] == len(before)
+    assert baseline_rows(conn) == before
+    assert steps == ["mark", "housekeeping"]
+
+
+def test_commit_steps_and_failure_step(conn, cfg, monkeypatch):
+    seen = []
+    commit(conn, cfg, today=date(2026, 10, 13), on_step=lambda *a: seen.append(a))
+    assert [a[0] for a in seen] == ["mark", "rebuild", "housekeeping"]
+    assert seen[1][2] == {"rows_before": 0, "rows": 0} and seen[2][2]["runs_deleted"] == 0
+    assert all(a[3] <= a[4] for a in seen)
+    monkeypatch.setattr("logai2.jobs.commit.REBUILD", "SELECT * FROM no_such_table")
+    with pytest.raises(Exception) as ei:
+        commit(conn, cfg, today=date(2026, 10, 14))
+    assert ei.value.step == "rebuild"
+
+
+def test_old_runs_deleted(conn, cfg):
+    for name, days in (("old", 366), ("new", 364)):
+        conn.execute("INSERT INTO retrain_runs (kind, trigger, state, started_at) "
+                     "VALUES (%s, 'manual', 'succeeded', now() - make_interval(days => %s))", (name, days))
+    conn.commit()
+    commit(conn, cfg, today=date(2026, 10, 13))
+    assert [r["kind"] for r in conn.execute("SELECT kind FROM retrain_runs")] == ["new"]
