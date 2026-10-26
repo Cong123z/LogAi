@@ -25,7 +25,9 @@ from logai2 import commands
 from logai2.alerts import alert_rows
 from logai2.config import AppConfig
 from logai2.db import connect, ensure_partitions, get_setting, migrate, put_setting
+from logai2.jobs import runs
 from logai2.jobs.commit import commit
+from logai2.jobs.runs import RunLog
 from logai2.metrics import Metrics
 from logai2.owner.owner import SQL, Owner
 from logai2.reader.cache import KnownLines
@@ -46,6 +48,10 @@ CONNECTION_FIELDS = ("hosts", "username", "password", "verify_certs")
 
 def _day(seconds: float) -> date:
     return local(int(seconds // 60)).date()
+
+
+FAILED_LABELS = {"mark": "Mark finished days", "rebuild": "Rebuild baseline",
+                 "housekeeping": "Partitions and retention"}
 
 
 class Engine:
@@ -120,7 +126,7 @@ class Engine:
                            "until catch-up re-judges their keys", raised)
         if self._commit_due():
             logger.info("missed daily commit: running it now")
-            self._commit()
+            self._commit("startup")
 
     def _seed_documents(self) -> None:
         path = self.cfg.documentation.seed_path
@@ -213,14 +219,14 @@ class Engine:
         if self._pending_events >= self.cfg.flush.max_events or now - self._last_flush >= self.cfg.flush.seconds:
             self._flush()
         if not self.owner.detection_enabled and self._caught_up():
-            self._commit()
+            self._commit("first_start")
             with self.db.transaction():
                 put_setting(self.db, "detection_enabled", True)
             self.owner.detection_enabled = True
             logger.info("first catch-up done: detection on")
             self._flush()   # status shows detection on
         elif self._commit_due():
-            self._commit()
+            self._commit("schedule")
         return batch["events"] > 0
 
     def _refresh(self, now: float) -> None:
@@ -373,15 +379,47 @@ class Engine:
         done = date.fromisoformat(self.last_commit["today"]) if self.last_commit else date.min
         return done < day and self.now() >= datetime.combine(day, self.commit_at, tzinfo=TZ).timestamp()
 
-    def _commit(self) -> dict:
+    def _record(self, fn, *args, **kw):
+        """Run bookkeeping must never change the commit's outcome: log and carry on. The runs helpers
+        use conn.transaction(), so a failure rolls back and leaves self.db idle."""
+        try:
+            return fn(self.db, *args, **kw)
+        except Exception:  # noqa: BLE001
+            logger.exception("recording retrain run failed")
+            return None
+
+    def _commit(self, trigger: str) -> dict:
         self._flush()
         day = self._owner_day()
-        result = commit(self.db, self.cfg, day)
+        run_id = self._record(runs.start, "rebuild", trigger)
+        rlog = RunLog()
+        rlog.attach()
+
+        def on_step(*a):
+            if run_id is not None:
+                self._record(runs.step, run_id, *a)
+        try:
+            result = commit(self.db, self.cfg, day, on_step=on_step)
+        except Exception as exc:
+            if run_id is not None:
+                failed = getattr(exc, "step", None)
+                for d in getattr(exc, "steps", []):
+                    on_step(*d)
+                if failed:
+                    on_step(failed, FAILED_LABELS.get(failed, failed), {}, time.time(), time.time())
+                self._record(runs.finish, run_id, "failed", error=str(exc), error_type=type(exc).__name__,
+                             failed_step=failed, log=rlog.lines)
+            raise
+        else:
+            if run_id is not None:
+                self._record(runs.finish, run_id, "succeeded", result, log=rlog.lines)
+        finally:
+            rlog.detach()
         with self.db.transaction():
             self.last_commit = get_setting(self.db, "last_commit")
         self.owner.reload_baseline()
         logger.info("commit for %s: %s", day, result)
-        return result
+        return {**result, "run_id": run_id}
 
     # --- commands ----------------------------------------------------------
 
@@ -399,7 +437,7 @@ class Engine:
 
     def _run(self, kind: str, payload: dict) -> dict:
         if kind == "recompute_baseline":
-            return self._commit()
+            return self._commit("manual")
         if kind == "reload_links":
             self.owner.reload_links()
             return {}

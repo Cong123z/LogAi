@@ -174,6 +174,62 @@ def test_recompute_command(conn, cfg, make):
     assert conn.execute("SELECT result FROM commands").fetchone()["result"]["days_committed"] >= 0
 
 
+def runs_of(conn, trigger=None):
+    return q(conn, "SELECT * FROM retrain_runs WHERE %s::text IS NULL OR trigger = %s ORDER BY id",
+             trigger, trigger)
+
+
+def test_rebuild_run_recorded(conn, cfg, make):
+    cfg.start.days_back = 0
+    engine = make(FakeSource({"a": []}), Clock(NOON))
+    engine.start()
+    commands.enqueue(conn, "recompute_baseline")
+    engine.tick()
+    (run,) = runs_of(conn, "manual")
+    assert (run["kind"], run["trigger"], run["state"]) == ("rebuild", "manual", "succeeded")
+    assert [s["key"] for s in run["steps"]] == ["mark", "rebuild", "housekeeping"]
+    assert all(s["finished_at"] for s in run["steps"]) and run["finished_at"]
+    assert "baseline_rows" in run["result"]
+    res = q(conn, "SELECT result FROM commands")[0]["result"]
+    assert res["run_id"] == run["id"] and "days_committed" in res and "baseline_rows" in res
+
+
+def test_failed_rebuild_records_error_and_step(conn, cfg, make, monkeypatch):
+    cfg.start.days_back = 0
+    put_setting(conn, "detection_enabled", True)
+    put_setting(conn, "last_commit", {"today": "2026-10-15"})
+    engine = make(FakeSource({"a": []}), Clock(NOON))
+    engine.start()
+    before = q(conn, "SELECT count(*) AS n FROM baseline")[0]["n"]
+    monkeypatch.setattr("logai2.jobs.commit.REBUILD", "SELECT * FROM no_such_table")
+    commands.enqueue(conn, "recompute_baseline")
+    engine.tick()
+    (run,) = runs_of(conn, "manual")
+    assert (run["state"], run["failed_step"], run["trigger"]) == ("failed", "rebuild", "manual")
+    assert run["error_type"] and run["error"] and run["finished_at"]
+    assert "error" in q(conn, "SELECT result FROM commands")[0]["result"]
+    assert [(s["key"], s["finished_at"] is not None) for s in run["steps"]] == [("mark", True), ("rebuild", True)]
+    assert run["steps"][1]["detail"] == {}
+    assert q(conn, "SELECT count(*) AS n FROM baseline")[0]["n"] == before
+
+
+def test_triggers_recorded(conn, cfg, make):
+    cfg.start.days_back = 2
+    clock = Clock(NOON)
+    engine = make(FakeSource({"a": history(NOON - 2 * 86400, NOON - 60, 1)}), clock)
+    engine.start()
+    catch_up(engine, clock)
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start"]
+    clock.t = datetime(2026, 10, 16, 2, 1, tzinfo=TZ).timestamp()
+    engine.tick()
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start", "schedule"]
+    cfg.start.days_back = 0
+    put_setting(conn, "last_commit", {"today": "2026-10-13"})
+    e2 = make(FakeSource({"a": []}), Clock(datetime(2026, 10, 17, 3, 0, tzinfo=TZ).timestamp()))
+    e2.start()
+    assert [r["trigger"] for r in runs_of(conn)][-1] == "startup"
+
+
 def test_bad_command_records_error_and_engine_continues(conn, cfg, make):
     cfg.start.days_back = 0
     engine = make(FakeSource({"a": []}), Clock(NOON))
@@ -418,6 +474,41 @@ def test_empty_pattern_caught_up_with_warning(conn, cfg, make):
     engine.tick()
     assert engine._caught_up()
     assert "no index matches nope-*" in engine._status()["warnings"]
+
+
+def _started(conn, cfg, make):
+    cfg.start.days_back = 0
+    put_setting(conn, "detection_enabled", True)
+    put_setting(conn, "last_commit", {"today": "2026-10-15"})
+    engine = make(FakeSource({"a": []}), Clock(NOON))
+    engine.start()
+    return engine
+
+
+def test_run_recording_failure_does_not_break_commit(conn, cfg, make, monkeypatch):
+    engine = _started(conn, cfg, make)
+    reloads = []
+    monkeypatch.setattr(engine.owner, "reload_baseline", lambda: reloads.append(1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("runs down")
+    monkeypatch.setattr("logai2.jobs.runs.step", boom)
+    monkeypatch.setattr("logai2.jobs.runs.finish", boom)
+    result = engine._commit("manual")
+    assert "days_committed" in result and reloads == [1]
+    assert engine.last_commit["today"] == "2026-10-15" and engine.last_commit["at"]
+    assert not engine.db.info.transaction_status.value   # idle
+    assert [r["state"] for r in runs_of(conn, "manual")] == ["running"]
+
+
+def test_run_start_failure_still_commits(conn, cfg, make, monkeypatch):
+    engine = _started(conn, cfg, make)
+
+    def boom(*a, **kw):
+        raise RuntimeError("runs down")
+    monkeypatch.setattr("logai2.jobs.runs.start", boom)
+    assert "days_committed" in engine._commit("manual")
+    assert runs_of(conn, "manual") == []
 
 
 def test_status_es_oldest(conn, cfg, make):

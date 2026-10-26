@@ -2,6 +2,7 @@
 "Recompute baseline now" and a missed 02:00 run call the same function."""
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from logai2.config import AppConfig
@@ -52,22 +53,49 @@ GROUP BY k.service, k.key, h.daytype, h.hour
 """
 
 
-def commit(conn, cfg: AppConfig, today: date) -> dict:
+def commit(conn, cfg: AppConfig, today: date, rebuild: bool = True, on_step=None) -> dict:
     """Call on an idle connection (no open transaction): otherwise the block below is only a
-    savepoint and nothing is committed until the caller commits."""
-    # db helpers open their own transaction() blocks; inside this one they become savepoints.
-    with conn.transaction():
-        days = conn.execute(MARK_DAYS, (today,)).rowcount
-        conn.execute("DELETE FROM baseline")
-        rows = conn.execute(REBUILD).rowcount
-        ensure_partitions(conn, today, today + timedelta(days=2))
-        cutoff = today - timedelta(days=cfg.retention.counts_days)
-        for table in ("service_hours", "hourly_counts", "alert_minutes"):
-            drop_partitions_before(conn, table, cutoff)
-        drop_partitions_before(conn, "template_module_hours",
-                               today - timedelta(days=cfg.retention.module_hours_days))
-        conn.execute("DELETE FROM alert_changes WHERE at < now() - make_interval(days => %s)",
-                     (cfg.retention.alert_changes_days,))
-        put_setting(conn, "last_commit", {"at": datetime.now(timezone.utc).isoformat(),
-                                          "today": today.isoformat()})
-    return {"days_committed": days, "baseline_rows": rows}
+    savepoint and nothing is committed until the caller commits. on_step(key, label, detail,
+    started_at, finished_at) is called per step after the transaction commits; an exception gets
+    `.step` (the running step's key) and `.steps` (the completed steps, as on_step args)."""
+    done: list[tuple] = []
+    key = "mark"
+    try:
+        # db helpers open their own transaction() blocks; inside this one they become savepoints.
+        with conn.transaction():
+            t0 = time.time()
+            days = conn.execute(MARK_DAYS, (today,)).rowcount
+            done.append(("mark", "Mark finished days", {"days": days}, t0, time.time()))
+            key = "rebuild"
+            t0 = time.time()
+            before = conn.execute("SELECT count(*) AS n FROM baseline").fetchone()["n"]
+            rows = before
+            if rebuild:
+                conn.execute("DELETE FROM baseline")
+                rows = conn.execute(REBUILD).rowcount
+                done.append(("rebuild", "Rebuild baseline", {"rows_before": before, "rows": rows}, t0, time.time()))
+            key = "housekeeping"
+            t0 = time.time()
+            ensure_partitions(conn, today, today + timedelta(days=2))
+            cutoff = today - timedelta(days=cfg.retention.counts_days)
+            dropped: list[str] = []
+            for table in ("service_hours", "hourly_counts", "alert_minutes"):
+                dropped += drop_partitions_before(conn, table, cutoff)
+            dropped += drop_partitions_before(conn, "template_module_hours",
+                                              today - timedelta(days=cfg.retention.module_hours_days))
+            conn.execute("DELETE FROM alert_changes WHERE at < now() - make_interval(days => %s)",
+                         (cfg.retention.alert_changes_days,))
+            deleted = conn.execute(
+                "DELETE FROM retrain_runs WHERE started_at < now() - interval '365 days'").rowcount
+            put_setting(conn, "last_commit", {"at": datetime.now(timezone.utc).isoformat(),
+                                              "today": today.isoformat()})
+            done.append(("housekeeping", "Partitions and retention",
+                         {"partitions_dropped": dropped, "runs_deleted": deleted}, t0, time.time()))
+    except Exception as exc:
+        exc.step = key
+        exc.steps = done
+        raise
+    if on_step:
+        for d in done:
+            on_step(*d)
+    return {"days_committed": days, "baseline_rows": rows, "rows_before": before}

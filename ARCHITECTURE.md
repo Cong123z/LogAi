@@ -630,7 +630,7 @@ not `*` or doc keys).
 
 ## 9. Daily commit and review exclusions
 
-`logai2/jobs/commit.py`, `commit(conn, cfg, today)`, one transaction,
+`logai2/jobs/commit.py`, `commit(conn, cfg, today, rebuild=True, on_step=None)`, one transaction,
 idempotent. The daily timer, the first catch-up, a missed commit at start and
 the web's **Recompute baseline now** all call it.
 
@@ -651,6 +651,17 @@ the web's **Recompute baseline now** all call it.
    `today − retention.counts_days`; delete `alert_changes` older than
    `retention.alert_changes_days`.
 4. Save `settings.last_commit = {"at": <UTC ISO>, "today": <local date>}`.
+
+**Every Rebuild is a run.** `Engine._commit(trigger)` (`first_start`, `schedule`,
+`startup`, `manual`) inserts a `retrain_runs` row (`kind='rebuild'`,
+`state='running'`) via `logai2/jobs/runs.py`, records each step after the
+commit transaction ends (`mark`, `rebuild`, `housekeeping`, each with start/end
+times and a detail dict), then sets `succeeded` with the result, or `failed`
+with `error`, `error_type` and `failed_step` (the step that raised; nothing is
+committed). A `RunLog` handler keeps the first 50 WARNING+ records of the
+`logai2` logger during the run in `log`. Housekeeping deletes runs older than
+365 days. `rebuild=False` marks days and housekeeps but leaves the baseline
+alone. The `recompute_baseline` command result is the commit result plus `run_id`.
 
 The engine then reloads the baseline into the detector (no `NOTIFY`: the
 commit runs in the engine process).
@@ -784,7 +795,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level, 006 modules per service, 007 template modules), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -802,6 +813,7 @@ service-scoped primary key.
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
 | `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
+| `retrain_runs` | `id` (index `started_at DESC`) | `kind`, `trigger`, `scope`, `state`, `started_at`, `finished_at`, `pos_ms`, `steps`, `result`, `error`, `error_type`, `failed_step`, `log` (jsonb) | engine (`jobs/runs.py`); deleted after 365 days by the commit |
 | `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | flush (seeded by migration 007 from all `alert_minutes`; keys `*…` and `doc:…`, and `…:unparsed` templates, skipped) |
 | `day_status` | `service, day` | `committed`, `daytype` | commit |
 | `review_exclusions` | `id` | `service`, `day`, `hour_from`, `hour_to` (`[from, to)`), `decision` (`exclude`/`keep`), `created_by` (unused, `''`), `created_at` | web |
