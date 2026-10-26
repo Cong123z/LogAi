@@ -560,12 +560,10 @@ Documented in `docs/WEB_UI.md` when built.
 6. **Build order:** the recorder (task 61) first, deployed as soon as it is merged. Every other task is built while data collects.
 7. **Company = fit only** (2026-10-26 evening): nothing injected (no Test A, no Test C) and nothing labelled (no Qwen judge, no human labels, no precision, no known-incident list). The CronJob runs `--test B`. Detection is checked only on the laptop, and that check is a gate for adoption.
 
-### Mockup changes still to make (in the page build, task 69)
-- Show the **verdict strength** (exploratory / provisional / final) next to every verdict.
-- Show the **90 % interval** for the interval score vs σ.
-- Drop the **Episodes and labels** board, the Qwen summary, and the precision / known-incident / lead / keep-hour columns.
-- Company runs: no Test A columns or recall curves; add the **laptop detect** column and MASE / sharpness columns.
-- The run bar shows the **site** (laptop / company, synthetic scenario).
+### Mockup
+Updated 2026-10-26 evening (version 6) to the company fit-only run: two boards (Evaluation, Calibrate),
+verdict strength, 90 % interval on the interval score, site in the run bar, the laptop detect column; the
+Episodes board, Qwen summary and label columns are gone. Task 69 builds it as drawn.
 
 ## Verification
 - `.venv/bin/pytest -q` green, including `tests/lab/` (synthetic data only).
