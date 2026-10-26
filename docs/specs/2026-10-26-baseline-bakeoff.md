@@ -515,6 +515,9 @@ alerting is untouched.
 - **Timelines:** a swimlane under the chart, one row per method, showing where each method alerted for this key. A per-service version shows all keys.
 
 ### 4. Calibrate
+- **Method picker:** the leader for the chosen monitor kind is selected first; the list holds every method that passes
+  the gates, plus σ. Switching method only reads its stored sweep; nothing is retrained on the page. Each method opens
+  on its auto knob (closest to 99.5 % coverage on the tune window, J4), marked "auto".
 - **Per method, a sensitivity sweep** precomputed by the run (5–7 knob values, e.g. k = 2.5…5,
   α = 1e-2…1e-5, CUSUM h). Charts:
   - **Test B:** coverage, interval score and alerts per day vs knob, with the target coverage and the alert budget as lines.
