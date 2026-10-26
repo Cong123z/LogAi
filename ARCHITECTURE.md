@@ -227,13 +227,17 @@ first **40 tokens** are kept. A line whose normalization raises is counted as
 
 ### 4.2 Query, paging and the millisecond re-read
 
+A pattern has one position across all its indices, so a doc that becomes searchable more than
+`upper_bound_seconds` later in one index than in another is skipped (same class as
+[B4](docs/BUGS.md)).
+
 One page per selected **pattern** per poll (`EsSource.page(target, ...)`, one search over all
 the pattern's indices, never one per concrete index; a new daily index is read from its first doc
 without waiting for a refresh):
 
 - `range @timestamp gte from_ms lte upper_ms` (`epoch_millis`), where
   `from_ms` is the pattern's position and `upper_ms = now - 30 s`;
-- sort `@timestamp asc` (`numeric_type: date`, so the sort value is epoch ms
+- sort `@timestamp asc` (`numeric_type: date` and `unmapped_type: date`, so the sort value is epoch ms
   also for `date_nanos`), then `_doc asc`; `size = elasticsearch.batch_size`;
 - `ignore_unavailable=true` and `allow_no_indices=true` (a deleted index or an empty
   pattern does not fail; the page is empty), `filter_path` limited to `_id`, `_index`, `_source`, `sort`;
@@ -535,7 +539,7 @@ transaction the block would only be a savepoint). Pending rows are cleared
 only after the commit; a failed flush keeps them all and the retry writes
 them once.
 
-**Cursor = oldest open minute.** The cursor written for every index is
+**Cursor = oldest open minute.** The cursor written for every pattern is
 `since_ms = max(boundary_ms, floor_ms)`, where `boundary_ms` is the start of
 the owner's oldest open minute. After a crash every open minute is re-read
 whole from ES and every closed minute was written exactly once, in the same
@@ -719,7 +723,7 @@ crosses a midnight.
 
 ### 10.4 Bootstrap and `days_back`
 
-On the first start every index reads from `now − days_back` (2 days) and
+On the first start every pattern reads from `now − days_back` (2 days) and
 every document is read (no sampling). With `days_back: 0` reading starts at
 now; the first catch-up commit then has no finished day, so only floors
 apply until the next nightly commit. ES retention on the selected indices

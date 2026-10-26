@@ -18,7 +18,7 @@ function srcStatusText(data) {
   if (!data.resolution) return 'The engine has not reported yet; the selection is applied when it starts.';
   if (!data.selection.revision) return 'The engine reads the index from its configuration. Save a selection here to choose indices.';
   if (!srcSaved().length) return 'No index selected: the engine is not reading any logs.';
-  return `Engine is reading ${Object.keys(data.indices || {}).length} index(es).`;
+  return `Engine is reading ${Object.keys(data.indices || {}).length} pattern(s).`;
 }
 
 function renderSources(data, force = false) {

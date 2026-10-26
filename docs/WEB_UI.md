@@ -145,8 +145,8 @@ Stage rules (constants in `logai2/web/pipeline_view.py`):
 
 | Stage | Degraded | Down |
 |---|---|---|
-| Elasticsearch | an index failing, one more than 5 min behind, or engine stale (position unknown) | all patterns failing |
-| Reader | a high-miss-ratio warning | engine stale, or 5 minutes of history at 0 events/s while an index is not caught up |
+| Elasticsearch | a pattern failing, one more than 5 min behind, or engine stale (position unknown) | all patterns failing |
+| Reader | a high-miss-ratio warning | engine stale, or 5 minutes of history at 0 events/s while a pattern is not caught up |
 | Templates | any unparsed line in the last hour | — |
 | Minutes & detection | lag over 5 min, or detection off | engine stale |
 | Postgres flush | slowest flush of the last 15 min over 10 s, or last commit older than 26 h | engine stale |

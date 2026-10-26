@@ -162,7 +162,8 @@ def test_page_query_shape():
     assert call.kwargs["filter_path"] == "hits.hits._id,hits.hits._index,hits.hits._source,hits.hits.sort"
     body = call.kwargs["body"]
     assert body["size"] == 10_000
-    assert body["sort"] == [{"@timestamp": {"order": "asc", "numeric_type": "date"}}, {"_doc": "asc"}]
+    assert body["sort"] == [{"@timestamp": {"order": "asc", "numeric_type": "date", "unmapped_type": "date"}},
+                            {"_doc": "asc"}]
     assert body["query"] == {"bool": {"filter": [
         {"range": {"@timestamp": {"gte": 5, "lte": 9, "format": "epoch_millis"}}}]}}
     assert body["_source"] == ["@timestamp", "service", "service_code2", "level",

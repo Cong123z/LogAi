@@ -126,6 +126,14 @@ Open items to fix, newest findings included. When one is fixed, move it to
   retention on `template_modules`/`modules` rows not seen for N days.
 - **Likelihood:** low-medium (depends on the source's field hygiene).
 
+### B14. One failing index fails the whole pattern's search
+- **Where:** `EsSource.page` (one search per pattern, task 51).
+- **What:** any per-index search error other than an unmapped `@timestamp` (a closed or red shard, a
+  mapping clash on another field) now fails the pattern's whole search; after `FAILING_AFTER` polls
+  the pattern is failing and its good indices stop being read too.
+- **Fix idea:** on a pattern failure, fall back to searching its resolved indices one by one.
+- **Likelihood:** low.
+
 ## Fixed
 
 ### F1. NUL byte in an ES field stalled the flush

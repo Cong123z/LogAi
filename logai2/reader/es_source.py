@@ -21,7 +21,7 @@ from logai2.reader.normalize import find_level
 _REQUEST_TIMEOUT_SECONDS = 30.0
 # The @timestamp sort value is always epoch milliseconds (also for a
 # date_nanos field), so a hit's first sort value can start a range query.
-_SORT = [{"@timestamp": {"order": "asc", "numeric_type": "date"}}, {"_doc": "asc"}]
+_SORT = [{"@timestamp": {"order": "asc", "numeric_type": "date", "unmapped_type": "date"}}, {"_doc": "asc"}]
 # Page size used to read one crowded millisecond whole: ES's default
 # index.max_result_window, the largest page a plain search may return.
 _WHOLE_MILLISECOND = 10_000
