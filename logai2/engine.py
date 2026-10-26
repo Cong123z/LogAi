@@ -35,6 +35,7 @@ from logai2.timeutil import TZ, local, minute_of
 logger = logging.getLogger("logai2.engine")
 
 AVAILABLE_REFRESH_SECONDS = 30
+ES_OLDEST_REFRESH_SECONDS = 600
 MISS_WINDOW_SECONDS = 300
 STATS_WINDOW_SECONDS = 900   # flush-time max and events/s in the status
 MISS_WARN_RATIO = 0.5
@@ -67,7 +68,9 @@ class Engine:
         self.last_commit: dict | None = None
         self.resolution: dict[str, list[str]] = {}
         self.available: list[dict] = []
-        self._refreshed = self._listed = -math.inf
+        self._refreshed = self._listed = self._oldest_at = -math.inf
+        self.es_oldest: dict[str, int | None] = {}
+        self._targets: dict[str, str] = {}
         self._partitions_day: date | None = None
         self._positions: dict[str, dict] = {}
         self._watermark_ms = 0
@@ -180,6 +183,7 @@ class Engine:
         oldest = min(saved.values(), default=None)
         starts = {p: saved.get(p, f if oldest is None else max(f, oldest)) for p, f in floors.items()}
         self.reader.set_sources(floors, starts, targets)
+        self._targets = targets
         return floors, starts
 
     # --- loop --------------------------------------------------------------
@@ -231,6 +235,12 @@ class Engine:
                 self.available = self.source.list_indices()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("list_indices failed: %s", exc)
+        if now - self._oldest_at >= ES_OLDEST_REFRESH_SECONDS:
+            self._oldest_at = now
+            try:
+                self.es_oldest = {p: self.source.oldest_ms(t) for p, t in self._targets.items()}
+            except Exception as exc:  # noqa: BLE001 — keep the previous values
+                logger.warning("es_oldest refresh failed: %s", exc)
         today = _day(now)
         if today != self._partitions_day:   # local midnight: roll partitions forward
             with self.db.transaction():
@@ -347,6 +357,7 @@ class Engine:
             "indices": {i: {**self._positions.get(i, {}), "floor": f} for i, f in self.reader.floors.items()},
             "available_indices": self.available,
             "resolution": self.resolution,
+            "es_oldest": self.es_oldest,
             "warnings": [f"no index matches {p}" for p in self.reader.floors if not self.resolution.get(p)]
                         + [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn],
         }

@@ -85,6 +85,7 @@ SQL = {
     "error_samples_trim": (
         "DELETE FROM error_samples WHERE ctid IN (SELECT ctid FROM error_samples "
         f"WHERE service = %s AND template_id = %s ORDER BY at DESC OFFSET {SAMPLES_KEPT})"),
+    "index_services": "INSERT INTO index_services (pattern, service) VALUES (%s, %s) ON CONFLICT DO NOTHING",
     "es_cursors": (
         "INSERT INTO es_cursors (index, since_ms, floor_ms) VALUES (%s, %s, %s) ON CONFLICT (index) DO UPDATE "
         "SET since_ms = EXCLUDED.since_ms, floor_ms = EXCLUDED.floor_ms, updated_at = now()"),
@@ -130,6 +131,8 @@ class Owner:
                                  "SELECT s.service, min(t.first_seen) AS first FROM services s "
                                  "LEFT JOIN templates t USING (service) GROUP BY s.service")}
             self.modules = {(r["service"], r["module_code"]) for r in conn.execute("SELECT service, module_code FROM modules")}
+            self._source_pairs = {(r["pattern"], r["service"])
+                                  for r in conn.execute("SELECT pattern, service FROM index_services")}
             states = {(r["service"], r["key"]): AlertRow(
                 r["service"], r["key"], r["state"], r["streak"], r["since"].timestamp(), r["score"],
                 r["count"], r["band_low"], r["band_high"]) for r in conn.execute("SELECT * FROM alert_state")}
@@ -149,6 +152,7 @@ class Owner:
     def _clear(self) -> None:
         self._services: dict[str, int] = {}
         self._modules: list[tuple[str, str]] = []
+        self._new_sources: set[tuple[str, str]] = set()   # not yet in index_services; known after the commit
         self._templates: dict[tuple[str, str], dict] = {}
         self._blobs: dict[str, bytes] = {}
         self._hours: Counter = Counter()
@@ -178,6 +182,7 @@ class Owner:
 
     def handle(self, batch: MinuteBatch) -> dict[tuple[str, str], str]:
         resolved: dict[tuple[str, str], str] = {}
+        self._new_sources |= set(map(tuple, batch.get("sources", ()))) - self._source_pairs
         for c in batch["counts"]:
             service, level, minute = c["service"], c["level"], c["minute"]
             template_id, text = c["template_id"], None
@@ -265,6 +270,7 @@ class Owner:
         with self.conn.transaction(), self.conn.cursor() as cur:
             cur.executemany(SQL["services"], list(self._services.items()))
             cur.executemany(SQL["modules"], self._modules)
+            cur.executemany(SQL["index_services"], sorted(self._new_sources))
             cur.executemany(SQL["templates"], new_t)
             cur.executemany(SQL["templates_seen"], seen_t)
             cur.executemany(SQL["drain3_state"], list(self._blobs.items()))
@@ -284,5 +290,6 @@ class Owner:
             cur.executemany(SQL["es_cursors"], [(i, since, floor) for i, (since, floor) in cursors.items()])
             cur.execute("DELETE FROM es_cursors WHERE index <> ALL(%s)", (list(cursors),))
             cur.executemany(SQL["worker_status"], [("engine", Jsonb(status))])
+        self._source_pairs |= self._new_sources
         self._clear()
         self.detector.touched.clear()

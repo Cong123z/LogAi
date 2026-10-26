@@ -388,3 +388,49 @@ def test_template_first_seen_moves_earlier(conn, cfg):
         conn.commit()
         want = ts(min(first, M - 60) if first != M else M)
         assert conn.execute("SELECT first_seen FROM templates").fetchone()["first_seen"] == want
+
+
+def _pairs(conn):
+    return [(r["pattern"], r["service"]) for r in rows(conn, "SELECT pattern, service FROM index_services ORDER BY 1, 2")]
+
+
+def test_index_services_recorded_once(conn, cfg, monkeypatch):
+    src = FakeSource({"a": lines(0, 2)})
+    reader, owner = make(conn, cfg, src, T0 / 1000 + 240)
+    tick(reader, owner, flush=False)
+    real = psycopg.Cursor.executemany
+
+    def boom(self, query, params, **kw):
+        if "es_cursors" in str(query):
+            raise RuntimeError("disk full")
+        return real(self, query, params, **kw)
+
+    monkeypatch.setattr(psycopg.Cursor, "executemany", boom)
+    with pytest.raises(RuntimeError):
+        owner.flush(reader.cursors(owner.boundary_ms), {})
+    monkeypatch.setattr(psycopg.Cursor, "executemany", real)
+    assert _pairs(conn) == []                                 # rolled back, still pending
+    owner.flush(reader.cursors(owner.boundary_ms), {})
+    assert _pairs(conn) == [("a", "s")]
+    src.hits["a"] += lines(1, 2)
+    tick(reader, owner)                                       # same pair again: no second insert
+    assert _pairs(conn) == [("a", "s")]
+    assert owner._source_pairs == {("a", "s")} and not owner._new_sources
+
+
+def test_index_services_loaded_on_start(conn, cfg, monkeypatch):
+    run_minutes(conn, cfg, lines(0, 2), T0 + 120_000)
+    assert _pairs(conn) == [("a", "s")]
+    reader, owner = make(conn, cfg, FakeSource({"a": lines(2, 2)}), T0 / 1000 + 400)
+    assert owner._source_pairs == {("a", "s")}
+    real = psycopg.Cursor.executemany
+    inserted = []
+
+    def spy(self, query, params, **kw):
+        if "index_services" in str(query):
+            inserted.extend(params)
+        return real(self, query, params, **kw)
+
+    monkeypatch.setattr(psycopg.Cursor, "executemany", spy)
+    tick(reader, owner)
+    assert inserted == []

@@ -45,6 +45,7 @@ class MinuteBatch(TypedDict):
     watermark_ms: int
     events: int
     positions: dict[str, dict]
+    sources: list[tuple[str, str]]   # distinct (pattern, service) of the lines read in this poll
 
 
 class Reader:
@@ -90,6 +91,7 @@ class Reader:
         upper_ms = int((self.now() - self.cfg.upper_bound_seconds) * 1000)
         aggregates: dict[tuple, Count] = {}
         events = 0
+        sources: set[tuple[str, str]] = set()
         for index in self._floors:
             try:
                 hits = self.source.page(self._targets[index], self._pos[index], upper_ms)
@@ -125,6 +127,7 @@ class Reader:
                     self.malformed += 1
                     continue
                 events += 1
+                sources.add((index, line.service))
                 self._add(aggregates, line)
             # A page shorter than the page size reached upper_ms, even under a
             # continuous stream. Stall guard: a page of only already-seen ids
@@ -134,6 +137,7 @@ class Reader:
             "counts": list(aggregates.values()),
             "watermark_ms": self._watermark(upper_ms),
             "events": events,
+            "sources": sorted(sources),
             "positions": {i: {"pos_ms": self._pos[i], "caught_up": self._caught_up[i],
                               "failing": self._errors[i] >= FAILING_AFTER} for i in self._floors},
         }
