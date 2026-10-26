@@ -166,7 +166,7 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `reader.upper_bound_seconds` | 30 | only docs with `@timestamp <= now - 30 s` are read |
 | `flush.seconds` | 2.0 | flush at least this often |
 | `flush.max_events` | 50000 | flush when this many events are pending |
-| `start.days_back` | 2 | first start reads from `now - days_back` days |
+| `start.days_back` | 7 | first start reads from `now - days_back` days |
 | `baseline.timezone` | `Asia/Ho_Chi_Minh` | **unused**: the zone is hard-coded in `logai2/timeutil.py` |
 | `baseline.commit_time` | `"02:00"` | local time of the daily commit |
 | `baseline.sigma_multiplier` | 3.0 | k of a full baseline |
@@ -723,7 +723,7 @@ crosses a midnight.
 
 ### 10.4 Bootstrap and `days_back`
 
-On the first start every pattern reads from `now − days_back` (2 days) and
+On the first start every pattern reads from `now − days_back` (7 days) and
 every document is read (no sampling). With `days_back: 0` reading starts at
 now; the first catch-up commit then has no finished day, so only floors
 apply until the next nightly commit. ES retention on the selected indices

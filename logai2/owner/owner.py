@@ -43,6 +43,7 @@ SQL = {
         "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (service, template_id) DO UPDATE SET "
         "level = EXCLUDED.level, text = EXCLUDED.text, "
         "last_seen = GREATEST(templates.last_seen, EXCLUDED.last_seen), "
+        "first_seen = LEAST(templates.first_seen, EXCLUDED.first_seen), "
         # a changed text makes the vector stale; the linker embeds it again
         "embedding = CASE WHEN templates.text IS DISTINCT FROM EXCLUDED.text THEN NULL ELSE templates.embedding END"),
     # a cache hit carries no text; its template row was inserted by the miss that taught the cache

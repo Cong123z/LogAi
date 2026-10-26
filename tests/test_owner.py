@@ -378,3 +378,13 @@ def test_module_hours_skipped_past_retention_but_pair_kept(conn, cfg):
             break
     assert _mod_rows(conn) == []
     assert [r["module_code"] for r in rows(conn, "SELECT module_code FROM template_modules")] == ["A"]
+
+
+def test_template_first_seen_moves_earlier(conn, cfg):
+    from logai2.owner.owner import SQL
+    ts = lambda m: datetime.fromtimestamp(m * 60, timezone.utc)
+    for first in (M, M - 60, M + 30):   # later, then an older minute, then a newer one that must not move it
+        conn.execute(SQL["templates"], ("s", "s:T1", "ERROR", "a <*>", ts(first), ts(M)))
+        conn.commit()
+        want = ts(min(first, M - 60) if first != M else M)
+        assert conn.execute("SELECT first_seen FROM templates").fetchone()["first_seen"] == want
