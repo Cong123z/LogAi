@@ -27,6 +27,7 @@ from logai2.config import AppConfig
 from logai2.db import connect, ensure_partitions, get_setting, migrate, put_setting
 from logai2.jobs import runs
 from logai2.jobs.commit import commit
+from logai2.jobs.reread import Lane, Scope, plan as plan_reread
 from logai2.jobs.runs import RunLog
 from logai2.metrics import Metrics
 from logai2.owner.owner import SQL, Owner
@@ -91,6 +92,8 @@ class Engine:
         self._flush_times: deque[tuple[float, float]] = deque()   # (finished at, seconds), last 900 s
         self._event_window: deque[tuple[float, int]] = deque()    # (observed at, events), last 900 s
         self._history: deque[dict] = deque(maxlen=60)             # one point per wall minute
+        self.reread: dict | None = None                           # the active re-read run (one at a time)
+        self._last_rate = 0.0                                     # docs/s of the last lane, for the estimate
 
     def _connect(self):
         c = connect(self.cfg.database.dsn)
@@ -129,6 +132,7 @@ class Engine:
         if self._commit_due():
             logger.info("missed daily commit: running it now")
             self._commit("startup", self._rebuild_today())
+        self._reread_resume()
 
     def _parse_schedule(self, raw) -> dict:
         """Effective schedule: each missing or invalid field falls back to its default."""
@@ -267,6 +271,7 @@ class Engine:
             self._flush()   # status shows detection on
         elif self._commit_due():
             self._commit("schedule", self._rebuild_today())
+        self._lane_tick(now)
         return batch["events"] > 0
 
     def _refresh(self, now: float) -> None:
@@ -431,12 +436,17 @@ class Engine:
             logger.exception("recording retrain run failed")
             return None
 
-    def _commit(self, trigger: str, rebuild: bool = True) -> dict:
+    def _commit(self, trigger: str, rebuild: bool = True, run: tuple | None = None) -> dict:
+        """`run` = (run id, RunLog, result(commit result) -> dict) makes this the rebuild of a re-read: its steps
+        and outcome go on that run, and its log is the run's."""
         self._flush()
         day = self._owner_day()
-        run_id = self._record(runs.start, "rebuild", trigger) if rebuild else None
-        rlog = RunLog()
-        rlog.attach()
+        if run:
+            run_id, rlog, to_result = run
+        else:
+            run_id = self._record(runs.start, "rebuild", trigger) if rebuild else None
+            rlog, to_result = RunLog(), lambda r: r
+            rlog.attach()
 
         def on_step(*a):
             if run_id is not None:
@@ -450,20 +460,198 @@ class Engine:
                     on_step(*d)
                 if failed:
                     on_step(failed, FAILED_LABELS.get(failed, failed), {}, time.time(), time.time())
-                self._record(runs.finish, run_id, "failed", error=str(exc), error_type=type(exc).__name__,
-                             failed_step=failed, log=rlog.lines)
+                self._record(runs.finish, run_id, "failed", to_result({}), error=str(exc),
+                             error_type=type(exc).__name__, failed_step=failed, log=rlog.lines)
             raise
         else:
             if run_id is not None:
-                self._record(runs.finish, run_id, "succeeded", result, log=rlog.lines)
+                self._record(runs.finish, run_id, "succeeded", to_result(result), log=rlog.lines)
         finally:
-            rlog.detach()
+            if not run:
+                rlog.detach()
         with self.db.transaction():
             self.last_commit = get_setting(self.db, "last_commit")
         if rebuild:
             self.owner.reload_baseline()
         logger.info("commit for %s: %s", day, result)
         return {**result, "run_id": run_id}
+
+    # --- re-read -----------------------------------------------------------
+
+    def _plan_reread(self, scope: Scope):
+        """Plan from the selected patterns' services; `oldest_ms` is asked fresh (es_oldest can be 10 min old)."""
+        with self.db.transaction():
+            pairs = self.db.execute("SELECT pattern, service FROM index_services").fetchall()
+        holding: dict[str, list[str]] = {}
+        for r in pairs:
+            if r["pattern"] in self.reader.floors:
+                holding.setdefault(r["pattern"], []).append(r["service"])
+        chosen = None if scope.services is None else set(scope.services)
+        holding = {p: ss for p, ss in holding.items() if chosen is None or chosen & set(ss)}
+        oldest = {p: self.source.oldest_ms(self._targets[p]) for p in holding}
+        hour = self._owner_hour_ms()
+        return plan_reread(scope, holding, oldest, hour)
+
+    def _owner_hour_ms(self) -> int:
+        t = local(self.owner.minutes.next_to_close).replace(minute=0, second=0, microsecond=0)
+        return int(t.timestamp() * 1000)
+
+    def _docs_in(self, windows) -> int:
+        return sum(self.source.count(self._targets[p], w.start_ms, w.end_ms - 1) for w in windows for p in w.patterns)
+
+    @staticmethod
+    def _scope_detail(p) -> dict:
+        return {"services": len(p.services), "patterns": len(p.patterns), "hours_chosen": p.hours_chosen,
+                "hours_not_in_es": p.hours_not_in_es, "hours_live": p.hours_live, "hours_to_read": p.hours_to_read}
+
+    def _estimate(self, scope: Scope) -> dict:
+        p = self._plan_reread(scope)
+        docs = self._docs_in(p.windows)
+        rate = self._last_rate or self.cfg.retrain.default_rate
+        return {"services": len(p.services), "patterns": len(p.patterns), "hours_to_read": p.hours_to_read,
+                "hours_not_in_es": p.hours_not_in_es, "hours_live": p.hours_live, "docs": docs,
+                "eta_s": docs / rate, "indices": len({i for x in p.patterns for i in self.resolution.get(x, [])})}
+
+    def _reread_run(self, scope: Scope) -> dict:
+        if self.reread:
+            return {"error": "a retrain is running"}
+        p = self._plan_reread(scope)
+        if p.hours_to_read == 0:
+            return {"error": "nothing to re-read", **self._scope_detail(p)}
+        now = self.now()
+        with self.db.transaction():
+            ensure_partitions(self.db, min(scope.days), max(_day(now), max(scope.days)))
+        run_id = runs.start(self.db, "reread", "manual", scope.to_json())
+        steps = {}
+        for key, label, detail, end in (("scope", "Scope", self._scope_detail(p), now),
+                                        ("partitions", "Partitions", {"first_day": min(scope.days).isoformat()}, now),
+                                        ("read", "Read from Elasticsearch", {}, None)):
+            steps[key] = {"key": key, "label": label, "started_at": now, "finished_at": end, "detail": detail}
+            self._record(runs.step, run_id, key, label, detail, now, end)
+        self._reread_begin(p, run_id, 0, steps, {})
+        return {"run_id": run_id}
+
+    def _reread_resume(self) -> None:
+        """A run left 'running' by a stopped engine continues from its saved position."""
+        with self.db.transaction():
+            row = self.db.execute("SELECT id, scope, pos_ms, steps FROM retrain_runs "
+                                  "WHERE kind = 'reread' AND state = 'running' ORDER BY id DESC LIMIT 1").fetchone()
+        if row is None:
+            return
+        steps = {s["key"]: s for s in row["steps"]}
+        try:
+            p = self._plan_reread(Scope.from_json(row["scope"]))
+            self._reread_begin(p, row["id"], row["pos_ms"] or 0, steps, steps.get("read", {}).get("detail", {}),
+                               resumed=True)
+        except Exception as exc:  # noqa: BLE001 — a run that cannot continue ends failed, the engine still starts
+            logger.exception("could not resume re-read %s", row["id"])
+            self._record(runs.finish, row["id"], "failed", error=str(exc), error_type=type(exc).__name__,
+                         failed_step="read")
+
+    def _reread_begin(self, p, run_id: int, pos_ms: int, steps: dict, saved: dict, resumed: bool = False) -> None:
+        with self.db.transaction():
+            first = {r["service"]: int(r["first"].timestamp()) // 60 for r in self.db.execute(
+                "SELECT service, min(first_seen) AS first FROM templates GROUP BY service") if r["first"]}
+        lane = Lane(p, run_id, pos_ms, self.source, self.owner.miners, self.reader.cache, first, self.cfg,
+                    self._targets)
+        base = {k: saved.get(k, 0) for k in ("docs_read", "hours_done", "new_templates")}
+        try:
+            target = base["docs_read"] + self._docs_in(lane.windows)
+        except Exception as exc:  # noqa: BLE001 — the bar is only an estimate
+            logger.warning("could not count the docs to re-read: %s", exc)
+            target = None
+        rlog = RunLog()
+        rlog.attach()
+        self.reread = {"run_id": run_id, "lane": lane, "plan": p, "steps": steps, "base": base, "target": target,
+                       "log": rlog, "errors": 0, "paused": saved.get("paused", 0), "lag": 0.0, "read": {}}
+        if resumed:
+            self.reread["resumed_at"] = self.now()
+        self._reread_publish([])
+
+    def _read_detail(self) -> dict:
+        rr = self.reread
+        lane, base = rr["lane"], rr["base"]
+        prog = lane.progress()
+        docs = base["docs_read"] + prog["docs_read"]
+        done = base["hours_done"] + prog["hours_done"]
+        total = base["hours_done"] + prog["hours_total"]
+        target = rr["target"]
+        pct = 100 if lane.done else min(99, round(100 * (docs / target if target else done / max(total, 1))))
+        eta = max(0, target - docs) / prog["rate"] if target and prog["rate"] > 0 else None
+        detail = {"docs_read": docs, "docs_target": target, "hours_done": done, "hours_total": total,
+                  "new_templates": base["new_templates"] + prog["new_templates"], "rate": prog["rate"],
+                  "position_ms": prog["position_ms"], "live_lag_s": rr["lag"], "paused": rr["paused"],
+                  "pct": pct, "eta_s": eta}
+        if "resumed_at" in rr:
+            detail["resumed_at"] = rr["resumed_at"]
+        return detail
+
+    def _steps_json(self) -> list[dict]:
+        return list(self.reread["steps"].values())
+
+    def _reread_publish(self, hours: list) -> None:
+        """Refresh the read step and queue the finished hours with the run's position for the next flush."""
+        rr = self.reread
+        rr["read"] = self._read_detail()
+        read = rr["steps"].setdefault("read", {"key": "read", "label": "Read from Elasticsearch",
+                                               "started_at": self.now(), "finished_at": None})
+        read["detail"] = rr["read"]
+        self.owner.add_lane(rr["run_id"], hours, {"pos_ms": rr["lane"].pos_ms, "steps": self._steps_json()})
+
+    def _lane_tick(self, now: float) -> None:
+        rr = self.reread
+        if rr is None:
+            return
+        lane = rr["lane"]
+        rr["lag"] = lag = max(0.0, now - self._watermark_ms / 1000)
+        hours: list = []
+        if not (self._caught_up() and lag <= self.cfg.retrain.max_live_lag_seconds):
+            rr["paused"] += 1   # live first: the lane never runs while it lags or catches up
+        else:
+            try:
+                hours = lane.step(self.cfg.retrain.tick_seconds, now)
+                rr["errors"] = 0
+            except Exception as exc:  # noqa: BLE001
+                rr["errors"] += 1
+                logger.warning("re-read page failed (%d in a row): %s", rr["errors"], exc)
+                if rr["errors"] >= 3:
+                    self._reread_end("failed", exc)
+                    return
+        self._reread_publish(hours)
+        if lane.done:
+            self._reread_end("succeeded")
+
+    def _reread_result(self) -> dict:
+        rr = self.reread
+        read, lane = rr["read"], rr["lane"]
+        return {"docs_read": read["docs_read"], "hours_replaced": read["hours_done"] - lane.skipped,
+                "hours_not_in_es": rr["plan"].hours_not_in_es + lane.skipped, "new_templates": read["new_templates"]}
+
+    def _reread_end(self, state: str, exc: Exception | None = None) -> None:
+        """succeeded: rebuild the baseline as steps of this run; failed / cancelled: the hours already flushed
+        stay, no rebuild."""
+        rr = self.reread
+        try:
+            read = rr["steps"]["read"]
+            read["finished_at"] = self.now()
+            self._last_rate = rr["lane"].progress()["rate"] or self._last_rate
+            if state == "succeeded":
+                rr["read"]["pct"] = 100
+                self._reread_publish([])
+                self._commit("manual", True, run=(rr["run_id"], rr["log"],
+                                                  lambda c: {**self._reread_result(), "baseline_rows": c.get("baseline_rows")}))
+                return
+            if exc is not None:
+                read["detail"] = {**rr["read"], "error": str(exc)}
+            self._flush()   # hours the lane already finished are written with their position
+            self._record(runs.step, rr["run_id"], "read", read["label"], read["detail"], read["started_at"],
+                         read["finished_at"])
+            self._record(runs.finish, rr["run_id"], state, self._reread_result(),
+                         error=str(exc) if exc else None, error_type=type(exc).__name__ if exc else None,
+                         failed_step="read" if exc else None, log=rr["log"].lines)
+        finally:
+            rr["log"].detach()
+            self.reread = None
 
     # --- commands ----------------------------------------------------------
 
@@ -482,6 +670,15 @@ class Engine:
     def _run(self, kind: str, payload: dict) -> dict:
         if kind == "recompute_baseline":
             return self._commit("manual")
+        if kind == "retrain_run":
+            return self._reread_run(Scope.from_json(payload))
+        if kind == "retrain_estimate":
+            return self._estimate(Scope.from_json(payload))
+        if kind == "retrain_cancel":
+            if self.reread is None or self.reread["run_id"] != payload.get("run_id"):
+                return {"error": "no such running re-read"}
+            self._reread_end("cancelled")
+            return {}
         if kind == "reload_links":
             self.owner.reload_links()
             return {}

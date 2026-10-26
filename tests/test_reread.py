@@ -430,7 +430,7 @@ def test_nothing_to_reread_makes_no_run(conn, ready):
     engine, clock, src = ready
     out = engine._run("retrain_run", Scope(None, [date(2026, 10, 10)], 0, 24).to_json())   # before ES's oldest doc
     assert out["error"] == "nothing to re-read" and out["hours_not_in_es"] == 24 and out["hours_to_read"] == 0
-    assert q(conn, "SELECT count(*) AS n FROM retrain_runs")[0]["n"] == 0
+    assert q(conn, "SELECT count(*) AS n FROM retrain_runs WHERE kind = 'reread'")[0]["n"] == 0
 
 
 def test_owner_hour_is_never_replaced(conn, ready):
@@ -470,7 +470,7 @@ def test_estimate_counts_docs(conn, ready):
     assert out["docs"] == 4 * 121 and out["hours_to_read"] == 4 and out["services"] == 1 and out["patterns"] == 1
     assert out["hours_not_in_es"] == 0 and out["hours_live"] == 0 and out["indices"] == 1
     assert out["eta_s"] == pytest.approx(4 * 121 / engine.cfg.retrain.default_rate)
-    assert q(conn, "SELECT count(*) AS n FROM retrain_runs")[0]["n"] == 0
+    assert q(conn, "SELECT count(*) AS n FROM retrain_runs WHERE kind = 'reread'")[0]["n"] == 0
     assert engine.reread is None
 
 
