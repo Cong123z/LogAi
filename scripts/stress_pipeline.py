@@ -1,5 +1,5 @@
 """Whole-pipeline stress test, normal operation and incidents (docs/perf/2026-10-24-pipeline-stress.md):
-python scripts/stress_pipeline.py --dsn <dsn> [--scenarios N1,N1-10k,N2,I1,I2,I3,I4,I5,I6,I7,E1|all]
+python scripts/stress_pipeline.py --dsn <dsn> [--scenarios N1,N1-10k,N2,I1,I2,I3,I4,I5,I6,I7,E1|all] (R1-R4, the re-read proof, only by name)
        [--scale tiny] [--services 10 --templates 300 --eps 2000] [--es-ms 2.5 --es-us-per-hit 10]
        [--es-host http://localhost:9200] [--max-bytes N] [--json out.json]
 
@@ -33,9 +33,11 @@ import time
 import traceback
 import uuid
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -48,6 +50,7 @@ from logai2.config import load_config  # noqa: E402
 from logai2.db import connect, ensure_partitions, migrate, put_setting  # noqa: E402
 from logai2.engine import MAX_BACKOFF_SECONDS, Engine  # noqa: E402
 from logai2.jobs.commit import commit  # noqa: E402
+from logai2.jobs.reread import Scope  # noqa: E402
 from logai2.owner.counts import ERROR_LEVELS  # noqa: E402
 from logai2.owner.miners import Miners  # noqa: E402
 from logai2.reader.normalize import normalize  # noqa: E402
@@ -152,9 +155,10 @@ class Stream:
     module and variables from mix(seed ^ k). `delay_ms`: visible only from ts + delay_ms (late ingest)."""
 
     def __init__(self, sid: str, service: str, a_ms: int, b_ms: int, rpm: int, templates: list[Template],
-                 module_fn=None, delay_ms: int = 0, bad: tuple[str, str] | None = None):
+                 module_fn=None, delay_ms: int = 0, bad: tuple[str, str] | None = None, index: str = ""):
         self.sid, self.service, self.a_ms, self.b_ms, self.rpm = sid, service, a_ms, b_ms, max(rpm, 0)
         self.templates, self.module_fn, self.delay_ms, self.bad = templates, module_fn, delay_ms, bad
+        self.index = index or f"stress-{service}"
         self.seed = mix(zlib.crc32(sid.encode()))
         acc, self.cum = 0.0, []
         for t in templates:
@@ -206,7 +210,7 @@ class GenSource:
         self.clock, self.size = clock, size
         self.indices: dict[str, list[Stream]] = {}
         for s in streams:
-            self.indices.setdefault(f"stress-{s.service}", []).append(s)
+            self.indices.setdefault(s.index, []).append(s)
         self.gen_seconds = 0.0
         self.pages = self.hits = 0
 
@@ -215,7 +219,19 @@ class GenSource:
         return sorted(i for i in fnmatch.filter(self.indices, first)
                       if not any(fnmatch.fnmatch(i, e[1:]) for e in excl))
 
-    def page(self, target: str, from_ms: int, upper_ms: int) -> list[dict]:
+    def count(self, target: str, from_ms: int, to_ms: int, timeout: int | None = None) -> int:
+        """Docs with from_ms <= ts <= to_ms (EsSource.count), ignoring late-ingest delays."""
+        return sum(s.count(from_ms, to_ms + 1) for i in self._match(target) for s in self.indices[i])
+
+    def oldest_ms(self, target: str) -> int | None:
+        firsts = [s.a_ms for i in self._match(target) for s in self.indices[i] if s.count(s.a_ms, s.b_ms)]
+        return min(firsts, default=None)
+
+    def delete_index(self, name: str) -> None:
+        """Retention: the index and its docs are gone."""
+        del self.indices[name]
+
+    def page(self, target: str, from_ms: int, upper_ms: int, timeout: int | None = None) -> list[dict]:
         started = time.perf_counter()
         now_ms = int(self.clock() * 1000)
         lists = [[{**h, "_index": i} for h in s.hits(from_ms, upper_ms, self.size, now_ms)]
@@ -282,12 +298,14 @@ def pretrain(cfg, world) -> tuple[dict[str, bytes], list[tuple]]:
     return miners.dirty(), [(s, tid, lv, text) for (s, tid), (lv, text) in texts.items()]
 
 
-def setup(a, cfg, world, schema: str, hours: list[int], burst: Template, read_from: float) -> None:
+def setup(a, cfg, world, schema: str, hours: list[int], burst: Template, read_from: float,
+          t0: float = T0, day0: date = DAY0, patterns: list[str] | None = None) -> None:
+    history = [day0 - timedelta(days=d) for d in (1, 2, 5, 6, 7)]
     with psycopg.connect(schema_dsn(a.dsn, schema), autocommit=False, row_factory=dict_row) as c:
         migrate(c)
-        ensure_partitions(c, DAY0 - timedelta(days=8), DAY0 + timedelta(days=2))
+        ensure_partitions(c, day0 - timedelta(days=8), day0 + timedelta(days=2))
         blobs, templates = pretrain(cfg, world)
-        first = datetime.fromtimestamp(T0 - 30 * 86400, TZ)
+        first = datetime.fromtimestamp(t0 - 30 * 86400, TZ)
         rpm = a.eps * 60 / a.services
         counts, service_hours = [], []
         for svc, ts in world.items():
@@ -296,7 +314,7 @@ def setup(a, cfg, world, schema: str, hours: list[int], burst: Template, read_fr
                 cls = "*error" if t.level in ERROR_LEVELS else "*warn" if t.level == "WARN" else "*info"
                 for key in (t.tid, cls):
                     lam[key] = lam.get(key, 0.0) + rpm * t.share
-            for d in HISTORY:
+            for d in history:
                 for hr in hours:
                     service_hours.append((svc, d, hr, 60))
                     # Poisson: mean x, variance x per minute
@@ -317,9 +335,11 @@ def setup(a, cfg, world, schema: str, hours: list[int], burst: Template, read_fr
                 with cur.copy(f"COPY {table} FROM STDIN") as cp:
                     for row in rows:
                         cp.write_row(row)
-        commit(c, cfg, DAY0)
+        commit(c, cfg, day0)
         put_setting(c, "detection_enabled", True)   # as the engine does after its first catch-up
         put_setting(c, "bootstrap", {"since": read_from, "until": read_from})
+        if patterns:
+            put_setting(c, "index_selection", {"entries": [{"pattern": p, "added_at": 0} for p in patterns]})
 
 
 # --- one run ---------------------------------------------------------------------------------------------
@@ -716,6 +736,421 @@ def scenarios(a) -> dict[str, Scenario]:
     return out
 
 
+# --- R1-R4: the re-read lane (docs/perf/2026-10-26-retrain.md) -----------------------------------------------
+
+D1, D2, D3 = DAY0, DAY0 + timedelta(days=1), DAY0 + timedelta(days=2)   # day 1 is re-read; D3 is "today"
+ALL_HOURS = list(range(24))
+CUT_HOUR = 18   # svc00's second pattern: extra-svc00-1 holds day 1 before 18:00, extra-svc00-2 the rest (R4 deletes -1)
+PATTERNS = ["stress-*", "extra-*"]
+
+
+def dms(d: date, hour: int = 0, minute: int = 0) -> int:
+    return int(datetime(d.year, d.month, d.day, hour, minute, tzinfo=TZ).timestamp() * 1000)
+
+
+NOW = dms(D3, 0, 5) / 1000   # R1, R3, R4: days 1 and 2 are in the past
+
+
+class Refused(Exception):
+    pass
+
+
+def r_streams(a, world, segments) -> list[Stream]:
+    """segments = [(from_ms, to_ms, events per minute per service)]. svc00 is fed by two patterns: half of its
+    events in stress-svc00, half in extra-svc00-1 (before day 1 18:00) and extra-svc00-2."""
+    cut, out = dms(D1, CUT_HOUR), []
+    for i, (a_ms, b_ms, rpm) in enumerate(segments):
+        for svc in world:
+            if svc != "svc00":
+                out.append(Stream(f"{svc}-r{i}", svc, a_ms, b_ms, rpm, world[svc]))
+                continue
+            out.append(Stream(f"{svc}-r{i}-p1", svc, a_ms, b_ms, rpm // 2, world[svc]))
+            for j, (x, y) in enumerate(((a_ms, min(b_ms, cut)), (max(a_ms, cut), b_ms))):
+                if y > x:
+                    out.append(Stream(f"{svc}-r{i}-p2{j}", svc, x, y, rpm - rpm // 2, world[svc],
+                                      index=f"extra-{svc}-{j + 1}"))
+    return out
+
+
+def r_rows(a, cfg, backlog_min: float = 0, live_min: float = 0, live_eps: float = 0, lane_hours: int = 0) -> int:
+    """Written rows of one session, as run_scenario estimates them (catch-up flushes every max_events)."""
+    s, t = a.services, a.templates
+    flush_term = a.r_eps * 60 / cfg.flush.max_events * s * t
+    a2 = argparse.Namespace(**{**vars(a), "eps": live_eps or a.r_eps})
+    live = rows_per_minute(a2, WORLD_FOR_EST[0], live_eps or a.r_eps)
+    return int(s * (t + 4) * 5 * 24 * 2 + backlog_min * (s * t * 3.4 + flush_term) + live_min * live
+               + lane_hours * s * t * 3.4)
+
+
+WORLD_FOR_EST: list = [None]
+
+
+def r_guard(name: str, rows: int, admin, a) -> None:
+    est = rows * ROW_BYTES * 2
+    free = shutil.disk_usage("/").free
+    limit = min(a.max_bytes, free // 2) if a.max_bytes else free // 2
+    print(f"\n## {name}: estimated write {est / 2**20:,.0f} MB, limit {limit / 2**20:,.0f} MB "
+          f"(free on / {free / 2**20:,.0f} MB)", flush=True)
+    if est > limit:
+        raise Refused(f"~{est / 2**20:,.0f} MB over the {limit / 2**20:,.0f} MB limit")
+
+
+@contextmanager
+def r_session(a, world, admin, streams, now: float, since: float):
+    """A throwaway schema and a real Engine reading the generator from `since`, its clock at `now`."""
+    cfg = load_config(None)
+    schema = f"stress_pipe_{uuid.uuid4().hex[:8]}"
+    admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    sess = None
+    try:
+        setup(a, cfg, world, schema, ALL_HOURS, world["svc00"][0], since, t0=dms(D1) / 1000, day0=D1,
+              patterns=PATTERNS)
+        cfg.database.dsn = schema_dsn(a.dsn, schema)
+        cfg.elasticsearch.index = "stress-*"
+        clock = Clock(now)
+        source = GenSource(clock, streams, cfg.elasticsearch.batch_size)
+        engine = Engine(cfg, connect(cfg.database.dsn), source, now=clock)
+        engine.start()
+        run = Run(a, engine, clock, source, since)
+        run.wrap()
+        sess = SimpleNamespace(cfg=cfg, dsn=cfg.database.dsn, run=run, source=source, clock=clock, wall0=time.perf_counter())
+        yield sess
+    finally:
+        if sess is not None:
+            for conn in (sess.run.engine.conn, sess.run.engine.db):
+                if not conn.closed:
+                    conn.close()
+        admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        admin.execute("CHECKPOINT")
+
+
+def drive(run: Run, t_end: float, hook=None, stop=None) -> str:
+    try:
+        run.until(t_end, hook, stop)
+    except Stalled:
+        return "stalled"
+    except DiskLow:
+        return "stopped: / under 600 MB free"
+    return ""
+
+
+def start_reread(run: Run, scope: Scope) -> dict:
+    return run.engine._run("retrain_run", scope.to_json())
+
+
+def reread_row(c) -> dict:
+    row = c.execute("SELECT state, pos_ms, result, steps, log, error FROM retrain_runs WHERE kind = 'reread' "
+                    "ORDER BY id DESC LIMIT 1").fetchone() or {}
+    return {**row, "steps": {s["key"]: s for s in row.get("steps", [])}}
+
+
+def rebuild(sess, today: date) -> None:
+    """The nightly commit's baseline rebuild, on an idle connection."""
+    with psycopg.connect(sess.dsn, row_factory=dict_row) as c:
+        commit(c, sess.cfg, today)
+
+
+def snapshot(c) -> dict:
+    """Day 1 rows keyed by template TEXT (ids may differ between schemas), and the baseline."""
+    texts = {(r["service"], r["template_id"]): r["text"]
+             for r in c.execute("SELECT service, template_id, text FROM templates")}
+
+    def label(svc, key):
+        return texts.get((svc, key), key)
+    snap: dict = {"service_hours": {}, "hourly_counts": {}, "template_module_hours": {}, "baseline": {}}
+    for r in c.execute("SELECT service, hour, n_minutes FROM service_hours WHERE day = %s", (D1,)):
+        snap["service_hours"][(r["service"], r["hour"])] = r["n_minutes"]
+    for table, col, keyf in (("hourly_counts", "key", None), ("template_module_hours", "template_id", None)):
+        extra = ", module_code" if table == "template_module_hours" else ", sumsq"
+        value = "count" if table == "template_module_hours" else "sum"
+        for r in c.execute(f"SELECT service, {col} AS k, hour, {value} AS v{extra} FROM {table} WHERE day = %s", (D1,)):
+            key = (r["service"], r["hour"], label(r["service"], r["k"])) + ((r["module_code"],)
+                                                                        if table == "template_module_hours" else ())
+            old = snap[table].get(key, (0, 0))
+            snap[table][key] = (old[0] + r["v"], old[1] + (0 if table == "template_module_hours" else r["sumsq"]))
+    for r in c.execute("SELECT service, key, daytype, hour, mean, std, days FROM baseline"):
+        snap["baseline"][(r["service"], r["hour"], label(r["service"], r["key"]), r["daytype"])] = (
+            r["mean"], r["std"], r["days"])
+    return snap
+
+
+def same(x, y) -> bool:
+    return x is not None and y is not None and len(x) == len(y) and all(
+        math.isclose(p, q, rel_tol=1e-9, abs_tol=1e-9) for p, q in zip(x, y))
+
+
+def compare(truth: dict, got: dict, tables=("service_hours", "hourly_counts", "template_module_hours"),
+            absent_ok=lambda k: False) -> dict:
+    """Rows that differ (or exist on one side only) per table; `absent_ok` keys may be missing from `got`."""
+    out = {"rows compared": 0}
+    for t in tables:
+        a, b = truth[t], got[t]
+        keys = set(a) | set(b)
+        out["rows compared"] += len(keys)
+        out[f"mismatch {t}"] = sum(
+            not (absent_ok(k) and k not in b) and not same(
+                a.get(k) if isinstance(a.get(k), tuple) else (a.get(k),),
+                b.get(k) if isinstance(b.get(k), tuple) else (b.get(k),)) for k in keys)
+    out["mismatches"] = sum(v for k, v in out.items() if k.startswith("mismatch "))
+    return out
+
+
+def day1_total(c) -> int:
+    return int(c.execute("SELECT coalesce(sum(sum), 0) AS n FROM hourly_counts WHERE key = '*total' AND day = %s",
+                         (D1,)).fetchone()["n"])
+
+
+TRUTH: dict = {}   # world -> what live reading of both days stored (R1's schema A), shared by R1, R3, R4
+
+
+def r_truth(a, world, admin) -> dict:
+    """Schema A: live reading of days 1 and 2 (the generator's world, `late` must be 0)."""
+    key = (a.services, a.templates, a.r_eps, a.seed)
+    if key in TRUTH:
+        return TRUTH[key]
+    cfg = load_config(None)
+    r_guard("R-truth (live, 2 days)", r_rows(a, cfg, backlog_min=2 * 1440), admin, a)
+    rpm = a.r_eps * 60 // a.services
+    streams = r_streams(a, world, [(dms(D1), dms(D3, 12), rpm)])
+    with r_session(a, world, admin, streams, NOW, dms(D1) / 1000) as s:
+        err = drive(s.run, NOW + 6 * 3600, stop=caught_up)
+        s.run.engine._flush()
+        wall = time.perf_counter() - s.wall0
+        rebuild(s, D3)
+        with psycopg.connect(s.dsn, row_factory=dict_row) as c:
+            snap = snapshot(c)
+            counted = day1_total(c)
+        info = {"events": int(s.run.engine.metrics.events._value.get()), "late": s.run.engine.owner.minutes.late,
+                "wall_s": wall, "counted": counted, "formula": s.source.truth(dms(D1), dms(D2)), "error": err}
+    TRUTH[key] = {"snap": snap, **info}
+    return TRUTH[key]
+
+
+def run_r1(a, world, admin) -> dict:
+    cfg = load_config(None)
+    r_guard("R1", r_rows(a, cfg, backlog_min=1440, live_min=30, lane_hours=24), admin, a)
+    truth = r_truth(a, world, admin)
+    rpm = a.r_eps * 60 // a.services
+    streams = r_streams(a, world, [(dms(D1), dms(D3, 12), rpm)])
+    with r_session(a, world, admin, streams, NOW, dms(D2) / 1000) as s:
+        err = drive(s.run, NOW + 6 * 3600, stop=caught_up)
+        s.run.engine._flush()
+        live_s = time.perf_counter() - s.wall0
+        t0, w0 = s.clock.t, time.perf_counter()
+        started = start_reread(s.run, Scope(None, [D1], 0, 24))
+        err = err or started.get("error", "") or drive(s.run, NOW + 12 * 3600,
+                                                        stop=lambda r: r.engine.reread is None)
+        s.run.engine._flush()
+        reread_wall, reread_sim = time.perf_counter() - w0, s.clock.t - t0
+        rebuild(s, D3)
+        with psycopg.connect(s.dsn, row_factory=dict_row) as c:
+            snap = snapshot(c)
+            counted = day1_total(c)
+            row = reread_row(c)
+    res = compare(truth["snap"], snap)
+    base = compare(truth["snap"], snap, tables=("baseline",))
+    res.update({"mismatch baseline": base["mismatch baseline"], "baseline rows compared": base["rows compared"],
+                "templates compared by": "text"})
+    res["mismatches"] += base["mismatch baseline"]
+    res.update({
+        "truth day 1": truth["formula"], "counted day 1 (A)": truth["counted"], "counted day 1 (B)": counted,
+        "late (A live)": truth["late"], "events (A live, 2 days)": truth["events"], "A wall s": truth["wall_s"],
+        "B live day 2 wall s": live_s, "reread state": row.get("state"), "reread wall s": reread_wall,
+        "reread sim s": reread_sim, "reread result": row.get("result"), "error": err or row.get("error") or "",
+        "docs/s (sim)": row.get("result", {}).get("docs_read", 0) / max(1e-9, reread_sim)})
+    return res
+
+
+def r_kill(sess) -> None:
+    """Crash: the connections go away without a flush (queued hours and open minutes are lost), then a new Engine
+    on the same schema starts and resumes the running re-read."""
+    run = sess.run
+    old = run.engine
+    old.reread["log"].detach()
+    for conn in (old.conn, old.db):
+        conn.close()
+    new = Engine(sess.cfg, connect(sess.dsn), sess.source, now=sess.clock)
+    new.start()
+    run.engine = new
+    run.wrap()
+
+
+def run_with_reread(a, world, admin, name: str, hook_factory, scope: Scope) -> dict:
+    """R3 and R4: nothing live before the re-read (the engine starts at `now`), then a re-read of day 1."""
+    cfg = load_config(None)
+    r_guard(name, r_rows(a, cfg, live_min=60, lane_hours=24 * 2), admin, a)
+    truth = r_truth(a, world, admin)
+    rpm = a.r_eps * 60 // a.services
+    streams = r_streams(a, world, [(dms(D1), dms(D3, 12), rpm)])
+    with r_session(a, world, admin, streams, NOW, NOW - 120) as s:
+        st = SimpleNamespace(rid=None, error="", pos=[], kills=0, deleted=False)
+        probe = psycopg.connect(s.dsn, autocommit=True, row_factory=dict_row)
+        hook = hook_factory(s, st, probe, scope)
+        stop = lambda r: st.rid is not None and r.engine.reread is None  # noqa: E731
+        t0, w0 = s.clock.t, time.perf_counter()
+        err = drive(s.run, NOW + 12 * 3600, hook, stop) or st.error
+        s.run.engine._flush()
+        wall, sim = time.perf_counter() - w0, s.clock.t - t0
+        probe.close()
+        rebuild(s, D3)
+        with psycopg.connect(s.dsn, row_factory=dict_row) as c:
+            snap = snapshot(c)
+            row = reread_row(c)
+            hours = {r["service"]: r["n"] for r in c.execute(
+                "SELECT service, count(*) AS n FROM service_hours WHERE day = %s GROUP BY 1", (D1,))}
+    return {"truth": truth, "snap": snap, "row": row, "state": st, "wall": wall, "sim": sim, "error": err,
+            "hours": hours, "late": s.run.engine.owner.minutes.late,
+            "docs formula": s.source.truth(dms(D1), dms(D2))}
+
+
+def starter(s, st, probe, scope):
+    """Hook part 1: start the re-read once the engine is caught up."""
+    if st.rid is None and s.run.engine._caught_up() and s.run.lags:
+        started = start_reread(s.run, scope)
+        st.rid, st.error = started.get("run_id"), started.get("error", "")
+    if st.rid is not None:
+        row = probe.execute("SELECT pos_ms FROM retrain_runs WHERE id = %s", (st.rid,)).fetchone()
+        if row and row["pos_ms"] is not None:
+            st.pos.append(row["pos_ms"])
+
+
+def fraction(s) -> float:
+    rr = s.run.engine.reread
+    return (rr["lane"].pos_ms - dms(D1)) / 86_400_000 if rr and rr["lane"].pos_ms else 0.0
+
+
+def crash_hook(s, st, probe, scope):
+    def hook(run):
+        starter(s, st, probe, scope)
+        if st.rid is not None and st.kills < 2 and fraction(s) >= (0.3, 0.7)[st.kills]:
+            st.kills += 1
+            r_kill(s)
+    return hook
+
+
+def retention_hook(s, st, probe, scope):
+    def hook(run):
+        starter(s, st, probe, scope)
+        if st.rid is not None and not st.deleted and fraction(s) >= 0.5:
+            st.deleted = True
+            s.source.delete_index("extra-svc00-1")   # the oldest index of pattern extra-*
+    return hook
+
+
+def run_r3(a, world, admin) -> dict:
+    r = run_with_reread(a, world, admin, "R3", crash_hook, Scope(None, [D1], 0, 24))
+    res = compare(r["truth"]["snap"], r["snap"])
+    pos = r["state"].pos
+    res.update({"state": r["row"].get("state"), "kills": r["state"].kills,
+                "pos never back": all(x <= y for x, y in zip(pos, pos[1:])), "pos samples": len(pos),
+                "docs read": r["row"].get("result", {}).get("docs_read"), "docs in day 1": r["docs formula"],
+                "reread wall s": r["wall"], "reread sim s": r["sim"], "late": r["late"], "error": r["error"] or
+                r["row"].get("error") or ""})
+    return res
+
+
+def run_r4(a, world, admin) -> dict:
+    r = run_with_reread(a, world, admin, "R4", retention_hook, Scope(None, [D1], 0, 24))
+    gone = lambda k: k[0] == "svc00" and k[1] < CUT_HOUR   # noqa: E731 — the deleted index held these hours
+    truth, snap = r["truth"]["snap"], r["snap"]
+    res = compare(truth, snap, absent_ok=gone)
+    zeros = sum(1 for (svc, hour, label), (n, _) in truth["hourly_counts"].items()
+                if label == "*total" and n > 0 and not gone((svc, hour)) and snap["hourly_counts"].get(
+                    (svc, hour, label), (0, 0))[0] == 0)
+    log = [x.get("message", "") for x in r["row"].get("log", [])]
+    res.update({"state": r["row"].get("state"), "warning": any("no longer in Elasticsearch" in m for m in log),
+                "skipped hours": r["row"].get("result", {}).get("hours_not_in_es"),
+                "svc00 hours missing": sum(1 for h in range(CUT_HOUR) if ("svc00", h) not in snap["service_hours"]),
+                "zeros after range": zeros,
+                "other services written": all(n == 24 for svc, n in r["hours"].items() if svc != "svc00")
+                and len(r["hours"]) >= a.services - 1,
+                "reread wall s": r["wall"], "error": r["error"] or r["row"].get("error") or ""})
+    return res
+
+
+def run_r2(a, world, admin) -> dict:
+    cfg = load_config(None)
+    hours = a.r_hours
+    docs = hours * 3600 * a.r_eps
+    r_guard("R2", r_rows(a, cfg, live_min=docs / 25_000 / 60 + 10, live_eps=a.r_live_eps, lane_hours=hours * 2),
+            admin, a)
+    now = dms(D2, 12) / 1000
+    rpm, live_rpm = a.r_eps * 60 // a.services, a.r_live_eps * 60 // a.services
+    streams = r_streams(a, world, [(dms(D1), dms(D2, 12), rpm), (dms(D2, 12), dms(D2, 12) + 6 * 3600_000, live_rpm)])
+    scope = Scope(None, [D1], 0, hours)
+    with r_session(a, world, admin, streams, now, now) as s:
+        st = SimpleNamespace(rid=None, error="", t0=0.0, t1=None, wall0=0.0, wall=0.0, commits=[])
+        commit_orig = s.run.engine._commit
+
+        def timed_commit(*args, **kw):   # the re-read's baseline rebuild runs inside one tick
+            t = time.perf_counter()
+            try:
+                return commit_orig(*args, **kw)
+            finally:
+                st.commits.append(time.perf_counter() - t)
+        s.run.engine._commit = timed_commit
+
+        def hook(run):
+            if st.rid is None and run.clock.t >= now + 60 and run.engine._caught_up():
+                started = start_reread(run, scope)
+                st.rid, st.error = started.get("run_id"), started.get("error", "")
+                st.t0, st.wall0 = run.clock.t, time.perf_counter()
+
+        def stop(run):
+            if st.rid is not None and run.engine.reread is None:
+                st.t1, st.wall = run.clock.t, time.perf_counter() - st.wall0
+                return True
+            return bool(st.error)
+        err = drive(s.run, now + 6 * 3600, hook, stop) or st.error
+        s.run.engine._flush()
+        eng = s.run.engine
+        boundary = eng.owner.boundary_ms
+        late = eng.owner.minutes.late
+        window = [(t, x) for t, x in s.run.lags if st.t0 <= t <= (st.t1 or t)]
+        lags = [x for _, x in window]
+        peak_t = max(window, key=lambda p: p[1])[0] if window else 0.0
+        with psycopg.connect(s.dsn, row_factory=dict_row) as c:
+            row = reread_row(c)
+            reread_counted = int(c.execute("SELECT coalesce(sum(sum), 0) AS n FROM hourly_counts WHERE key = '*total' "
+                                           "AND day = %s AND hour < %s", (D1, hours)).fetchone()["n"])
+            live_counted = int(c.execute("SELECT coalesce(sum(sum), 0) AS n FROM hourly_counts WHERE key = '*total' "
+                                         "AND day = %s AND hour >= 12", (D2,)).fetchone()["n"])
+        events = int(eng.metrics.events._value.get())
+    read = row.get("steps", {}).get("read", {}).get("detail", {})
+    live_truth = s.source.truth(int(now * 1000), boundary)
+    max_lag = a.max_live_lag + 30
+    return {"state": row.get("state"), "live eps": a.r_live_eps, "reread hours": hours,
+            "live lag s p50/p95/max": [pct(lags, q) for q in (0.5, 0.95, 1)], "lag max at (s before the end)": (st.t1 or 0) - peak_t,
+            "seconds with lag > 60": sum(x > 60 for x in lags), "baseline rebuild wall s": st.commits,
+            "lag target (max <)": max_lag,
+            "lag ok": bool(lags) and max(lags) < max_lag, "late counts": late,
+            "lane rate docs/s (sim)": row.get("result", {}).get("docs_read", 0) / max(1e-9, (st.t1 or 0) - st.t0),
+            "lane rate docs/s (wall, incl. generator)": row.get("result", {}).get("docs_read", 0) / max(1e-9, st.wall),
+            "reread wall s": st.wall, "reread sim s": (st.t1 or 0) - st.t0, "lane paused ticks": read.get("paused"),
+            "docs read": row.get("result", {}).get("docs_read"), "docs in scope": s.source.truth(dms(D1), dms(D1, hours)),
+            "reread counted": reread_counted, "reread truth": s.source.truth(dms(D1), dms(D1, hours)),
+            "live events": events, "live counted": live_counted, "live truth": live_truth,
+            "live lost": live_truth - live_counted - late, "error": err or row.get("error") or ""}
+
+
+R_SCENARIOS = {"R1": run_r1, "R2": run_r2, "R3": run_r3, "R4": run_r4}
+
+
+def run_r(name: str, a, world, admin) -> dict:
+    lg = logging.getLogger("logai2")
+    level, propagate = lg.level, lg.propagate
+    lg.setLevel(logging.WARNING)   # the run's log (RunLog) records WARNING+; keep the console quiet
+    lg.propagate = False
+    WORLD_FOR_EST[0] = world
+    try:
+        return R_SCENARIOS[name](a, world, admin)
+    except Refused as exc:
+        return {"refused": str(exc)}
+    finally:
+        lg.setLevel(level)
+        lg.propagate = propagate
+
+
 # --- E1: real Elasticsearch ------------------------------------------------------------------------------
 
 def run_e1(a, cfg, world) -> dict:
@@ -800,7 +1235,7 @@ def run_e1(a, cfg, world) -> dict:
 
 # --- main ------------------------------------------------------------------------------------------------
 
-TINY = dict(services=2, templates=20, eps=20, storm_templates=60, module_values=100, backlog_minutes=20,
+TINY = dict(services=2, templates=20, eps=20, r_eps=2, r_live_eps=200, r_hours=2, storm_templates=60, module_values=100, backlog_minutes=20,
             es_ms=500.0, e1_docs=2000)
 
 
@@ -827,6 +1262,9 @@ def run(argv: list[str] | None = None) -> tuple[int, dict]:
     ap.add_argument("--es-us-per-hit", type=float, default=10.0, help="modelled ES latency per returned hit (E1: 10k page 104 ms)")
     ap.add_argument("--es-host", default="http://localhost:9200")
     ap.add_argument("--e1-docs", type=int, default=250_000)
+    ap.add_argument("--r-eps", type=int, help="R1/R3/R4/R2: events/s of the past data (default --eps)")
+    ap.add_argument("--r-live-eps", type=int, default=10_000, help="R2: live events/s")
+    ap.add_argument("--r-hours", type=int, default=6, help="R2: hours of day 1 re-read")
     ap.add_argument("--seed", default="1")
     ap.add_argument("--max-bytes", type=int)
     ap.add_argument("--json")
@@ -835,12 +1273,14 @@ def run(argv: list[str] | None = None) -> tuple[int, dict]:
     if a.scale == "tiny":
         vars(a).update(TINY)
     a.poll_interval, a.flush_seconds = 1.0, 2.0
+    a.r_eps = a.r_eps or a.eps
     logging.basicConfig(level=logging.WARNING if a.verbose else logging.CRITICAL)
     if public_is_migrated(a.dsn):
         print("REFUSED: this database has a migrated public schema (real data); use an empty database", file=sys.stderr)
         return 3, {}
     cfg = load_config(None)
     a.flush_seconds = cfg.flush.seconds
+    a.max_live_lag = cfg.retrain.max_live_lag_seconds
     world = build_world(a)
     table = scenarios(a)
     names = [n for n in table] + ["E1"] if a.scenarios == "all" else a.scenarios.split(",")
@@ -855,6 +1295,8 @@ def run(argv: list[str] | None = None) -> tuple[int, dict]:
         for name in names:
             if name == "E1":
                 results[name] = run_e1(a, load_config(None), world)
+            elif name in R_SCENARIOS:
+                results[name] = run_r(name, a, world, admin)
             else:
                 sc = table[name]
                 try:
