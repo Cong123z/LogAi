@@ -265,3 +265,22 @@ def test_oldest_ms_query_shape():
     assert call.kwargs["ignore_unavailable"] is True and call.kwargs["allow_no_indices"] is True
     assert call.kwargs["body"] == {"size": 0, "aggs": {"oldest": {"min": {"field": "@timestamp"}}}}
     assert source.oldest_ms("idx") is None
+
+
+def test_count_query_shape():
+    source = make_source([])
+    source.client.count.return_value = {"count": 42}
+    assert source.count("idx-a*,-idx-ab*", 5, 9) == 42
+    call = source.client.count.call_args
+    assert call.kwargs["index"] == "idx-a*,-idx-ab*"
+    assert call.kwargs["ignore_unavailable"] is True and call.kwargs["allow_no_indices"] is True
+    assert call.kwargs["body"] == {"query": {"bool": {"filter": [{"range": {"@timestamp": {
+        "gte": 5, "lte": 9, "format": "epoch_millis"}}}]}}}
+
+
+def test_page_timeout_is_the_request_timeout():
+    source = make_source([{"hits": {"hits": []}}, {"hits": {"hits": []}}])
+    source.page("idx", 1, 2, timeout=7)
+    assert source.client.search.call_args.kwargs["request_timeout"] == 7
+    source.page("idx", 1, 2)
+    assert "request_timeout" not in source.client.search.call_args.kwargs

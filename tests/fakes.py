@@ -15,6 +15,7 @@ class FakeSource:
         self.hits = hits_by_index
         self.failing: set[str] = set()
         self.calls: list[str] = []
+        self.timeouts: list[int | None] = []
         self.size = 10_000   # EsSource's page size (cfg.elasticsearch.batch_size)
         self.oldest_failing = False
         self.oldest_calls: list[str] = []
@@ -27,8 +28,16 @@ class FakeSource:
         return sorted(i for i in fnmatch.filter(self.hits, first)
                       if not any(fnmatch.fnmatch(i, e[1:]) for e in excl))
 
-    def page(self, target: str, from_ms: int, upper_ms: int) -> list[dict]:
+    def delete_index(self, name: str) -> None:
+        """ES retention dropping an index: its docs are gone."""
+        self.hits.pop(name, None)
+
+    def count(self, target: str, from_ms: int, to_ms: int) -> int:
+        return sum(1 for i in self._match(target) for h in self.hits[i] if from_ms <= h["sort"][0] <= to_ms)
+
+    def page(self, target: str, from_ms: int, upper_ms: int, timeout: int | None = None) -> list[dict]:
         self.calls.append(target)
+        self.timeouts.append(timeout)
         if target in self.failing:
             self.failing.discard(target)
             raise ConnectionError(f"{target} down")
