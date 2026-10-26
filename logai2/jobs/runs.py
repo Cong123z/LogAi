@@ -3,7 +3,7 @@ call on an idle connection."""
 from __future__ import annotations
 
 import logging
-import time
+from collections import deque
 
 from psycopg.types.json import Jsonb
 
@@ -41,16 +41,22 @@ def finish(conn, run_id: int, state: str, result: dict | None = None, error: str
 
 
 class RunLog(logging.Handler):
-    """Keeps the first 50 WARNING+ records of the logai2 logger while a run is going."""
+    """Keeps the last 50 WARNING+ records of the logai2 logger while a run is going."""
 
     def __init__(self) -> None:
         super().__init__(logging.WARNING)
-        self.lines: list[dict] = []
+        self._lines: deque = deque(maxlen=MAX_LOG)
+
+    @property
+    def lines(self) -> list[dict]:
+        return list(self._lines)
 
     def emit(self, record: logging.LogRecord) -> None:
-        if len(self.lines) < MAX_LOG:
-            self.lines.append({"ts": record.created, "level": record.levelname, "logger": record.name,
-                               "message": self.format(record)})
+        try:
+            self._lines.append({"ts": record.created, "level": record.levelname, "logger": record.name,
+                                "message": self.format(record)})
+        except Exception:  # noqa: BLE001
+            self.handleError(record)
 
     def attach(self) -> None:
         logging.getLogger("logai2").addHandler(self)

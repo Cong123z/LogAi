@@ -47,6 +47,6 @@ def test_run_log_keeps_warnings():
         h.detach()
     logging.getLogger("logai2.x").warning("after detach")
     assert len(h.lines) == 50
-    assert h.lines[0]["message"] == "w 1" and h.lines[0]["level"] == "WARNING"
-    assert h.lines[0]["logger"] == "logai2.x" and isinstance(h.lines[0]["ts"], float)
-    assert h.lines[1]["level"] == "ERROR"
+    assert h.lines[0]["message"] == "n10" and h.lines[-1]["message"] == "n59"
+    assert h.lines[0]["level"] == "WARNING" and h.lines[0]["logger"] == "logai2.x"
+    assert isinstance(h.lines[0]["ts"], float)

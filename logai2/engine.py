@@ -49,6 +49,10 @@ def _day(seconds: float) -> date:
     return local(int(seconds // 60)).date()
 
 
+FAILED_LABELS = {"mark": "Mark finished days", "rebuild": "Rebuild baseline",
+                 "housekeeping": "Partitions and retention"}
+
+
 class Engine:
     def __init__(self, cfg: AppConfig, conn, source, now: Callable[[], float] = time.time,
                  metrics: Metrics | None = None):
@@ -364,21 +368,40 @@ class Engine:
         done = date.fromisoformat(self.last_commit["today"]) if self.last_commit else date.min
         return done < day and self.now() >= datetime.combine(day, self.commit_at, tzinfo=TZ).timestamp()
 
+    def _record(self, fn, *args, **kw):
+        """Run bookkeeping must never change the commit's outcome: log and carry on. The runs helpers
+        use conn.transaction(), so a failure rolls back and leaves self.db idle."""
+        try:
+            return fn(self.db, *args, **kw)
+        except Exception:  # noqa: BLE001
+            logger.exception("recording retrain run failed")
+            return None
+
     def _commit(self, trigger: str) -> dict:
         self._flush()
         day = self._owner_day()
-        run_id = runs.start(self.db, "rebuild", trigger)
+        run_id = self._record(runs.start, "rebuild", trigger)
         rlog = RunLog()
         rlog.attach()
+
+        def on_step(*a):
+            if run_id is not None:
+                self._record(runs.step, run_id, *a)
         try:
-            result = commit(self.db, self.cfg, day,
-                            on_step=lambda *a: runs.step(self.db, run_id, *a))
+            result = commit(self.db, self.cfg, day, on_step=on_step)
         except Exception as exc:
-            runs.finish(self.db, run_id, "failed", error=str(exc), error_type=type(exc).__name__,
-                        failed_step=getattr(exc, "step", None), log=rlog.lines)
+            if run_id is not None:
+                failed = getattr(exc, "step", None)
+                for d in getattr(exc, "steps", []):
+                    on_step(*d)
+                if failed:
+                    on_step(failed, FAILED_LABELS.get(failed, failed), {}, time.time(), time.time())
+                self._record(runs.finish, run_id, "failed", error=str(exc), error_type=type(exc).__name__,
+                             failed_step=failed, log=rlog.lines)
             raise
         else:
-            runs.finish(self.db, run_id, "succeeded", result, log=rlog.lines)
+            if run_id is not None:
+                self._record(runs.finish, run_id, "succeeded", result, log=rlog.lines)
         finally:
             rlog.detach()
         with self.db.transaction():

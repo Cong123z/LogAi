@@ -57,7 +57,7 @@ def commit(conn, cfg: AppConfig, today: date, rebuild: bool = True, on_step=None
     """Call on an idle connection (no open transaction): otherwise the block below is only a
     savepoint and nothing is committed until the caller commits. on_step(key, label, detail,
     started_at, finished_at) is called per step after the transaction commits; an exception gets
-    `.step` (the running step's key)."""
+    `.step` (the running step's key) and `.steps` (the completed steps, as on_step args)."""
     done: list[tuple] = []
     key = "mark"
     try:
@@ -93,6 +93,7 @@ def commit(conn, cfg: AppConfig, today: date, rebuild: bool = True, on_step=None
                          {"partitions_dropped": dropped, "runs_deleted": deleted}, t0, time.time()))
     except Exception as exc:
         exc.step = key
+        exc.steps = done
         raise
     if on_step:
         for d in done:

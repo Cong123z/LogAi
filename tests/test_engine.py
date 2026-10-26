@@ -200,6 +200,7 @@ def test_failed_rebuild_records_error_and_step(conn, cfg, make, monkeypatch):
     put_setting(conn, "last_commit", {"today": "2026-10-15"})
     engine = make(FakeSource({"a": []}), Clock(NOON))
     engine.start()
+    before = q(conn, "SELECT count(*) AS n FROM baseline")[0]["n"]
     monkeypatch.setattr("logai2.jobs.commit.REBUILD", "SELECT * FROM no_such_table")
     commands.enqueue(conn, "recompute_baseline")
     engine.tick()
@@ -207,6 +208,9 @@ def test_failed_rebuild_records_error_and_step(conn, cfg, make, monkeypatch):
     assert (run["state"], run["failed_step"], run["trigger"]) == ("failed", "rebuild", "manual")
     assert run["error_type"] and run["error"] and run["finished_at"]
     assert "error" in q(conn, "SELECT result FROM commands")[0]["result"]
+    assert [(s["key"], s["finished_at"] is not None) for s in run["steps"]] == [("mark", True), ("rebuild", True)]
+    assert run["steps"][1]["detail"] == {}
+    assert q(conn, "SELECT count(*) AS n FROM baseline")[0]["n"] == before
 
 
 def test_triggers_recorded(conn, cfg, make):
@@ -470,3 +474,38 @@ def test_empty_pattern_caught_up_with_warning(conn, cfg, make):
     engine.tick()
     assert engine._caught_up()
     assert "no index matches nope-*" in engine._status()["warnings"]
+
+
+def _started(conn, cfg, make):
+    cfg.start.days_back = 0
+    put_setting(conn, "detection_enabled", True)
+    put_setting(conn, "last_commit", {"today": "2026-10-15"})
+    engine = make(FakeSource({"a": []}), Clock(NOON))
+    engine.start()
+    return engine
+
+
+def test_run_recording_failure_does_not_break_commit(conn, cfg, make, monkeypatch):
+    engine = _started(conn, cfg, make)
+    reloads = []
+    monkeypatch.setattr(engine.owner, "reload_baseline", lambda: reloads.append(1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("runs down")
+    monkeypatch.setattr("logai2.jobs.runs.step", boom)
+    monkeypatch.setattr("logai2.jobs.runs.finish", boom)
+    result = engine._commit("manual")
+    assert "days_committed" in result and reloads == [1]
+    assert engine.last_commit["today"] == "2026-10-15" and engine.last_commit["at"]
+    assert not engine.db.info.transaction_status.value   # idle
+    assert [r["state"] for r in runs_of(conn, "manual")] == ["running"]
+
+
+def test_run_start_failure_still_commits(conn, cfg, make, monkeypatch):
+    engine = _started(conn, cfg, make)
+
+    def boom(*a, **kw):
+        raise RuntimeError("runs down")
+    monkeypatch.setattr("logai2.jobs.runs.start", boom)
+    assert "days_committed" in engine._commit("manual")
+    assert runs_of(conn, "manual") == []
