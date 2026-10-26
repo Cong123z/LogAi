@@ -158,11 +158,12 @@ class EsSource:
         return self.client.search(index=index, body=body, ignore_unavailable=True, allow_no_indices=True,
                                   filter_path=_FILTER_PATH, **extra)
 
-    def count(self, target: str, from_ms: int, to_ms: int) -> int:
+    def count(self, target: str, from_ms: int, to_ms: int, timeout: int | None = None) -> int:
         """Docs of `target` with from_ms <= @timestamp <= to_ms (the re-read's progress target)."""
         body = {"query": {"bool": {"filter": [{"range": {"@timestamp": {
             "gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}}]}}}
-        response = self.client.count(index=target, body=body, ignore_unavailable=True, allow_no_indices=True)
+        extra = {} if timeout is None else {"request_timeout": timeout}
+        response = self.client.count(index=target, body=body, ignore_unavailable=True, allow_no_indices=True, **extra)
         return int((response or {}).get("count", 0))
 
     def page(self, target: str, from_ms: int, upper_ms: int, timeout: int | None = None) -> List[Dict[str, Any]]:

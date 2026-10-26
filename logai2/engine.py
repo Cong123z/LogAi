@@ -93,6 +93,8 @@ class Engine:
         self._event_window: deque[tuple[float, int]] = deque()    # (observed at, events), last 900 s
         self._history: deque[dict] = deque(maxlen=60)             # one point per wall minute
         self.reread: dict | None = None                           # the active re-read run (one at a time)
+        self._resume: dict | None = None                          # a running re-read waiting for a plan (ES error)
+        self._resume_at = -math.inf
         self._last_rate = 0.0                                     # docs/s of the last lane, for the estimate
 
     def _connect(self):
@@ -271,6 +273,8 @@ class Engine:
             self._flush()   # status shows detection on
         elif self._commit_due():
             self._commit("schedule", self._rebuild_today())
+        if self._resume and now - self._resume_at >= self.cfg.elasticsearch.index_refresh_seconds:
+            self._reread_resume()
         self._lane_tick(now)
         return batch["events"] > 0
 
@@ -497,7 +501,18 @@ class Engine:
         return int(t.timestamp() * 1000)
 
     def _docs_in(self, windows) -> int:
-        return sum(self.source.count(self._targets[p], w.start_ms, w.end_ms - 1) for w in windows for p in w.patterns)
+        """Docs of the windows: one `_count` per pattern per contiguous span of its windows."""
+        spans: dict[str, list[list[int]]] = {}
+        for w in windows:
+            for p in w.patterns:
+                s = spans.setdefault(p, [])
+                if s and s[-1][1] == w.start_ms:
+                    s[-1][1] = w.end_ms
+                else:
+                    s.append([w.start_ms, w.end_ms])
+        timeout = self.cfg.retrain.es_timeout_seconds
+        return sum(self.source.count(self._targets[p], a, b - 1, timeout=timeout)
+                   for p, ranges in spans.items() for a, b in ranges)
 
     @staticmethod
     def _scope_detail(p) -> dict:
@@ -513,7 +528,7 @@ class Engine:
                 "eta_s": docs / rate, "indices": len({i for x in p.patterns for i in self.resolution.get(x, [])})}
 
     def _reread_run(self, scope: Scope) -> dict:
-        if self.reread:
+        if self.reread or self._resume:
             return {"error": "a retrain is running"}
         p = self._plan_reread(scope)
         if p.hours_to_read == 0:
@@ -532,21 +547,29 @@ class Engine:
         return {"run_id": run_id}
 
     def _reread_resume(self) -> None:
-        """A run left 'running' by a stopped engine continues from its saved position."""
-        with self.db.transaction():
-            row = self.db.execute("SELECT id, scope, pos_ms, steps FROM retrain_runs "
-                                  "WHERE kind = 'reread' AND state = 'running' ORDER BY id DESC LIMIT 1").fetchone()
+        """A run left 'running' by a stopped engine continues from its saved position. When the plan cannot
+        be made (ES briefly down) the run stays running and the resume is retried, once per
+        index_refresh_seconds."""
+        if self._resume is None:
+            with self.db.transaction():
+                self._resume = self.db.execute(
+                    "SELECT id, scope, pos_ms, steps FROM retrain_runs "
+                    "WHERE kind = 'reread' AND state = 'running' ORDER BY id DESC LIMIT 1").fetchone()
+        row = self._resume
         if row is None:
             return
+        self._resume_at = self.now()
         steps = {s["key"]: s for s in row["steps"]}
+        saved = steps.get("read", {}).get("detail", {})
         try:
             p = self._plan_reread(Scope.from_json(row["scope"]))
-            self._reread_begin(p, row["id"], row["pos_ms"] or 0, steps, steps.get("read", {}).get("detail", {}),
+            self._reread_begin(p, row["id"], row["pos_ms"] or 0, steps,
+                               {**saved, "docs_read": saved.get("docs_committed", saved.get("docs_read", 0))},
                                resumed=True)
-        except Exception as exc:  # noqa: BLE001 — a run that cannot continue ends failed, the engine still starts
-            logger.exception("could not resume re-read %s", row["id"])
-            self._record(runs.finish, row["id"], "failed", error=str(exc), error_type=type(exc).__name__,
-                         failed_step="read")
+        except Exception as exc:  # noqa: BLE001 — ES blip: keep the run, try again later
+            logger.warning("could not resume re-read %s yet (%s); will retry", row["id"], exc)
+            return
+        self._resume = None
 
     def _reread_begin(self, p, run_id: int, pos_ms: int, steps: dict, saved: dict, resumed: bool = False) -> None:
         with self.db.transaction():
@@ -555,6 +578,8 @@ class Engine:
         lane = Lane(p, run_id, pos_ms, self.source, self.owner.miners, self.reader.cache, first, self.cfg,
                     self._targets)
         base = {k: saved.get(k, 0) for k in ("docs_read", "hours_done", "new_templates")}
+        if not resumed:
+            base = dict.fromkeys(base, 0)
         try:
             target = base["docs_read"] + self._docs_in(lane.windows)
         except Exception as exc:  # noqa: BLE001 — the bar is only an estimate
@@ -578,7 +603,8 @@ class Engine:
         target = rr["target"]
         pct = 100 if lane.done else min(99, round(100 * (docs / target if target else done / max(total, 1))))
         eta = max(0, target - docs) / prog["rate"] if target and prog["rate"] > 0 else None
-        detail = {"docs_read": docs, "docs_target": target, "hours_done": done, "hours_total": total,
+        detail = {"docs_read": docs, "docs_committed": base["docs_read"] + prog["docs_committed"],
+                  "docs_target": target, "hours_done": done, "hours_total": total,
                   "new_templates": base["new_templates"] + prog["new_templates"], "rate": prog["rate"],
                   "position_ms": prog["position_ms"], "live_lag_s": rr["lag"], "paused": rr["paused"],
                   "pct": pct, "eta_s": eta}
@@ -612,9 +638,11 @@ class Engine:
                 hours = lane.step(self.cfg.retrain.tick_seconds, now)
                 rr["errors"] = 0
             except Exception as exc:  # noqa: BLE001
+                hours = lane.take_ready()   # windows closed before the failure are queued, never lost
                 rr["errors"] += 1
                 logger.warning("re-read page failed (%d in a row): %s", rr["errors"], exc)
                 if rr["errors"] >= 3:
+                    self._reread_publish(hours)
                     self._reread_end("failed", exc)
                     return
         self._reread_publish(hours)
@@ -675,6 +703,10 @@ class Engine:
         if kind == "retrain_estimate":
             return self._estimate(Scope.from_json(payload))
         if kind == "retrain_cancel":
+            if self._resume and self._resume["id"] == payload.get("run_id") and self.reread is None:
+                self._record(runs.finish, self._resume["id"], "cancelled")
+                self._resume = None
+                return {}
             if self.reread is None or self.reread["run_id"] != payload.get("run_id"):
                 return {"error": "no such running re-read"}
             self._reread_end("cancelled")

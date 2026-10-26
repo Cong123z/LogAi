@@ -700,11 +700,11 @@ one whole hour at a time, then rebuilds the baseline.
   cache only when the window is complete and its templates are queued in the owner. A
   window closes into one `LaneHour` per service; a service is zero-filled from
   `max(window start, min(first minute in the DB, first minute the lane saw))`.
-- `Owner.add_lane` queues the hours and the run's `pos_ms` / `steps`; the flush (§7.3) writes
+- `Lane.take_ready` hands out the closed windows (only then do `pos_ms`, the counters and the shared cache move; the engine calls it on its error path too, so a failing page never loses a closed hour). `Owner.add_lane` queues the hours and the run's `pos_ms` / `steps`; the flush (§7.3) writes
   both in one transaction, so a crash resumes from `pos_ms` with no half-replaced hour.
   The lane never touches `Owner.services` or the live `OpenMinutes`.
 - If a window returns nothing for a pattern and ES's oldest doc is now after the window (an
-  index deleted by retention), that pattern's services are skipped for the window with a
+  index deleted by retention), the services fed by that pattern (a service is skipped if ANY of its patterns lost the window) are skipped for the window with a
   WARNING in the run log; zeros are never written.
 - End: the lane done and flushed, `commit(rebuild=True)` with its steps (`rebuild`, `mark`,
   `housekeeping`) recorded on this run, baseline reloaded, `succeeded`. Cancel drops the
@@ -969,6 +969,9 @@ No DLQ.
 | Area | Limit | Impact |
 |---|---|---|
 | Reader | One millisecond with more than 20k docs in one index: the whole-ms read (10k) plus one `search_after` page | docs beyond that are lost or the index stalls; use PIT + `_shard_doc` if a source ever logs that much in one ms |
+| Re-read | A nightly or manual Rebuild during a re-read attaches a second `RunLog`; both handlers see every WARNING+ line of the `logai2` logger | each run's log can hold lines of the other |
+| Re-read | A lane page blocks the engine tick up to `retrain.es_timeout_seconds` (30 s), live reading waits meanwhile; the progress target costs one `_count` per pattern per contiguous span of windows (also in the estimate), run inside the command | a slow ES delays live by up to that timeout once per page; the lane pauses itself when live lags more than `retrain.max_live_lag_seconds` |
+| Re-read | A resume whose plan fails (ES down at start) stays `running` and is retried once per `elasticsearch.index_refresh_seconds`; `retrain_run` is refused meanwhile, `retrain_cancel` ends it | |
 | Re-read | After a restart the resumed run's `hours_not_in_es` counts only the plan's, not the hours skipped before the restart; a lane error count and a window's partial read are not kept (the window is read again) | the result's skipped count can be short after a restart |
 | Re-read | A sample is kept for an ERROR+ *line* (live keeps it for a template whose worst level is ERROR+); one sample per (template, level, module, minute) like live | a template promoted to ERROR later can lack samples in re-read hours |
 | Re-read | The lane matches per line (live per aggregate) and the Drain3 miners are shared | a template tree can differ slightly from a live-only history; ids already learned never change |

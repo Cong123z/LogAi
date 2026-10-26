@@ -48,6 +48,7 @@ class Window:
     end_ms: int
     patterns: tuple[str, ...]   # patterns to read
     services: tuple[str, ...]   # services whose hour is replaced
+    by_pattern: tuple[tuple[str, tuple[str, ...]], ...] = ()   # (pattern, the window's services it holds)
 
 
 @dataclass
@@ -85,8 +86,9 @@ def plan(scope: Scope, patterns: dict[str, list[str]], es_oldest: dict[str, int 
             ok = [s for s in services if (o := oldest(s)) is not None and start >= o]
             out.hours_not_in_es += len(services) - len(ok)
             if ok:
-                out.windows.append(Window(start, end, tuple(sorted({p for s in ok for p in holding[s]})),
-                                          tuple(ok)))
+                pats = sorted({p for s in ok for p in holding[s]})
+                out.windows.append(Window(start, end, tuple(pats), tuple(ok), tuple(
+                    (p, tuple(s for s in ok if p in holding[s])) for p in pats)))
                 out.hours_to_read += len(ok)
     return out
 
@@ -118,8 +120,10 @@ class Lane:
         self.first = first
         self.page_size = cfg.elasticsearch.batch_size
         self.hours_total = sum(len(w.services) for w in self.windows)
-        self.hours_done = 0
+        self.hours_done = 0     # of the windows handed out by take_ready
         self.docs_read = 0
+        self.docs_committed = 0  # docs of the windows handed out (a resume re-reads the rest)
+        self._ready: list[tuple] = []   # closed windows not yet handed out: (end_ms, n services, docs, hours, learned)
         self.new_templates = 0
         self.skipped = 0   # service-hours whose index was deleted by retention during the run
         self.seen: dict[tuple, int] = {}   # (_index, _id) -> ms, only ids at the current position ms
@@ -130,15 +134,29 @@ class Lane:
 
     @property
     def done(self) -> bool:
-        return self._i >= len(self.windows)
+        return self._i >= len(self.windows) and not self._ready
+
+    def take_ready(self) -> list[LaneHour]:
+        """Hand out the hours of the windows closed so far. Only now do pos_ms, hours_done and the shared cache
+        move: they never run ahead of what the owner was given, so a failing page cannot lose a closed hour
+        (the engine calls this also on its error path)."""
+        out: list[LaneHour] = []
+        for end_ms, n, docs, hours, learned in self._ready:
+            for (service, text), tid in learned.items():
+                self.cache.put(service, text, tid)
+            self.pos_ms = end_ms
+            self.hours_done += n
+            self.docs_committed += docs
+            out += hours
+        self._ready = []
+        return out
 
     # --- reading -----------------------------------------------------------
 
     def step(self, budget_s: float, now: float) -> list[LaneHour]:
         """Read pages until the budget is used (at least one page); returns the windows completed."""
         deadline = time.monotonic() + budget_s
-        out: list[LaneHour] = []
-        while not self.done:
+        while self._i < len(self.windows):
             w = self.windows[self._i]
             if self._window is not w:
                 self._begin(w)
@@ -147,7 +165,7 @@ class Lane:
                 if time.monotonic() >= deadline:
                     break
             if self._p >= len(w.patterns):
-                out += self._close(w)
+                self._ready.append(self._close(w))
                 self._window = None
                 self._i += 1
             if time.monotonic() >= deadline:
@@ -155,7 +173,7 @@ class Lane:
         self._rate.append((now, self.docs_read))
         while len(self._rate) > 1 and self._rate[0][0] < now - RATE_WINDOW_SECONDS:
             self._rate.popleft()
-        return out
+        return self.take_ready()
 
     def _begin(self, w: Window) -> None:
         self._window = w
@@ -166,7 +184,8 @@ class Lane:
         self._agg: dict[tuple, list] = {}  # (service, template_id, level, module, minute) -> [n, sample]
         self._tmpl: dict[tuple[str, str], dict] = {}
         self._learned: dict[tuple[str, str], str] = {}
-        self._gone: set[str] = set()      # services whose pattern lost this window to retention
+        self._gone: set[str] = set()      # patterns that lost this window to retention
+        self._docs0 = self.docs_read
         self._unparsed: set[str] = set()
 
     def _target(self, pattern: str) -> str:
@@ -221,7 +240,7 @@ class Lane:
             logger.warning("window %s of %s is no longer in Elasticsearch; its services are skipped, not zeroed",
                            datetime.fromtimestamp(window.start_ms / 1000, TZ).strftime("%Y-%m-%d %H:00"),
                            ", ".join(patterns))
-            self._gone |= set(window.services)
+            self._gone |= set(patterns)
 
     def _add(self, line) -> None:
         service = line.service
@@ -264,12 +283,15 @@ class Lane:
 
     # --- closing -----------------------------------------------------------
 
-    def _close(self, w: Window) -> list[LaneHour]:
+    def _close(self, w: Window) -> tuple:
         start_min, end_min = w.start_ms // 60_000, w.end_ms // 60_000
+        # a service is skipped when ANY pattern that feeds it lost the window: a partial read is never written
+        holders = w.by_pattern or tuple((p, w.services) for p in w.patterns)
+        gone = {s for p, ss in holders if p in self._gone for s in ss}
         om = OpenMinutes(start_min)
         for (service, tid, level, module, minute), (n, _) in self._agg.items():
             om.add(service, tid, level, module, minute, n)
-        keep = [s for s in w.services if s not in self._gone]
+        keep = [s for s in w.services if s not in gone]
         self.skipped += len(w.services) - len(keep)
         first_map = {}
         for s in keep:   # a service seen nowhere (no DB first, no doc) is not written
@@ -279,7 +301,7 @@ class Lane:
         hours: dict[str, LaneHour] = {}
         for cm in om.close_before(end_min, first_map):
             for (service, key), n in cm.keys.items():
-                if service in self._gone:
+                if service in gone:
                     continue
                 h = hours.get(service) or hours.setdefault(service, LaneHour(service, cm.day, cm.hour))
                 if key == "*total":
@@ -288,7 +310,7 @@ class Lane:
                     s, sq = h.sums.get(key, (0, 0))
                     h.sums[key] = (s + n, sq + n * n)
             for (service, tid, module), n in cm.modules.items():
-                if tid.endswith(":unparsed") or service in self._gone:
+                if tid.endswith(":unparsed") or service in gone:
                     continue
                 h = hours[service]
                 h.module_hours[(tid, module)] = h.module_hours.get((tid, module), 0) + n
@@ -303,17 +325,15 @@ class Lane:
                 hours[service].templates[tid] = t
         for (service, _), q in samples.items():
             hours[service].samples += q
-        # the learned lines are safe to share now: the owner gets their templates in this same step
-        for (service, text), tid in self._learned.items():
-            self.cache.put(service, text, tid)
-        self.pos_ms = w.end_ms
-        self.hours_done += len(w.services)
-        return [h for h in hours.values() if h.n_minutes]
+        # shared with the cache only once handed out (take_ready), and only for services that are written
+        learned = {k: t for k, t in self._learned.items() if k[0] in hours}
+        return (w.end_ms, len(w.services), self.docs_read - self._docs0,
+                [h for h in hours.values() if h.n_minutes], learned)
 
     def progress(self) -> dict:
         rate = 0.0
         if len(self._rate) > 1 and self._rate[-1][0] > self._rate[0][0]:
             rate = (self._rate[-1][1] - self._rate[0][1]) / (self._rate[-1][0] - self._rate[0][0])
-        return {"docs_read": self.docs_read, "hours_done": self.hours_done, "hours_total": self.hours_total,
+        return {"docs_read": self.docs_read, "docs_committed": self.docs_committed, "hours_done": self.hours_done, "hours_total": self.hours_total,
                 "new_templates": self.new_templates, "rate": rate,
                 "position_ms": self._pos if self._window is not None else self.pos_ms}
