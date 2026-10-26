@@ -230,6 +230,108 @@ def test_triggers_recorded(conn, cfg, make):
     assert [r["trigger"] for r in runs_of(conn)][-1] == "startup"
 
 
+def at(day, hh, mm=0, ss=0):
+    return datetime(2026, 10, day, hh, mm, ss, tzinfo=TZ).timestamp()
+
+
+def caught_up_engine(conn, cfg, make, schedule=None):
+    """First start on 10-15 noon (first_start commit done); returns (engine, clock)."""
+    cfg.start.days_back = 2
+    if schedule is not None:
+        put_setting(conn, "retrain_schedule", schedule)
+    clock = Clock(NOON)
+    engine = make(FakeSource({"a": history(NOON - 2 * 86400, NOON - 60, 1)}), clock)
+    engine.start()
+    catch_up(engine, clock)
+    return engine, clock
+
+
+def test_schedule_time_from_setting(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make, {"time": "03:30"})
+    clock.t = at(16, 2)
+    engine.tick()
+    assert setting(conn, "last_commit")["today"] == "2026-10-15"
+    clock.t = at(16, 3, 30)
+    engine.tick()
+    assert setting(conn, "last_commit")["today"] == "2026-10-16"
+
+
+def test_disabled_schedule_still_housekeeps(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make, {"enabled": False})
+    order = "SELECT * FROM baseline ORDER BY service, key, daytype, hour"
+    baseline = q(conn, order)
+    assert baseline
+    days = q(conn, "SELECT count(*) AS n FROM day_status")[0]["n"]
+    clock.t = at(16, 2, 1)
+    engine.tick()
+    assert setting(conn, "last_commit")["today"] == "2026-10-16"
+    assert q(conn, "SELECT count(*) AS n FROM day_status")[0]["n"] > days
+    assert q(conn, order) == baseline
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start"]
+    clock.t = at(16, 2, 2)
+    assert not engine._commit_due()
+
+
+def test_weekday_off_skips_rebuild(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make, {"weekdays": [0, 1]})   # 10-16 is a Friday
+    clock.t = at(16, 2, 1)
+    engine.tick()
+    assert setting(conn, "last_commit")["today"] == "2026-10-16"
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start"]
+    put_setting(conn, "retrain_schedule", {"weekdays": [6]})
+    engine._load_schedule()
+    clock.t = at(18, 2, 1)   # Sunday: on
+    engine.tick()
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start", "schedule"]
+
+
+def test_schedule_change_picked_up_without_restart(conn, cfg, make):
+    cfg.elasticsearch.index_refresh_seconds = 60
+    engine, clock = caught_up_engine(conn, cfg, make, {"time": "05:00"})
+    clock.t = at(16, 1)
+    engine.tick()
+    put_setting(conn, "retrain_schedule", {"time": "01:00"})
+    clock.t = at(16, 1, 0, 10)
+    engine.tick()
+    assert engine.schedule["time"] == "05:00"
+    assert setting(conn, "last_commit")["today"] == "2026-10-15"
+    clock.t = at(16, 1, 1, 10)
+    engine.tick()
+    assert engine.schedule["time"] == "01:00"
+    assert setting(conn, "last_commit")["today"] == "2026-10-16"
+
+
+def test_invalid_schedule_falls_back_to_defaults(conn, cfg, make, caplog):
+    cfg.elasticsearch.index_refresh_seconds = 60
+    put_setting(conn, "retrain_schedule", {"time": "25:99", "weekdays": "x"})
+    cfg.start.days_back = 0
+    clock = Clock(NOON)
+    engine = make(FakeSource({"a": []}), clock)
+    with caplog.at_level("WARNING", logger="logai2.engine"):
+        engine.start()
+        clock.t += 120
+        engine.tick()   # a refresh re-reads the same bad value: no second warning
+    assert engine.schedule == {"enabled": True, "time": cfg.baseline.commit_time, "weekdays": list(range(7))}
+    assert len([r for r in caplog.records if "retrain_schedule" in r.getMessage()]) == 1
+
+
+def test_manual_and_first_start_always_rebuild(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make, {"enabled": False})
+    commands.enqueue(conn, "recompute_baseline")
+    engine.tick()
+    assert [r["trigger"] for r in runs_of(conn)] == ["first_start", "manual"]
+
+
+def test_status_next_commit_at(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make, {"time": "03:30", "weekdays": [1]})
+    st = engine._status()
+    assert st["schedule"] == {"enabled": True, "time": "03:30", "weekdays": [1]}
+    assert st["next_commit_at"] == at(16, 3, 30)
+    clock.t = at(16, 3, 30)
+    engine.tick()
+    assert engine._status()["next_commit_at"] == at(17, 3, 30)
+
+
 def test_bad_command_records_error_and_engine_continues(conn, cfg, make):
     cfg.start.days_back = 0
     engine = make(FakeSource({"a": []}), Clock(NOON))

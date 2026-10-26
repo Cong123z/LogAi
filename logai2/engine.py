@@ -67,7 +67,8 @@ class Engine:
         self._search_path = conn.execute("SHOW search_path").fetchone()["search_path"]
         conn.rollback()
         self.db = self._connect()
-        self.commit_at = datetime.strptime(cfg.baseline.commit_time, "%H:%M").time()
+        self.schedule = self._parse_schedule(None)
+        self._schedule_warned = None
         self.reader: Reader | None = None
         self.owner: Owner | None = None
         self.bootstrap: dict = {}
@@ -111,6 +112,7 @@ class Engine:
                 logger.info("first start: reading from %s", local(int(self.bootstrap["since"] // 60)))
             self.last_commit = get_setting(self.db, "last_commit")
             self._seed_documents()
+        self._load_schedule()
         self._apply_connection()
         self.reader = Reader(self.source, self.cfg, KnownLines(self.cfg.reader.cache_size), now=self.now)
         floors, starts = self._wait_for_indices()
@@ -126,7 +128,45 @@ class Engine:
                            "until catch-up re-judges their keys", raised)
         if self._commit_due():
             logger.info("missed daily commit: running it now")
-            self._commit("startup")
+            self._commit("startup", self._rebuild_today())
+
+    def _parse_schedule(self, raw) -> dict:
+        """Effective schedule: each missing or invalid field falls back to its default."""
+        raw = raw if isinstance(raw, dict) else {}
+        out = {"enabled": True, "time": self.cfg.baseline.commit_time, "weekdays": list(range(7))}
+        if isinstance(raw.get("enabled"), bool):
+            out["enabled"] = raw["enabled"]
+        try:
+            out["time"] = datetime.strptime(raw["time"], "%H:%M").strftime("%H:%M")
+        except (KeyError, TypeError, ValueError):
+            pass
+        days = raw.get("weekdays")
+        if isinstance(days, list) and all(type(d) is int and 0 <= d <= 6 for d in days):
+            out["weekdays"] = sorted(set(days))
+        return out
+
+    def _load_schedule(self) -> None:
+        with self.db.transaction():
+            raw = get_setting(self.db, "retrain_schedule")
+        self.schedule = self._parse_schedule(raw)
+        valid = isinstance(raw, dict) and all(
+            k in ("enabled", "time", "weekdays") and self.schedule[k] == v for k, v in raw.items())
+        if raw is not None and not valid and raw != self._schedule_warned:   # once per distinct bad value
+            self._schedule_warned = raw
+            logger.warning("invalid retrain_schedule %r: using defaults for the bad fields", raw)
+
+    def _rebuild_today(self) -> bool:
+        return self.schedule["enabled"] and self._owner_day().weekday() in self.schedule["weekdays"]
+
+    def _next_commit_at(self) -> float | None:
+        if not self.owner.detection_enabled:
+            return None
+        day = self._owner_day()
+        done = date.fromisoformat(self.last_commit["today"]) if self.last_commit else date.min
+        if done >= day:
+            day += timedelta(days=1)
+        at = datetime.strptime(self.schedule["time"], "%H:%M").time()
+        return datetime.combine(day, at, tzinfo=TZ).timestamp()
 
     def _seed_documents(self) -> None:
         path = self.cfg.documentation.seed_path
@@ -226,12 +266,13 @@ class Engine:
             logger.info("first catch-up done: detection on")
             self._flush()   # status shows detection on
         elif self._commit_due():
-            self._commit("schedule")
+            self._commit("schedule", self._rebuild_today())
         return batch["events"] > 0
 
     def _refresh(self, now: float) -> None:
         if now - self._refreshed >= self.cfg.elasticsearch.index_refresh_seconds:
             try:
+                self._load_schedule()
                 self._select_indices()
             except Exception as exc:  # noqa: BLE001 — keep reading the indices already selected
                 logger.warning("index refresh failed: %s", exc)
@@ -360,6 +401,8 @@ class Engine:
             "detection_enabled": self.owner.detection_enabled,
             "bootstrap": self.bootstrap,
             "last_commit": self.last_commit,
+            "schedule": self.schedule,
+            "next_commit_at": self._next_commit_at(),
             "indices": {i: {**self._positions.get(i, {}), "floor": f} for i, f in self.reader.floors.items()},
             "available_indices": self.available,
             "resolution": self.resolution,
@@ -377,7 +420,7 @@ class Engine:
             return False   # the first catch-up runs the first commit
         day = self._owner_day()
         done = date.fromisoformat(self.last_commit["today"]) if self.last_commit else date.min
-        return done < day and self.now() >= datetime.combine(day, self.commit_at, tzinfo=TZ).timestamp()
+        return done < day and self.now() >= self._next_commit_at()
 
     def _record(self, fn, *args, **kw):
         """Run bookkeeping must never change the commit's outcome: log and carry on. The runs helpers
@@ -388,10 +431,10 @@ class Engine:
             logger.exception("recording retrain run failed")
             return None
 
-    def _commit(self, trigger: str) -> dict:
+    def _commit(self, trigger: str, rebuild: bool = True) -> dict:
         self._flush()
         day = self._owner_day()
-        run_id = self._record(runs.start, "rebuild", trigger)
+        run_id = self._record(runs.start, "rebuild", trigger) if rebuild else None
         rlog = RunLog()
         rlog.attach()
 
@@ -399,7 +442,7 @@ class Engine:
             if run_id is not None:
                 self._record(runs.step, run_id, *a)
         try:
-            result = commit(self.db, self.cfg, day, on_step=on_step)
+            result = commit(self.db, self.cfg, day, rebuild=rebuild, on_step=on_step)
         except Exception as exc:
             if run_id is not None:
                 failed = getattr(exc, "step", None)
@@ -417,7 +460,8 @@ class Engine:
             rlog.detach()
         with self.db.transaction():
             self.last_commit = get_setting(self.db, "last_commit")
-        self.owner.reload_baseline()
+        if rebuild:
+            self.owner.reload_baseline()
         logger.info("commit for %s: %s", day, result)
         return {**result, "run_id": run_id}
 

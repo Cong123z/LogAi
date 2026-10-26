@@ -168,7 +168,7 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `flush.max_events` | 50000 | flush when this many events are pending |
 | `start.days_back` | 7 | first start reads from `now - days_back` days |
 | `baseline.timezone` | `Asia/Ho_Chi_Minh` | **unused**: the zone is hard-coded in `logai2/timeutil.py` |
-| `baseline.commit_time` | `"02:00"` | local time of the daily commit |
+| `baseline.commit_time` | `"02:00"` | default local time of the daily commit (the `retrain_schedule` setting overrides it, §12.1) |
 | `baseline.sigma_multiplier` | 3.0 | k of a full baseline |
 | `baseline.young_sigma_multiplier` | 4.0 | k of a young baseline |
 | `baseline.full_after_days` | 5 | committed days for a full baseline (weekend capped at 4, §8.3) |
@@ -652,6 +652,12 @@ the web's **Recompute baseline now** all call it.
    `retention.alert_changes_days`.
 4. Save `settings.last_commit = {"at": <UTC ISO>, "today": <local date>}`.
 
+**Housekeeping always runs.** Steps 1, 3 and 4 run every night. Step 2 (the
+rebuild) is skipped (`commit(..., rebuild=False)`) when the schedule is off or
+the owner day's weekday is not in it (§10.3); such a night writes no
+`retrain_runs` row and reloads no baseline. The first catch-up and
+**Recompute baseline now** always rebuild.
+
 **Every Rebuild is a run.** `Engine._commit(trigger)` (`first_start`, `schedule`,
 `startup`, `manual`) inserts a `retrain_runs` row (`kind='rebuild'`,
 `state='running'`) via `logai2/jobs/runs.py`, records each step after the
@@ -727,10 +733,16 @@ was closed and continues. Open minutes stay in memory.
 
 A commit is due when detection is on, the owner's day (local date of the
 oldest open minute) is later than `last_commit.today`, and the wall clock has
-passed `commit_time` (02:00) on that owner day. In steady state this is
-02:00 local for the previous days. During a catch-up after downtime the
+passed `schedule.time` (default `baseline.commit_time`, 02:00) on that owner
+day. In steady state this is 02:00 local for the previous days. During a catch-up after downtime the
 owner day moves through the missed days, and a commit runs each time it
 crosses a midnight.
+
+The schedule is the setting `retrain_schedule` (§12.1), read at start and every
+`index_refresh_seconds`. At the due time, if `enabled` is false or the owner
+day's weekday (0 = Monday) is not in `weekdays`, the commit runs without the
+rebuild (trigger `schedule`/`startup`); otherwise it rebuilds. Housekeeping
+runs either way, so `last_commit` advances once per day.
 
 ### 10.4 Bootstrap and `days_back`
 
@@ -760,6 +772,8 @@ The engine writes `worker_status['engine'].status` at every flush:
 | `detection_enabled` | first catch-up done |
 | `bootstrap` | `{since, until}` |
 | `last_commit` | `{at, today}` or null |
+| `schedule` | the effective `retrain_schedule`: `{enabled, time, weekdays}` |
+| `next_commit_at` | epoch s when the next commit becomes due (null before the first catch-up ends) |
 | `indices` | `{pattern: {pos_ms, caught_up, failing, floor}}` |
 | `available_indices` | `[{index, docs_count, health, status}]` |
 | `resolution` | `{pattern: [index, ...]}` |
@@ -854,6 +868,7 @@ day), at every local midnight and at every commit, always through today + 2.
 | `bootstrap` | `{"since", "until"}` | engine, once | epoch s |
 | `last_commit` | `{"at", "today"}` | commit | ISO UTC timestamp, local ISO date |
 | `detection_enabled` | `true` | engine, once | — |
+| `retrain_schedule` | `{"enabled": bool, "time": "HH:MM", "weekdays": [0..6]}` | web | local time, 0 = Monday; a missing or invalid field uses its default (enabled, `baseline.commit_time`, all days) and logs one warning |
 
 Every write gets a new random `revision`. The web's writes are optimistic:
 the client sends the revision it read (`null` before the first save) and a
