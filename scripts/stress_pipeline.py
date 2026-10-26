@@ -1079,7 +1079,16 @@ def run_r2(a, world, admin) -> dict:
     streams = r_streams(a, world, [(dms(D1), dms(D2, 12), rpm), (dms(D2, 12), dms(D2, 12) + 6 * 3600_000, live_rpm)])
     scope = Scope(None, [D1], 0, hours)
     with r_session(a, world, admin, streams, now, now) as s:
-        st = SimpleNamespace(rid=None, error="", t0=0.0, t1=None, wall0=0.0, wall=0.0)
+        st = SimpleNamespace(rid=None, error="", t0=0.0, t1=None, wall0=0.0, wall=0.0, commits=[])
+        commit_orig = s.run.engine._commit
+
+        def timed_commit(*args, **kw):   # the re-read's baseline rebuild runs inside one tick
+            t = time.perf_counter()
+            try:
+                return commit_orig(*args, **kw)
+            finally:
+                st.commits.append(time.perf_counter() - t)
+        s.run.engine._commit = timed_commit
 
         def hook(run):
             if st.rid is None and run.clock.t >= now + 60 and run.engine._caught_up():
@@ -1097,7 +1106,9 @@ def run_r2(a, world, admin) -> dict:
         eng = s.run.engine
         boundary = eng.owner.boundary_ms
         late = eng.owner.minutes.late
-        lags = [x for t, x in s.run.lags if st.t0 <= t <= (st.t1 or t)]
+        window = [(t, x) for t, x in s.run.lags if st.t0 <= t <= (st.t1 or t)]
+        lags = [x for _, x in window]
+        peak_t = max(window, key=lambda p: p[1])[0] if window else 0.0
         with psycopg.connect(s.dsn, row_factory=dict_row) as c:
             row = reread_row(c)
             reread_counted = int(c.execute("SELECT coalesce(sum(sum), 0) AS n FROM hourly_counts WHERE key = '*total' "
@@ -1109,7 +1120,9 @@ def run_r2(a, world, admin) -> dict:
     live_truth = s.source.truth(int(now * 1000), boundary)
     max_lag = a.max_live_lag + 30
     return {"state": row.get("state"), "live eps": a.r_live_eps, "reread hours": hours,
-            "live lag s p50/p95/max": [pct(lags, q) for q in (0.5, 0.95, 1)], "lag target (max <)": max_lag,
+            "live lag s p50/p95/max": [pct(lags, q) for q in (0.5, 0.95, 1)], "lag max at (s before the end)": (st.t1 or 0) - peak_t,
+            "seconds with lag > 60": sum(x > 60 for x in lags), "baseline rebuild wall s": st.commits,
+            "lag target (max <)": max_lag,
             "lag ok": bool(lags) and max(lags) < max_lag, "late counts": late,
             "lane rate docs/s (sim)": row.get("result", {}).get("docs_read", 0) / max(1e-9, (st.t1 or 0) - st.t0),
             "lane rate docs/s (wall, incl. generator)": row.get("result", {}).get("docs_read", 0) / max(1e-9, st.wall),
