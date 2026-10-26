@@ -5,8 +5,9 @@
 > **fresh Sonnet** subagent before the tech lead's final review. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** Record per-minute counts on both sites, then build a lab that runs 13 alerting methods + 1 ensemble
-on the recorded real data, judges them with one protocol (Tests A, B, C; equal false-alarm budget;
-day-block bootstrap; blind labels with Qwen), and an **Evaluation** page where every method draws its band
+on the recorded data and judges them with one protocol. The **company** run is Test B only: what each method
+predicts and whether its band fits real traffic (equal coverage, interval score, day-block bootstrap); nothing
+is injected or labelled. The **laptop** adds Tests A and C (planted incidents) as a detect gate. An **Evaluation** page where every method draws its band
 over the real line, to choose and calibrate a method per monitor kind. Live alerting does not change.
 
 **Spec:** docs/specs/2026-10-26-baseline-bakeoff.md. **Mockup:** https://claude.ai/artifact/EXqQaUkx4aAZTsEmj1A2be
@@ -27,11 +28,11 @@ numpy, pandas, statsmodels, prophet, lightgbm, stumpy, torch (CPU), chronos-fore
 | 62 | Lab skeleton: loader, kind assignment, method interface, runner, σ method, episodes, run storage | 2 | 61 | — |
 | 63 | Core methods #2–#7, #13, E1 (pure Python) | 2 | 62 | 64, 66, 70 |
 | 64 | Scoring: shared normal minutes, Test B metrics, equal-budget tuning, sweeps, bootstrap, decision tree | 2 | 62 | 63, 66, 70 |
-| 65 | Test A injector + recall/delay scoring | 2 | 64 | 66, 67, 70 |
+| 65 | Test A injector + recall/delay scoring (laptop only) | 2 | 64 | 66, 68, 70 |
 | 66 | Lab image + heavy methods #8–#12 (`Dockerfile.lab`, baked weights, `--check`) | 2 | 62 | 63, 64, 65 |
-| 67 | Qwen judge (blind) + report summary | 3 | 64 | 65, 68 |
-| 68 | Evaluation API (`eval_view.py`) | 3 | 64 | 67 |
-| 69 | Evaluation page (nav "Evaluate", fit chart, scoreboard, calibrate, episodes) | 3 | 68 | 70, 71 |
+| 67 | *(dropped 2026-10-26: no Qwen judge or labels)* | – | – | – |
+| 68 | Evaluation API (`eval_view.py`) | 3 | 64 | 65 |
+| 69 | Evaluation page (nav "Evaluate", fit chart, scoreboard, calibrate) | 3 | 68 | 70, 71 |
 | 70 | Synthetic world: world file from the replay, `synth.py --mode counts|engine` | 2 | 62 | 63–66 |
 | 71 | Test C loader, compose lab service, k8s lab Job + read-only role, docs | 4 | 66 | 69 |
 | 72 | Proof: laptop synthetic 7/14/28-day runs + replay Test C, timings, validation report | 4 | all | — |
@@ -71,13 +72,13 @@ numpy, pandas, statsmodels, prophet, lightgbm, stumpy, torch (CPU), chronos-fore
 
 ### 61 Migration 010 + LabConfig + recorder
 
-**Files:** `logai2/migrations/010_lab.sql`, `logai2/config.py` (`LabConfig`: `record`, `days`, `llm_max_calls`;
+**Files:** `logai2/migrations/010_lab.sql`, `logai2/config.py` (`LabConfig`: `record`, `days`;
 env `LOGAI2_LAB_RECORD`), `logai2/owner/owner.py`, `logai2/jobs/commit.py` (retention), `config.yaml`,
 `docker-compose.yml`, `k8s/logai-engine.yaml` (env), tests `tests/test_recorder.py`, `tests/test_db.py`.
 
 - [ ] Migration 010 creates every lab table from the spec at once:
   - `lab_minute_counts(service, key, day, hour, counts int[60])`, partitioned by day like `hourly_counts`;
-  - `lab_runs`, `lab_results`, `lab_episodes`, `lab_bands`, `lab_sweeps`, `lab_labels`, `lab_choices`, `lab_incidents`.
+  - `lab_runs`, `lab_results`, `lab_episodes`, `lab_bands`, `lab_sweeps`, `lab_choices`, `lab_incidents`.
 - [ ] **Recorder:**
   - With `lab.record`, the owner keeps the open hour's per-minute counts per key in memory (from `ClosedMinute.keys`). It writes one row per key when the hour closes, **in the same flush transaction** as `hourly_counts`.
   - Keys with all-zero hours are not written.
@@ -109,6 +110,7 @@ env `LOGAI2_LAB_RECORD`), `logai2/owner/owner.py`, `logai2/jobs/commit.py` (rete
 - [ ] **Episodes:** every method's minute verdicts go through `detect.step` (`logai2/owner/detect.py`) with the live `AlertConfig`.
 - [ ] **`run.py`:**
   - `--test A|B|C`, `--methods`, `--days`, `--site laptop|company`, `--scenario`, `--check`, `--seed`;
+  - `--site company` with `--test A` or `C` exits with an error and writes nothing (test in `tests/lab/test_run.py`);
   - it writes `lab_runs` (code version, image tag, window, seed, knob grids, kinds) and per-method `lab_results`, `lab_episodes`, `lab_bands` (5-min for the drawn keys, 1-min ± 2 h around episodes);
   - it keeps the last 5 runs.
 - [ ] **Parity test:** method #1 on recorded minutes reproduces the engine's own `alert_changes` on the same minutes, on a small world made by the stress generator.
@@ -134,16 +136,16 @@ env `LOGAI2_LAB_RECORD`), `logai2/owner/owner.py`, `logai2/jobs/commit.py` (rete
 tests `tests/lab/test_score.py`.
 
 - [ ] **J2/J3:**
-  - shared normal minutes (one set for all methods);
+  - shared normal minutes (one set for all methods; minus Review `exclude` hours, and on the laptop minus planted windows);
   - coverage, Winkler interval score (relative to σ), sharpness, MASE (7-day, or 1-day seasonal naive);
-  - false-alarm rate, flap share, keep-hour alerts, known incidents caught, lead vs σ, precision (≥ 30 labels).
-- [ ] **J4:** tune/test split (keys split on a < 14-day window); the most sensitive knob within budget; σ tuned the same way; `lab_sweeps` for every knob value.
+  - alert rate and flap share.
+- [ ] **J4:** tune/test split (keys split on a < 14-day window); band methods: the knob whose tune-window coverage is closest to 99.5 %; score-only methods: the most sensitive knob within the alert budget; σ tuned the same way; `lab_sweeps` for every knob value.
 - [ ] **J6:**
   - day-block bootstrap (1,000) with 90 % intervals;
-  - "better than σ" = +10 points and lower bound > 0;
+  - "fits better than σ" = interval-score ratio ≤ 0.90 and the upper end of its 90 % interval < 1.00;
   - ties → simplest (core before heavy, then cost);
   - verdict strength exploratory / provisional / final.
-- [ ] **J7:** decision tree per kind (gates, rank, confirm, service check) → `lab_results` verdicts.
+- [ ] **J7:** decision tree per kind (gates incl. the laptop detect check, rank by interval score, service check) → `lab_results` verdicts. The detect check reads the latest laptop run's Test A recall from `lab_results` when the same database holds it; on the company it is entered from the laptop's metrics-only export (or shown "not checked").
 - [ ] **Tests:** hand-made series with known coverage, interval score, flaps and verdicts; the bootstrap is reproducible with a seed.
 
 ### 65 Test A injector
@@ -151,7 +153,7 @@ tests `tests/lab/test_score.py`.
 **Files:** `scripts/lab/inject.py`, `scripts/lab/score.py` (recall/delay), tests `tests/lab/test_inject_score.py`.
 
 - [ ] **J5 injections:** spike, drop, ramp, level shift, burst (M6), mix swap (M7) at 3 relative sizes.
-  - Placed at random times in the test window, never in real incident windows, and ≥ 3 h apart per key.
+  - Laptop only. Placed at random times in the test window, never in planted incident windows, and ≥ 3 h apart per key.
   - 5 passes with different seeds; fits are cached between passes.
 - [ ] **Recall and delay:** recall (hit = episode start within 15 min) and delay per type × size.
 - [ ] **Tests:** an injected window produces exactly the expected hits, false alarms and delay; no overlap with real windows.
@@ -186,22 +188,9 @@ It reuses `scripts/stress_pipeline.py` (`GenSource`, `Clock`, `pretrain`, throwa
   - day factors and the holiday show in the hourly totals;
   - `engine` mode on a 1-day tiny world gives the same counts as `counts` mode (≥ 99.9 % template match).
 
-## Phase 3: judge with people and Qwen, and the page
+## Phase 3: the page
 
-### 67 Qwen judge
-
-**Files:** `scripts/lab/llm_judge.py`, tests `tests/lab/test_llm_judge.py` (fake server as in `tests/test_llm.py`).
-
-- [ ] **Merge episodes** (± 15 min, any method). Draw the **random trust sample** (30) and the disagreement-first order.
-- [ ] **Blind prompt:**
-  - template text and level, document title and error code;
-  - counts ± 2 h plus the same hours on the previous 3 days;
-  - the co-moving keys;
-  - **no method names, no bands**.
-
-  The reply is `{verdict, confidence, reason}`. It uses `chat_json` / `active_profiles` (`logai2/llm.py`) and the resolver failover, and is capped at `lab.llm_max_calls`.
-- [ ] **Agreement:** the agreement maths (random sample only, ≥ 25 decided rows, ≥ 80 %). Qwen labels count toward precision only when trusted.
-- [ ] **Report summary:** from aggregate tables only, stored per run and kind.
+*(Task 67, the Qwen judge, was dropped on 2026-10-26: the company run injects and labels nothing.)*
 
 ### 68 Evaluation API
 
@@ -211,14 +200,12 @@ It reuses `scripts/stress_pipeline.py` (`GenSource`, `Clock`, `pretrain`, throwa
   - `GET /api/eval/runs`
   - `GET /api/eval/scoreboard?run=`
   - `GET /api/eval/series?run=&service=&key=&from=&to=&methods=&knob=`
-  - `GET /api/eval/episodes?run=&filter=`
   - `GET /api/eval/sweep?run=&kind=`
-  - `POST /api/eval/labels`
   - `POST /api/eval/choices`
-  - `POST /api/eval/incidents`: incidents you enter.
+  - `POST /api/eval/detect`: import a laptop run's metrics-only summary (Test A recall per method × kind) for the detect gate.
 - [ ] **Behaviour:**
   - reads only `lab_*` (plus counts for the real line);
-  - blind rows are returned without Qwen's verdict or methods until labelled;
+  - a company run's scoreboard has no Test A columns;
   - the API token is honoured as on the other routes.
 
 ### 69 Evaluation page
@@ -226,8 +213,8 @@ It reuses `scripts/stress_pipeline.py` (`GenSource`, `Clock`, `pretrain`, throwa
 **Files:** `logai2/web/static/js/views/evaluation.js`, `logai2/web/static/index.html` (nav section "Evaluate"),
 `logai2/web/static/js/main.js`, `logai2/web/static/css/app.css`, `docs/WEB_UI.md`.
 
-- [ ] **Build it as the mockup:** run bar (with site), decision per kind, scoreboard with pass/fail cells, the fit chart as small multiples with a shared zoom (ECharts via `charts.js`), overlay mode, score panels, swimlanes, Calibrate (sweeps, knob pills redraw the band, Choose), and Episodes (filters, labels, trust counter).
-- [ ] **Add the mockup changes** from the spec: verdict strength, 90 % intervals, blind trust rows, site.
+- [ ] **Build it as the mockup:** run bar (with site), decision per kind, scoreboard with pass/fail cells, the fit chart as small multiples with a shared zoom (ECharts via `charts.js`), overlay mode, score panels, swimlanes, and Calibrate (sweeps, knob pills redraw the band, Choose).
+- [ ] **Add the mockup changes** from the spec: verdict strength, 90 % interval, site, laptop detect column; drop Episodes, Qwen summary and the label columns.
 - [ ] **Key picker:** reuse `keypicker.js` (as Baseline does).
 
 ## Phase 4: deploy and prove
@@ -240,7 +227,7 @@ It reuses `scripts/stress_pipeline.py` (`GenSource`, `Clock`, `pretrain`, throwa
 - [ ] **`load_incidents.py`:** turns a `scripts/incident_test.py` run directory into `lab_incidents` (source `test-c`).
 - [ ] **Test C check:** recall difference Test A vs Test C per method (> 10 points → flag the injector).
 - [ ] **Compose:** the lab service; `LOGAI2_LAB_RECORD=true` for the engine.
-- [ ] **k8s:** a CronJob at 03:00 (after the 02:00 commit), 4 CPU / 8 Gi, read-only DSN for loading and a lab-writer DSN for `lab_*`.
+- [ ] **k8s:** a CronJob at 03:00 (after the 02:00 commit) running `run.py --site company --test B`, 4 CPU / 8 Gi, read-only DSN for loading and a lab-writer DSN for `lab_*`.
 - [ ] **Docs:** README (both sites, run commands as single short lines), ARCHITECTURE (lab section).
 
 ### 72 Proof
