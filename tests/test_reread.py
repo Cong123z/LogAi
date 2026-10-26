@@ -77,7 +77,7 @@ def snap(conn):
 
 
 def wipe(conn):
-    for t in (*TABLES, "templates", "drain3_state", "template_modules", "error_samples", "services", "modules",
+    for t in (*TABLES, "templates", "drain3_state", "template_modules", "error_samples", "modules", "services",
               "retrain_runs"):
         conn.execute(f"DELETE FROM {t}")
     conn.commit()
@@ -87,7 +87,8 @@ def lane_of(conn, cfg, src, *, hour_from=10, hour_to=12, services=None, patterns
             owner_hour_ms=T0 + 4 * H, pos_ms=0, first=None, run_id=None, size=None):
     now_s = (T0 + 6 * H) / 1000
     owner = Owner(conn, cfg, M, now=lambda: now_s)
-    p = plan(Scope(services, [DAY], hour_from, hour_to), patterns or {"a": ["s"]}, {"a": oldest}, owner_hour_ms)
+    patterns = patterns or {"a": ["s"]}
+    p = plan(Scope(services, [DAY], hour_from, hour_to), patterns, dict.fromkeys(patterns, oldest), owner_hour_ms)
     if run_id is None:
         run_id = runs.start(conn, "reread", "manual")
         conn.rollback()
