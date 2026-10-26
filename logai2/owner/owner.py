@@ -48,8 +48,8 @@ SQL = {
         "embedding = CASE WHEN templates.text IS DISTINCT FROM EXCLUDED.text THEN NULL ELSE templates.embedding END"),
     # a cache hit carries no text; its template row was inserted by the miss that taught the cache
     "templates_seen": (
-        "UPDATE templates SET level = %s, last_seen = GREATEST(last_seen, %s) "
-        "WHERE service = %s AND template_id = %s"),
+        "UPDATE templates SET level = %s, last_seen = GREATEST(last_seen, %s), "
+        "first_seen = LEAST(first_seen, %s) WHERE service = %s AND template_id = %s"),
     "drain3_state": (
         "INSERT INTO drain3_state (service, blob) VALUES (%s, %s) ON CONFLICT (service) DO UPDATE SET "
         "blob = EXCLUDED.blob, version = drain3_state.version + 1"),
@@ -82,6 +82,10 @@ SQL = {
         "INSERT INTO alert_changes (service, key, at, from_state, to_state, count, band_low, band_high) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING"),
     "error_samples": "INSERT INTO error_samples (service, template_id, at, line) VALUES (%s, %s, %s, %s)",
+    # re-read lane: replace one whole (service, day, hour)
+    "lane_had": "SELECT EXISTS (SELECT 1 FROM service_hours WHERE service = %s AND day = %s AND hour = %s) AS had",
+    "lane_delete": ("service_hours", "hourly_counts", "template_module_hours"),
+    "retrain_run": "UPDATE retrain_runs SET pos_ms = %s, steps = %s WHERE id = %s",
     "error_samples_trim": (
         "DELETE FROM error_samples WHERE ctid IN (SELECT ctid FROM error_samples "
         f"WHERE service = %s AND template_id = %s ORDER BY at DESC OFFSET {SAMPLES_KEPT})"),
@@ -105,6 +109,7 @@ def copy_upsert(cur, table: str, rows: list[tuple]) -> None:
         for row in rows:
             cp.write_row(row)
     cur.execute(SQL[table])
+    cur.execute(sql.SQL("TRUNCATE {}").format(sql.Identifier(f"tmp_{table}")))   # a second call in one transaction
 
 
 def _ts(seconds: float) -> datetime:
@@ -162,6 +167,8 @@ class Owner:
         self._pairs: dict[tuple[str, str, str], list[int]] = {}  # (service, template_id, module) -> [first, last] minute
         self._changes: list = []
         self._samples: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=SAMPLES_KEPT))
+        self._lane_hours: list = []                    # re-read LaneHours replacing whole hours in the next flush
+        self._lane_run: tuple[int, dict] | None = None  # (run id, {"pos_ms", "steps"}) written in that flush
 
     def _load_links(self) -> dict[tuple[str, str], str]:
         return {(r["service"], r["template_id"]): r["doc_id"]
@@ -256,6 +263,56 @@ class Owner:
             row["first"] = min(row["first"], minute)
             row["last"] = max(row["last"], minute)
 
+    def add_lane(self, run_id: int, hours: list, run_update: dict) -> None:
+        """Queue closed re-read hours and the run's pos_ms / steps; the next flush replaces those hours and
+        writes the update in its transaction, after every live write. The lane's templates, modules and pairs
+        go through the same pending paths as live ones; Owner.services (the zero-fill map) is not touched."""
+        self._lane_hours += hours
+        self._lane_run = (run_id, run_update)
+        for h in hours:
+            if h.service not in self.services:
+                self._services.setdefault(h.service, zlib.crc32(h.service.encode("utf-8")) % 60)
+            for tid, t in h.templates.items():
+                key = (h.service, tid)
+                if _more_severe(t["level"], self.levels.get(key)):
+                    self.levels[key] = t["level"]
+                row = self._templates.get(key)
+                if row is None:
+                    self._templates[key] = {"text": t["text"], "first": t["first"], "last": t["last"]}
+                else:
+                    row["text"] = t["text"] or row["text"]
+                    row["first"], row["last"] = min(row["first"], t["first"]), max(row["last"], t["last"])
+            for (tid, module), (a, b) in h.pairs.items():
+                if module and (h.service, module) not in self.modules:
+                    self.modules.add((h.service, module))
+                    self._modules.append((module, h.service))
+                pair = self._pairs.setdefault((h.service, tid, module), [a, b])
+                pair[0], pair[1] = min(pair[0], a), max(pair[1], b)
+
+    def _flush_lane(self, cur) -> None:
+        today = day_hour(int(self.now() // 60))[0]
+        mod_cutoff = today - timedelta(days=self.cfg.retention.module_hours_days)
+        mod_rows, sample_rows, trims = [], [], set()
+        for h in self._lane_hours:
+            k = (h.service, h.day, h.hour)
+            had = cur.execute(SQL["lane_had"], k).fetchone()["had"]
+            for table in SQL["lane_delete"]:
+                cur.execute(f"DELETE FROM {table} WHERE service = %s AND day = %s AND hour = %s", k)
+            cur.execute(SQL["service_hours"], (*k, h.n_minutes))
+            cur.executemany(SQL["hourly_counts"], [(h.service, key, h.day, h.hour, s, sq)
+                                                   for key, (s, sq) in h.sums.items()])
+            if h.day >= mod_cutoff:
+                mod_rows += [(h.service, tid, module, h.day, h.hour, n) for (tid, module), n in h.module_hours.items()]
+            if not had:   # an hour that had rows has its samples already
+                sample_rows += [(h.service, tid, _ts(m * 60), line) for tid, m, line in h.samples]
+                trims |= {(h.service, tid) for tid, _, _ in h.samples}
+        copy_upsert(cur, "template_module_hours", mod_rows)
+        cur.executemany(SQL["error_samples"], sample_rows)
+        cur.executemany(SQL["error_samples_trim"], sorted(trims))
+        if self._lane_run:
+            run_id, update = self._lane_run
+            cur.execute(SQL["retrain_run"], (update["pos_ms"], Jsonb(update["steps"]), run_id))
+
     def flush(self, cursors: dict[str, tuple[int, int]], status: dict) -> None:
         if self.conn.info.transaction_status != TransactionStatus.IDLE:
             # inside an open transaction conn.transaction() is only a savepoint: nothing would commit
@@ -263,7 +320,7 @@ class Owner:
         self._blobs.update(self.miners.dirty())  # kept pending: a failed flush must not lose them
         new_t = [(s, t, self.levels[(s, t)], r["text"], _ts(r["first"] * 60), _ts(r["last"] * 60))
                  for (s, t), r in self._templates.items() if r["text"] is not None]
-        seen_t = [(self.levels[(s, t)], _ts(r["last"] * 60), s, t)
+        seen_t = [(self.levels[(s, t)], _ts(r["last"] * 60), _ts(r["first"] * 60), s, t)
                   for (s, t), r in self._templates.items() if r["text"] is None]
         states = self.detector.states
         touched = list(self.detector.touched)
@@ -287,6 +344,7 @@ class Owner:
             cur.executemany(SQL["error_samples"], [(s, t, _ts(m * 60), line)
                                                    for (s, t), q in self._samples.items() for m, line in q])
             cur.executemany(SQL["error_samples_trim"], list(self._samples))
+            self._flush_lane(cur)
             cur.executemany(SQL["es_cursors"], [(i, since, floor) for i, (since, floor) in cursors.items()])
             cur.execute("DELETE FROM es_cursors WHERE index <> ALL(%s)", (list(cursors),))
             cur.executemany(SQL["worker_status"], [("engine", Jsonb(status))])

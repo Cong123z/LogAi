@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from psycopg.types.json import Jsonb
 
-KINDS = ("recompute_baseline", "reload_sources", "reload_links")
+KINDS = ("recompute_baseline", "reload_sources", "reload_links", "retrain_run", "retrain_cancel", "retrain_estimate")
 
 
 def enqueue(conn, kind: str, payload: dict | None = None) -> int:

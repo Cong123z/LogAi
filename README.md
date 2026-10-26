@@ -153,7 +153,7 @@ connection and index selection saved on the **Data sources** page.
 | `LOGAI2_EMBEDDING_API_KEY` | optional key for the embeddings service, sent as `Authorization: Bearer` (linker) |
 
 Every `config.yaml` key and default (floors, k, commit time, retention,
-flush, Drain3) is listed in [ARCHITECTURE §3](ARCHITECTURE.md#3-configuration).
+flush, Drain3, `retrain.*` for the Re-read lane) is listed in [ARCHITECTURE §3](ARCHITECTURE.md#3-configuration).
 
 ## Module alert API
 

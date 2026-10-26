@@ -434,3 +434,16 @@ def test_index_services_loaded_on_start(conn, cfg, monkeypatch):
     monkeypatch.setattr(psycopg.Cursor, "executemany", spy)
     tick(reader, owner)
     assert inserted == []
+
+
+def test_templates_seen_moves_first_seen_earlier(conn, cfg):
+    # the re-read lane's cache hits carry no text: the UPDATE must move first_seen earlier, never later
+    from logai2.owner.owner import SQL
+    ts = lambda m: datetime.fromtimestamp(m * 60, timezone.utc)
+    conn.execute(SQL["templates"], ("s", "s:T1", "INFO", "a <*>", ts(M), ts(M)))
+    conn.commit()
+    for first, want in ((M - 60, M - 60), (M + 30, M - 60)):
+        conn.execute(SQL["templates_seen"], ("INFO", ts(M + 5), ts(first), "s", "s:T1"))
+        conn.commit()
+        row = conn.execute("SELECT first_seen, last_seen FROM templates").fetchone()
+        assert (row["first_seen"], row["last_seen"]) == (ts(want), ts(M + 5))
