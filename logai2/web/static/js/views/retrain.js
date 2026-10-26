@@ -77,11 +77,13 @@ function rtStepLine(run, step) {
   const d = step.detail || {};
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   if (step.key === 'scope') {
+    if (d.hours_chosen == null) return '';
     const live = d.hours_live ? ` · ${d.hours_live} in the live hour` : '';
     return `${plural(d.services, 'service')} · ${d.hours_chosen} hours chosen · ${d.hours_not_in_es} not in ES${live} · ${d.hours_to_read} to read`;
   }
   if (step.key === 'partitions') return d.first_day ? `partitions ready from ${rtDay(d.first_day)}` : '';
   if (step.key === 'read') {
+    if (d.hours_total == null) return run.state === 'running' ? 'starting…' : 'nothing read yet';
     const bits = [d.docs_target ? `${rtN(d.docs_read)} of ${rtN(d.docs_target)} docs` : `${rtN(d.docs_read)} docs`,
       `${d.hours_done} of ${d.hours_total} hours replaced`, `${d.new_templates} new templates`];
     if (d.rate) bits.push(`${rtN(d.rate)} docs/s`);
@@ -89,9 +91,9 @@ function rtStepLine(run, step) {
     if (d.resumed_at) bits.push(`resumed ${rtAt(d.resumed_at)}`);
     return bits.join(' · ');
   }
-  if (step.key === 'mark') return `${plural(d.days, 'finished day')} marked`;
-  if (step.key === 'rebuild') return `baseline rows ${d.rows_before} → ${d.rows}`;
-  if (step.key === 'housekeeping') return `${plural((d.partitions_dropped || []).length, 'partition')} dropped · ${plural(d.runs_deleted, 'old run')} deleted`;
+  if (step.key === 'mark') return d.days == null ? '' : `${plural(d.days, 'finished day')} marked`;
+  if (step.key === 'rebuild') return d.rows == null ? '' : `baseline rows ${d.rows_before} → ${d.rows}`;
+  if (step.key === 'housekeeping') return d.runs_deleted == null ? '' : `${plural((d.partitions_dropped || []).length, 'partition')} dropped · ${plural(d.runs_deleted, 'old run')} deleted`;
   return '';
 }
 
@@ -115,7 +117,7 @@ function rtStatus(data) {
   } else if (last && last.state === 'failed') {
     cls = 'llm-status-error';
     const read = (rtStep(last, 'read') || {}).detail;
-    const kept = last.kind === 'reread' && read ? ` ${read.hours_done} of ${read.hours_total} hours were replaced and kept; the baseline was not rebuilt.` : '';
+    const kept = last.kind === 'reread' && read && read.hours_total != null ? ` ${read.hours_done} of ${read.hours_total} hours were replaced and kept; the baseline was not rebuilt.` : '';
     text = `Last retrain failed at ${rtFailedLabel(last)}.${kept} Next retrain: ${next}.`;
   } else {
     const done = !last ? 'No retrain has run yet.'
@@ -131,16 +133,20 @@ function rtStatus(data) {
 }
 
 // ── details panel ──
+function rtBar(d) {   // no pct yet (the read step has no detail until the first publish): an indeterminate bar
+  if (d.pct == null) return '<div class="rt-bar"><progress aria-label="Read progress"></progress><span class="ins-meta">starting…</span></div>';
+  const pct = Number(d.pct) || 0;
+  return `<div class="rt-bar"><progress max="100" value="${pct}" aria-label="Read progress"></progress><span class="ins-meta">${pct}%${d.eta_s != null ? ` · ${rtEta(d.eta_s)}` : ''}</span></div>`;
+}
 function rtPick(data) {
   const byId = id => data.runs.find(r => r.id === id);
-  if (rt.selected) return byId(rt.selected) || {id: rt.selected};
+  if (rt.selected) return byId(rt.selected) || {id: rt.selected};   // not in the last 50: fetched by id
   const row = data.current || data.runs.find(r => r.state !== 'running');
   if (!row || row.id === rt.closed) return null;
   return data.current || (row.state === 'failed' ? row : null);
 }
 
 async function rtLoadRun(row) {   // the list has no log; a finished run never changes, so it is fetched once
-  if (row.state === 'running') return row;
   if (rt.cache[row.id]) return rt.cache[row.id];
   const run = await getJson(`/api/retrain/runs/${row.id}`, 'Unable to load the run');
   if (run.state !== 'running') rt.cache[row.id] = run;
@@ -149,8 +155,20 @@ async function rtLoadRun(row) {   // the list has no log; a finished run never c
 
 function rtRenderDetail(run) {
   const $panel = $rt('rt-detail');
-  $panel.hidden = !run;
-  if (!run) { rt.shown = null; return; }
+  $panel.hidden = !run && !rt.selected;
+  if (!run) {   // a picked run that is unknown or failed to load
+    rt.shown = null;
+    if (rt.selected) {
+      $rt('rt-d-title').textContent = `Run #${rt.selected} not found`;
+      $rt('rt-d-meta').textContent = 'It may be older than 365 days, or the web could not read it.';
+      $rt('rt-cancel').hidden = true;
+      $rt('rt-close').hidden = false;
+      $rt('rt-d-error').hidden = true;
+      $rt('rt-d-steps').innerHTML = '';
+      $rt('rt-d-log').hidden = true;
+    }
+    return;
+  }
   const running = run.state === 'running';
   const scope = run.kind === 'reread' ? rtScope(run.scope) : 'All services';
   const scopeStep = (rtStep(run, 'scope') || {}).detail || {};
@@ -161,7 +179,7 @@ function rtRenderDetail(run) {
     if (read.live_lag_s != null && running) meta.push(`live lag ${rtDur(read.live_lag_s)}`);
     if (read.paused) meta.push(`lane paused ${read.paused}× for live`);
   }
-  const [badge, label] = RT_BADGE[run.state] || ['badge-gray', run.state];
+  const [badge, label] = RT_BADGE[run.state] || ['badge-gray', escapeHtml(String(run.state))];
   $rt('rt-d-title').innerHTML = `<strong>${rtKind(run)}</strong> · ${escapeHtml(scope)} <span class="badge ${badge}">${label}</span>`;
   $rt('rt-d-meta').textContent = meta.join(' · ');
   $rt('rt-cancel').hidden = !(running && run.kind === 'reread');
@@ -191,13 +209,14 @@ function rtRenderDetail(run) {
   $rt('rt-d-steps').innerHTML = steps.map(s => `<li class="rt-step ${s.cls}">
       <span class="rt-mark" aria-hidden="true">${s.mark}</span><span class="rt-lbl">${escapeHtml(s.label)}</span><span class="rt-time">${escapeHtml(s.time)}</span>
       <div class="rt-sub">${escapeHtml(s.line)}</div>
-      ${s.bar ? `<div class="rt-bar"><progress max="100" value="${s.bar.pct}" aria-label="Read progress"></progress><span class="ins-meta">${s.bar.pct}%${s.bar.eta_s != null ? ` · ${rtEta(s.bar.eta_s)}` : ''}</span></div>` : ''}
+      ${s.bar ? rtBar(s.bar) : ''}
     </li>`).join('');
 
   const lines = (run.log || []).filter(l => l.level === 'WARNING' || l.level === 'ERROR');
   const $log = $rt('rt-d-log');
-  $log.hidden = running;
-  if (rt.shown !== run.id) $log.open = run.state === 'failed';   // the viewer's own toggle survives the polls
+  $log.hidden = false;
+  if (rt.shown !== run.id || rt.shownState !== run.state) $log.open = run.state === 'failed';   // the viewer's own toggle survives the polls
+  rt.shownState = run.state;
   $rt('rt-d-log-n').textContent = lines.length;
   $rt('rt-d-log-list').innerHTML = lines.map(l => `<li class="${l.level === 'ERROR' ? 'e' : ''}"><span class="ins-meta">${rtClock(l.ts)} ${escapeHtml(l.level)} ${escapeHtml(l.logger)}</span> ${escapeHtml(l.message)}</li>`).join('');
   rt.shown = run.id;
@@ -249,7 +268,7 @@ $rt('rt-sched').addEventListener('submit', async event => {
   } catch (err) {
     $rt('rt-sch-msg').textContent = err.status === 409
       ? 'The schedule was changed elsewhere; your changes are kept, review them and save again.' : err.message;
-    if (err.status === 409) { rt.data = await getJson('/api/retrain', 'Unable to load retrain'); }
+    if (err.status === 409) { try { rt.data = await getJson('/api/retrain', 'Unable to load retrain'); } catch (e) { /* the next poll refreshes it */ } }
     rtRenderSchedule();
   }
 });
@@ -258,7 +277,7 @@ $rt('rt-sched').addEventListener('submit', async event => {
 function rtRenderHistory(data) {
   const $body = $rt('rt-history');
   $body.innerHTML = data.runs.length ? data.runs.map(r => {
-    const [badge, label] = RT_BADGE[r.state] || ['badge-gray', r.state];
+    const [badge, label] = RT_BADGE[r.state] || ['badge-gray', escapeHtml(String(r.state))];
     const at = r.state === 'failed' ? `<div class="ins-meta">at ${escapeHtml(rtFailedLabel(r))}</div>` : '';
     return `<tr class="rt-row${r.id === rt.shown ? ' selected' : ''}" tabindex="0" data-run="${r.id}"${r.id === rt.shown ? ' aria-current="true"' : ''}>
       <td>${escapeHtml(rtAt(r.started_at))}</td><td>${rtKind(r)}</td><td>${escapeHtml(r.kind === 'reread' ? rtScope(r.scope) : 'All services')}</td>
@@ -282,8 +301,9 @@ $rt('rt-close').addEventListener('click', () => {
 });
 
 // ── commands (start, estimate, cancel): poll /api/commands/<id> ──
-async function rtWait(commandId, alive = () => true) {
-  for (;;) {
+async function rtWait(commandId, alive = () => true, maxMs = 120000) {   // null: gave up (bound, or `alive` said stop)
+  const end = Date.now() + maxMs;
+  while (Date.now() < end) {
     await new Promise(resolve => setTimeout(resolve, 800));
     if (!alive()) return null;
     try {
@@ -291,14 +311,17 @@ async function rtWait(commandId, alive = () => true) {
       if (cmd.done) return cmd.result || {};
     } catch (err) { /* keep polling: the web may be restarting */ }
   }
+  return null;
 }
 $rt('rt-cancel').addEventListener('click', async () => {
   const id = rt.shown;
   rt.cancelling = true;
   $rt('rt-cancel').disabled = true;
   try {
-    const result = await rtWait((await apiMutation(`/api/retrain/runs/${id}/cancel`, 'POST', {})).command_id);
-    showToast(result.error ? `Cancel failed: ${result.error}` : 'Re-read cancelled. Hours already replaced stay.', Boolean(result.error));
+    const result = await rtWait((await apiMutation(`/api/retrain/runs/${id}/cancel`, 'POST', {})).command_id,
+                                () => state.activeView === 'retrain', 60000);
+    if (!result) showToast('The engine has not answered yet; the cancel stays queued.', true);
+    else showToast(result.error ? `Cancel failed: ${result.error}` : 'Re-read cancelled. Hours already replaced stay.', Boolean(result.error));
   } catch (err) {
     showToast(`Cancel failed: ${err.message}`, true);
   }
@@ -397,7 +420,7 @@ $rtModal.addEventListener('change', event => {
   if (event.target.id === 'rt-hour-to' && Number($rt('rt-hour-from').value) >= Number(event.target.value)) $rt('rt-hour-from').value = String(Number(event.target.value) - 1);
   rtDialogChanged();
 });
-$rtModal.querySelectorAll('[data-close="rt-modal"]').forEach(b => b.addEventListener('click', () => { rt.dialogSeq++; }));
+$rtModal.querySelectorAll('[data-close="rt-modal"]').forEach(b => b.addEventListener('click', () => { rt.dialogSeq++; clearTimeout(rt.estTimer); }));
 $rt('rt-run').addEventListener('click', () => {
   if (!rt.data) return;
   rtBuildDialog();
@@ -407,16 +430,16 @@ $rt('rt-form').addEventListener('submit', async event => {
   event.preventDefault();
   const $start = $rt('rt-start');
   const $error = $rt('rt-error');
-  const seq = ++rt.dialogSeq;
+  ++rt.dialogSeq;   // drops a pending estimate
   $start.disabled = true;
   $error.textContent = '';
   const label = $start.textContent;
   $start.textContent = 'Starting…';
   try {
     const {command_id: id} = await apiMutation('/api/retrain/runs', 'POST', rtBody());
-    const r = await rtWait(id, () => seq === rt.dialogSeq && $rtModal.classList.contains('open'));
-    if (!r) return;   // the dialog was closed while waiting
-    if (r.error) { $error.textContent = r.error; return; }
+    const r = await rtWait(id);   // independent of the dialog: the run was posted, so its outcome is always reported
+    if (!r) { $error.textContent = 'The engine has not answered; the run stays queued and starts when it does.'; return; }
+    if (r.error) { $error.textContent = r.error; if (!$rtModal.classList.contains('open')) showToast(r.error, true); return; }
     $rtModal.classList.remove('open');
     rt.selected = null;
     r.run_id ? rtOpenRun(r.run_id) : loadData();
@@ -447,7 +470,7 @@ async function loadRetrain() {
   const sub = /^\d+$/.test(state.subView) ? Number(state.subView) : null;   // #retrain/<run id>
   if (sub !== rt.routeSub) { rt.routeSub = sub; rt.selected = sub; }
   const row = rtPick(data);
-  const run = row ? await rtLoadRun(row).catch(() => row) : null;
+  const run = row ? await rtLoadRun(row).catch(() => null) : null;
   if (seq !== rt.seq) return;   // a newer load started meanwhile
   rtRender(data);
   rtRenderDetail(run);

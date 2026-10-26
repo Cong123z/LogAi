@@ -85,7 +85,7 @@ SQL = {
     # re-read lane: replace one whole (service, day, hour)
     "lane_had": "SELECT EXISTS (SELECT 1 FROM service_hours WHERE service = %s AND day = %s AND hour = %s) AS had",
     "lane_delete": ("service_hours", "hourly_counts", "template_module_hours"),
-    "retrain_run": "UPDATE retrain_runs SET pos_ms = %s, steps = %s WHERE id = %s",
+    "retrain_run": "UPDATE retrain_runs SET pos_ms = %s, steps = %s, log = COALESCE(%s, log) WHERE id = %s",
     "error_samples_trim": (
         "DELETE FROM error_samples WHERE ctid IN (SELECT ctid FROM error_samples "
         f"WHERE service = %s AND template_id = %s ORDER BY at DESC OFFSET {SAMPLES_KEPT})"),
@@ -311,7 +311,9 @@ class Owner:
         cur.executemany(SQL["error_samples_trim"], sorted(trims))
         if self._lane_run:
             run_id, update = self._lane_run
-            cur.execute(SQL["retrain_run"], (update["pos_ms"], Jsonb(update["steps"]), run_id))
+            log = update.get("log")   # callers without a log (tests) leave the stored one
+            cur.execute(SQL["retrain_run"], (update["pos_ms"], Jsonb(update["steps"]),
+                                             None if log is None else Jsonb(log), run_id))
 
     def flush(self, cursors: dict[str, tuple[int, int]], status: dict) -> None:
         if self.conn.info.transaction_status != TransactionStatus.IDLE:

@@ -382,8 +382,9 @@ timezone (`timezone` of `GET /api/retrain`).
   the running run, else the last run if it failed, until Close. Kind, scope, run id, patterns, live lag;
   **Cancel** while a re-read runs; an error box for a failed run; a step list (✓ done, ● current with a
   progress bar and eta, ✕ failed, ○ waiting) with one detail line per step; the engine log's warnings and
-  errors in a `<details>` (open for a failed run; a running run has none yet). A finished run is fetched once
-  from `GET /api/retrain/runs/<id>`.
+  errors in a `<details>` (open for a failed run, closed while running; the engine updates the log with each
+  flush). A running run is fetched on every poll, a finished one once, from `GET /api/retrain/runs/<id>`. A read
+  step with no detail yet shows "starting…" and an indeterminate bar; an unknown run id shows "Run #N not found".
 - **Schedule**: switch, time, seven day toggles, Save / Discard (enabled when changed). No day ticked is
   refused inline; a 409 keeps the draft and says it was changed elsewhere.
 - **History**: the last 50 runs; a row (click or Enter) opens its details.

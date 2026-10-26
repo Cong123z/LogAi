@@ -643,7 +643,7 @@ not `*` or doc keys).
 
 `logai2/jobs/commit.py`, `commit(conn, cfg, today, rebuild=True, on_step=None)`, one transaction,
 idempotent. The daily timer, the first catch-up, a missed commit at start and
-the web's **Recompute baseline now** all call it.
+the Retrain page's **Rebuild** (and its re-read's last step) all call it.
 
 1. **Mark days:** every (service, day) in `service_hours` with `day < today`
    is inserted into `day_status` as committed, with its day type (ISO
@@ -667,7 +667,7 @@ the web's **Recompute baseline now** all call it.
 rebuild) is skipped (`commit(..., rebuild=False)`) when the schedule is off or
 the owner day's weekday is not in it (§10.3); such a night writes no
 `retrain_runs` row and reloads no baseline. The first catch-up and
-**Recompute baseline now** always rebuild.
+the Retrain page's **Rebuild** always rebuild.
 
 **Every Rebuild is a run.** `Engine._commit(trigger)` (`first_start`, `schedule`,
 `startup`, `manual`) inserts a `retrain_runs` row (`kind='rebuild'`,
