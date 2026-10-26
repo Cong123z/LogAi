@@ -62,16 +62,6 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Fix idea:** raise `upper_bound_seconds` (e.g. 120; alerts come later by the same amount).
 - **Likelihood:** likely under load.
 
-### B5. First catch-up memory when the index pattern covers several indices
-- **Where:** `Reader._seen` / `forget_before`, `OpenMinutes`.
-- **What:** with a data stream, alias or daily indices, every index is read in parallel
-  but minutes close at the slowest one. Faster indices' counts and every doc id stay in
-  memory until then; over 7 days this can pass the 4Gi limit -> OOMKilled loop.
-- **Check:** `GET _resolve/index/hdfs`; one index = not affected.
-- **Fix idea:** do not read an index far ahead of the watermark (skip its page while
-  `pos - watermark` > a few minutes).
-- **Likelihood:** only if several indices.
-
 ### B6. Postgres hostPath PV has no node pinning
 - **Where:** `k8s/logai-postgres.yaml` (`logai-pg-pv`).
 - **What:** if the Postgres pod moves to another node it gets an empty `/u01/logai-pg`,
@@ -86,11 +76,11 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Fix idea:** `emptyDir: {medium: Memory, sizeLimit: 512Mi}` mounted at `/dev/shm`.
 - **Likelihood:** medium as data grows.
 
-### B8. Index pattern matching nothing: detection never turns on
-- **Where:** `Engine._caught_up`.
-- **What:** with no resolved index, `_caught_up` is always false: no detection, no daily
-  commit; the only sign is an empty indices list on the Pipeline page.
-- **Fix idea:** a status warning when the selection resolves to no index.
+### B8. Index pattern matching nothing: no detection until it matches
+- **Where:** `Engine._status`.
+- **What:** a pattern with no index reads an empty page, so it is caught up and detection is not
+  blocked; the engine status carries the warning `no index matches <pattern>`.
+- **Fix idea:** none needed; a typo in a pattern shows as that warning.
 - **Likelihood:** low (setup mistake).
 
 ### B9. Two web tests fail at some local times of day
@@ -136,7 +126,26 @@ Open items to fix, newest findings included. When one is fixed, move it to
   retention on `template_modules`/`modules` rows not seen for N days.
 - **Likelihood:** low-medium (depends on the source's field hygiene).
 
+### B14. One failing index fails the whole pattern's search
+- **Where:** `EsSource.page` (one search per pattern, task 51).
+- **What:** any per-index search error other than an unmapped `@timestamp` (a closed or red shard, a
+  mapping clash on another field) now fails the pattern's whole search; after `FAILING_AFTER` polls
+  the pattern is failing and its good indices stop being read too.
+- **Fix idea:** on a pattern failure, fall back to searching its resolved indices one by one.
+- **Likelihood:** low.
+
 ## Fixed
 
 ### F1. NUL byte in an ES field stalled the flush
 - 2026-10-23, merge `05ec099`: `hit_to_line` strips `\x00` from every stored field.
+
+### B5. First catch-up memory when the index pattern covers several indices (fixed, task 51)
+- **Where:** `Reader._seen` / `forget_before`, `OpenMinutes`.
+- **What:** with a data stream, alias or daily indices, every index is read in parallel
+  but minutes close at the slowest one. Faster indices' counts and every doc id stay in
+  memory until then; over 7 days this can pass the 4Gi limit -> OOMKilled loop.
+- **Check:** `GET _resolve/index/hdfs`; one index = not affected.
+- **Fix idea:** do not read an index far ahead of the watermark (skip its page while
+  `pos - watermark` > a few minutes).
+- **Likelihood:** only if several indices.
+- **Fix:** one cursor and one search per pattern, sorted by timestamp, so indices are no longer read in parallel.

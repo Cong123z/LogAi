@@ -72,7 +72,7 @@ def stage_states(engine: dict, engine_stale: bool, linker: dict | None, linker_s
     if engine_stale:
         es = _stage("warn", "position unknown (engine stale)")
     elif indices and len(failing) == len(indices):
-        es = _stage("bad", "all indices failing")
+        es = _stage("bad", "all patterns failing")
     elif failing or slow:
         es = _stage("warn", f"failing: {', '.join(failing)}" if failing else f"catching up: {', '.join(slow)}")
     else:

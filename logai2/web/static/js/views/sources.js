@@ -18,7 +18,7 @@ function srcStatusText(data) {
   if (!data.resolution) return 'The engine has not reported yet; the selection is applied when it starts.';
   if (!data.selection.revision) return 'The engine reads the index from its configuration. Save a selection here to choose indices.';
   if (!srcSaved().length) return 'No index selected: the engine is not reading any logs.';
-  return `Engine is reading ${Object.keys(data.indices || {}).length} index(es).`;
+  return `Engine is reading ${Object.keys(data.indices || {}).length} pattern(s).`;
 }
 
 function renderSources(data, force = false) {
@@ -43,12 +43,13 @@ function renderSources(data, force = false) {
     if (!saved) reading = '<span class="badge badge-yellow">Not saved yet</span>';
     else if (!indices) reading = '<span class="ins-meta">—</span>';
     else if (!indices.length) reading = '<span class="badge badge-gray">No matching index yet</span>';
-    else reading = indices.map(index => {
-      const p = progress[index] || {};
+    else {
+      const p = progress[pattern] || {};
       const at = p.pos_ms ? `at ${formatTs(p.pos_ms / 1000)}` : 'no events yet';
       const badge = p.failing ? '<span class="badge badge-red">failing</span>' : '';
-      return `<div><span class="tmpl-id">${escapeHtml(index)}</span> <span class="ins-meta">${escapeHtml(at)}${p.caught_up ? ' · caught up' : ''}</span> ${badge}</div>`;
-    }).join('');
+      reading = `<div><span class="ins-meta">${escapeHtml(at)}${p.caught_up ? ' · caught up' : ''}</span> ${badge}</div>`
+        + `<div class="ins-meta">${indices.map(escapeHtml).join(', ')}</div>`;
+    }
     return `<tr>
       <td><span class="tmpl-id">${escapeHtml(pattern)}</span></td>
       <td>${reading}</td>

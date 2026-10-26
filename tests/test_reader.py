@@ -1,4 +1,4 @@
-"""Reader: per-index positions, _id dedup, known-line cache, watermark."""
+"""Reader: per-pattern positions, _id dedup, known-line cache, watermark."""
 from __future__ import annotations
 
 from logai2.reader.cache import KnownLines
@@ -14,7 +14,7 @@ def make(cfg, hits, floors, cache=None):
     src = FakeSource(hits)
     src.size = cfg.elasticsearch.batch_size
     r = Reader(src, cfg, cache or KnownLines(10), now=NOW)
-    r.set_indices(floors, {})
+    r.set_sources(floors, {})
     return src, r
 
 
@@ -22,7 +22,7 @@ def test_aggregates_and_dedups(cfg):
     src = FakeSource({"a": [hit("1", T0, service="s", message="boom 1"),
                             hit("2", T0, service="s", message="boom 2")]})
     r = Reader(src, cfg, KnownLines(10), now=NOW)
-    r.set_indices({"a": T0}, {})
+    r.set_sources({"a": T0}, {})
     b = r.poll()
     assert sum(c["n"] for c in b["counts"]) == 2 and b["events"] == 2
     assert len(b["counts"]) == 1 and b["counts"][0]["template_id"] is None   # same normalized text
@@ -61,14 +61,14 @@ def test_malformed_hits_are_counted_not_aggregated(cfg):
     assert b["events"] == 1 and r.malformed == 1
 
 
-def test_watermark_is_slowest_index(cfg):
-    cfg.elasticsearch.batch_size = 1    # full pages: neither index reached upper_ms
+def test_watermark_is_slowest_pattern(cfg):
+    cfg.elasticsearch.batch_size = 1    # full pages: neither pattern reached upper_ms
     _, r = make(cfg, {"a": [hit("1", T0 + 120_000, service="s", message="m")],
                       "b": [hit("2", T0 + 30_000, service="s", message="m")]}, {"a": T0, "b": T0})
     assert r.poll()["watermark_ms"] == T0 + 30_000
 
 
-def test_failing_index_stops_holding_watermark(cfg):
+def test_failing_pattern_stops_holding_watermark(cfg):
     cfg.elasticsearch.batch_size = 1
     src, r = make(cfg, {"a": [hit("1", T0 + 120_000, service="s", message="m")],
                         "b": [hit("2", T0 + 30_000, service="s", message="m")]}, {"a": T0, "b": T0})
@@ -81,7 +81,7 @@ def test_failing_index_stops_holding_watermark(cfg):
     assert not b["positions"]["b"]["failing"] and b["watermark_ms"] == T0 + 30_000
 
 
-def test_no_healthy_index_holds_watermark(cfg):
+def test_no_healthy_pattern_holds_watermark(cfg):
     # ES down: closing minutes up to upper_ms would write them empty and drop the outage docs as late
     src, r = make(cfg, {"a": [hit("1", T0 + 30_000, service="s", message="m")]}, {"a": T0})
     assert r.poll()["watermark_ms"] == UPPER
@@ -91,7 +91,7 @@ def test_no_healthy_index_holds_watermark(cfg):
     assert b["positions"]["a"]["failing"] and b["watermark_ms"] == T0 + 30_000
 
 
-def test_no_indices_watermark_is_upper(cfg):
+def test_no_patterns_watermark_is_upper(cfg):
     _, r = make(cfg, {}, {})
     assert r.poll()["watermark_ms"] == UPPER
 
@@ -117,29 +117,29 @@ def test_full_page_is_not_caught_up(cfg):
     assert b["events"] == 0 and b["positions"]["a"]["caught_up"] and b["watermark_ms"] == UPPER
 
 
-def test_removed_index_dropped(cfg):
+def test_removed_pattern_dropped(cfg):
     _, r = make(cfg, {"a": [hit("1", T0 + 120_000, service="s", message="m")],
                       "b": [hit("2", T0 + 30_000, service="s", message="m")]}, {"a": T0, "b": T0})
     r.poll()
-    r.set_indices({"a": T0}, {})        # b removed → not in positions, not in watermark
+    r.set_sources({"a": T0}, {})        # b removed → not in positions, not in watermark
     b = r.poll()
     assert set(b["positions"]) == {"a"} and b["watermark_ms"] == UPPER
     assert dict(r.floors) == {"a": T0}
 
 
-def test_saved_cursor_wins_over_floor_for_new_index(cfg):
+def test_saved_cursor_wins_over_floor_for_new_pattern(cfg):
     src, r = make(cfg, {"a": [hit("1", T0, service="s", message="m"),
                               hit("2", T0 + 60_000, service="s", message="m")]}, {})
-    r.set_indices({"a": T0}, {"a": T0 + 60_000})
+    r.set_sources({"a": T0}, {"a": T0 + 60_000})
     b = r.poll()
     assert b["events"] == 1 and b["positions"]["a"]["pos_ms"] == T0 + 60_000
 
 
-def test_refresh_does_not_rewind_tracked_index(cfg):
+def test_refresh_does_not_rewind_tracked_pattern(cfg):
     src, r = make(cfg, {"a": [hit("1", T0 + 60_000, service="s", message="m")]}, {"a": T0})
     assert r.poll()["events"] == 1
     r.poll()                            # quiet poll: caught up
-    r.set_indices({"a": T0}, {"a": T0})
+    r.set_sources({"a": T0}, {"a": T0})
     b = r.poll()
     assert b["events"] == 0 and b["positions"]["a"] == {
         "pos_ms": T0 + 60_000, "caught_up": True, "failing": False}
@@ -163,7 +163,7 @@ def test_forget_before_keeps_ids_at_or_after_position(cfg):
     r.forget_before(T0 + 120_000)
     b = r.poll()
     assert b["events"] == 0 and b["positions"]["a"]["caught_up"] and b["watermark_ms"] == UPPER
-    assert set(r._seen["a"]) == {"2"}   # "1" is before the position: forgotten
+    assert set(r._seen["a"]) == {("a", "2")}   # "1" is before the position: forgotten
 
 
 def test_non_numeric_sort_is_malformed(cfg):
@@ -176,7 +176,7 @@ def test_non_numeric_sort_is_malformed(cfg):
 
 def test_cursors_use_boundary_but_not_before_floor(cfg):
     _, r = make(cfg, {}, {"a": T0})
-    r.set_indices({"a": T0, "b": T0 + 600_000}, {})
+    r.set_sources({"a": T0, "b": T0 + 600_000}, {})
     assert r.cursors(T0 + 60_000) == {"a": (T0 + 60_000, T0), "b": (T0 + 600_000, T0 + 600_000)}
 
 
@@ -200,3 +200,34 @@ def test_normalize_failure_counts_line_unparsed(cfg, monkeypatch):
     assert b["events"] == 2
     bad = [c for c in b["counts"] if c["text"] is None and c["template_id"] is None]
     assert len(bad) == 1 and bad[0]["n"] == 1 and bad[0]["sample"] == "poison pill"
+
+
+def test_new_daily_index_first_minute_counted(cfg):
+    src, r = make(cfg, {"app-1": [hit("1", T0, service="s", message="m")]}, {"app-*": T0})
+    assert r.poll()["events"] == 1
+    src.hits["app-2"] = [hit("2", T0 + 60_000, service="s", message="m")]   # no set_sources call
+    b = r.poll()
+    assert b["events"] == 1 and b["positions"]["app-*"]["pos_ms"] == T0 + 60_000
+
+
+def test_one_search_per_pattern_per_poll(cfg):
+    src, r = make(cfg, {f"app-{i}": [hit(str(i), T0 + i, service="s", message="m")] for i in range(3)}, {"app-*": T0})
+    assert r.poll()["events"] == 3
+    assert src.calls == ["app-*"]
+    r.poll()
+    assert src.calls == ["app-*"] * 2
+
+
+def test_dedup_same_id_two_indices(cfg):
+    _, r = make(cfg, {"app-1": [hit("1", T0, service="s", message="m")],
+                      "app-2": [hit("1", T0, service="s", message="m")]}, {"app-*": T0})
+    assert r.poll()["events"] == 2
+    assert r.poll()["events"] == 0      # re-read, both (_index, _id) already seen
+
+
+def test_overlapping_patterns_read_once(cfg):
+    src = FakeSource({"app-pay-1": [hit(str(i), T0 + i, service="s", message="m") for i in range(3)]})
+    r = Reader(src, cfg, KnownLines(10), now=NOW)
+    r.set_sources({"app-*": T0, "app-pay-*": T0}, {}, {"app-*": "app-*", "app-pay-*": "app-pay-*,-app-*"})
+    assert r.poll()["events"] == 3
+    assert src.calls == ["app-*", "app-pay-*,-app-*"]

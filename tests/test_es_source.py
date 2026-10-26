@@ -155,13 +155,15 @@ def bodies(source):
 def test_page_query_shape():
     page = [hit("a", 5, message="m")]
     source = make_source([{"hits": {"hits": page}}])
-    assert source.page("idx-a", 5, 9) == page
+    assert source.page("idx-a*,-idx-ab*", 5, 9) == page
     call = source.client.search.call_args
-    assert call.kwargs["index"] == "idx-a" and call.kwargs["ignore_unavailable"] is True
-    assert call.kwargs["filter_path"] == "hits.hits._id,hits.hits._source,hits.hits.sort"
+    assert call.kwargs["index"] == "idx-a*,-idx-ab*"
+    assert call.kwargs["ignore_unavailable"] is True and call.kwargs["allow_no_indices"] is True
+    assert call.kwargs["filter_path"] == "hits.hits._id,hits.hits._index,hits.hits._source,hits.hits.sort"
     body = call.kwargs["body"]
     assert body["size"] == 10_000
-    assert body["sort"] == [{"@timestamp": {"order": "asc", "numeric_type": "date"}}, {"_doc": "asc"}]
+    assert body["sort"] == [{"@timestamp": {"order": "asc", "numeric_type": "date", "unmapped_type": "date"}},
+                            {"_doc": "asc"}]
     assert body["query"] == {"bool": {"filter": [
         {"range": {"@timestamp": {"gte": 5, "lte": 9, "format": "epoch_millis"}}}]}}
     assert body["_source"] == ["@timestamp", "service", "service_code2", "level",

@@ -196,7 +196,7 @@ def test_reload_sources_reconnects_and_reresolves(conn, cfg, make):
     commands.enqueue(conn, "reload_sources")
     engine.tick()
     assert src.connected.hosts == ["http://other:9200"] and src.connected.verify_certs is False
-    assert set(engine.reader.floors) == {"a", "b"}
+    assert set(engine.reader.floors) == {"*"}
 
 
 def test_index_added_later_starts_at_added_at(conn, cfg, make):
@@ -307,12 +307,13 @@ def test_first_catch_up_completes_under_continuous_traffic(conn, cfg, make):
 
 
 def test_first_catch_up_ignores_failing_index(conn, cfg, make, monkeypatch):
-    put_setting(conn, "index_selection", {"entries": [{"pattern": "*", "added_at": 0}]})
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "a", "added_at": 0},
+                                                      {"pattern": "b", "added_at": 0}]})
     clock = Clock(NOON)
     src = FakeSource({"a": history(NOON - 2 * 86400, NOON - 60, 1), "b": []})
     real = src.page
     monkeypatch.setattr(src, "page", lambda index, *a: (_ for _ in ()).throw(ConnectionError("b down"))
-                        if index == "b" else real(index, *a))
+                        if index.split(",")[0] == "b" else real(index, *a))
     engine = make(src, clock)
     engine.start()
     catch_up(engine, clock)
@@ -395,3 +396,25 @@ def test_history_keeps_60_minutes(conn, cfg, make):
     _run_minutes(engine, clock, hits, 70)
     h = q(conn, "SELECT status FROM worker_status WHERE worker = 'engine'")[0]["status"]["history"]
     assert len(h) == 60 and h[0]["t"] < h[-1]["t"]
+
+
+def test_upgrade_from_index_cursors(conn, cfg, make):
+    # rows from before the upgrade are keyed by concrete index and all hold the minute boundary
+    b = (NOON - 3600) * 1000
+    put_setting(conn, "bootstrap", {"since": NOON - 86400, "until": NOON})
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "a", "added_at": 0}]})
+    conn.execute("INSERT INTO es_cursors (index, since_ms, floor_ms) VALUES ('a-old-1', %s, 1), ('a-old-2', %s, 1)", (b, b))
+    conn.commit()
+    engine = make(FakeSource({"a": []}), Clock(NOON))
+    engine.start()
+    assert engine.reader._pos["a"] == b
+
+
+def test_empty_pattern_caught_up_with_warning(conn, cfg, make):
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "nope-*", "added_at": 0}]})
+    clock = Clock(NOON)
+    engine = make(FakeSource({"a": []}), clock)
+    engine.start()
+    engine.tick()
+    assert engine._caught_up()
+    assert "no index matches nope-*" in engine._status()["warnings"]

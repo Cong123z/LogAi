@@ -76,7 +76,7 @@ flowchart LR
     EMB[bge-m3<br/>embeddings]
 
     APP -->|index documents| ES
-    ES -->|range query per index| ENG
+    ES -->|range query per pattern| ENG
     ENG -->|flush transaction,<br/>daily commit, worker_status| PG
     PG -->|settings, commands,<br/>links, exclusions| ENG
     WEB <-->|read state,<br/>write settings / documents /<br/>links / decisions / commands| PG
@@ -156,7 +156,7 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `elasticsearch.username` / `password` | `""` | basic auth when both are set |
 | `elasticsearch.verify_certs` | `true` | TLS verification |
 | `elasticsearch.index` | `app-logs-*` (repo `config.yaml`: `recharge-logs`) | index or pattern read when no selection is saved |
-| `elasticsearch.batch_size` | 10000 | page size per index per poll; also the "caught up" threshold |
+| `elasticsearch.batch_size` | 10000 | page size per pattern per poll; also the "caught up" threshold |
 | `elasticsearch.poll_interval_seconds` | 1.0 | sleep after a tick that read no event |
 | `elasticsearch.index_refresh_seconds` | 60 | re-resolve the selected patterns |
 | `database.dsn` | `postgresql://logai:logai@postgres:5432/logai` | Postgres |
@@ -227,19 +227,25 @@ first **40 tokens** are kept. A line whose normalization raises is counted as
 
 ### 4.2 Query, paging and the millisecond re-read
 
-One page per selected index per poll (`EsSource.page`):
+A pattern has one position across all its indices, so a doc that becomes searchable more than
+`upper_bound_seconds` later in one index than in another is skipped (same class as
+[B4](docs/BUGS.md)).
+
+One page per selected **pattern** per poll (`EsSource.page(target, ...)`, one search over all
+the pattern's indices, never one per concrete index; a new daily index is read from its first doc
+without waiting for a refresh):
 
 - `range @timestamp gte from_ms lte upper_ms` (`epoch_millis`), where
-  `from_ms` is the index's position and `upper_ms = now - 30 s`;
-- sort `@timestamp asc` (`numeric_type: date`, so the sort value is epoch ms
+  `from_ms` is the pattern's position and `upper_ms = now - 30 s`;
+- sort `@timestamp asc` (`numeric_type: date` and `unmapped_type: date`, so the sort value is epoch ms
   also for `date_nanos`), then `_doc asc`; `size = elasticsearch.batch_size`;
-- `ignore_unavailable=true` (a deleted index does not fail the others),
-  `filter_path` limited to `_id`, `_source`, `sort`;
+- `ignore_unavailable=true` and `allow_no_indices=true` (a deleted index or an empty
+  pattern does not fail; the page is empty), `filter_path` limited to `_id`, `_index`, `_source`, `sort`;
 - one attempt per search, no retry; the client timeout is a hard-coded 30 s.
 
 The range starts **at** the position's millisecond (inclusive), so docs
 sharing the last millisecond of the previous page are read again and dropped
-by `_id` (§6). This replaces logai-engine's `search_after` on `_doc`, which
+by `(_index, _id)` (§6). This replaces logai-engine's `search_after` on `_doc`, which
 skipped docs sharing a millisecond at a page boundary (`_doc` changes on
 segment merges). When one millisecond fills a whole page, re-reading it would
 never advance, so it is read whole with `size` 10,000, and if it still fills
@@ -253,13 +259,20 @@ the page, one `search_after` page continues it (ceiling: §14).
   agree). Patterns are resolved with `indices.get(expand_wildcards=open)`
   every `index_refresh_seconds` (60 s) and on the `reload_sources` command.
   Data-stream backing indices are included, hidden ones are not.
-- **Floor** of an index: an entry added before the first start ended
+- **One cursor per pattern.** The reader state, `es_cursors.index` and the status `indices` are
+  keyed by pattern. `resolution` (pattern -> indices) is refreshed only for the Data sources page
+  and the `no index matches <pattern>` warning; reading does not depend on it.
+- **Overlap.** Entries keep their saved order; pattern k searches `P_k,-P_1,...,-P_(k-1)`, so an
+  index matched by two patterns is read once, by the earlier one. A duplicate pattern keeps its first entry.
+- **Floor** of a pattern: an entry added before the first start ended
   (`added_at <= bootstrap.until`) is read from `bootstrap.since`; a later one
-  from its `added_at`. An index matched by several patterns takes the
-  earliest floor. A newly selected index starts at its saved cursor, else at
-  its floor; an index that stays selected keeps its in-memory position.
-  Deselected indices are dropped from the reader and their `es_cursors` row
+  from its `added_at`. A newly selected pattern starts at its saved cursor, else at
+  its floor; a pattern that stays selected keeps its in-memory position.
+  Deselected patterns are dropped from the reader and their `es_cursors` row
   is deleted at the next flush.
+- **Upgrade.** Rows saved by the per-index reader are keyed by concrete index and all hold the
+  minute boundary. A pattern without a row starts at `max(floor, min(since_ms over all saved rows))`
+  when any row exists, else at its floor; the next flush deletes the old rows.
 - **Available indices** (`cat.indices`, non-hidden, sorted) are listed every
   30 s for the web picker.
 - **Connection** (`settings.es_connection`): `{"hosts", "username",
@@ -425,21 +438,22 @@ Each profile's state (`down_until`, `error`) and the last LLM error are in
 
 `logai2/reader/reader.py`, `Reader.poll()` once per engine tick:
 
-1. For each selected index, `page(index, pos, upper_ms)`. On an exception
-   the index's failure count goes up, it is marked not caught up, and the
-   other indices continue. After 3 consecutive failures (`FAILING_AFTER`)
-   the index is **failing**.
-2. Each hit: skip if its `_id` is in the index's seen-set; advance the
+1. For each selected pattern, `page(target, pos, upper_ms)` (target = the pattern plus `-` exclusions
+   of earlier patterns). On an exception
+   the pattern's failure count goes up, it is marked not caught up, and the
+   other patterns continue. After 3 consecutive failures (`FAILING_AFTER`)
+   the pattern is **failing**.
+2. Each hit: skip if its `(_index, _id)` is in the pattern's seen-set; advance the
    position to the hit's sort value (malformed hits too, so junk never pins
-   it); remember `_id → ts`; convert to a `Line`; normalize; look up the
+   it); remember `(_index, _id) → ts`; convert to a `Line`; normalize; look up the
    known-line cache `(service, normalized text) → template id`; add to the
    batch aggregate.
 3. **Caught up** = the page was shorter than `batch_size` (it reached
    `upper_ms`), or it held no new id (stall guard).
-4. **Watermark** = min over healthy (not failing) indices of `upper_ms` if
+4. **Watermark** = min over healthy (not failing) patterns of `upper_ms` if
    caught up, else its position. With no healthy index the watermark is held
-   at the min over all indices (so an ES outage never closes minutes);
-   with no index at all it is `upper_ms`.
+   at the min over all patterns (so an ES outage never closes minutes);
+   with no pattern at all it is `upper_ms`.
 
 After a successful flush the engine calls `forget_before(boundary)`: ids
 older than min(boundary, position) are dropped from the seen-set, so it holds
@@ -525,7 +539,7 @@ transaction the block would only be a savepoint). Pending rows are cleared
 only after the commit; a failed flush keeps them all and the retry writes
 them once.
 
-**Cursor = oldest open minute.** The cursor written for every index is
+**Cursor = oldest open minute.** The cursor written for every pattern is
 `since_ms = max(boundary_ms, floor_ms)`, where `boundary_ms` is the start of
 the owner's oldest open minute. After a crash every open minute is re-read
 whole from ES and every closed minute was written exactly once, in the same
@@ -665,11 +679,11 @@ status and `commit()`, each unit of work in its own transaction.
 2. `settings.bootstrap`: on the very first start it is created as
    `{"since": now − days_back·86400, "until": now}` (epoch s); later starts
    reuse it. Read `last_commit`; seed documents (§4.4).
-3. Apply the saved ES connection; select indices. If ES is unreachable,
+3. Apply the saved ES connection; select patterns. If ES is unreachable,
    retry with backoff 1, 2, 4 … 30 s, writing `worker_status` with an
    "Elasticsearch unreachable" warning and re-reading the saved connection on
    every retry (the web's fix is picked up before the loop runs commands).
-4. `start_ms` = min over selected indices of (saved `since_ms`, else floor).
+4. `start_ms` = min over the selected patterns' starting positions (saved `since_ms`, else the upgrade rule or floor, §4.3).
    Create partitions from that local day (or today) to today + 2.
 5. Build the owner with `start_minute = start_ms // 60000`; load Drain3
    blobs, template levels, services, modules, alert states, links,
@@ -709,7 +723,7 @@ crosses a midnight.
 
 ### 10.4 Bootstrap and `days_back`
 
-On the first start every index reads from `now − days_back` (7 days) and
+On the first start every pattern reads from `now − days_back` (7 days) and
 every document is read (no sampling). With `days_back: 0` reading starts at
 now; the first catch-up commit then has no finished day, so only floors
 apply until the next nightly commit. ES retention on the selected indices
@@ -735,7 +749,7 @@ The engine writes `worker_status['engine'].status` at every flush:
 | `detection_enabled` | first catch-up done |
 | `bootstrap` | `{since, until}` |
 | `last_commit` | `{at, today}` or null |
-| `indices` | `{index: {pos_ms, caught_up, failing, floor}}` |
+| `indices` | `{pattern: {pos_ms, caught_up, failing, floor}}` |
 | `available_indices` | `[{index, docs_count, health, status}]` |
 | `resolution` | `{pattern: [index, ...]}` |
 | `warnings` | `"high miss ratio: <service> NN%"` when a service's 5-min miss ratio > 50% on ≥ 100 events, once 5 min of data exist; or the ES-unreachable warning at start |
@@ -853,7 +867,7 @@ Any other kind fails with `unknown command kind`.
 | Failure | Behavior |
 |---|---|
 | One index fails | the others continue; after 3 failures in a row it stops holding the watermark and shows `failing`. Its docs for minutes closed meanwhile are lost (§14) |
-| Every index fails (ES down) | the watermark is held at the indices' positions: no minute closes, nothing is written as zero; reading resumes where it stopped |
+| Every pattern fails (ES down) | the watermark is held at the patterns' positions: no minute closes, nothing is written as zero; reading resumes where it stopped |
 | ES unreachable at start | start retries with backoff up to 30 s and reports the warning in `worker_status`; no crash loop |
 | A hung ES host | each search waits up to the 30 s client timeout, per failing index per poll |
 | Postgres down at flush | the flush is retried with backoff (1 → 30 s), reconnecting when the connection is closed; no reading meanwhile; open minutes and pending rows stay in memory; cursors have not moved, so nothing is lost |
@@ -877,10 +891,10 @@ No DLQ.
 | Area | Limit | Impact |
 |---|---|---|
 | Reader | One millisecond with more than 20k docs in one index: the whole-ms read (10k) plus one `search_after` page | docs beyond that are lost or the index stalls; use PIT + `_shard_doc` if a source ever logs that much in one ms |
-| Reader | The ES request timeout is a hard-coded 30 s | a black-holed host blocks one poll up to 30 s per failing index; lower it or make it config if hung hosts appear |
+| Reader | The ES request timeout is a hard-coded 30 s | a black-holed host blocks one poll up to 30 s per failing pattern; lower it or make it config if hung hosts appear |
 | Reader | A failing index gets the boundary cursor like the others | its docs for minutes closed while it failed are lost (they would be late counts anyway); saving its older position would re-open closed minutes on restart |
 | Reader | The cursor is `@timestamp` (event time), not an ingest-time field | docs indexed later than `upper_bound_seconds` + the open-minute window after their timestamp are late and dropped (sub-project 0) |
-| Reader | The seen-id set holds every id of the open minutes per index in memory | fine for one or two minutes of traffic; large catch-up pages cost memory |
+| Reader | The seen-id set holds every `(_index, _id)` of the open minutes per pattern in memory | fine for one or two minutes of traffic; one page per pattern bounds catch-up memory (B5) |
 | Detection | Doc key band is `Σmean ± k·Σσ` | up to √n wider than `√Σσ²`; spread-out increases inside each template's band can go unseen |
 | Detection | `*total` never raises an upper alert (INFO has no floor); only drops on a full profile with mean ≥ 20 | a service-wide volume surge is visible only through its ERROR/WARN templates |
 | Detection | `alert_state` rows are never evicted; the detector scans all states per minute | grows with every key that was ever high |
