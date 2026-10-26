@@ -529,6 +529,18 @@ def test_reread_survives_two_page_failures(conn, ready):
     assert run_row(conn, rid)["state"] == "succeeded"
 
 
+def test_warning_while_running_is_in_the_run_log_after_the_next_flush(conn, ready):
+    engine, clock, src = ready
+    rid = engine._run("retrain_run", YESTERDAY.to_json())["run_id"]
+    logging.getLogger("logai2.test").warning("slow page while reading")
+    engine.tick()
+    clock.t += 1
+    engine.tick()
+    assert engine.reread is not None   # still running
+    log = run_row(conn, rid)["log"]
+    assert any(l["level"] == "WARNING" and "slow page while reading" in l["message"] for l in log)
+
+
 def test_lane_waits_while_live_lags(conn, cfg, ready):
     engine, clock, src = ready
     cfg.retrain.max_live_lag_seconds = 10   # live reads up to 30 s behind: always "lagging"

@@ -24,6 +24,7 @@
   <script defer src="/static/js/views/baseline.js"></script>
   <script defer src="/static/js/views/review.js"></script>
   <script defer src="/static/js/views/llm.js"></script>
+  <script defer src="/static/js/views/retrain.js"></script>
   <script defer src="/static/js/main.js"></script>
 </head>
 <body>
@@ -48,6 +49,7 @@
         <div class="nav-section"><div class="nav-heading">Settings</div>
           <a href="#sources" data-view="sources" title="Data sources"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg><span class="nav-label">Data sources</span></a>
           <a href="#llm" data-view="llm" title="LLM profiles"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg><span class="nav-label">LLM profiles</span></a>
+          <a href="#retrain" data-view="retrain" title="Retrain"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg><span class="nav-label">Retrain</span></a>
         </div>
       </nav>
       <button type="button" class="sidebar-collapse" id="sidebar-collapse" aria-expanded="true" aria-controls="sidebar-nav" title="Collapse sidebar">
@@ -312,6 +314,55 @@
         <div class="llm-list" id="llm-unused"></div>
         <p class="sync-status llm-usage" id="llm-usage"></p>
       </section>
+      <section class="view groups-section" id="view-retrain" aria-label="Retrain">
+        <div class="section-heading">
+          <p class="sync-status" id="rt-status" aria-live="polite">Loading...</p>
+          <button type="button" class="btn btn-primary" id="rt-run">Run retrain</button>
+        </div>
+        <section class="rv-panel" id="rt-detail" aria-label="Run details" hidden>
+          <div class="rv-head">
+            <div><div id="rt-d-title"></div><div class="ins-meta" id="rt-d-meta"></div></div>
+            <button type="button" class="btn btn-danger" id="rt-cancel" hidden>Cancel</button>
+            <button type="button" class="btn" id="rt-close" hidden>Close</button>
+          </div>
+          <div class="rt-error" id="rt-d-error" hidden></div>
+          <ol class="rt-steps" id="rt-d-steps"></ol>
+          <details id="rt-d-log" class="rt-log" hidden>
+            <summary>Warnings and errors from the engine log (<span id="rt-d-log-n">0</span>)</summary>
+            <ul id="rt-d-log-list"></ul>
+          </details>
+        </section>
+        <section class="rv-panel" aria-labelledby="rt-sch-h">
+          <div class="rv-head"><h3 id="rt-sch-h">Schedule</h3><span class="ins-meta">Day marking, partitions and retention run every night, even when off</span></div>
+          <form id="rt-sched" class="rt-sched">
+            <label class="switch"><input type="checkbox" role="switch" id="rt-sch-on"> Nightly rebuild at</label>
+            <input type="time" id="rt-sch-time" class="filter-select" required>
+            <div class="toggle-group" id="rt-sch-days" role="group" aria-label="Days">
+              <button type="button" class="toggle-btn" data-day="0" aria-pressed="false">Mon</button>
+              <button type="button" class="toggle-btn" data-day="1" aria-pressed="false">Tue</button>
+              <button type="button" class="toggle-btn" data-day="2" aria-pressed="false">Wed</button>
+              <button type="button" class="toggle-btn" data-day="3" aria-pressed="false">Thu</button>
+              <button type="button" class="toggle-btn" data-day="4" aria-pressed="false">Fri</button>
+              <button type="button" class="toggle-btn" data-day="5" aria-pressed="false">Sat</button>
+              <button type="button" class="toggle-btn" data-day="6" aria-pressed="false">Sun</button>
+            </div>
+            <span class="ins-meta" id="rt-sch-tz"></span>
+            <span class="rt-sched-actions">
+              <button type="button" class="btn" id="rt-sch-discard" disabled>Discard</button>
+              <button type="submit" class="btn btn-primary" id="rt-sch-save" disabled>Save</button>
+            </span>
+          </form>
+          <div class="form-error" id="rt-sch-msg" role="status" aria-live="polite"></div>
+          <p class="ins-meta" id="rt-sch-note"></p>
+        </section>
+        <section class="rv-panel" aria-labelledby="rt-his-h">
+          <div class="rv-head"><h3 id="rt-his-h">History</h3><span class="ins-meta">Select a run for its details · kept 365 days</span></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Started</th><th>Kind</th><th>Scope</th><th>Trigger</th><th>Duration</th><th>Result</th></tr></thead>
+            <tbody id="rt-history"><tr><td colspan="6" class="loading">Loading...</td></tr></tbody>
+          </table></div>
+        </section>
+      </section>
       <section class="view groups-section" id="view-baseline" aria-label="Baseline">
         <div class="section-heading">
           <div class="filter-bar">
@@ -370,7 +421,7 @@
               <button type="button" class="toggle-btn" data-days="28" aria-pressed="false">28 days</button>
             </div>
           </div>
-          <button type="button" class="btn btn-primary" id="rv-recompute">Recompute baseline</button>
+          <a class="btn btn-primary" href="#retrain">Retrain…</a>
         </div>
         <div id="rv-picker"></div>
         <p class="ins-toast" id="rv-status" role="status" aria-live="polite"></p>
@@ -430,6 +481,34 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <div class="modal-overlay" id="rt-modal" role="dialog" aria-modal="true" aria-labelledby="rt-modal-title">
+    <div class="modal">
+      <div class="modal-header"><h2 id="rt-modal-title">Run retrain</h2><button type="button" class="modal-close" data-close="rt-modal" aria-label="Close">&times;</button></div>
+      <form id="rt-form" autocomplete="off">
+        <p class="ins-meta" id="rt-es-range"></p>
+        <fieldset class="rt-fieldset"><legend>Kind</legend>
+          <div class="rt-kinds">
+            <label><input type="radio" name="rt-kind" value="rebuild"><span><strong>Rebuild</strong><br><span class="ins-meta">Stored counts, all services, seconds</span></span></label>
+            <label><input type="radio" name="rt-kind" value="reread" checked><span><strong>Re-read, then rebuild</strong><br><span class="ins-meta">Replace counts from Elasticsearch</span></span></label>
+          </div>
+        </fieldset>
+        <div id="rt-reread">
+          <fieldset class="rt-fieldset"><legend>Services</legend><div class="rt-chips" id="rt-svc"></div></fieldset>
+          <fieldset class="rt-fieldset"><legend>Days</legend><div class="rt-days7" id="rt-days"></div></fieldset>
+          <div class="rt-fieldset rt-hours">
+            <label for="rt-hour-from">Hours from</label><select id="rt-hour-from" class="filter-select"></select>
+            <label for="rt-hour-to">to</label><select id="rt-hour-to" class="filter-select"></select>
+            <span class="ins-meta">on every chosen day</span>
+          </div>
+        </div>
+        <p class="rt-est" id="rt-est" role="status" aria-live="polite"></p>
+        <p class="rt-warn" id="rt-llm" hidden>An LLM profile is active: new templates found by the re-read may get AI document drafts.</p>
+        <div class="form-error" id="rt-error" role="alert"></div>
+        <div class="form-actions"><button type="button" class="btn" data-close="rt-modal">Cancel</button><button type="submit" class="btn btn-primary" id="rt-start">Start re-read</button></div>
+      </form>
+    </div>
   </div>
 
   <div class="modal-overlay" id="llm-modal" role="dialog" aria-modal="true" aria-labelledby="llm-modal-title">

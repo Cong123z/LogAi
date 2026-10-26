@@ -622,7 +622,8 @@ class Engine:
         read = rr["steps"].setdefault("read", {"key": "read", "label": "Read from Elasticsearch",
                                                "started_at": self.now(), "finished_at": None})
         read["detail"] = rr["read"]
-        self.owner.add_lane(rr["run_id"], hours, {"pos_ms": rr["lane"].pos_ms, "steps": self._steps_json()})
+        self.owner.add_lane(rr["run_id"], hours, {"pos_ms": rr["lane"].pos_ms, "steps": self._steps_json(),
+                                                 "log": rr["log"].lines})
 
     def _lane_tick(self, now: float) -> None:
         rr = self.reread

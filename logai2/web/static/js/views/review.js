@@ -1,10 +1,10 @@
 // ── Review: decide which hours stay in the baseline ──
 // A days x hours heatmap of one key against its baseline (colours come from the API's `cls`),
 // an inspector for the selected hours, and the coverage the baseline is built from.
-// Decisions are used by the next daily commit or by "Recompute baseline".
+// Decisions are used by the next daily commit or by a Retrain.
 const rv = {service: '', key: '*total', days: 14, sel: null, view: 'chart', lastSub: null,
             matrix: null, base: null, insp: null, cells: new Map(), rows: [], index: new Map(), cur: null,
-            seq: 0, inspSeq: 0, commandId: null, pollTimer: null, docs: [], templates: [], tplService: null};
+            seq: 0, inspSeq: 0, docs: [], templates: [], tplService: null};
 const rvPicker = createKeyPicker(document.getElementById('rv-picker'), {onPick: key => { rv.key = key; rvChangeRoute(); }});
 const $rv = id => document.getElementById(id);
 const RV_DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -464,7 +464,7 @@ function rvRenderEffect(sel, d, row, decided) {
   $rv('rv-exclude').hidden = $rv('rv-keep').hidden = Boolean(decided);
   $rv('rv-undo').hidden = !decided;
   $rv('rv-undo').dataset.id = decided ? decided.id : '';
-  const commit = `Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or Recompute.`;
+  const commit = `Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or a Retrain.`;
   const thin = d.left_days.filter(x => x.days < 3);
   if (decided) {
     effect.className = 'rv-effect';
@@ -494,8 +494,8 @@ async function rvDecide(decision) {
     const result = await apiMutation('/api/baseline/decisions', 'POST',
       {service: rv.service, day: sel.day, hour_from: sel.from, hour_to: sel.to, decision});
     if (result.warning) showToast(`${result.warning.map(rvHour).join(', ')} now ${result.warning.length === 1 ? 'has' : 'have'} fewer than 3 days of baseline: floor-only alerts there.`, true);
-    rvStatus(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or Recompute.`);
-    rvDecisionNote(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or Recompute.`);
+    rvStatus(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or a Retrain.`);
+    rvDecisionNote(`${decision === 'exclude' ? 'Excluded' : 'Kept'} ${rvDayLabel(sel.day)} ${rvHours(sel.from, sel.to)}. Takes effect at the next commit (${rv.base.commit_time || '02:00'}) or a Retrain.`);
     await rvReloadData();
     const next = rvSuggestions()[0];
     rv.sel = next ? {day: next.day, from: next.hour_from, to: next.hour_to} : null;
@@ -577,36 +577,4 @@ $rv('rv-view').addEventListener('click', event => {
   rv.view = b.dataset.v;
   $rv('rv-view').querySelectorAll('button').forEach(x => { x.classList.toggle('active', x === b); x.setAttribute('aria-pressed', String(x === b)); });
   rvRenderMatrix();
-});
-
-// ── Recompute (polls the queued command) ──
-async function rvPollCommand() {
-  clearTimeout(rv.pollTimer);
-  try {
-    const cmd = await getJson(`/api/commands/${rv.commandId}`, 'Unable to read the command');
-    if (cmd.done) {
-      const r = cmd.result || {};
-      rv.commandId = null;
-      $rv('rv-recompute').disabled = false;
-      if (r.error) rvStatus(`Recompute failed: ${r.error}`, true);
-      else rvStatus(`Baseline recomputed: ${r.days_committed ?? 0} days newly committed, ${r.baseline_rows ?? 0} baseline rows.`);
-      if (state.activeView === 'review') loadData();
-      return;
-    }
-    rvStatus('Recompute queued: the engine runs it between flushes…');
-  } catch (err) {
-    rvStatus('Recompute queued; status unavailable, retrying…', true);
-  }
-  rv.pollTimer = setTimeout(rvPollCommand, 1000);
-}
-$rv('rv-recompute').addEventListener('click', async event => {
-  const button = event.currentTarget;
-  button.disabled = true;
-  try {
-    rv.commandId = (await apiMutation('/api/baseline/recompute', 'POST', {})).id;
-    rvPollCommand();
-  } catch (err) {
-    button.disabled = false;
-    rvStatus(`Could not queue the recompute: ${err.message}`, true);
-  }
 });
