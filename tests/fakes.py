@@ -16,6 +16,7 @@ class FakeSource:
         self.failing: set[str] = set()
         self.calls: list[str] = []
         self.timeouts: list[int | None] = []
+        self.counts: list[tuple] = []
         self.size = 10_000   # EsSource's page size (cfg.elasticsearch.batch_size)
         self.oldest_failing = False
         self.oldest_calls: list[str] = []
@@ -32,7 +33,8 @@ class FakeSource:
         """ES retention dropping an index: its docs are gone."""
         self.hits.pop(name, None)
 
-    def count(self, target: str, from_ms: int, to_ms: int) -> int:
+    def count(self, target: str, from_ms: int, to_ms: int, timeout: int | None = None) -> int:
+        self.counts.append((target, from_ms, to_ms, timeout))
         return sum(1 for i in self._match(target) for h in self.hits[i] if from_ms <= h["sort"][0] <= to_ms)
 
     def page(self, target: str, from_ms: int, upper_ms: int, timeout: int | None = None) -> list[dict]:

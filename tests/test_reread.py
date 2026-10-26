@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import logging
 from datetime import date
+from unittest import mock
 
 import pytest
 
 from logai2 import commands
 from logai2.jobs import runs
 from logai2.jobs.reread import Lane, Scope, plan
+from logai2.reader.normalize import normalize
+from logai2.reader.reader import Reader
+from logai2.owner import owner as owner_mod
 from logai2.owner.owner import Owner
 from logai2.reader.cache import KnownLines
 from tests.fakes import FakeSource, hit
@@ -120,6 +124,82 @@ def test_reread_equals_live_counts(conn, cfg):
     owner, lane, rid = lane_of(conn, cfg, FakeSource({"a": hits}))
     drive(owner, lane, rid)
     assert snap(conn) == live
+
+
+def live_two_patterns(conn, cfg, src, until_ms):
+    saved = {}
+    reader = Reader(src, cfg, KnownLines(1000), now=lambda: until_ms / 1000 + 60)
+    reader.set_sources({"a": T0, "b": T0}, saved)
+    owner = Owner(conn, cfg, M, now=lambda: until_ms / 1000 + 60)
+    for _ in range(20):
+        batch = reader.poll()
+        reader.learn(owner.handle(batch))
+        owner.flush(reader.cursors(owner.boundary_ms), {})
+        reader.forget_before(owner.boundary_ms)
+        if batch["watermark_ms"] >= until_ms:
+            return
+    raise AssertionError("watermark never passed until_ms")
+
+
+def test_reread_equals_live_two_services_two_patterns(conn, cfg, monkeypatch):
+    import logai2.jobs.reread as rr
+    import logai2.reader.reader as rd
+    for mod in (rr, rd):   # a line whose normalization fails is counted as <service>:unparsed
+        real = mod.normalize
+        monkeypatch.setattr(mod, "normalize",
+                            lambda m, real=real: (_ for _ in ()).throw(ValueError("bad")) if "poison" in m else real(m))
+    # every template of a appears in hour 10 and b's after them: Drain3 numbers templates by first appearance,
+    # which is the same for live (a, then b) and the lane (per hour, a then b) then
+    both = lambda h: docs(h, skip=lambda m: m % 7 == 3) + docs(h, per=1, level="WARN", msg="disk usage at 91 percent",
+                                                               module="M2", prefix="w", skip=lambda m: m % 5 != 0)
+    hits = {"a": both(10) + both(11) + docs(10, service="t", msg="timeout talking to host 7", module="M3", prefix="ta",
+                                skip=lambda m: m % 4 == 0)
+                 + [hit("poison", T0 + 5000, service="t", message="poison pill", level="WARN")],
+            "b": docs(10, service="s", level="WARN", msg="queue length is 9", module="M4", prefix="sb",
+                      skip=lambda m: m % 3 != 0)
+                 + docs(11, service="s", level="INFO", msg="queue length is 9", module="", prefix="sb2",
+                        skip=lambda m: m % 9 != 0)}
+    src = FakeSource(hits)
+    live_two_patterns(conn, cfg, src, T0 + 2 * H)
+    live = snap(conn)
+    assert {r[0] for r in live["service_hours"]} == {"s", "t"}
+    assert any(r[1] == "t:unparsed" for r in live["hourly_counts"]) and len(live["service_hours"]) == 4
+    wipe(conn)
+    now_s = (T0 + 6 * H) / 1000
+    owner = Owner(conn, cfg, M, now=lambda: now_s)
+    p = plan(Scope(None, [DAY], 10, 12), {"a": ["s", "t"], "b": ["s"]}, {"a": T0, "b": T0}, T0 + 4 * H)
+    rid = runs.start(conn, "reread", "manual")
+    conn.rollback()
+    lane = Lane(p, rid, 0, src, owner.miners, KnownLines(1000), {}, cfg)
+    drive(owner, lane, rid)
+    assert snap(conn) == live
+
+
+def test_reread_failed_flush_rolls_back_the_replace(conn, cfg):
+    old = docs(10, msg="old failure 1", prefix="o") + docs(11, prefix="k", level="WARN", msg="disk usage at 91 percent")
+    new = docs(10, per=1, level="WARN", msg="brand new warning", module="M9", prefix="n") \
+        + docs(11, prefix="k2", msg="disk usage at 91 percent")
+
+    def replace(fail):
+        run_minutes(conn, cfg, old, T0 + 2 * H)
+        before = snap(conn)
+        owner, lane, rid = lane_of(conn, cfg, FakeSource({"a": new}))
+        drive(owner, lane, rid, flush=False, budget=5.0)
+        if fail:
+            real = owner_mod.copy_upsert
+
+            def boom(cur, table, rows_):
+                if table == "template_module_hours" and rows_:   # runs after the lane's DELETEs
+                    raise RuntimeError("flush dies")
+                return real(cur, table, rows_)
+            with mock.patch.object(owner_mod, "copy_upsert", boom), pytest.raises(RuntimeError):
+                owner.flush({}, {})
+            assert snap(conn) == before   # delete and insert rolled back together
+        owner.flush({}, {})   # the retry writes the pending hours once
+        return snap(conn)
+    retried = replace(fail=True)
+    wipe(conn)
+    assert retried == replace(fail=False) and retried != {}
 
 
 def test_reread_never_writes_hours_not_in_es(conn, cfg):
@@ -257,6 +337,59 @@ def test_lane_passes_the_es_timeout(conn, cfg):
     owner, lane, rid = lane_of(conn, cfg, src, hour_to=11)
     drive(owner, lane, rid)
     assert set(src.timeouts) == {17}
+
+
+def test_failed_page_after_a_closed_window_loses_no_hour(conn, cfg):
+    hits = mixed() + docs(12, prefix="e", minutes=20)
+    owner, lane, rid = lane_of(conn, cfg, FakeSource({"a": hits}), hour_to=13)
+    drive(owner, lane, rid, budget=5.0)
+    clean = snap(conn)
+    wipe(conn)
+    src = FakeSource({"a": hits})
+    owner, lane, rid = lane_of(conn, cfg, src, hour_to=13)
+    real, calls = src.page, [0]
+
+    def page(*a, **k):
+        calls[0] += 1
+        if calls[0] == 2:   # window 1 is closed by now, window 2's page fails
+            raise ConnectionError("blip")
+        return real(*a, **k)
+    src.page = page
+    for _ in range(10):
+        if lane.done:
+            break
+        try:
+            got = lane.step(5.0, 1.0)
+        except ConnectionError:
+            got = lane.take_ready()   # what the engine does on the error path
+        owner.add_lane(rid, got, {"pos_ms": lane.pos_ms, "steps": []})
+        owner.flush({}, {})
+    assert snap(conn) == clean
+
+
+def test_note_es_gone_skips_only_services_with_a_gone_pattern(conn, cfg):
+    msg = "payment failed for user 42"
+    src = FakeSource({"a": docs(10, service="x") + docs(10, service="z", prefix="za"),
+                      "b": docs(10, service="y", prefix="yb") + docs(10, service="z", prefix="zb")})
+    pats = {"a": ["x", "z"], "b": ["y", "z"]}
+    owner, lane, rid = lane_of(conn, cfg, src, hour_to=11, patterns=pats)
+    src.delete_index("b")   # retention
+    drive(owner, lane, rid)
+    assert {r["service"] for r in rows(conn, "SELECT service FROM service_hours")} == {"x"}
+    assert lane.skipped == 2
+    # z's lines were read from a, but its hour is not written: nothing may make the cache answer for it
+    assert lane.cache.get("z", normalize(msg)) is None and lane.cache.get("x", normalize(msg)) is not None
+
+
+def test_count_calls_are_per_pattern_span(ready):
+    engine, clock, src = ready
+    out = engine._run("retrain_estimate", Scope(None, [date(2026, 10, 13), D14], 0, 24).to_json())
+    assert out["hours_to_read"] == 12 + 24 and out["hours_not_in_es"] == 12
+    assert len(src.counts) == 1   # one pattern, one contiguous span
+    assert src.counts[0][3] == engine.cfg.retrain.es_timeout_seconds
+    src.counts.clear()
+    engine._run("retrain_run", YESTERDAY.to_json())
+    assert len(src.counts) == 1
 
 
 # --- the engine --------------------------------------------------------------
@@ -462,6 +595,87 @@ def test_reread_crash_resumes_exact_engine(conn, cfg, ready, make):
     assert (t[10], t[11], t[12], t[13]) == (121, 121, 121, 121)
     assert q(conn, "SELECT count(*) AS n FROM service_hours WHERE day = %s AND hour BETWEEN 10 AND 13", D14)[0]["n"] == 4
     assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total' AND day = %s", D14)[0]["n"] == 24 * 120 + 4
+
+
+def test_lane_error_after_closed_windows_keeps_them(conn, cfg, ready):
+    engine, clock, src = ready
+    cfg.retrain.tick_seconds = 5.0   # every window closes in one step
+    rid = engine._run("retrain_run", YESTERDAY.to_json())["run_id"]
+    live, calls = src.page, [0]
+
+    def page(target, from_ms, upper_ms, timeout=None):
+        if timeout is not None:
+            calls[0] += 1
+            if calls[0] >= 2:
+                raise ConnectionError("es is down")
+        return live(target, from_ms, upper_ms)
+    src.page = page
+    for _ in range(3):
+        engine.tick()
+        clock.t += 1
+    row = run_row(conn, rid)
+    assert row["state"] == "failed" and row["failed_step"] == "read"
+    t = hour_totals(conn)
+    assert (t[10], t[11], t[12], t[13]) == (121, 120, 120, 120)   # the closed hour is written, the failed ones not
+    assert row["result"]["hours_replaced"] == 1 and row["pos_ms"] == at(D14, 11)
+
+
+def test_lane_single_error_after_closed_windows_still_replaces_all(conn, cfg, ready):
+    engine, clock, src = ready
+    cfg.retrain.tick_seconds = 5.0
+    rid = engine._run("retrain_run", YESTERDAY.to_json())["run_id"]
+    live, calls = src.page, [0]
+
+    def page(target, from_ms, upper_ms, timeout=None):
+        if timeout is not None:
+            calls[0] += 1
+            if calls[0] == 3:
+                raise ConnectionError("blip")
+        return live(target, from_ms, upper_ms)
+    src.page = page
+    run_until_done(engine, clock)
+    row = run_row(conn, rid)
+    assert row["state"] == "succeeded" and row["result"]["hours_replaced"] == 4
+    t = hour_totals(conn)
+    assert (t[10], t[11], t[12], t[13]) == (121, 121, 121, 121)
+
+
+def test_resume_survives_a_transient_es_error(conn, cfg, ready, make):
+    engine, clock, src = ready
+    rid = engine._run("retrain_run", YESTERDAY.to_json())["run_id"]
+    engine.tick()
+    engine.db.close()
+    src.oldest_failing = True
+    again = make(src, clock)
+    again.start()   # the plan cannot be made: the run is neither failed nor lost
+    assert again.reread is None and run_row(conn, rid)["state"] == "running"
+    assert again._run("retrain_run", YESTERDAY.to_json()) == {"error": "a retrain is running"}
+    src.oldest_failing = False
+    again.tick()   # too early to retry
+    assert again.reread is None
+    clock.t += cfg.elasticsearch.index_refresh_seconds + 1
+    again.tick()
+    assert again.reread is not None and again.reread["run_id"] == rid
+    run_until_done(again, clock)
+    assert run_row(conn, rid)["state"] == "succeeded"
+
+
+def test_resume_does_not_count_the_partial_window_twice(conn, cfg, ready, make):
+    engine, clock, src = ready
+    src.size = cfg.elasticsearch.batch_size = 50   # 3 pages per window, one page per tick
+    rid = engine._run("retrain_run", YESTERDAY.to_json())["run_id"]
+    for _ in range(5):   # window 1 closed, window 2 part read, and that progress flushed
+        engine.tick()
+        clock.t += 1
+    row = run_row(conn, rid)
+    assert row["pos_ms"] == at(D14, 11) and row["steps"]["read"]["detail"]["docs_read"] > 121
+    engine.db.close()
+    again = make(src, clock)
+    again.start()
+    run_until_done(again, clock)
+    row = run_row(conn, rid)
+    assert row["state"] == "succeeded" and row["result"]["docs_read"] == 4 * 121
+    assert row["steps"]["read"]["detail"]["docs_read"] == 4 * 121
 
 
 def test_estimate_counts_docs(conn, ready):

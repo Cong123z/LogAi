@@ -284,3 +284,12 @@ def test_page_timeout_is_the_request_timeout():
     assert source.client.search.call_args.kwargs["request_timeout"] == 7
     source.page("idx", 1, 2)
     assert "request_timeout" not in source.client.search.call_args.kwargs
+
+
+def test_count_timeout_is_the_request_timeout():
+    source = make_source([])
+    source.client.count.return_value = {"count": 1}
+    source.count("idx", 1, 2, timeout=9)
+    assert source.client.count.call_args.kwargs["request_timeout"] == 9
+    source.count("idx", 1, 2)
+    assert "request_timeout" not in source.client.count.call_args.kwargs
