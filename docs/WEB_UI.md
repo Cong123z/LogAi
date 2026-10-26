@@ -42,7 +42,7 @@ theme).
 | Review | `/#review/<service>/<key>/<days>[/<day>/<from>/<to>]` | on entry and after each change; every 1 s while a recompute runs | `GET /api/baseline/matrix`, `/api/baseline/groups`, `/api/baseline`, `/api/baseline/inspect`, `/api/services`, `/api/templates`, `/api/documents`, `GET /api/commands/<id>` |
 
 The sidebar groups them into Monitor (Alerting, Pipeline), Catalog
-(Templates, Documentation) and Settings (Data sources, LLM profiles, Baseline, Review). The top
+(Templates, Documentation, Baseline, Review) and Settings (Data sources, LLM profiles). The top
 bar has an **engine health pill**, refreshed every 5 s from `/api/pipeline`:
 red (unavailable) when the heartbeat is stale (older than 30 s), yellow
 (degraded) when the engine reports warnings, green otherwise.
