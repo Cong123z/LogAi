@@ -150,13 +150,22 @@ class EsSource:
         self.cfg = cfg
         self.client = _build_client(cfg)
 
-    def _search(self, body: Dict[str, Any], index: str) -> Dict[str, Any]:
+    def _search(self, body: Dict[str, Any], index: str, timeout: int | None = None) -> Dict[str, Any]:
         """One attempt, no retry: a failing index must not stall the poll of
         the others (spec section 6); the reader counts its failures."""
         # A deleted index must not fail the poll of every other one.
-        return self.client.search(index=index, body=body, ignore_unavailable=True, allow_no_indices=True, filter_path=_FILTER_PATH)
+        extra = {} if timeout is None else {"request_timeout": timeout}
+        return self.client.search(index=index, body=body, ignore_unavailable=True, allow_no_indices=True,
+                                  filter_path=_FILTER_PATH, **extra)
 
-    def page(self, target: str, from_ms: int, upper_ms: int) -> List[Dict[str, Any]]:
+    def count(self, target: str, from_ms: int, to_ms: int) -> int:
+        """Docs of `target` with from_ms <= @timestamp <= to_ms (the re-read's progress target)."""
+        body = {"query": {"bool": {"filter": [{"range": {"@timestamp": {
+            "gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}}]}}}
+        response = self.client.count(index=target, body=body, ignore_unavailable=True, allow_no_indices=True)
+        return int((response or {}).get("count", 0))
+
+    def page(self, target: str, from_ms: int, upper_ms: int, timeout: int | None = None) -> List[Dict[str, Any]]:
         """Raw hits of `target` (a search expression: a pattern, optionally
         followed by `,-<pattern>` exclusions) with from_ms <= @timestamp <= upper_ms, sorted
         by (@timestamp, _doc).
@@ -183,17 +192,17 @@ class EsSource:
         def stuck(hits: List[Dict[str, Any]], page: int) -> bool:
             return len(hits) >= page and (hits[-1].get("sort") or [None])[0] == from_ms
 
-        hits = hits_of(self._search(body, target))
+        hits = hits_of(self._search(body, target, timeout))
         if stuck(hits, size) and size < _WHOLE_MILLISECOND:
             # The millisecond fills the page: read all of it in one request.
             body = {**body, "size": _WHOLE_MILLISECOND}
-            hits = hits_of(self._search(body, target))
+            hits = hits_of(self._search(body, target, timeout))
         if stuck(hits, body["size"]):
             # ponytail: one millisecond holding more than 10k docs is continued
             # by one search_after page, where _doc can still skip a doc and a
             # >20k millisecond still stalls; use PIT + _shard_doc if a source
             # ever logs that much in one millisecond.
-            hits = hits + hits_of(self._search({**body, "search_after": hits[-1]["sort"]}, target))
+            hits = hits + hits_of(self._search({**body, "search_after": hits[-1]["sort"]}, target, timeout))
         return hits
 
     def oldest_ms(self, target: str) -> int | None:

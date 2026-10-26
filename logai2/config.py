@@ -38,6 +38,14 @@ class ReaderConfig:
 
 
 @dataclass
+class RetrainConfig:
+    tick_seconds: float = 1.0           # re-read lane reading time per engine tick
+    es_timeout_seconds: int = 30        # request timeout of a lane page
+    max_live_lag_seconds: int = 60      # the lane waits while live lags more than this
+    default_rate: int = 25000           # docs/s assumed by the estimate before a lane has measured one
+
+
+@dataclass
 class FlushConfig:
     seconds: float = 2.0
     max_events: int = 50000
@@ -141,6 +149,7 @@ class AppConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     reader: ReaderConfig = field(default_factory=ReaderConfig)
     flush: FlushConfig = field(default_factory=FlushConfig)
+    retrain: RetrainConfig = field(default_factory=RetrainConfig)
     start: StartConfig = field(default_factory=StartConfig)
     baseline: BaselineConfig = field(default_factory=BaselineConfig)
     floors: dict = field(default_factory=lambda: {"ERROR": 5, "WARN": 10})
