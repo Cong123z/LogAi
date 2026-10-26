@@ -5,7 +5,7 @@ import hmac
 import re
 import time
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import urlparse
@@ -17,6 +17,7 @@ from werkzeug.exceptions import HTTPException
 from logai2 import db
 from logai2.alerts import alert_rows
 from logai2.commands import enqueue
+from logai2.jobs.reread import Scope
 from logai2.config import AppConfig
 from logai2.module_alerts import data_until, module_alerts, parse_window
 from logai2.links import ALERTING_SOURCES, LEVEL_ORDER, class_sql, cluster_edges, error_lines, level_class, next_doc_id, similar
@@ -166,13 +167,14 @@ def create_app(cfg: AppConfig) -> Flask:
         row = conn().execute("SELECT value, revision FROM settings WHERE key = %s", (key,)).fetchone()
         return (row["value"], row["revision"]) if row else (None, None)
 
-    def save(key: str, value: dict, revision: str | None) -> str:
+    def save(key: str, value: dict, revision: str | None, notify: bool = True) -> str:
         _, current = setting(key)
         # put_setting treats revision None as "overwrite"; for the web None means "nothing saved yet"
         if revision != current:
             raise db.StaleRevision(current)
         new = db.put_setting(conn(), key, value, revision)
-        enqueue(conn(), "reload_sources")
+        if notify:
+            enqueue(conn(), "reload_sources")
         conn().commit()   # the SELECT above opened a transaction: the setting and its command land together
         return new
 
@@ -603,6 +605,116 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.post("/api/baseline/recompute")
     def recompute():
         return jsonify({"id": enqueue(conn(), "recompute_baseline")}), 202
+
+    # --- Retrain: reads retrain_runs / settings / worker_status; actions are queued as engine commands.
+    RUN_COLS = ("id, kind, trigger, scope, state, extract(epoch FROM started_at)::float8 AS started_at, "
+                "extract(epoch FROM finished_at)::float8 AS finished_at, steps, result, error, error_type, failed_step")
+
+    def retrain_payload() -> dict:
+        c = conn()
+        saved, revision = setting("retrain_schedule")
+        status = engine_status()
+        schedule = {"enabled": True, "time": cfg.baseline.commit_time, "weekdays": list(range(7))}
+        schedule.update(saved or {})
+        runs = c.execute(f"SELECT {RUN_COLS} FROM retrain_runs ORDER BY started_at DESC, id DESC LIMIT 50").fetchall()
+        current = c.execute(f"SELECT {RUN_COLS} FROM retrain_runs WHERE state = 'running' "
+                            "ORDER BY started_at DESC LIMIT 1").fetchone()
+        return {"schedule": schedule, "revision": revision, "saved": saved is not None,
+                "next_run_at": status.get("next_commit_at"), "timezone": str(TZ), "current": current, "runs": runs,
+                "es_oldest": status.get("es_oldest") or {},
+                "services": [r["service"] for r in c.execute("SELECT service FROM services ORDER BY service")],
+                "llm_active": c.execute("SELECT EXISTS (SELECT 1 FROM llm_profiles WHERE active) AS a").fetchone()["a"],
+                "engine_stale": time.time() - (status.get("heartbeat") or 0) > STALE_HEARTBEAT_SECONDS,
+                "default_rate": cfg.retrain.default_rate}
+
+    @app.get("/api/retrain")
+    def retrain():
+        return jsonify(retrain_payload())
+
+    @app.get("/api/retrain/runs/<int:run_id>")
+    def retrain_run_detail(run_id: int):
+        row = conn().execute(f"SELECT {RUN_COLS}, log FROM retrain_runs WHERE id = %s", (run_id,)).fetchone()
+        if not row:
+            abort(404, "Unknown run")
+        return jsonify(row)
+
+    @app.put("/api/retrain/schedule")
+    def put_retrain_schedule():
+        payload = body()
+        raw = payload.get("schedule")
+        if not isinstance(raw, dict):
+            raise BadRequest("schedule required")
+        enabled, at, days = raw.get("enabled"), raw.get("time"), raw.get("weekdays")
+        if not isinstance(enabled, bool):
+            raise BadRequest("enabled must be true or false")
+        if not (isinstance(at, str) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at)):
+            raise BadRequest("time must be HH:MM")
+        if not isinstance(days, list) or not days:
+            raise BadRequest("choose at least one day")
+        if not all(type(d) is int and 0 <= d <= 6 for d in days) or len(set(days)) != len(days):
+            raise BadRequest("weekdays must be distinct numbers 0-6")
+        save("retrain_schedule", {"enabled": enabled, "time": at, "weekdays": sorted(days)},
+             payload.get("revision"), notify=False)   # the engine re-reads it every 60 s
+        return jsonify(retrain_payload())
+
+    def reread_scope() -> dict:
+        p = body()
+        days, services = p.get("days"), p.get("services")
+        hour_from, hour_to = p.get("hour_from"), p.get("hour_to")
+        if not isinstance(days, list) or not days:
+            raise BadRequest("choose at least one day")
+        today = datetime.now(TZ).date()
+        parsed = []
+        for d in days:
+            try:
+                parsed.append(date.fromisoformat(d))
+            except (TypeError, ValueError):
+                raise BadRequest("days must be YYYY-MM-DD") from None
+        if len(set(parsed)) != len(parsed):
+            raise BadRequest("days must be distinct")
+        if any(not today - timedelta(days=7) <= d <= today for d in parsed):
+            raise BadRequest("days must be within the last 7 days")
+        if not all(type(h) is int for h in (hour_from, hour_to)) or not 0 <= hour_from < hour_to <= 24:
+            raise BadRequest("hours must satisfy 0 <= hour_from < hour_to <= 24")
+        if services is not None:
+            known = {r["service"] for r in conn().execute("SELECT service FROM services")}
+            if not isinstance(services, list) or not services or not all(isinstance(s, str) and s in known for s in services):
+                raise BadRequest("services must be a non-empty list of known services")
+        return Scope(services, parsed, hour_from, hour_to).to_json()
+
+    @app.post("/api/retrain/runs")
+    def retrain_start():
+        c = conn()
+        kind = body().get("kind")
+        if kind == "rebuild":
+            command_id = enqueue(c, "recompute_baseline")
+        elif kind == "reread":
+            scope = reread_scope()
+            if c.execute("SELECT 1 FROM retrain_runs WHERE kind = 'reread' AND state = 'running'").fetchone():
+                return jsonify({"error": "a retrain is running"}), 409
+            command_id = enqueue(c, "retrain_run", scope)
+        else:
+            raise BadRequest("kind must be rebuild or reread")
+        c.commit()
+        return jsonify({"command_id": command_id}), 202
+
+    @app.post("/api/retrain/estimate")
+    def retrain_estimate():
+        scope = reread_scope()
+        command_id = enqueue(conn(), "retrain_estimate", scope)
+        conn().commit()
+        return jsonify({"command_id": command_id}), 202
+
+    @app.post("/api/retrain/runs/<int:run_id>/cancel")
+    def retrain_cancel(run_id: int):
+        row = conn().execute("SELECT kind, state FROM retrain_runs WHERE id = %s", (run_id,)).fetchone()
+        if not row:
+            abort(404, "Unknown run")
+        if (row["kind"], row["state"]) != ("reread", "running"):
+            return jsonify({"error": "only a running re-read can be cancelled"}), 409
+        command_id = enqueue(conn(), "retrain_cancel", {"run_id": run_id})
+        conn().commit()
+        return jsonify({"command_id": command_id}), 202
 
     @app.get("/api/commands/<int:command_id>")
     def command(command_id: int):

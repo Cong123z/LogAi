@@ -434,6 +434,12 @@ unless noted; days are ISO dates (`YYYY-MM-DD`) in local time.
 | `POST /api/documents` | `{title, error?, handling?, error_code?, verdict?, service?, level?}` | `201 {doc_id, revision}` | 400 | — |
 | `PUT /api/documents/<doc_id>` | `{title, error?, handling?, error_code?, verdict?, service?, level?, revision}` | `{doc_id, revision}` | 400, 404, 409 | — |
 | `DELETE /api/documents/<doc_id>` | — | `{doc_id}` | 404, 409 | — |
+| `GET /api/retrain` | — | `{schedule: {enabled, time, weekdays}, revision, saved, next_run_at, timezone, current, runs, es_oldest, services, llm_active, engine_stale, default_rate}`; `schedule` is the saved setting over the defaults, `runs` the last 50 newest first without `log`, `current` the running run or null; a run is `{id, kind, trigger, scope, state, started_at, finished_at, steps, result, error, error_type, failed_step}` | — | — |
+| `GET /api/retrain/runs/<id>` | — | the run plus `log` | 404 | — |
+| `PUT /api/retrain/schedule` | `{schedule: {enabled: bool, time: "HH:MM", weekdays: [0-6]}, revision}` e.g. `{"schedule": {"enabled": true, "time": "02:00", "weekdays": [0,1,2,3,4]}, "revision": null}` | the `GET /api/retrain` payload; weekdays stored sorted | 400 (`choose at least one day` for an empty list), 409 | — (the engine re-reads every 60 s) |
+| `POST /api/retrain/runs` | `{kind: "rebuild"}` or `{kind: "reread", services: [str] \| null, days: ["YYYY-MM-DD"], hour_from, hour_to}`: days distinct, today-7 .. today (local), `0 <= hour_from < hour_to <= 24`, services null or known | `202 {command_id}` (poll `GET /api/commands/<id>`: the result holds `run_id` or `error`) | 400, 409 `{error: "a retrain is running"}` (reread only) | `recompute_baseline` / `retrain_run` |
+| `POST /api/retrain/estimate` | the reread body | `202 {command_id}` | 400 | `retrain_estimate` |
+| `POST /api/retrain/runs/<id>/cancel` | — | `202 {command_id}` | 404, 409 (not a running reread) | `retrain_cancel` |
 | `GET /api/llm/profiles` | — | `[profile]` (no key) | — | — |
 | `GET /api/llm/usage` | — | `{hour, day, drafts_waiting, limits, linker_running, last_cycle, last_error, profiles, warnings}` | — | — |
 | `PUT /api/llm/profiles/<name>` | `{base_url, model, api_key?, timeout_seconds?, priority?, revision}` (no `priority`: an edit keeps it, a new profile gets max(active)+1, 1 if none) | `{name, revision}` | 400, 409 | — |
