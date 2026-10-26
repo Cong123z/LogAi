@@ -9,21 +9,29 @@ def hit(_id, ms, **src):
 
 
 class FakeSource:
-    """EsSource.page over in-memory hits; `fail(index)` makes the next page() raise."""
+    """EsSource.page over in-memory hits; `fail(target)` makes the next page() of that target raise."""
 
     def __init__(self, hits_by_index: dict[str, list[dict]]):
         self.hits = hits_by_index
         self.failing: set[str] = set()
+        self.calls: list[str] = []
         self.size = 10_000   # EsSource's page size (cfg.elasticsearch.batch_size)
 
-    def fail(self, index: str) -> None:
-        self.failing.add(index)
+    def fail(self, target: str) -> None:
+        self.failing.add(target)
 
-    def page(self, index: str, from_ms: int, upper_ms: int) -> list[dict]:
-        if index in self.failing:
-            self.failing.discard(index)
-            raise ConnectionError(f"{index} down")
-        hits = [h for h in self.hits.get(index, []) if from_ms <= h["sort"][0] <= upper_ms]
+    def _match(self, target: str) -> list[str]:
+        first, *excl = target.split(",")
+        return sorted(i for i in fnmatch.filter(self.hits, first)
+                      if not any(fnmatch.fnmatch(i, e[1:]) for e in excl))
+
+    def page(self, target: str, from_ms: int, upper_ms: int) -> list[dict]:
+        self.calls.append(target)
+        if target in self.failing:
+            self.failing.discard(target)
+            raise ConnectionError(f"{target} down")
+        hits = [{**h, "_index": i} for i in self._match(target) for h in self.hits[i]
+                if from_ms <= h["sort"][0] <= upper_ms]
         return sorted(hits, key=lambda h: h["sort"])[:self.size]
 
     def resolve(self, patterns: list[str]) -> dict[str, list[str]]:

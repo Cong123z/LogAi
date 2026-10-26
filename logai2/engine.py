@@ -104,8 +104,8 @@ class Engine:
             self._seed_documents()
         self._apply_connection()
         self.reader = Reader(self.source, self.cfg, KnownLines(self.cfg.reader.cache_size), now=self.now)
-        floors, saved = self._wait_for_indices()
-        start_ms = min((saved.get(i, f) for i, f in floors.items()), default=int(now * 1000))
+        floors, starts = self._wait_for_indices()
+        start_ms = min(starts.values(), default=int(now * 1000))
         # catch-up (first start, or a restart after downtime) writes counts into every day since start_ms
         with self.db.transaction():
             ensure_partitions(self.db, min(_day(start_ms / 1000), today), today + timedelta(days=2))
@@ -167,13 +167,20 @@ class Engine:
         entries = selection.get("entries") or [{"pattern": self.cfg.elasticsearch.index, "added_at": 0}]
         self.resolution = self.source.resolve([e["pattern"] for e in entries])
         floors: dict[str, int] = {}
+        targets: dict[str, str] = {}
         for e in entries:
-            # an index selected before the first start is read from days_back; a later one from when it was added
+            if e["pattern"] in floors:
+                continue   # duplicate pattern: the first entry wins
+            # a pattern selected before the first start is read from days_back; a later one from when it was added
             floor = self.bootstrap["since"] if e["added_at"] <= self.bootstrap["until"] else e["added_at"]
-            for index in self.resolution.get(e["pattern"], []):
-                floors[index] = min(floors.get(index, math.inf), int(floor * 1000))
-        self.reader.set_indices(floors, saved)
-        return floors, saved
+            floors[e["pattern"]] = int(floor * 1000)
+            # an index matched by two patterns is read once, by the earlier one
+            targets[e["pattern"]] = ",".join([e["pattern"]] + [f"-{p}" for p in floors if p != e["pattern"]])
+        # upgrade: rows keyed by concrete index all hold the minute boundary; a pattern without a row starts there
+        oldest = min(saved.values(), default=None)
+        starts = {p: saved.get(p, f if oldest is None else max(f, oldest)) for p, f in floors.items()}
+        self.reader.set_sources(floors, starts, targets)
+        return floors, starts
 
     # --- loop --------------------------------------------------------------
 
@@ -340,7 +347,8 @@ class Engine:
             "indices": {i: {**self._positions.get(i, {}), "floor": f} for i, f in self.reader.floors.items()},
             "available_indices": self.available,
             "resolution": self.resolution,
-            "warnings": [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn],
+            "warnings": [f"no index matches {p}" for p in self.reader.floors if not self.resolution.get(p)]
+                        + [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn],
         }
 
     def _owner_day(self) -> date:

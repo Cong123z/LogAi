@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import fnmatch
 import heapq
 import json
 import logging
@@ -209,10 +210,16 @@ class GenSource:
         self.gen_seconds = 0.0
         self.pages = self.hits = 0
 
-    def page(self, index: str, from_ms: int, upper_ms: int) -> list[dict]:
+    def _match(self, target: str) -> list[str]:
+        first, *excl = target.split(",")
+        return sorted(i for i in fnmatch.filter(self.indices, first)
+                      if not any(fnmatch.fnmatch(i, e[1:]) for e in excl))
+
+    def page(self, target: str, from_ms: int, upper_ms: int) -> list[dict]:
         started = time.perf_counter()
         now_ms = int(self.clock() * 1000)
-        lists = [s.hits(from_ms, upper_ms, self.size, now_ms) for s in self.indices[index]]
+        lists = [[{**h, "_index": i} for h in s.hits(from_ms, upper_ms, self.size, now_ms)]
+                 for i in self._match(target) for s in self.indices[i]]
         hits = lists[0] if len(lists) == 1 else list(heapq.merge(*lists, key=lambda h: h["sort"][0]))[:self.size]
         self.pages += 1
         self.hits += len(hits)
@@ -220,7 +227,7 @@ class GenSource:
         return hits
 
     def resolve(self, patterns: list[str]) -> dict[str, list[str]]:
-        return {p: sorted(self.indices) for p in patterns}
+        return {p: self._match(p) for p in patterns}
 
     def list_indices(self) -> list[dict]:
         return [{"index": i} for i in sorted(self.indices)]
@@ -753,7 +760,7 @@ def run_e1(a, cfg, world) -> dict:
             return hits
         source.page = timed
         reader = Reader(source, cfg, KnownLines(cfg.reader.cache_size), now=time.time)
-        reader.set_indices({index: int((now - 700) * 1000)}, {})
+        reader.set_sources({index: int((now - 700) * 1000)}, {})
         t0, events = time.perf_counter(), 0
         while True:
             batch = reader.poll()
@@ -770,7 +777,7 @@ def run_e1(a, cfg, world) -> dict:
                       world["svc00"])
         cfg.reader.upper_bound_seconds = 0   # measure ES visibility; the engine adds upper_bound_seconds (30 s)
         reader = Reader(source, cfg, KnownLines(cfg.reader.cache_size), now=time.time)
-        reader.set_indices({index: int(time.time() * 1000)}, {})
+        reader.set_sources({index: int(time.time() * 1000)}, {})
         delays, sent_to, stop_at = [], int(time.time() * 1000), time.time() + 30
         pages.clear()
         while time.time() < stop_at:

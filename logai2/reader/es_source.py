@@ -1,7 +1,7 @@
 """Elasticsearch source (copied from logai-engine logai/collector/es_collector.py).
 
 The only code that talks to Elasticsearch. `page` returns one page of raw
-hits of one index sorted by (@timestamp, _doc) from a millisecond position;
+hits of a search target (pattern) sorted by (@timestamp, _doc) from a millisecond position;
 the reader keeps the position and drops re-read docs by _id. One attempt per
 search: the reader's failure count and the next poll are the backoff.
 `hit_to_line` turns a hit into a `Line`.
@@ -25,7 +25,7 @@ _SORT = [{"@timestamp": {"order": "asc", "numeric_type": "date"}}, {"_doc": "asc
 # Page size used to read one crowded millisecond whole: ES's default
 # index.max_result_window, the largest page a plain search may return.
 _WHOLE_MILLISECOND = 10_000
-_FILTER_PATH = "hits.hits._id,hits.hits._source,hits.hits.sort"
+_FILTER_PATH = "hits.hits._id,hits.hits._index,hits.hits._source,hits.hits.sort"
 
 
 class Line(NamedTuple):
@@ -154,10 +154,11 @@ class EsSource:
         """One attempt, no retry: a failing index must not stall the poll of
         the others (spec section 6); the reader counts its failures."""
         # A deleted index must not fail the poll of every other one.
-        return self.client.search(index=index, body=body, ignore_unavailable=True, filter_path=_FILTER_PATH)
+        return self.client.search(index=index, body=body, ignore_unavailable=True, allow_no_indices=True, filter_path=_FILTER_PATH)
 
-    def page(self, index: str, from_ms: int, upper_ms: int) -> List[Dict[str, Any]]:
-        """Raw hits of `index` with from_ms <= @timestamp <= upper_ms, sorted
+    def page(self, target: str, from_ms: int, upper_ms: int) -> List[Dict[str, Any]]:
+        """Raw hits of `target` (a search expression: a pattern, optionally
+        followed by `,-<pattern>` exclusions) with from_ms <= @timestamp <= upper_ms, sorted
         by (@timestamp, _doc).
 
         Starting at from_ms (inclusive) re-reads the docs sharing the previous
@@ -182,17 +183,17 @@ class EsSource:
         def stuck(hits: List[Dict[str, Any]], page: int) -> bool:
             return len(hits) >= page and (hits[-1].get("sort") or [None])[0] == from_ms
 
-        hits = hits_of(self._search(body, index))
+        hits = hits_of(self._search(body, target))
         if stuck(hits, size) and size < _WHOLE_MILLISECOND:
             # The millisecond fills the page: read all of it in one request.
             body = {**body, "size": _WHOLE_MILLISECOND}
-            hits = hits_of(self._search(body, index))
+            hits = hits_of(self._search(body, target))
         if stuck(hits, body["size"]):
             # ponytail: one millisecond holding more than 10k docs is continued
             # by one search_after page, where _doc can still skip a doc and a
             # >20k millisecond still stalls; use PIT + _shard_doc if a source
             # ever logs that much in one millisecond.
-            hits = hits + hits_of(self._search({**body, "search_after": hits[-1]["sort"]}, index))
+            hits = hits + hits_of(self._search({**body, "search_after": hits[-1]["sort"]}, target))
         return hits
 
     def resolve(self, patterns: List[str]) -> Dict[str, List[str]]:

@@ -78,7 +78,7 @@ function plText(d) {
   const prof = plProfiles(d), down = prof.filter(p => p.down).length;
   const pending = l && l.pending ? (l.pending.templates || 0) + (l.pending.documents || 0) : null;
   return {
-    elasticsearch: [`${idx.filter(i => !i.failing).length} / ${idx.length} indices`, oldest == null ? 'no position yet' : `oldest position ${plDuration(oldest)}`],
+    elasticsearch: [`${idx.filter(i => !i.failing).length} / ${idx.length} patterns`, oldest == null ? 'no position yet' : `oldest position ${plDuration(oldest)}`],
     reader: [`${(s.events_per_second_15m ?? s.events_per_second ?? 0).toFixed(0)} ev/s`, `cache hit ${plPercent(s.cache_hit_ratio)}`],
     templates: [`${plInt(sum('templates'))} templates`, `+${plInt(sum('new_24h'))} in 24 h · ${plInt(sum('unparsed_1h'))} unparsed`],
     detection: [`lag ${plDuration(s.lag_seconds)}`, `${s.detection_enabled ? 'On' : 'Off'} · ${plInt(sum('not_normal'))} keys not NORMAL`],
@@ -143,8 +143,8 @@ function plRenderTopology(d) {
 // ── Stage details under the topology ──
 function plIndexTable(d) {
   const idx = plIndices(d), names = Object.keys(idx).sort();
-  return names.length ? `<div class="table-wrap"><table><thead><tr><th>Index</th><th>Position</th><th>Reads from</th><th>Status</th></tr></thead><tbody>${plIndexRows(d)}</tbody></table></div>`
-    : '<p>No index is being read yet.</p>';
+  return names.length ? `<div class="table-wrap"><table><thead><tr><th>Pattern</th><th>Position</th><th>Reads from</th><th>Status</th></tr></thead><tbody>${plIndexRows(d)}</tbody></table></div>`
+    : '<p>No pattern is being read yet.</p>';
 }
 function plIndexRows(d) {
   const idx = plIndices(d);
@@ -389,7 +389,7 @@ document.querySelector('#pl-services thead').addEventListener('click', e => {
 
 function plRenderIndices(d) {
   const rows = plIndexRows(d);
-  $pl('pl-indices-tbody').innerHTML = rows || '<tr><td colspan="4" class="empty-state">No index is being read yet.</td></tr>';
+  $pl('pl-indices-tbody').innerHTML = rows || '<tr><td colspan="4" class="empty-state">No pattern is being read yet.</td></tr>';
 }
 
 function plRenderAll(d) {

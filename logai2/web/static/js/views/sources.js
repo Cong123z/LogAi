@@ -43,12 +43,13 @@ function renderSources(data, force = false) {
     if (!saved) reading = '<span class="badge badge-yellow">Not saved yet</span>';
     else if (!indices) reading = '<span class="ins-meta">—</span>';
     else if (!indices.length) reading = '<span class="badge badge-gray">No matching index yet</span>';
-    else reading = indices.map(index => {
-      const p = progress[index] || {};
+    else {
+      const p = progress[pattern] || {};
       const at = p.pos_ms ? `at ${formatTs(p.pos_ms / 1000)}` : 'no events yet';
       const badge = p.failing ? '<span class="badge badge-red">failing</span>' : '';
-      return `<div><span class="tmpl-id">${escapeHtml(index)}</span> <span class="ins-meta">${escapeHtml(at)}${p.caught_up ? ' · caught up' : ''}</span> ${badge}</div>`;
-    }).join('');
+      reading = `<div><span class="ins-meta">${escapeHtml(at)}${p.caught_up ? ' · caught up' : ''}</span> ${badge}</div>`
+        + `<div class="ins-meta">${indices.map(escapeHtml).join(', ')}</div>`;
+    }
     return `<tr>
       <td><span class="tmpl-id">${escapeHtml(pattern)}</span></td>
       <td>${reading}</td>

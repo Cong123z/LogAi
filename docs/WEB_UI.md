@@ -104,7 +104,7 @@ updates the existing chart instances.
 
   | Stage | Headline | Second line |
   |---|---|---|
-  | Elasticsearch | `N / M indices` not failing | oldest position age |
+  | Elasticsearch | `N / M patterns` not failing | oldest position age |
   | Reader | events/s (15-min average) | cache hit ratio |
   | Templates | templates in all services | new in 24 h, unparsed lines in the last hour |
   | Minutes & detection | lag | detection On/Off, keys not NORMAL |
@@ -137,7 +137,7 @@ updates the existing chart instances.
   1 h ago (only when the oldest point is 55-60 min old), 5-min miss ratio,
   templates, new in 24 h, unparsed in 1 h, keys not NORMAL. A row click
   filters the Reader and Templates details to that service;
-- a table of indices: position, floor, and `failing` / `caught up` /
+- a table of patterns (one cursor per pattern): position, floor, and `failing` / `caught up` /
   `catching up` / `not reading` (an `es_cursors` row the engine no longer
   reports).
 
@@ -145,7 +145,7 @@ Stage rules (constants in `logai2/web/pipeline_view.py`):
 
 | Stage | Degraded | Down |
 |---|---|---|
-| Elasticsearch | an index failing, one more than 5 min behind, or engine stale (position unknown) | all indices failing |
+| Elasticsearch | an index failing, one more than 5 min behind, or engine stale (position unknown) | all patterns failing |
 | Reader | a high-miss-ratio warning | engine stale, or 5 minutes of history at 0 events/s while an index is not caught up |
 | Templates | any unparsed line in the last hour | — |
 | Minutes & detection | lag over 5 min, or detection off | engine stale |
@@ -322,8 +322,8 @@ On the first engine start, an empty table is seeded from
 
 ## Data sources
 
-**Indices.** The selected patterns, with what each currently resolves to
-(per index: position, caught up, failing), and when it was added ("engine
+**Indices.** The selected patterns, each with its own progress (position, caught up, failing)
+and the indices it currently resolves to as a plain list, and when it was added ("engine
 start" for an entry read since bootstrap). Below, the available indices
 listed by the engine (doc count, health), filterable; ticking an index adds
 it, an index already covered by a selected pattern is shown as "via

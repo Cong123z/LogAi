@@ -29,7 +29,7 @@ def make(conn, cfg, src, now_s, floor_ms=T0):
     """A fresh Reader/Owner pair built from what the database holds, as after a restart."""
     saved = {r["index"]: r["since_ms"] for r in rows(conn, "SELECT index, since_ms FROM es_cursors")}
     reader = Reader(src, cfg, KnownLines(1000), now=lambda: now_s)
-    reader.set_indices({"a": floor_ms}, saved)
+    reader.set_sources({"a": floor_ms}, saved)
     owner = Owner(conn, cfg, saved.get("a", floor_ms) // 60_000, now=lambda: now_s)
     return reader, owner
 

@@ -1,10 +1,11 @@
-"""Reader: polls each selected index from its position and hands the owner a
-MinuteBatch, a plain dict (a Kafka message in v2).
+"""Reader: polls each selected index pattern from its position and hands the
+owner a MinuteBatch, a plain dict (a Kafka message in v2).
 
-Each poll reads one page per index starting at its position's millisecond
-(inclusive), so docs sharing that millisecond are re-read and dropped by _id.
-The watermark says every doc before it has been read: an index whose page
-did not reach upper_ms holds it at its position. When every index fails (ES
+Each poll reads one page per pattern (one search over all its indices)
+starting at its position's millisecond (inclusive), so docs sharing that
+millisecond are re-read and dropped by (_index, _id). The watermark says
+every doc before it has been read: a pattern whose page
+did not reach upper_ms holds it at its position. When every pattern fails (ES
 down) the watermark is held too: closing the outage minutes would write them
 empty and drop their docs as late on recovery.
 """
@@ -23,8 +24,8 @@ from logai2.timeutil import minute_of
 
 logger = logging.getLogger("logai2.reader")
 
-# Consecutive page() failures after which an index stops holding the
-# watermark: a dead index must not freeze minute closing for every other one.
+# Consecutive page() failures after which a pattern stops holding the
+# watermark: a dead pattern must not freeze minute closing for every other one.
 FAILING_AFTER = 3
 
 
@@ -60,26 +61,30 @@ class Reader:
         self._caught_up: dict[str, bool] = {}
         self._errors: dict[str, int] = {}
         # ponytail: dedup ids kept for every open minute in memory; bounded by
-        # one or two minutes of docs per index, move to a ts-bucketed set if
+        # one or two minutes of docs per pattern, move to a ts-bucketed set if
         # catch-up memory shows up.
-        self._seen: dict[str, dict[str, int]] = {}
+        self._seen: dict[str, dict[tuple, int]] = {}
+        self._targets: dict[str, str] = {}
 
     @property
     def floors(self) -> Mapping[str, int]:
         return MappingProxyType(self._floors)
 
-    def set_indices(self, floors: dict[str, int], saved: dict[str, int]) -> None:
-        for index in set(self._floors) - set(floors):
+    def set_sources(self, floors: dict[str, int], saved: dict[str, int],
+                    targets: dict[str, str] | None = None) -> None:
+        """Keys are patterns; targets[pattern] is the search expression (default the pattern)."""
+        for key in set(self._floors) - set(floors):
             for state in (self._pos, self._caught_up, self._errors, self._seen):
-                state.pop(index, None)
-        # A tracked index keeps its position, caught_up and dedup ids: the
-        # periodic selection refresh must not rewind running indices.
-        for index in set(floors) - set(self._floors):
-            self._pos[index] = saved.get(index, floors[index])
-            self._caught_up[index] = False
-            self._errors[index] = 0
-            self._seen[index] = {}
+                state.pop(key, None)
+        # A tracked pattern keeps its position, caught_up and dedup ids: the
+        # periodic selection refresh must not rewind running patterns.
+        for key in set(floors) - set(self._floors):
+            self._pos[key] = saved.get(key, floors[key])
+            self._caught_up[key] = False
+            self._errors[key] = 0
+            self._seen[key] = {}
         self._floors = dict(floors)
+        self._targets = {k: (targets or {}).get(k, k) for k in floors}
 
     def poll(self) -> MinuteBatch:
         upper_ms = int((self.now() - self.cfg.upper_bound_seconds) * 1000)
@@ -87,8 +92,8 @@ class Reader:
         events = 0
         for index in self._floors:
             try:
-                hits = self.source.page(index, self._pos[index], upper_ms)
-            except Exception as exc:  # noqa: BLE001 — one index must not stop the others
+                hits = self.source.page(self._targets[index], self._pos[index], upper_ms)
+            except Exception as exc:  # noqa: BLE001 — one pattern must not stop the others
                 self._errors[index] += 1
                 self._caught_up[index] = False
                 logger.warning("page(%s) failed (%d in a row): %s", index, self._errors[index], exc)
@@ -99,7 +104,8 @@ class Reader:
             for h in hits:
                 h = h if isinstance(h, dict) else {}
                 doc_id = h.get("_id")
-                if doc_id in seen:
+                key = (h.get("_index"), doc_id)
+                if key in seen:
                     continue
                 try:
                     ts_ms = int((h.get("sort") or [self._pos[index]])[0])
@@ -112,7 +118,7 @@ class Reader:
                 if doc_id is None:
                     self.malformed += 1
                     continue
-                seen[doc_id] = ts_ms
+                seen[key] = ts_ms
                 new += 1
                 line = hit_to_line(h, self.cfg.module_field, self.cfg.max_line_bytes)
                 if line is None:
@@ -154,7 +160,7 @@ class Reader:
     def _watermark(self, upper_ms: int) -> int:
         marks = {i: upper_ms if self._caught_up[i] else self._pos[i] for i in self._floors}
         healthy = [m for i, m in marks.items() if self._errors[i] < FAILING_AFTER]
-        # no healthy index: hold at the positions (a failing index is never caught up)
+        # no healthy pattern: hold at the positions (a failing pattern is never caught up)
         return min(healthy or marks.values(), default=upper_ms)
 
     def learn(self, resolved: dict[tuple[str, str], str]) -> None:
@@ -162,7 +168,7 @@ class Reader:
             self.cache.put(service, text, template_id)
 
     def cursors(self, boundary_ms: int) -> dict[str, tuple[int, int]]:
-        # ponytail: a failing index gets the boundary too, so its docs from
+        # ponytail: a failing pattern gets the boundary too, so its docs from
         # minutes closed while it failed are lost (they would be late counts
         # anyway); saving its older position would re-open closed minutes on
         # restart.
@@ -173,5 +179,5 @@ class Reader:
         # the position's millisecond and would count them again.
         for index, seen in self._seen.items():
             cut = min(boundary_ms, self._pos[index])
-            for doc_id in [d for d, ts in seen.items() if ts < cut]:
-                del seen[doc_id]
+            for key in [k for k, ts in seen.items() if ts < cut]:
+                del seen[key]
