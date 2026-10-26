@@ -1,7 +1,7 @@
 # Baseline bake-off: test alerting methods on real data, judge them, choose per monitor kind
 
 Status: **approved for build** (2026-10-26). Plan: `docs/plans/2026-10-26-baseline-bakeoff.md`.
-Mockup (3 boards: Evaluation, Calibrate, Episodes): https://claude.ai/artifact/EXqQaUkx4aAZTsEmj1A2be.
+Mockup (2 boards: Evaluation, Calibrate): https://claude.ai/artifact/EXqQaUkx4aAZTsEmj1A2be.
 Research behind the method choice: 40 candidates surveyed (statistics, control charts, forecasting,
 ML, foundation models, log-sequence models), cut to the roster below.
 Everything here is lab-only: **live alerting does not change**. Using a chosen method in production is a
