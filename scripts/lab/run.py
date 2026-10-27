@@ -134,7 +134,7 @@ def run(args, cfg, data_conn, results_conn, collect=None, finish=None) -> int:
             ctx = RunCtx(days, tune_days, params["split"], make_part(service, days, tune_days, by_days), cfg, sd)
             variants, ps = [(sd, kinds, ctx)], None
             if args.test == "A":
-                ps = inject.passes(sd, kinds, ctx.part, args.seed)
+                ps = inject.passes(sd, kinds, args.seed)
                 inject.record(results_conn, run_id, args.schema, service, [injs for _, _, injs in ps])
                 variants = [(p_sd, p_kinds, replace(ctx, sd=p_sd, injections=injs)) for p_sd, p_kinds, injs in ps]
             for name, m in instances.items():

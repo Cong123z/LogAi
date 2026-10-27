@@ -1,4 +1,5 @@
 from array import array
+from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
@@ -58,7 +59,7 @@ def planted():
 def build(seed=3, incidents=None):
     sd = world(planted() if incidents is None else incidents)
     kinds = assign(sd, TUNE)
-    return sd, kinds, plan(sd, kinds, part, seed, Expect(sd))
+    return sd, kinds, plan(sd, kinds, seed, Expect(sd))
 
 
 # 1 ---------------------------------------------------------------------------------------------------------------
@@ -133,7 +134,7 @@ def test_placement(seed):
 def test_passes_use_distinct_seeds_and_record_incidents():
     sd = world()
     kinds = assign(sd, TUNE)
-    ps = passes(sd, kinds, part, 7)
+    ps = passes(sd, kinds, 7)
     assert len(ps) == 5
     assert len({tuple(i) for _, _, i in ps}) == 5
     for p_sd, p_kinds, injs in ps:
@@ -160,3 +161,13 @@ def test_burst_creates_m6_key_and_mix_swap_leaves_total():
     assert list(out.minutes["*total"][DAYS[6]]) == list(sd.minutes["*total"][DAYS[6]])      # *total unchanged
     assert {i.key for i in out.incidents} == {"*mix", "A", "B"}
     check_consistent(out)
+
+
+def test_short_window_still_places_mix_swap_even_if_mix_hashes_to_tune():
+    days = DAYS[:6]
+    sd = world()
+    sd = replace(sd, days=days)
+    kinds = assign(sd, days[:3])
+    injs = plan(sd, kinds, 3, Expect(sd))
+    assert "mix_swap" in {i.type for i in injs}
+    assert all(slot_of(i.start)[0] >= days[3] for i in injs)       # last half of the window, whatever part(key, day) says

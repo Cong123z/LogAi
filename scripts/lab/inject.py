@@ -2,7 +2,7 @@
 
 Every change is made on a template's counts; `*total`, the template's level key and every `doc:` key that contains it get
 the same delta on the same minutes (`*mix` shares `*total`'s arrays), so `*total` = sum of templates keeps holding. Arrays an
-injection does not touch are shared with the clean data. Injections go only into the test part, never within NEAR minutes
+injection does not touch are shared with the clean data. Injections start only in the last half of the window (the test days; a short window splits keys, but placement is by days), never within NEAR minutes
 of a planted incident, and at least GAP minutes apart per key. Fully seeded.
 """
 from __future__ import annotations
@@ -88,10 +88,10 @@ def _near(a, b, gap) -> bool:
     return a[0] < b[1] + gap and b[0] < a[1] + gap
 
 
-def plan(sd: ServiceData, kinds: dict, part, seed: int, exp: Expect) -> list[Injection]:
+def plan(sd: ServiceData, kinds: dict, seed: int, exp: Expect) -> list[Injection]:
     """One pass: about PER_TYPE (= one per size) injections of every type. A candidate that breaks a rule is redrawn."""
     rng = random.Random(seed)
-    lo, hi = minute_at(sd.days[0], 0), minute_at(sd.days[-1], 0) + 1440
+    mid, hi = minute_at(sd.days[len(sd.days) // 2], 0), minute_at(sd.days[-1], 0) + 1440
     tmpl = sorted(k for k in sd.minutes if not k.startswith(("*", "doc:")))
     planted = [(i.start - NEAR, i.end + NEAR) for i in sd.incidents if i.source in ("synthetic", "test-c")]
     busy: dict[str, list] = {}
@@ -107,25 +107,21 @@ def plan(sd: ServiceData, kinds: dict, part, seed: int, exp: Expect) -> list[Inj
 
     def draw(typ, name, size):
         _, _, dur, min_exp = TYPES[typ]
-        start = rng.randrange(lo, hi - dur)
+        start = rng.randrange(mid, hi - dur)
         end = start + dur
         if any(start < b and a < end for a, b in planted):
             return None
         if typ == "burst":
-            key = f"inj:{seed}:{len(out)}:{rng.randrange(10 ** 6)}"      # redrawn with the attempt: a by-keys split may put a name in tune
-            if part(key, slot_of(start)[0]) != "test" or part(key, slot_of(end - 1)[0]) != "test":
-                return None
+            key = f"inj:{seed}:{len(out)}"
             return Injection(typ, name, size, key, "M6", start, end, key, add=(size,) * dur), (key,)
         if typ == "mix_swap":
             pair = _pair(start, dur, size)
-            if not pair or part(MIX, slot_of(start)[0]) != "test" or part(MIX, slot_of(end - 1)[0]) != "test":
+            if not pair:
                 return None
             return Injection(typ, name, size, MIX, "M7", start, end, pair=pair), (MIX, *pair)
         if not by_kind[typ]:
             return None
         key = rng.choice(by_kind[typ])
-        if part(key, slot_of(start)[0]) != "test" or part(key, slot_of(end - 1)[0]) != "test":
-            return None
         e = exp.window(key, start, dur)
         if sum(e) < min_exp:
             return None
@@ -243,11 +239,11 @@ def apply(sd: ServiceData, injs: list[Injection]) -> ServiceData:
     return replace(sd, minutes=minutes, levels=levels, first_seen=first, incidents=incidents)
 
 
-def passes(sd: ServiceData, kinds: dict, part, seed: int, n: int = PASSES):
+def passes(sd: ServiceData, kinds: dict, seed: int, n: int = PASSES):
     """[(injected ServiceData, kinds with the burst keys as M6, injections)] for seeds seed .. seed+n-1."""
     exp, out = Expect(sd), []
     for p in range(n):
-        injs = plan(sd, kinds, part, seed + p, exp)
+        injs = plan(sd, kinds, seed + p, exp)
         out.append((apply(sd, injs), {**kinds, **{i.key: "M6" for i in injs if i.type == "burst"}}, injs))
     return out
 

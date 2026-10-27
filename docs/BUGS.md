@@ -5,6 +5,13 @@ Open items to fix, newest findings included. When one is fixed, move it to
 
 ## Open
 
+### B-lab1. M6 decisions need a Test B M6 tune alert rate
+- **Where:** `scripts/lab/decide.py` (`_gates`, `_detect_decision`), `scripts/lab/tune.py`.
+- **What:** the M6 alert-rate gate reads the Test B M6 tune alert rate. When no template was born in the tune part there are no
+  M6 normal minutes there, the rate is None, the gate fails, and M6 is always "sigma stays" on such data.
+- **Fix idea:** judge the M6 alert rate on the test part, or on the base-kind minutes of the new templates.
+- **Likelihood:** medium on short or quiet windows.
+
 ### B1. A value Postgres can never store stalls the engine forever
 - **Where:** `Engine._flush` (`logai2/engine.py`), `Owner.flush`.
 - **What:** a failed flush retries the same pending rows until it succeeds. A permanent

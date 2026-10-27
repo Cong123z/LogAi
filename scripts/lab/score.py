@@ -11,7 +11,7 @@ from datetime import timedelta
 
 from logai2.links import level_class
 from scripts.lab import store
-from scripts.lab.data import UNOBSERVED, minute_at, slot_of
+from scripts.lab.data import MIX, UNOBSERVED, minute_at, slot_of
 from scripts.lab.episodes import Tracker
 from scripts.lab.kinds import has_new, is_new
 
@@ -137,7 +137,8 @@ class ScoreSink:
             for inc in sd.incidents:
                 lvl = LEVEL_KEY[level_class(sd.levels.get(inc.key))] if inc.key else None
                 if (inc.key in (None, "*total", key) or key == "*total" or key == lvl
-                        or (key.startswith("doc:") and inc.key in sd.docs.get(key, []))):
+                        or (key.startswith("doc:") and inc.key in sd.docs.get(key, []))
+                        or (key == MIX and not inc.key.startswith(("*", "doc:")))):
                     w.append((inc.start - MARGIN, inc.end + MARGIN))
             self._win[key] = w
         return self._win[key]
