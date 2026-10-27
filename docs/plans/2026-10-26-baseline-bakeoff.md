@@ -1,5 +1,7 @@
 # Baseline Bake-off Implementation Plan
 
+**Superseded for the laptop build** by `docs/plans/2026-10-27-bakeoff-laptop.md` (tasks 0–17); the company deployment gets its own plan after the laptop proof.
+
 > **Team workflow** (docs/TEAM_WORKFLOW.md): Opus = tech lead (briefs, rulings, final review, merge);
 > every task implemented by a Claude **Sonnet 5.5** subagent in its own worktree; every branch reviewed by a
 > **fresh Sonnet** subagent before the tech lead's final review. Steps use checkbox (`- [ ]`) syntax.

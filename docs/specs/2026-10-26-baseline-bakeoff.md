@@ -467,6 +467,7 @@ The same inputs give the same numbers. "Compare with run" shows what changed: da
 | In-cluster smoke | company cluster | `run.py --test B --methods 1,2,6 --days 3` finishes and the Evaluation page draws all three methods' lines for one key |
 
 ## Files
+The laptop build (`docs/specs/2026-10-27-bakeoff-laptop.md`) refines this list: recorder additive per flush with a `*minutes` key (D1, D2), also in the re-read lane (`logai2/jobs/reread.py`); results always in `public.lab_*`, synthetic data in `lab_s_<scenario>` schemas (D6); k8s files deferred.
 - **New**
   - `scripts/lab/`: `run.py`, `load.py` (read-only DB reads), `inject.py`, `score.py`, `methods/`, `synth.py`, `world.py`, `load_incidents.py`.
   - `requirements-lab.txt`, `Dockerfile.lab` (weights baked in). These are the **only** new dependencies, and they are lab-image only; the app image's `requirements.txt` does not change.
