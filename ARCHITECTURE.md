@@ -198,11 +198,11 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `embedding.timeout_seconds` / `max_retries` / `retry_backoff_seconds` | 30 / 2 / 1 | per request; network errors, timeouts, 5xx and 429 are retried, waiting backoff × attempt; other 4xx fail at once |
 | `embedding.dimension` | 1024 | checked on every reply; the DB columns are `vector(1024)`, so another value needs a migration |
 | `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
+| `llm.per_service_hour` / `daily_max` | 0 / 0 | LLM results per service per hour, in all per day; 0 = no limit |
+| `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |
 | `lab.record` | `false` (env `LOGAI2_LAB_RECORD`; compose: `true`) | the owner also stores per-minute counts in `lab_minute_counts` |
 | `lab.days` | 28 | partitions of `lab_minute_counts` kept |
 | `lab.holidays` | core Vietnamese holidays 2025-2027 (repo `config.yaml`) | ISO dates the lab treats as holidays |
-| `llm.per_service_hour` / `daily_max` | 0 / 0 | LLM results per service per hour, in all per day; 0 = no limit |
-| `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |
 
 The repo's `config.yaml` sets only `elasticsearch.index: recharge-logs`,
 `baseline.sigma_multiplier: 3.0` and the two floors. Secrets and endpoints
@@ -531,25 +531,25 @@ Everything goes in **one** transaction, in this order:
    then a `last_seen`/`level` update for templates known only from the cache
 3. `drain3_state` (changed services only, `version + 1`)
 4. `service_hours` (`n_minutes +=`), `hourly_counts` (`sum +=, sumsq +=`)
-5. `template_module_hours` (`count +=`), `template_modules` (`first_seen` LEAST,
+5. Only when `lab.record`: `lab_minute_counts` (`COPY`ed, element-wise `counts +=` of the
+   minutes closed since the last flush, so an hour built over many flushes, or
+   across a crash, holds each minute once; pending rows are kept by a failed flush)
+6. `template_module_hours` (`count +=`), `template_modules` (`first_seen` LEAST,
    `last_seen` GREATEST); filled for every closed minute, also before detection
    is enabled; `:unparsed` templates skipped; no module is `''`. Both are
    `COPY`ed into session temp tables (`ON COMMIT DELETE ROWS`) and upserted
    with one `INSERT … SELECT` each (`owner.copy_upsert`)
-4b. Only when `lab.record`: `lab_minute_counts` (`COPY`ed, element-wise `counts +=` of the
-   minutes closed since the last flush, so an hour built over many flushes, or
-   across a crash, holds each minute once; pending rows are kept by a failed flush)
-6. `alert_minutes` (insert, ignore conflicts)
-7. `alert_state` (upsert every key stepped since the last flush, so streaks
+7. `alert_minutes` (insert, ignore conflicts)
+8. `alert_state` (upsert every key stepped since the last flush, so streaks
    survive a restart), `alert_changes` (insert)
-8. `error_samples` (insert, then trim to the newest 20 per template)
-9. **Re-read hours** (`Owner.add_lane`, §9): per queued `LaneHour`, delete its
+9. `error_samples` (insert, then trim to the newest 20 per template)
+10. **Re-read hours** (`Owner.add_lane`, §9): per queued `LaneHour`, delete its
    (service, day, hour) from `service_hours`, `hourly_counts` and
    `template_module_hours` and insert the lane's rows (after every live write, so a
    live minute pending for that hour is replaced too); `error_samples` only when the
    hour had no `service_hours` row; then `retrain_runs.pos_ms` and `steps`
-10. `es_cursors` (upsert per selected index; delete rows of unselected ones)
-11. `worker_status` (`engine` row)
+11. `es_cursors` (upsert per selected index; delete rows of unselected ones)
+12. `worker_status` (`engine` row)
 
 The connection must be idle (`Owner.flush` raises otherwise: inside an open
 transaction the block would only be a savepoint). Pending rows are cleared
@@ -665,7 +665,8 @@ the Retrain page's **Rebuild** (and its re-read's last step) all call it.
      mean², 0))` (population σ over minutes; missing count rows are zeros),
      `days` = number of contributing days.
 3. Create partitions for today .. today + 2; drop partitions older than
-   `today − retention.counts_days`; delete `alert_changes` older than
+   `today − retention.counts_days` (`template_module_hours`: `module_hours_days`;
+   `lab_minute_counts`: `lab.days`); delete `alert_changes` older than
    `retention.alert_changes_days`.
 4. Save `settings.last_commit = {"at": <UTC ISO>, "today": <local date>}`.
 
@@ -879,7 +880,7 @@ service-scoped primary key.
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
 | `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
-| `lab_minute_counts` | `service, key, day, hour` (partitioned by `day`) | `counts int[60]`: per-minute counts of the local hour; key `*minutes` = 1 per observed minute | flush (only when `lab.record`) |
+| `lab_minute_counts`\* | `service, key, day, hour` | `counts int[60]`: per-minute counts of the local hour; key `*minutes` = 1 per observed minute | flush (only when `lab.record`) |
 | `lab_runs` | `id` | one bake-off run: site, test, status, window, seed, params, kinds, error | lab |
 | `lab_results` | `run_id, method, kind, scope` | knob, status, metrics, verdict, strength | lab |
 | `lab_episodes` | `run_id, method, service, key, start_minute` | `end_minute`, `peak_score`, `alerted_minutes` | lab |
@@ -913,6 +914,7 @@ day), at every local midnight and at every commit, always through today + 2.
 |---|---|
 | `service_hours`, `hourly_counts`, `alert_minutes` | 90 days (whole partitions dropped at commit) |
 | `template_module_hours` | 7 days (whole partitions dropped at commit) |
+| `lab_minute_counts` | `lab.days` (28) days (whole partitions dropped at commit) |
 | `alert_changes` | 365 days (rows deleted at commit) |
 | `error_samples` | newest 20 per template (trimmed at every flush) |
 | everything else (`templates`, `alert_state`, `commands`, `day_status`, `review_exclusions`, `documents`) | never pruned |

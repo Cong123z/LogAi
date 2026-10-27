@@ -6,7 +6,7 @@ from datetime import date
 import psycopg
 import pytest
 
-from logai2.db import ensure_partitions
+from logai2.db import ensure_partitions, put_setting
 from logai2.owner.owner import SQL, copy_upsert
 from tests.fakes import FakeSource
 from tests.test_owner import M, T0, lines, make, rows, run_minutes, tick
@@ -109,26 +109,25 @@ def test_old_day_not_written(conn, rec):
 
 
 def test_live_tables_unchanged(conn, cfg):
-    per = {0: 20, 1: 25, 2: 0, 3: 30}
-    hits = feed(per) + lines(1, 3, msg="ERROR timeout talking to db 5") + lines(3, 2, msg="boom", level="ERROR")
-
-    def snap():
-        conn.execute("UPDATE settings SET value = 'true'::jsonb WHERE key = 'detection_enabled'")
-        return {t: rows(conn, f"SELECT * FROM {t} ORDER BY 1, 2, 3") for t in
-                ("hourly_counts", "service_hours", "alert_changes", "alert_state")}
+    put_setting(conn, "detection_enabled", True)
+    for hour in (10, 11):
+        conn.execute("INSERT INTO baseline VALUES ('s', 's:T00001', 'weekday', %s, 1, 0.5, 5)", (hour,))
+    conn.commit()
+    hits = [h for m in range(6) for h in lines(m, 40, level="ERROR", moduleCode="M1")]
+    tables = ("hourly_counts", "service_hours", "alert_changes", "alert_state")
 
     def one(flag):
-        for t in ("hourly_counts", "service_hours", "alert_changes", "alert_state", "lab_minute_counts",
-                  "es_cursors", "templates", "services", "drain3_state"):
+        for t in tables + ("lab_minute_counts", "alert_minutes", "template_module_hours", "template_modules", "modules",
+                              "es_cursors", "templates", "services", "drain3_state"):
             conn.execute(f"DELETE FROM {t}")
         conn.commit()
         cfg.lab.record = flag
         run_minutes(conn, cfg, hits, T0 + 6 * MIN)
-        return {t: rows(conn, f"SELECT * FROM {t} ORDER BY 1, 2, 3") for t in
-                ("hourly_counts", "service_hours", "alert_changes", "alert_state")}
+        return {t: rows(conn, f"SELECT * FROM {t} ORDER BY 1, 2, 3") for t in tables}
 
     off = one(False)
     on = one(True)
+    assert off["alert_state"] and off["alert_changes"] and on["alert_state"] and on["alert_changes"]
     assert on == off
     assert rows(conn, "SELECT count(*) AS n FROM lab_minute_counts")[0]["n"] > 0
 

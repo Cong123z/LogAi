@@ -95,3 +95,22 @@ def test_lab_minute_counts_is_partitioned(conn):
     assert conn.execute("SELECT relkind FROM pg_class WHERE oid = to_regclass('lab_minute_counts')").fetchone()["relkind"] == "p"
     ensure_partitions(conn, date(2026, 11, 5), date(2026, 11, 5))
     assert conn.execute("SELECT to_regclass('lab_minute_counts_20261105') AS t").fetchone()["t"]
+
+
+def test_migration_010_on_an_empty_database(schema):
+    from tests.conftest import TEST_DSN
+    from logai2.db import connect
+    c = connect(TEST_DSN)
+    try:
+        c.execute(f"CREATE SCHEMA {schema}")
+        c.execute(f"SET search_path TO {schema}, public")
+        c.commit()
+        assert migrate(c)[-1] == 10
+        names = {r["tablename"] for r in c.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
+        assert LAB_TABLES <= names
+        c.rollback()
+    finally:
+        c.rollback()
+        c.execute(f"DROP SCHEMA {schema} CASCADE")
+        c.commit()
+        c.close()
