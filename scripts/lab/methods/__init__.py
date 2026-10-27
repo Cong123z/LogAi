@@ -84,3 +84,9 @@ def select(arg: str) -> list[str]:
     if bad:
         raise ValueError(f"unknown method: {', '.join(bad)}")
     return names
+
+
+from scripts.lab.methods.sigma import Sigma  # noqa: E402  (registered last: sigma imports Spec from here)
+
+METHODS["sigma"] = Sigma
+GROUPS["core"].append("sigma")

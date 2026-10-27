@@ -2,7 +2,7 @@ import gc
 import weakref
 import zlib
 from array import array
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import psycopg
 import pytest
@@ -64,6 +64,7 @@ def test_company_a_or_c_exits_2_before_connecting(monkeypatch, conn):
 
 
 def test_check_with_no_methods(monkeypatch, capsys):
+    monkeypatch.setattr(methods, "GROUPS", {"core": [], "heavy": []})     # bk04 registered sigma: empty the registry
     monkeypatch.setattr(labrun, "connect", lambda *a, **k: pytest.fail("connected"))
     assert labrun.main(["--site", "laptop", "--test", "B", "--methods", "all", "--days", "3", "--check"]) == 1
     assert "available" not in capsys.readouterr().out.replace("unavailable", "")
@@ -93,6 +94,24 @@ def test_run_end_to_end_with_failed_method(monkeypatch, conn, cfg):
     assert res[("const", "M1")]["status"] == "ok" and res[("const", "M1")]["metrics"]["n_keys"] == 1
     assert res[("const", "M3")]["metrics"]["n_keys"] == 1 and res[("const", "M3")]["metrics"]["n_minutes"] > 0
     assert res[("boom", "M1")]["status"] == "failed" and "nope" in res[("boom", "M1")]["metrics"]["error"]
+
+
+def test_first_fitted_day_gets_the_previous_days_model(monkeypatch, conn, cfg):
+    seen = []
+
+    class Rec(Const):
+        def fit(self, sd, day, cfg):
+            return {"day": day}
+
+        def day(self, model, prev, sd, key, day, knobs, cfg):
+            seen.append((day, model["day"], prev and prev["day"]))
+            return super().day(model, prev, sd, key, day, knobs, cfg)
+    monkeypatch.setattr(methods, "METHODS", {"const": Rec})
+    seed(conn)
+    labrun.run(args(), cfg, conn, conn)
+    first = min(seen)
+    assert first[0] == DAYS[0] and first[2] == DAYS[0] - timedelta(1)
+    assert all(prev == day - timedelta(1) for day, _, prev in seen)
 
 
 def test_short_window_splits_keys(monkeypatch, conn, cfg):
@@ -210,10 +229,10 @@ def test_streaming_order_prev_model_skip_and_no_references(monkeypatch, conn, cf
     assert {c[1] for c in adds} == {"*total", "busy"}                  # M2 (*error) is not served, so not walked
     assert [c[2] for c in adds] == sorted(c[2] for c in adds)          # ascending days, nothing out of order
     assert {c[2] for c in adds} == set(DAYS) - {DAYS[2]}
-    assert [e[1] for e in m.log if e[0] == "fit"] == DAYS
+    assert [e[1] for e in m.log if e[0] == "fit"] == [DAYS[0] - timedelta(1)] + DAYS     # day 1's prev is D-1's fit
     for _, key, day, prev in (e for e in m.log if e[0] == "day"):
         i = DAYS.index(day)
-        assert prev == (None if i == 0 or i == 3 else {"day": DAYS[i - 1]})   # day 3 follows the refused fit
+        assert prev == (None if i == 3 else {"day": day - timedelta(1)})   # day 3 follows the refused fit
     gc.collect()
     assert sink.refs and all(r() is None for r in sink.refs)           # the runner kept nothing
 
