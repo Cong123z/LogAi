@@ -55,11 +55,16 @@ def floor_for(key: str, level: str, cfg) -> int | None:
     return cfg.floors[cls] if cls else None
 
 
-def apply_d4(count, low, high, expected, key, level, cfg) -> bool:
-    """D4 (spec 6.2): high when count > high and count >= floor (no floor for INFO), or, on `*total` only, when
-    count < low and expected >= cfg.drop.min_mean. Score methods pass high = threshold and count = score."""
+def apply_d4(count, low, high, expected, key, level, cfg, score=None) -> bool:
+    """D4 (spec 6.2): the live alert shape of `baseline.judge`. High when the key has a floor (ERROR/WARN, `*error`)
+    and the upper test passes and count >= floor; INFO templates and `*total` are never high on the upper side.
+    On `*total` only: high when count < low and expected >= cfg.drop.min_mean (low/expected must be known).
+    Band methods: upper test is `count > high`. Score methods pass `score` and `high` = threshold: the upper test is
+    `score > high`, the floor test still uses the raw `count`. Live also needs a full baseline and not upper_only for
+    the drop; those are sigma-specific and bk04's sigma handles them through its own judge call, not here."""
     floor = floor_for(key, level, cfg)
-    if high is not None and count > high and (floor is None or count >= floor):
+    value = count if score is None else score
+    if floor is not None and high is not None and value > high and count >= floor:
         return True
     return (key == "*total" and low is not None and expected is not None
             and count < low and expected >= cfg.drop.min_mean)

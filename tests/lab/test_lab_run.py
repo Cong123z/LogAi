@@ -113,14 +113,19 @@ def d4cfg(cfg):
 
 def test_apply_d4_truth_table(d4cfg):
     c = d4cfg
-    f = lambda count, low, high, exp, key, level: apply_d4(count, low, high, exp, key, level, c)   # noqa: E731
+    f = lambda count, low, high, exp, key, level, **kw: apply_d4(count, low, high, exp, key, level, c, **kw)   # noqa: E731
     assert f(6, 0, 5, 3, "t", "ERROR") and not f(5, 0, 5, 3, "t", "ERROR")          # count > high
     assert not f(4, 0, 3, 3, "t", "ERROR") and f(5, 0, 3, 3, "t", "FATAL")           # error floor 5
     assert not f(9, 0, 3, 3, "t", "WARN") and f(10, 0, 3, 3, "t", "WARNING")          # warn floor 10
-    assert f(1, 0, 0, 0, "t", "INFO") and not f(0, 0, 0, 0, "t", "INFO")             # INFO: no floor
+    assert not f(1000, 0, 0, 0, "t", "INFO")                                          # INFO template: never high
+    assert not f(1000, 0, 0, 0, "*total", "INFO")                                     # *total: never high on the upper side
     assert not f(4, 0, 3, 3, "*error", "INFO") and f(5, 0, 3, 3, "*error", "INFO")   # key level beats level
     assert f(10, 12, 100, 30, "*total", "INFO")                                      # drop: below low, expected >= 20
     assert not f(10, 12, 100, 19, "*total", "INFO")                                  # expected < 20
     assert not f(10, 12, 100, 30, "t", "INFO")                                       # drop only on *total
     assert not f(13, 12, 100, 30, "*total", "INFO")                                  # not below low
     assert not f(10, None, None, None, "*total", "INFO")                             # no band: nothing
+    # score method: score > threshold, floor tested on the raw count
+    assert f(4, None, 1.0, None, "t", "ERROR", score=1.5) is False                   # count below floor 5
+    assert f(5, None, 1.0, None, "t", "ERROR", score=1.5) and not f(50, None, 1.0, None, "t", "ERROR", score=1.0)
+    assert not f(50, None, 1.0, None, "t", "INFO", score=9.0)                        # INFO: never
