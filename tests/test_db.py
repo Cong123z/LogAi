@@ -83,12 +83,41 @@ LAB_TABLES = {"lab_minute_counts", "lab_runs", "lab_results", "lab_episodes", "l
 def test_migration_010_creates_lab_tables_on_009(conn):
     conn.execute("DROP TABLE lab_minute_counts, lab_results, lab_episodes, lab_bands, lab_sweeps, "
                  "lab_choices, lab_incidents, lab_runs CASCADE")
-    conn.execute("DELETE FROM schema_migrations WHERE version = 10")
-    assert migrate(conn) == [10]
+    conn.execute("DELETE FROM schema_migrations WHERE version IN (10, 11)")
+    assert migrate(conn) == [10, 11]
     names = {r["tablename"] for r in conn.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
     assert LAB_TABLES <= names
-    assert conn.execute("SELECT max(version) AS v FROM schema_migrations").fetchone()["v"] == 10
+    assert conn.execute("SELECT max(version) AS v FROM schema_migrations").fetchone()["v"] == 11
+
+
+def test_migration_011_lab_knob_and_daily_bands(conn):
+    conn.execute("DROP TABLE lab_episodes, lab_bands")
+    conn.execute("DELETE FROM schema_migrations WHERE version = 11")
+    conn.execute("CREATE TABLE lab_episodes (run_id bigint REFERENCES lab_runs ON DELETE CASCADE, method text, "
+                 "service text, key text, start_minute int, end_minute int, peak_score double precision, "
+                 "alerted_minutes int, PRIMARY KEY (run_id, method, service, key, start_minute))")
+    conn.execute("CREATE TABLE lab_bands (run_id bigint, method text, service text, key text, step smallint, "
+                 "minute int, count int, expected real, low real, high real, high_flag boolean)")
+    assert migrate(conn) == [11]
+    cols = lambda t: {r["column_name"]: r for r in conn.execute(     # noqa: E731
+        "SELECT column_name, is_nullable FROM information_schema.columns WHERE table_schema = current_schema() "
+        "AND table_name = %s", (t,))}
+    assert cols("lab_episodes")["knob"]["is_nullable"] == "NO"
+    b = cols("lab_bands")
+    assert {"day", "step", "counts", "expected", "low", "high", "flags", "knob"} <= set(b) and "minute" not in b
+    pk = lambda t: [r["attname"] for r in conn.execute(                # noqa: E731
+        "SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+        "WHERE i.indrelid = %s::regclass AND i.indisprimary ORDER BY array_position(i.indkey::int[], a.attnum::int)", (t,))]
+    assert pk("lab_episodes") == ["run_id", "method", "knob", "service", "key", "start_minute"]
+    assert pk("lab_bands") == ["run_id", "method", "knob", "service", "key", "day"]
+    rid = conn.execute("INSERT INTO lab_runs (site, test, code_version, window_from, window_to, tune_to, seed, params) "
+                       "VALUES ('laptop', 'B', 'x', '2026-10-01', '2026-10-02', '2026-10-01', 1, '{}') RETURNING id"
+                       ).fetchone()["id"]
+    conn.execute("INSERT INTO lab_bands VALUES (%s, 'm', 3.0, 's', 'k', '2026-10-01', 5, %s, %s, %s, %s, %s)",
+                 (rid, [1], [1.0], [0.0], [2.0], [False]))
+    conn.execute("DELETE FROM lab_runs")
+    assert conn.execute("SELECT count(*) AS n FROM lab_bands").fetchone()["n"] == 0     # cascade
 
 
 def test_lab_minute_counts_is_partitioned(conn):
@@ -105,7 +134,7 @@ def test_migration_010_on_an_empty_database(schema):
         c.execute(f"CREATE SCHEMA {schema}")
         c.execute(f"SET search_path TO {schema}, public")
         c.commit()
-        assert migrate(c)[-1] == 10
+        assert migrate(c)[-1] == 11
         names = {r["tablename"] for r in c.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
         assert LAB_TABLES <= names
         c.rollback()

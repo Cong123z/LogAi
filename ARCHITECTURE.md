@@ -863,7 +863,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs, 009 index services, 010 lab), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs, 009 index services, 010 lab, 011 lab knob), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -883,9 +883,9 @@ service-scoped primary key.
 | `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
 | `lab_minute_counts`\* | `service, key, day, hour` | `counts int[60]`: per-minute counts of the local hour; key `*minutes` = 1 per observed minute | flush (only when `lab.record`); a re-read lane hour always deletes its rows and writes its own when `lab.record` |
 | `lab_runs` | `id` | one bake-off run: site, test, status, window, seed, params, kinds, error | lab |
-| `lab_results` | `run_id, method, kind, scope` | knob, status, metrics, verdict, strength | lab |
-| `lab_episodes` | `run_id, method, service, key, start_minute` | `end_minute`, `peak_score`, `alerted_minutes` | lab |
-| `lab_bands` | `run_id, method, service, key, step, minute` | `count`, `expected`, `low`, `high`, `high_flag` | lab |
+| `lab_results` | `run_id, method, kind, scope` | knob (NULL from the scoring sink), status, metrics, verdict, strength. The scoring sink writes one row per method × kind × service: `metrics` = `{n_keys, no_band_share, knobs: {knob: {tune, test}}, days: {knob: {date: D}}}` (coverage, Winkler interval score at α 0.005 normalized by the key's mean count, sharpness, MASE with its naive (7d/1d), alert rate, flap share; `days` are the test-part day sums for the bootstrap) | lab |
+| `lab_episodes` | `run_id, method, knob, service, key, start_minute` | `end_minute` (exclusive), `peak_score`, `alerted_minutes`; every episode of every knob, normal or not (migration 011) | lab (`score.ScoreSink.end`) |
+| `lab_bands` | `run_id, method, knob, service, key, day` | one row per drawn key and day (migration 011): `step` 1 (1440 values, a day with a high flag at that knob) or 5 (288 five-minute means; counts = sum ÷ 5 rounded, flag = any), arrays `counts`, `expected`, `low`, `high` (NULL for score methods), `flags`; drawn keys = per kind the 3 busiest walked keys plus up to 5 keys named by incidents | lab (`score.ScoreSink.end`) |
 | `lab_sweeps` | `run_id, method, kind, knob, part` | `metrics` on tune and test | lab |
 | `lab_choices` | `kind` | chosen `method`, `knob`, `run_id`, `note` | lab |
 | `lab_incidents` | `id` | injected or known incidents: source, service, key, type, size, start/end minute, meta | lab |

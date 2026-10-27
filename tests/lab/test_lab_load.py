@@ -1,7 +1,7 @@
 from datetime import date, datetime
 
 from logai2.timeutil import TZ
-from scripts.lab.data import UNOBSERVED, minute_at
+from scripts.lab.data import UNOBSERVED, Incident, minute_at
 from scripts.lab.load import load_service, services
 from tests.test_links import doc, link, tmpl
 
@@ -79,3 +79,24 @@ def test_load_runs_read_only(conn):
     sd = load_service(conn, "s", D1, D2, 3)
     assert sd.minutes["A"][D1][0] == 3
     conn.rollback()
+
+
+def test_load_incidents_of_the_service_and_window(conn):
+    fill(conn)
+    lo, hi = minute_at(D1, 0), minute_at(D2, 0) + 1440
+    rows = [("s", "A", lo + 10, lo + 20), ("s", None, hi - 5, hi + 50),            # inside; straddles the window end
+            ("s", "B", lo - 10, lo - 5),                                            # ends 5 min before the window
+            ("s", "B", lo - 100, lo - 50),                                          # too early to matter
+            ("s", "B", hi + 20, hi + 30), ("t", "A", lo + 10, lo + 20)]             # after; another service
+    for svc, key, a, b in rows:
+        conn.execute("INSERT INTO lab_incidents (source, service, key, type, start_minute, end_minute) "
+                     "VALUES ('synthetic', %s, %s, 'spike', %s, %s)", (svc, key, a, b))
+    conn.commit()
+    sd = load_service(conn, "s", D1, D2, 3)
+    assert sorted(sd.incidents, key=lambda i: i.start) == [
+        Incident("B", lo - 10, lo - 5, "synthetic"), Incident("A", lo + 10, lo + 20, "synthetic"),
+        Incident(None, hi - 5, hi + 50, "synthetic")]
+    assert sd.incidents[0].start >= 0
+    conn.execute("DELETE FROM lab_incidents")
+    conn.commit()
+    assert load_service(conn, "s", D1, D2, 3).incidents == []

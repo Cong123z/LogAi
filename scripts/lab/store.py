@@ -32,18 +32,20 @@ def clear_results(conn, run_id, method, scope) -> None:
         conn.execute("DELETE FROM lab_results WHERE run_id = %s AND method = %s AND scope = %s", (run_id, method, scope))
 
 
-def put_episodes(conn, run_id, method, service, key, episodes) -> None:
+def put_episodes(conn, run_id, method, knob, service, key, episodes) -> None:
     """episodes: rows (start, end, peak, alerted)."""
     with conn.transaction(), conn.cursor() as cur:
-        cur.executemany("INSERT INTO lab_episodes VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        [(run_id, method, service, key, *e) for e in episodes])
+        cur.executemany("INSERT INTO lab_episodes (run_id, method, knob, service, key, start_minute, end_minute, "
+                        "peak_score, alerted_minutes) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        [(run_id, method, knob, service, key, *e) for e in episodes])
 
 
-def put_bands(conn, run_id, method, service, key, step, rows) -> None:
-    """rows: (minute, count, expected, low, high, flag)."""
+def put_bands(conn, run_id, method, knob, service, key, rows) -> None:
+    """rows: (day, step, counts, expected, low, high, flags), one per day; expected/low/high None for score methods."""
     with conn.transaction(), conn.cursor() as cur:
-        cur.executemany("INSERT INTO lab_bands VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                        [(run_id, method, service, key, step, *r) for r in rows])
+        cur.executemany("INSERT INTO lab_bands (run_id, method, knob, service, key, day, step, counts, expected, low, "
+                        "high, flags) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        [(run_id, method, knob, service, key, *r) for r in rows])
 
 
 def put_sweep(conn, run_id, method, kind, knob, part, metrics) -> None:

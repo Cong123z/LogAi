@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from logai2.owner.baseline import KEY_LEVEL
@@ -23,6 +23,14 @@ def minute_at(day: date, slot: int) -> int:
     return int((datetime.combine(day, time(), TZ) + timedelta(minutes=slot)).timestamp() // 60)
 
 
+@dataclass(frozen=True)
+class Incident:
+    key: str | None         # None = the whole service
+    start: int              # minutes; end is exclusive
+    end: int
+    source: str
+
+
 @dataclass
 class ServiceData:
     service: str
@@ -36,6 +44,7 @@ class ServiceData:
     levels: dict[str, str]                            # template_id -> level
     first_seen: dict[str, int]                        # template_id -> minute
     docs: dict[str, list[str]]                        # 'doc:<id>' -> linked template ids
+    incidents: list[Incident] = field(default_factory=list)   # lab_incidents of the service touching the window
 
     def count(self, key: str, minute: int) -> int:
         day, slot = slot_of(minute)
