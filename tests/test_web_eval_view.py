@@ -107,10 +107,11 @@ def test_keys(conn, client):
 
 def test_series_steps_default_knob_episodes_nulls(conn, client):
     rid = seed_series(conn)
-    r = client.get(f"/api/eval/series?run={rid}&service=pay&key=*total&from=2026-10-10&to=2026-10-11").get_json()
+    r = client.get(f"/api/eval/series?run={rid}&kind=M1&service=pay&key=*total&from=2026-10-10&to=2026-10-11").get_json()
     sg = r["sigma"]
     assert sg["knob"] == 3.0 and len(sg["points"]) == 288 + 1440
     p = sg["points"]
+    assert p[0]["t"] == "2026-10-09T17:00:00Z"        # 2026-10-10 00:00 local (Asia/Ho_Chi_Minh, UTC+7)
     assert p[0]["t"] == iso(minute(D1) * 60) and p[1]["t"] == iso(minute(D1, 5) * 60)
     assert p[0]["expected"] is None and p[0]["low"] == 0.5 and p[1]["flag"] is True
     assert p[1]["t"] != p[0]["t"] and p[288]["count"] == 0
@@ -119,14 +120,14 @@ def test_series_steps_default_knob_episodes_nulls(conn, client):
     assert sg["episodes"][0]["start"].endswith("Z")
     # no scope row for ewma: first grid knob with bands; score-less band has null expected
     assert r["ewma"]["knob"] == 0.1 and r["ewma"]["points"][5]["expected"] is None
-    one = client.get(f"/api/eval/series?run={rid}&service=pay&key=*total&methods=sigma&knob=2&from=2026-10-10&to=2026-10-10").get_json()
+    one = client.get(f"/api/eval/series?run={rid}&kind=M1&service=pay&key=*total&methods=sigma&knob=2&from=2026-10-10&to=2026-10-10").get_json()
     assert list(one) == ["sigma"] and one["sigma"]["knob"] == 2.0 and len(one["sigma"]["points"]) == 288
     json.dumps(r, allow_nan=False)
 
 
 def test_series_window_cap_and_missing(conn, client):
     rid = seed_series(conn)
-    q = f"/api/eval/series?run={rid}&service=pay&key=*total"
+    q = f"/api/eval/series?run={rid}&kind=M1&service=pay&key=*total"
     assert client.get(q + "&from=2026-10-01&to=2026-10-08").status_code == 400
     assert client.get(q + "&from=2026-10-01&to=2026-10-07").status_code == 200
     assert client.get(q + "&from=2026-10-01").status_code == 400
@@ -146,6 +147,7 @@ def test_sweep(conn, client):
 
 def test_choices(conn, client):
     rid = run(conn)
+    result(conn, rid, "ewma", "M1", "all", 0.3, {})
     counts = lambda: [conn.execute(f"SELECT count(*) AS n FROM {t}").fetchone()["n"]
                       for t in ("alert_state", "baseline", "hourly_counts")]
     before = counts()
@@ -156,12 +158,29 @@ def test_choices(conn, client):
     assert len(rows) == 1 and rows[0]["knob"] == 0.1 and rows[0]["note"] == "y" and rows[0]["run_id"] == rid
     for bad in ({"kind": "M9"}, {"method": "nope"}, {"knob": 0.2}, {"kind": None}):
         assert client.post("/api/eval/choices", json={**ok, **bad}).status_code == 400
+    assert client.post("/api/eval/choices", json={**ok, "kind": "M2"}).status_code == 400    # no M2 result for ewma
+    assert client.post("/api/eval/choices", json={**ok, "note": "x" * 501}).status_code == 400
     assert client.post("/api/eval/choices", json={**ok, "run_id": 999}).status_code == 404
     assert counts() == before
 
 
 def test_unknown_run_404(client):
     for u in ("scoreboard?run=999", "keys?run=999&kind=M1", "sweep?run=999&kind=M1", "scoreboard?run=x",
-              "series?run=999&service=a&key=b&from=2026-10-01&to=2026-10-02"):
+              "series?run=999&kind=M1&service=a&key=b&from=2026-10-01&to=2026-10-02"):
         assert client.get("/api/eval/" + u).status_code == 404, u
     assert client.get("/api/eval/scoreboard").status_code == 400
+
+
+def test_series_chosen_knob_is_per_kind(conn, client):
+    rid = run(conn)
+    result(conn, rid, "sigma", "M1", "all", 3.0, {})
+    result(conn, rid, "sigma", "M2", "all", 2.0, {})
+    band(conn, rid, "sigma", 3.0, D1, 5)
+    band(conn, rid, "sigma", 2.0, D1, 5)
+    q = f"/api/eval/series?run={rid}&service=pay&key=*total&from=2026-10-10&to=2026-10-10&methods=sigma&kind="
+    assert client.get(q + "M1").get_json()["sigma"]["knob"] == 3.0
+    assert client.get(q + "M2").get_json()["sigma"]["knob"] == 2.0
+    assert client.get(q + "M9").status_code == 400
+    assert client.get(q[:-5]).status_code == 400
+    assert client.get(f"/api/eval/keys?run={rid}&kind=M9").status_code == 400
+    assert client.get(f"/api/eval/sweep?run={rid}&kind=M9").status_code == 400

@@ -559,7 +559,7 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.get("/api/eval/series")
     def eval_series():
         run, a = lab_run(), request.args
-        for name in ("service", "key", "from", "to"):
+        for name in ("kind", "service", "key", "from", "to"):
             if not a.get(name):
                 eval_bad_param(name)
         try:
@@ -568,7 +568,7 @@ def create_app(cfg: AppConfig) -> Flask:
         except ValueError:
             raise eval_view.BadRequest("from/to must be ISO dates and knob a number") from None
         methods = [m for m in a.get("methods", "").split(",") if m] or None
-        return jsonify(eval_view.series(conn(), run, iso, a["service"], a["key"], methods, knob, d_from, d_to))
+        return jsonify(eval_view.series(conn(), run, iso, a["kind"], a["service"], a["key"], methods, knob, d_from, d_to))
 
     @app.get("/api/eval/sweep")
     def eval_sweep():

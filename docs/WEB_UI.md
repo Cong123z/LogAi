@@ -896,13 +896,13 @@ is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `nu
 - `GET /api/eval/keys?run=&kind=`: `[{service, key, kind, methods}]` of the drawn keys. The lab stores no per-key kind, so it
   is rebuilt from the key name (`*total` M1, `*error` M2, `*mix` M7, `doc:` M5) and, for template keys, the mean drawn count
   (>= 2 M3, else M4; M6 keys read as M4).
-- `GET /api/eval/series?run=&service=&key=&from=&to=[&methods=a,b][&knob=]`: `{method: {knob, points: [{t, count, expected,
+- `GET /api/eval/series?run=&kind=&service=&key=&from=&to=[&methods=a,b][&knob=]`: `{method: {knob, points: [{t, count, expected,
   low, high, flag}], episodes: [{start_minute, end_minute, start, end, peak_score, alerted_minutes}]}}`. `from`/`to` are
-  inclusive local days, at most 7 (400 beyond). Default knob: the method's `scope='all'` knob, else the first grid knob
+  inclusive local days, at most 7 (400 beyond). `kind` (M1 to M7, required; the page knows it from `/keys`) picks the chosen knob. Default knob: the method's `scope='all'` knob for that kind, else the first grid knob
   that has bands. Step-5 days give 288 points, step-1 days 1440.
 - `GET /api/eval/sweep?run=&kind=`: `{method: [{knob, chosen, tune, test}]}`, knobs ascending.
 - `POST /api/eval/choices` `{kind, method, knob, run_id, note}`: upserts `lab_choices` and returns it. 400 unless `kind` is
-  M1 to M7, `method` is in that run and `knob` is in its grid (`lab_runs.params.knobs`); 404 for an unknown `run_id`.
+  M1 to M7, `method` is in that run with a `scope='all'` result for that kind, `knob` is in its grid (`lab_runs.params.knobs`) and `note` is at most 500 characters; an unknown `kind` is also 400 on keys, sweep and series; 404 for an unknown `run_id`.
 
 ### Commands
 

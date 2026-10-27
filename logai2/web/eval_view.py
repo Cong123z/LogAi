@@ -94,7 +94,14 @@ def key_kind(service_key: str, mean: float) -> str:
     return "M3" if mean >= 2 else "M4"
 
 
+def check_kind(kind) -> str:
+    if kind not in KINDS:
+        raise BadRequest("kind must be one of M1 to M7")
+    return kind
+
+
 def keys(conn, run: dict, kind: str) -> list[dict]:
+    check_kind(kind)
     out: dict[tuple, dict] = {}
     for r in conn.execute("SELECT method, service, key, avg((SELECT avg(c) FROM unnest(counts) c)) AS mean "
                           "FROM lab_bands WHERE run_id = %s GROUP BY method, service, key", (run["id"],)):
@@ -105,9 +112,9 @@ def keys(conn, run: dict, kind: str) -> list[dict]:
     return [x for x in res if x["kind"] == kind]
 
 
-def chosen_knob(conn, run: dict, method: str) -> float | None:
-    r = conn.execute("SELECT knob FROM lab_results WHERE run_id = %s AND method = %s AND scope = 'all' "
-                     "AND knob IS NOT NULL LIMIT 1", (run["id"], method)).fetchone()
+def chosen_knob(conn, run: dict, method: str, kind: str) -> float | None:
+    r = conn.execute("SELECT knob FROM lab_results WHERE run_id = %s AND method = %s AND kind = %s AND scope = 'all' "
+                     "AND knob IS NOT NULL", (run["id"], method, kind)).fetchone()
     return r["knob"] if r else None
 
 
@@ -115,14 +122,15 @@ def day_start(d: date) -> int:
     return int(datetime.combine(d, time(), TZ).timestamp() // 60)
 
 
-def series(conn, run: dict, iso, service: str, key: str, methods: list[str] | None, knob: float | None,
+def series(conn, run: dict, iso, kind: str, service: str, key: str, methods: list[str] | None, knob: float | None,
            d_from: date, d_to: date) -> dict:
+    check_kind(kind)
     if d_to < d_from or (d_to - d_from).days + 1 > MAX_DAYS:
         raise BadRequest(f"the window must be 1 to {MAX_DAYS} days")
     grids = run["params"].get("knobs", {})
     out = {}
     for m in methods or order(run, grids):
-        k = knob if knob is not None else chosen_knob(conn, run, m)
+        k = knob if knob is not None else chosen_knob(conn, run, m, kind)
         rows = []
         for cand in ([k] if k is not None else grids.get(m, [])):   # no chosen knob: the first grid knob with bands
             rows = conn.execute("SELECT day, step, counts, expected, low, high, flags FROM lab_bands WHERE run_id = %s "
@@ -152,6 +160,7 @@ def series(conn, run: dict, iso, service: str, key: str, methods: list[str] | No
 
 
 def sweep(conn, run: dict, kind: str) -> dict:
+    check_kind(kind)
     chosen = {r["method"]: r["knob"] for r in conn.execute(
         "SELECT method, knob FROM lab_results WHERE run_id = %s AND kind = %s AND scope = 'all'", (run["id"], kind))}
     by: dict[str, dict[float, dict]] = {}
@@ -164,17 +173,21 @@ def sweep(conn, run: dict, kind: str) -> dict:
 
 def choose(conn, payload: dict[str, Any]) -> dict:
     kind, method, note = payload.get("kind"), payload.get("method"), payload.get("note")
-    if kind not in KINDS:
-        raise BadRequest("kind must be one of M1 to M7")
+    check_kind(kind)
     run = get_run(conn, payload.get("run_id"))
     grid = run["params"].get("knobs", {}).get(method) if isinstance(method, str) else None
     if grid is None:
         raise BadRequest("method is not known in that run")
+    if not conn.execute("SELECT 1 FROM lab_results WHERE run_id = %s AND method = %s AND kind = %s AND scope = 'all'",
+                        (run["id"], method, kind)).fetchone():
+        raise BadRequest("that run has no result for this method and kind")
     knob = payload.get("knob")
     if isinstance(knob, bool) or not isinstance(knob, (int, float)) or float(knob) not in [float(g) for g in grid]:
         raise BadRequest("knob is not in the method's grid")
     if note is not None and not isinstance(note, str):
         raise BadRequest("note must be text")
+    if note and len(note) > 500:
+        raise BadRequest("note must be at most 500 characters")
     conn.execute("INSERT INTO lab_choices (kind, method, knob, run_id, note) VALUES (%s, %s, %s, %s, %s) "
                  "ON CONFLICT (kind) DO UPDATE SET method = EXCLUDED.method, knob = EXCLUDED.knob, "
                  "run_id = EXCLUDED.run_id, note = EXCLUDED.note, chosen_at = now()",
