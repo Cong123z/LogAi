@@ -3,7 +3,7 @@
 Status: **approved for build** (2026-10-26). Plan: `docs/plans/2026-10-26-baseline-bakeoff.md`.
 Mockup (2 boards: Evaluation, Calibrate): https://claude.ai/artifact/EXqQaUkx4aAZTsEmj1A2be.
 Research behind the method choice: 40 candidates surveyed (statistics, control charts, forecasting,
-ML, foundation models, log-sequence models), cut to the roster below.
+ML, foundation models, log-sequence models), cut to the roster below. Why each method was chosen and how it fits our problem: `docs/specs/2026-10-26-bakeoff-methods.md`.
 Everything here is lab-only: **live alerting does not change**. Using a chosen method in production is a
 separate, later spec.
 
