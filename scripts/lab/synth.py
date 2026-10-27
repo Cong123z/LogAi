@@ -7,6 +7,7 @@ import hashlib
 import json
 import random
 import re
+import sys
 import time
 from array import array
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from pathlib import Path
 import yaml
 
 from logai2.config import load_config
-from logai2.db import MIGRATIONS_DIR, connect, ensure_partitions, migrate
+from logai2.db import connect, ensure_partitions, migrate
 from logai2.links import level_class
 from logai2.timeutil import TZ
 from scripts.lab.data import minute_at
@@ -53,8 +54,8 @@ class Generated:
 def poisson(rng: random.Random, lam: float) -> int:
     if lam < 1e-9:
         return 0
-    if lam >= 30:   # ponytail: normal approximation above 30 (error well under 1 %); exact sampler if it matters
-        return max(0, int(rng.gauss(lam, lam ** 0.5) + 0.5))
+    if lam >= 30:   # exact: a sum of independent Poissons
+        return poisson(rng, lam / 2) + poisson(rng, lam - lam / 2)
     u, p = rng.random(), exp(-lam)
     c, n = p, 0
     while u > c and n < 200:
@@ -66,34 +67,53 @@ def poisson(rng: random.Random, lam: float) -> int:
 
 def draw(rng: random.Random, lam: float, nb: float) -> int:
     """Poisson, or gamma-Poisson with variance/mean = 1 + nb (nb = 0: plain Poisson)."""
-    if nb > 0 and lam >= 0.05:   # below that the overdispersion is invisible
+    if nb > 0 and lam > 0:
         lam = rng.gammavariate(lam / nb, nb)
     return poisson(rng, lam)
 
 
-def _place_incidents(rng, sv_name, tpl, specs, days, d_start):
+PLACE_TRIES = 50
+
+
+def _place_incidents(rng, name, tpl, specs, days, d_start, expected, gap_minutes):
+    """expected(template or None for the service total, d, lo, hi) = expected count in minutes [lo, hi) of day d."""
+    ids = {t["template_id"] for t in tpl}
     busy = sorted(tpl, key=lambda t: -sum(t["mean"]))
     busy = busy[:max(1, len(busy) // 5)]
     out: list[dict] = []
     for sp in specs:
-        every, length = int(sp["every_days"]), int(sp["minutes"])
+        every, length, typ = int(sp["every_days"]), int(sp["minutes"]), sp["type"]
+        if not 1 <= length < MIN_DAY:
+            raise ValueError(f"incident minutes must be 1..1439: {sp}")
+        if sp.get("key") is not None and typ in ("spike", "ramp", "level_shift") and sp["key"] not in ids:
+            raise ValueError(f"incident key {sp['key']!r} is not a template of the service: {sp}")
+        if sp.get("key") is not None and typ == "drop" and sp["key"] != "*total":
+            raise ValueError(f"drop works on *total only: {sp}")
         for j in range(1, days // every + 1):
-            for _ in range(20):
-                start = d_start + (j * every - 1) * MIN_DAY + rng.randrange(MIN_DAY - length)
-                if all(start + length <= o["start_minute"] or o["end_minute"] <= start for o in out):
+            d = j * every - 1
+            for _ in range(PLACE_TRIES):
+                lo = rng.randrange(MIN_DAY - length)
+                start = d_start[d] + lo
+                if any(m in gap_minutes[d] for m in range(lo, lo + length)):
+                    continue
+                if any(start < o["end_minute"] and o["start_minute"] < start + length for o in out):
+                    continue
+                key, meta = sp.get("key"), None
+                if typ == "drop":
+                    key, targets, floor = "*total", [None], 50
+                elif typ == "mix_swap":
+                    a, b = rng.sample([t["template_id"] for t in tpl], 2)
+                    key, meta, targets, floor = None, {"a": a, "b": b}, [info for info in tpl if info["template_id"] in (a, b)], 10
+                else:
+                    key = key or rng.choice(busy)["template_id"]
+                    targets, floor = [t for t in tpl if t["template_id"] == key], 10
+                if all(expected(t, d, lo, lo + length) >= floor for t in targets):
+                    out.append({"service": name, "type": typ, "key": key, "size": sp.get("size"), "meta": meta,
+                                "start_minute": start, "end_minute": start + length})
                     break
             else:
-                continue
-            typ, meta, key = sp["type"], None, sp.get("key")
-            if typ == "drop":
-                key = "*total"
-            elif typ == "mix_swap":
-                a, b = rng.sample([t["template_id"] for t in tpl], 2)
-                key, meta = None, {"a": a, "b": b}
-            elif key not in {t["template_id"] for t in tpl}:
-                key = rng.choice(busy)["template_id"]
-            out.append({"service": sv_name, "type": typ, "key": key, "size": sp.get("size"), "meta": meta,
-                        "start_minute": start, "end_minute": start + length})
+                print(f"warning: {name}: no window for {typ} on day {d} after {PLACE_TRIES} tries; skipped",
+                      file=sys.stderr)
     return sorted(out, key=lambda o: o["start_minute"])
 
 
@@ -106,6 +126,13 @@ def generate(world: dict, scenario: dict, end: date) -> Generated:
     nbw = sc["dispersion"] == "world"
     sv_cfg, df, hol, nt = sc["services"], sc["day_factors"], sc["holiday"], sc["new_templates"]
     src_names = sorted(world["services"])
+    jitter = [rng.uniform(-df["jitter"], df["jitter"]) for _ in days]      # one per day, shared by the services
+    facs = []
+    for d, day in enumerate(days):
+        dayf = df["weekday"] * (1 + jitter[d]) if day.weekday() < 5 else df["sat"] if day.weekday() == 5 else df["sun"]
+        facs.append(dayf * (hol["factor"] if hol["start_day"] <= d < hol["start_day"] + hol["length"] else 1.0))
+    gap_minutes = [{i for g in sc["gaps"] if g["day"] == d for i in range(g["hour_from"] * 60, g["hour_to"] * 60)}
+                   for d in range(n_days)]
     out = []
     for si in range(sv_cfg["count"]):
         name = f"synth{si + 1}"
@@ -114,7 +141,11 @@ def generate(world: dict, scenario: dict, end: date) -> Generated:
         tpl = [base[i] for i in keep]
         scale, phase = sv_cfg["scale"][si % len(sv_cfg["scale"])], sv_cfg["phase_minutes"][si % len(sv_cfg["phase_minutes"])]
         hour_of = [((i + phase) % MIN_DAY) // 60 for i in range(MIN_DAY)]
-        incs = _place_incidents(rng, name, tpl, sc["incidents"], n_days, window_start)
+        def expected(t, d, lo, hi, scale=scale, hour_of=hour_of):
+            k = scale * facs[d] * (1 + sc["trend"]["per_week"] * d / 7)
+            return k * sum(sum(x["mean"][hour_of[i]] for i in range(lo, hi)) if t is None or x is t else 0
+                           for x in (tpl if t is None else [t]))
+        incs = _place_incidents(rng, name, tpl, sc["incidents"], n_days, d_start, expected, gap_minutes)
         info = {t["template_id"]: t for t in tpl}
         # rate table: template -> (mean per hour, extra variance ratio per hour)
         rates = {t["template_id"]: (t["mean"], [max(v / m - 1, 0.0) if nbw and m > 0 else 0.0
@@ -125,14 +156,9 @@ def generate(world: dict, scenario: dict, end: date) -> Generated:
         born: dict[str, int] = {}
         for d, day in enumerate(days):
             d0 = d_start[d]
-            if day.weekday() < 5:
-                dayf = df["weekday"] * (1 + rng.uniform(-df["jitter"], df["jitter"]))
-            else:
-                dayf = df["sat"] if day.weekday() == 5 else df["sun"]
-            holf = hol["factor"] if hol["start_day"] <= d < hol["start_day"] + hol["length"] else 1.0
-            fac = dayf * holf
+            fac = facs[d]
             for n in range(nt["per_service_day"]):
-                tid = f"{name}:N{d}{n}"
+                tid = f"{name}:N{d:02d}{n:02d}"
                 words = rng.choice(base)["text"].split()
                 at = rng.choice([i for i, w in enumerate(words) if not w.startswith("<")] or range(len(words)))
                 words[at] = f"x{rng.randrange(10 ** 6)}"
@@ -141,10 +167,8 @@ def generate(world: dict, scenario: dict, end: date) -> Generated:
                                   "level": "ERROR" if rng.random() < nt["error_share"] else "INFO"})
                 counts[tid] = {dd: array("i", [0]) * MIN_DAY for dd in range(d)}
             obs = array("i", [1]) * MIN_DAY
-            for g in sc["gaps"]:
-                if g["day"] == d:
-                    for i in range(g["hour_from"] * 60, g["hour_to"] * 60):
-                        obs[i] = 0
+            for i in gap_minutes[d]:
+                obs[i] = 0
             counts["*minutes"][d] = obs
             tot, cls = array("i", [0]) * MIN_DAY, {c: array("i", [0]) * MIN_DAY for c in DERIVED[1:]}
             today = [o for o in incs if o["end_minute"] > d0 and o["start_minute"] < d0 + MIN_DAY]
@@ -218,11 +242,7 @@ def write(conn, schema: str, gen: Generated) -> None:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
         conn.execute(f"CREATE SCHEMA {schema}")
         conn.commit()
-        conn.execute(f"SET search_path TO {schema}, public")    # public: pgvector
-        conn.commit()
-        # migrate() looks schema_migrations up on the whole path: with a migrated `public` it would skip everything
-        conn.execute((MIGRATIONS_DIR / "001_init.sql").read_text())
-        conn.execute("INSERT INTO schema_migrations (version) VALUES (1)")
+        conn.execute(f"SET search_path TO {schema}, {old}")    # the caller's path stays behind (pgvector lives in public)
         conn.commit()
         migrate(conn)
         ensure_partitions(conn, gen.days[0], gen.days[-1])
@@ -244,8 +264,8 @@ def write(conn, schema: str, gen: Generated) -> None:
             copy("template_doc_links (service, template_id, doc_id, source)",
                  [(s.name, t["template_id"], t["doc_id"], "manual") for s in gen.services for t in s.templates if t["doc_id"]])
             copy("day_status (service, day, committed, daytype)",
-                 [(s.name, day, day != gen.days[-1], "weekend" if day.weekday() >= 5 else "weekday")
-                  for s in gen.services for day in gen.days])
+                 [(s.name, day, True, "weekend" if day.weekday() >= 5 else "weekday")
+                  for s in gen.services for day in gen.days[:-1]])     # the last day is still open, as in the engine
             lab, hourly, hours = [], [], []
             for s in gen.services:
                 for key, per_day in s.counts.items():

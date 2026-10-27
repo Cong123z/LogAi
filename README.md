@@ -128,7 +128,7 @@ A multi-week history made from the laptop's own templates and hourly shapes, wri
 
 `python -m scripts.lab.synth --mode counts --scenario lab/scenarios/default.yaml --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
 
-`lab/world.json` holds template texts and is git-ignored. `lab/scenarios/tiny.yaml` is the quick one.
+`lab/world.json` holds template texts and is git-ignored. It uses only hours with counts (at least 30 observed minutes and `*total` above 0) and warns when fewer than 8 exist: rebuild it after a full overnight replay. `lab/scenarios/tiny.yaml` is the quick one.
 
 ### Upgrading to migrations 008 and 009 (Retrain)
 

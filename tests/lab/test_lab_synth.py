@@ -89,7 +89,7 @@ def test_invariants_and_hourly(conn, lab_schema):
     assert not rows(conn, lab_schema, "SELECT 1 FROM S.hourly_counts WHERE key = '*minutes'")
     ds = {r["day"]: r["committed"] for r in rows(conn, lab_schema, "SELECT day, committed FROM S.day_status "
                                                  "WHERE service=%s", (sv.name,))}
-    assert ds == {gen.days[0]: True, gen.days[1]: False}
+    assert ds == {gen.days[0]: True}
     assert rows(conn, lab_schema, "SELECT 1 FROM S.template_doc_links WHERE source='manual' AND doc_id='D1'")
 
 
@@ -167,8 +167,14 @@ def test_write_touches_only_scenario_schema(conn, lab_schema):
             out[t["tablename"]] = conn.execute(f'SELECT count(*) AS n FROM public."{t["tablename"]}"').fetchone()["n"]
         return out
     before = snap()
+    other = conn.execute("SELECT current_schema() AS s").fetchone()["s"]     # migrated, on the path behind the scenario
+    versions = lambda sch: [r["version"] for r in conn.execute(f"SELECT version FROM {sch}.schema_migrations ORDER BY 1")]
+    other_v = versions(other)
     write(conn, lab_schema, generate(mkworld(), scen(days=2), END))
     conn.commit()
+    assert versions(lab_schema) == other_v and versions(other) == other_v
+    assert not conn.execute(f"SELECT 1 FROM {other}.templates").fetchall()
+    assert len(conn.execute(f"SELECT 1 FROM pg_tables WHERE schemaname='{lab_schema}'").fetchall()) > 30
     assert snap() == before
     assert rows(conn, lab_schema, "SELECT count(*) AS n FROM S.lab_minute_counts")[0]["n"] > 0
 
@@ -196,19 +202,23 @@ def mk_source(conn):
     conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('a','x','D','manual')")
     conn.execute("INSERT INTO template_doc_links (service, template_id, doc_id, source) VALUES ('a','y','D','draft')")
     for d in (d1, d2):
-        for h in (0, 1):
+        for h in (0, 1, 5):     # hour 5: observed but silent
             conn.execute("INSERT INTO service_hours VALUES ('a', %s, %s, 60)", (d, h))
+    conn.execute("INSERT INTO service_hours VALUES ('a', %s, 7, 20)", (d1,))     # active but < 30 minutes: not used
     # x: hour 0 -> sums 120 and 240 over 120 minutes; hour 1 -> only day 1, 60
     for d, h, s, q in ((d1, 0, 120, 400), (d2, 0, 240, 1000), (d1, 1, 60, 100)):
         conn.execute("INSERT INTO hourly_counts VALUES ('a','x',%s,%s,%s,%s)", (d, h, s, q))
-    conn.execute("INSERT INTO hourly_counts VALUES ('a','*total',%s,0,1,1)", (d1,))
-    conn.execute("INSERT INTO hourly_counts VALUES ('a','z',%s,0,0,0)", (d1,))   # all zero: dropped
+        conn.execute("INSERT INTO hourly_counts VALUES ('a','*total',%s,%s,%s,%s)", (d, h, s, q))
+    conn.execute("INSERT INTO hourly_counts VALUES ('a','*total','2026-10-01',7,50,50)")
+    conn.execute("INSERT INTO hourly_counts VALUES ('a','z','2026-10-01',0,0,0)")   # all zero: dropped
     conn.commit()
 
 
-def test_world_from_source(conn):
+def test_world_from_source(conn, capsys):
     mk_source(conn)
     w = build_world(conn)
+    assert w["active_hours"]["a"] == [0, 1]
+    assert "warning" in capsys.readouterr().err.lower()      # fewer than 8 active hours
     ts = {t["template_id"]: t for t in w["services"]["a"]}
     assert set(ts) == {"x"}   # y, z have no counts
     x = ts["x"]
@@ -219,7 +229,9 @@ def test_world_from_source(conn):
     assert not x["mirrored"][0] and not x["mirrored"][1]
     assert x["mirrored"][23] and x["mean"][23] == x["mean"][0]       # 23 - 23 = 0
     assert x["mirrored"][22] and x["mean"][22] == x["mean"][1]
-    assert x["mean"][12] == pytest.approx((360 / 120 + 60 / 120) / 2) and x["mirrored"][12]   # both missing
+    over = (360 / 120 + 60 / 120) / 2
+    for h in (5, 7, 12):                                             # silent, too short, not observed
+        assert x["mean"][h] == pytest.approx(over) and x["mirrored"][h]
     # a draft link is not an alerting source
     conn.execute("INSERT INTO hourly_counts VALUES ('a','y','2026-10-01',0,5,25)")
     conn.commit()
@@ -243,3 +255,120 @@ def test_engine_mode_rejected(capsys):
     from scripts.lab import synth
     with pytest.raises(SystemExit):
         synth.main(["--mode", "engine", "--scenario", "x"])
+
+
+def flat(sv, key, d=None):
+    days = range(len(sv.counts[key])) if d is None else [d]
+    return [x for dd in days for x in sv.counts[key][dd]]
+
+
+def weekday_scen(**kw):
+    kw.setdefault("day_factors", {"weekday": 1.0, "jitter": 0.0, "sat": 1.0, "sun": 1.0})
+    kw.setdefault("services", {"count": 1, "scale": [1.0], "subset": 1.0, "phase_minutes": [0]})
+    return scen(**kw)
+
+
+def test_dispersion_world_vs_poisson():
+    w = mkworld(mean=5.0, var=25.0)
+    ratio = {}
+    for disp in ("world", "poisson"):
+        x = flat(generate(w, weekday_scen(days=4, dispersion=disp), END).services[0], "T1")
+        m = sum(x) / len(x)
+        ratio[disp] = sum((v - m) ** 2 for v in x) / len(x) / m
+    assert 3.5 < ratio["world"] < 6.5 and ratio["poisson"] < 1.3
+
+
+def test_trend_and_phase():
+    s = weekday_scen(days=14, trend={"per_week": 0.5})
+    sv = generate(mkworld(), s, END).services[0]
+    t = [sum(sv.counts["*total"][d]) for d in range(14)]
+    assert abs(t[13] / t[0] / (1 + 0.5 * 13 / 7) - 1) < 0.05
+    w = mkworld(n=2)
+    for tm in w["services"]["orders"]:
+        tm["mean"] = [1.0 + 20 * (h == 10) for h in range(24)]
+        tm["var"] = tm["mean"]
+    for phase, hour in ((0, 10), (60, 9)):
+        sv = generate(w, weekday_scen(days=1, services={"count": 1, "scale": [1.0], "subset": 1.0,
+                                                         "phase_minutes": [phase]}), END).services[0]
+        tot = flat(sv, "*total")
+        assert sum(tot[hour * 60:(hour + 1) * 60]) > 5 * max(sum(tot[:hour * 60]) / hour, 1)
+
+
+def incident_sum(gen, key, o):
+    d0 = minute_at(gen.days[0], 0)
+    a = o["start_minute"] - d0
+    return flat(gen.services[0], key)[a:o["end_minute"] - d0]
+
+
+def test_ramp_levelshift_mixswap_shapes():
+    s = weekday_scen(days=4, incidents=[{"type": "ramp", "size": 4, "minutes": 120, "every_days": 4, "key": "T0"},
+                                        {"type": "level_shift", "size": 1.5, "minutes": 240, "every_days": 2, "key": "T0"}])
+    gen = generate(mkworld(), s, END)
+    for o in gen.services[0].incidents:
+        w = incident_sum(gen, "T0", o)
+        n = len(w)
+        if o["type"] == "ramp":
+            first, last = sum(w[:n // 3]), sum(w[-n // 3:])
+            assert abs(last / first / (3.5 / 1.5) - 1) < 0.15
+        else:
+            assert abs(sum(w) / (1.5 * 20.1 * n) - 1) < 0.06
+    s = weekday_scen(days=4, incidents=[{"type": "mix_swap", "minutes": 120, "every_days": 3}])
+    gen = generate(mkworld(), s, END)
+    (o,) = gen.services[0].incidents
+    mean = {t["template_id"]: sum(t["mean"]) / 24 for t in mkworld()["services"]["orders"]}
+    for me, other in ((o["meta"]["a"], o["meta"]["b"]), (o["meta"]["b"], o["meta"]["a"])):
+        got = sum(incident_sum(gen, me, o))
+        assert abs(got / (mean[other] * 120) - 1) < 0.25
+
+
+def sv_rate(w, minute):
+    return w['services']['orders'][0]['mean'][minute // 60]
+
+
+def test_incidents_avoid_silent_windows_and_gaps():
+    w = mkworld()
+    for tm in w["services"]["orders"]:
+        tm["mean"] = [10.0 if 8 <= h < 12 else 0.0 for h in range(24)]
+        tm["var"] = tm["mean"]
+    s = weekday_scen(days=8, gaps=[{"day": d, "hour_from": 9, "hour_to": 10} for d in range(8)],
+                     incidents=[{"type": t, "size": 3, "minutes": 30, "every_days": 1}
+                                for t in ("spike", "mix_swap")] +
+                               [{"type": "drop", "size": 0.3, "minutes": 30, "every_days": 1}])
+    gen = generate(w, s, END)
+    incs = gen.services[0].incidents
+    assert len(incs) >= 12
+    d0 = minute_at(gen.days[0], 0)
+    for o in incs:
+        a, b = (o["start_minute"] - d0) % 1440, (o["end_minute"] - d0 - 1) % 1440 + 1
+        assert b > 480 and a < 720 and not (a < 600 and b > 540)
+        assert sum(sv_rate(w, m) for m in range(a, b)) >= 10
+
+
+def test_unplaceable_incident_warns_and_is_skipped(capsys):
+    w = mkworld(mean=0.01)
+    for tm in w["services"]["orders"]:
+        tm["mean"] = [0.01] * 24
+    gen = generate(w, weekday_scen(days=2, incidents=[{"type": "spike", "size": 3, "minutes": 10, "every_days": 1}]), END)
+    assert gen.services[0].incidents == [] and "warning" in capsys.readouterr().err.lower()
+
+
+def test_bad_incident_specs():
+    for bad in ({"type": "spike", "size": 3, "minutes": 10, "every_days": 1, "key": "*error"},
+                {"type": "spike", "size": 3, "minutes": 1440, "every_days": 1}):
+        with pytest.raises(ValueError):
+            generate(mkworld(), weekday_scen(incidents=[bad]), END)
+
+
+def test_new_template_ids_unique():
+    gen = generate(mkworld(), scen(days=3, new_templates={"per_service_day": 12, "error_share": 0.3, "rate": 1.0}), END)
+    for sv in gen.services:
+        ids = [t["template_id"] for t in sv.templates]
+        assert len(ids) == len(set(ids)) == 6 + 36
+
+
+def test_jitter_shared_by_services():
+    s = scen(days=5, day_factors={"weekday": 1.0, "jitter": 0.3, "sat": 1.0, "sun": 1.0},
+             services={"count": 2, "scale": [1.0, 1.0], "subset": 1.0, "phase_minutes": [0, 0]})
+    gen = generate(mkworld(mean=20.0), s, END)
+    a, b = ([sum(sv.counts["*total"][d]) for d in range(5)] for sv in gen.services)
+    assert all(abs(x / y - 1) < 0.05 for x, y in zip(a, b))

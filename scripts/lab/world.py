@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from logai2.config import load_config
@@ -15,6 +16,16 @@ def build_world(conn) -> dict:
     n_min: dict[tuple[str, int], int] = {}
     for r in conn.execute("SELECT service, hour, sum(n_minutes) AS n FROM service_hours GROUP BY 1, 2"):
         n_min[r["service"], r["hour"]] = int(r["n"])
+    total: dict[tuple[str, int], int] = {}
+    for r in conn.execute("SELECT service, hour, sum(sum) AS s FROM hourly_counts WHERE key = '*total' GROUP BY 1, 2"):
+        total[r["service"], r["hour"]] = int(r["s"])
+    # active hours only: observed-but-silent hours (engine up, replay not running) would teach a rate of zero
+    active = {svc: [h for h in range(24) if n_min.get((svc, h), 0) >= 30 and total.get((svc, h), 0) > 0]
+              for svc in {s for s, _ in n_min}}
+    for svc, hs in sorted(active.items()):
+        if len(hs) < 8:
+            print(f"warning: service {svc} has only {len(hs)} active hours {hs}; rebuild after a full replay",
+                  file=sys.stderr)
     sums: dict[tuple[str, str], dict[int, tuple[int, int]]] = {}
     for r in conn.execute("SELECT h.service, h.key, h.hour, sum(h.sum) AS s, sum(h.sumsq) AS q FROM hourly_counts h "
                           "JOIN templates t ON t.service = h.service AND t.template_id = h.key GROUP BY 1, 2, 3"):
@@ -25,8 +36,8 @@ def build_world(conn) -> dict:
     world: dict[str, list[dict]] = {}
     for t in conn.execute("SELECT service, template_id, level, text FROM templates ORDER BY 1, 2"):
         svc, tid = t["service"], t["template_id"]
-        per = {h: v for h, v in sums.get((svc, tid), {}).items() if n_min.get((svc, h))}
-        seen = [h for h in range(24) if n_min.get((svc, h))]
+        seen = active.get(svc, [])
+        per = {h: v for h, v in sums.get((svc, tid), {}).items() if h in seen}
         if not seen or not any(s for s, _ in per.values()):
             continue
         stat = {}
@@ -45,7 +56,7 @@ def build_world(conn) -> dict:
         world.setdefault(svc, []).append({"template_id": tid, "text": t["text"], "level": t["level"],
                                           "doc_id": docs.get((svc, tid)), "mean": mean, "var": var,
                                           "mirrored": mirrored})
-    return {"services": world}
+    return {"services": world, "active_hours": {s: active[s] for s in world}}
 
 
 def main(argv=None) -> None:
