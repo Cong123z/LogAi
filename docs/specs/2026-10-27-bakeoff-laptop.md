@@ -278,7 +278,7 @@ final.
 | `lab_bands` | run, method, service, key, step, minute | count, expected, low, high, high flag; step 5 overview, 1 within ± 2 h of episodes |
 | `lab_sweeps` | run, method, kind, knob, part | metrics for every knob on tune and test |
 | `lab_choices` | kind | method, knob, run, note (lab only) |
-| `lab_incidents` | id | source (synthetic / test-a / test-c), data schema, run, service, key, type, size, start, end, meta |
+| `lab_incidents` | id | source (synthetic / test-a / test-c), data schema, run, service, key, type, size, start, end (minutes; end exclusive), meta |
 
 Every `lab_*` table except `lab_minute_counts`, `lab_choices` and `lab_incidents` cascades from `lab_runs`.
 The last 5 runs per site are kept. `lab_bands` stores the real count so the page never reads count tables.
