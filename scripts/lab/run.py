@@ -201,7 +201,7 @@ def main(argv=None) -> int:
     dsn = a.dsn or cfg.database.dsn
     data, results = _open(dsn, a.schema, read_only=True), _open(dsn, a.results_schema)
     try:
-        return run(a, cfg, data, results, finish=lambda conn, rid: finish_all(conn, rid, seed=a.seed, cfg=cfg))
+        return run(a, cfg, data, results, finish=(lambda conn, rid: finish_all(conn, rid, seed=a.seed, cfg=cfg)) if a.test == "B" else None)
     finally:
         data.close()
         results.close()

@@ -38,7 +38,7 @@ def tune(band: bool, tune_by_knob: dict[float, dict]) -> tuple[float | None, boo
     knob and False. Knobs with nothing measured are ignored; None when no knob is left."""
     if band:
         have = {k: m["coverage"] for k, m in tune_by_knob.items() if m["coverage"] is not None}
-        return (min(have, key=lambda k: (abs(have[k] - COVERAGE_TARGET), -have[k])) if have else None), True
+        return (min(have, key=lambda k: (round(abs(have[k] - COVERAGE_TARGET), 9), -have[k])) if have else None), True
     have = {k: m["alert_rate"] for k, m in tune_by_knob.items() if m["alert_rate"] is not None}
     if not have:
         return None, True

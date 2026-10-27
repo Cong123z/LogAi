@@ -29,6 +29,14 @@ def percentile(v: list[float], q: float) -> float:
     return v[lo] + (v[hi] - v[lo]) * (pos - lo)
 
 
+def point_ratio(m: dict, s: dict):
+    """Interval-score ratio over the same day pool the bootstrap draws from (days both have), or None."""
+    pool = set(m) & set(s)
+    a = {f: sum(m[d][f] for d in pool) for f in F}
+    b = {f: sum(s[d][f] for d in pool) for f in F}
+    return (a["winkler"] / a["n"]) / (b["winkler"] / b["n"]) if a["n"] and b["n"] and b["winkler"] else None
+
+
 def ci90(m: dict, s: dict, kind: str, seed: int, draws: int = 1000) -> dict:
     """m, s: summed days of the method and sigma. -> {"ratio": [lo, hi], "mase": [...], "alert_rate": [...]},
     each None when no draw defines it. Same seed -> same numbers."""

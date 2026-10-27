@@ -266,6 +266,49 @@ def test_stability_note(conn, cfg, two):
     assert all_rows(conn, r3)["_decision", "M2"]["metrics"]["stability"] == "unstable"
 
 
+def test_int_knobs_keep_stored_keys(conn, cfg, monkeypatch):
+    sp = lambda n: fake(mkspec(n, knobs=(1, 2, 3)))        # noqa: E731
+    monkeypatch.setattr(methods, "METHODS", {"sigma": sp("sigma"), "alt": sp("alt")})
+    rid = new_run(conn)
+    for m, sc in (("sigma", 10.0), ("alt", 5.0)):
+        kn = {k: (M(cov=0.98 + 0.005 * k, score=sc), M(cov=0.995, score=sc)) for k in (1, 2, 3)}
+        dy = {k: {D0 + timedelta(14 + i): D(wink=sc * 100) for i in range(14)} for k in (1, 2, 3)}
+        put(conn, rid, m, "s1", metrics(kn, dy))
+    finish_all(conn, rid, seed=7, cfg=cfg)
+    alt = all_rows(conn, rid)["alt", "M2"]
+    assert alt["knob"] == 3.0 and alt["metrics"]["ratio_vs_sigma"] == pytest.approx(0.5) and alt["metrics"]["worse_share"] == 0.0
+
+
+def test_test_a_run_writes_no_decision_rows(conn, schema):
+    seed(conn)
+    argv = ["--site", "laptop", "--test", "A", "--methods", "sigma", "--from", DAYS[0].isoformat(),
+            "--to", DAYS[-1].isoformat(), "--dsn", TEST_DSN, "--schema", schema, "--results-schema", schema]
+    labrun.main(argv)
+    assert conn.execute("SELECT count(*) AS n FROM lab_results WHERE scope = 'all'").fetchone()["n"] == 0
+
+
+def test_m6_decision_is_pending(conn, cfg, two):
+    rid = new_run(conn)
+    for (m, s), sc in scores(5.0, 6.0).items():
+        kn = {k: (M(cov=0.995, score=sc), M(cov=0.995, score=sc)) for k in (1.0, 2.0)}
+        dy = {k: {D0 + timedelta(14 + i): D(wink=sc * 100) for i in range(14)} for k in (1.0, 2.0)}
+        put(conn, rid, m, s, metrics(kn, dy), kind="M6")
+    finish_all(conn, rid, seed=7, cfg=cfg)
+    dec = all_rows(conn, rid)["_decision", "M6"]
+    assert dec["verdict"] == "pending" and "bk10" in dec["metrics"]["note"]
+
+
+def test_note_explains_cheaper_tied_method_and_heavy_loses_to_core():
+    d = judge_kind([cand("top", 0.80, [0.70, 0.85], cost=5), cand("cheap", 0.92, [0.80, 0.97], cost=1)])
+    assert d["leader"] == "cheap" and "top does" in d["note"]
+    d = judge_kind([cand("heavy", 0.70, [0.7, 0.8], heavy=True, cost=0), cand("core", 0.72, [0.7, 0.8], cost=3)])
+    assert d["leader"] == "core"
+
+
+def test_tune_tie_rounds_distance():
+    assert tune(True, {1.0: {"coverage": 0.993}, 2.0: {"coverage": 0.997}})[0] == 2.0
+
+
 # 6 -------------------------------------------------------------------------------------------------------------
 def test_strength_labels():
     assert strength_of(7, 1) == "exploratory"

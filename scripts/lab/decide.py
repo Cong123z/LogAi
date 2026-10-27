@@ -2,6 +2,11 @@
 (judging J4, J6, J7; spec 9). Reads the per-service lab_results rows the scoring sink wrote; writes the `scope = 'all'` rows,
 the `_decision` rows and lab_sweeps.
 
+Scope: Test B only (`main` passes the hook only for `--test B`; Tests A and C get their own finish). M6 and M7 get
+no ranking here: sigma has no band for new templates (M6) and does not judge the mix (M7), so interval score against sigma
+means nothing; their `_decision` row is `pending` ("decided on Test A detection (bk10)"). Score-only methods get no
+interval score, so they are never adopt candidates for M1-M5 (they feed E1).
+
 Test A recall is read from the latest ok `lab_runs` row with test = 'A' and this run's code_version: its
 lab_results row (method, kind, scope 'all') has metrics {"recall": {"medium": <0..1>, ...}} (the shape bk-test-a writes)."""
 from __future__ import annotations
@@ -10,7 +15,7 @@ from dataclasses import dataclass, field
 
 import scripts.lab.methods as methods
 from scripts.lab import store
-from scripts.lab.bootstrap import ci90, sum_days
+from scripts.lab.bootstrap import ci90, point_ratio, sum_days
 from scripts.lab.tune import BUDGET, aggregate, tune
 
 SIGMA, DECISION = "sigma", "_decision"
@@ -62,10 +67,13 @@ def judge_kind(cands: list[Cand]) -> dict:
         return {"verdict": "sigma stays", "leader": None, "tied": [], "note": "no method passed the gates"}
     top = live[0]
     tied = [c for c in live if c is top or _overlap(c.ci, top.ci)]
-    lead = min(tied, key=lambda c: (c.cost, c.heavy, inf if c.mase is None else c.mase, c.name))
+    lead = min(tied, key=lambda c: (c.heavy, c.cost, inf if c.mase is None else c.mase, c.name))
     out = {"leader": lead.name, "tied": sorted(c.name for c in tied)}
     if not fits_better(lead.ratio, lead.ci):
-        return {**out, "verdict": "sigma stays", "note": f"{lead.name} does not fit better than sigma"}
+        why = f"{lead.name} does not fit better than sigma"
+        if lead is not top and fits_better(top.ratio, top.ci):
+            why += f" ({top.name} does, but ties go to the simpler {lead.name})"
+        return {**out, "verdict": "sigma stays", "note": why}
     if lead.worse_share is not None and lead.worse_share > WORSE_SHARE:
         return {**out, "verdict": "mixed",
                 "note": f"{lead.name} is worse than sigma on {lead.worse_share:.0%} of services"}
@@ -83,10 +91,6 @@ def _spec(name):
         return getattr(cls, "spec", None) or cls().spec
     except methods.Unavailable:
         return None
-
-
-def _knobs(by_knob) -> dict[float, dict]:
-    return {float(k): v for k, v in by_knob.items()}
 
 
 def _recalls(conn, run_id):
@@ -139,18 +143,19 @@ def finish_all(results_conn, run_id, *, seed: int, cfg) -> None:
         if not ok:
             info[m, kd] = {"spec": spec, "status": "failed" if any(r["status"] == "failed" for r in rows) else "skipped"}
             continue
-        knobs = sorted({float(k) for r in ok for k in r["metrics"]["knobs"]})
-        sweep = {k: {p: aggregate([r["metrics"]["knobs"][str(k)][p] for r in ok if str(k) in r["metrics"]["knobs"]], kd)
+        key = {float(k): k for r in ok for k in r["metrics"]["knobs"]}      # float -> the key as stored ("3" or "3.0")
+        knobs = sorted(key)
+        sweep = {k: {p: aggregate([r["metrics"]["knobs"][key[k]][p] for r in ok if key[k] in r["metrics"]["knobs"]], kd)
                      for p in ("tune", "test")} for k in knobs}
         days = {}
         for k in knobs:
-            days[k] = sum_days([r["metrics"]["days"].get(str(k), {}) for r in ok])
+            days[k] = sum_days([r["metrics"]["days"].get(key[k], {}) for r in ok])
             d = days[k].values()
             ab = sum(x["abs_naive"] for x in d)
             sweep[k]["test"]["mase"] = sum(x["abs_err"] for x in d) / ab if ab > 0 else None
         knob, in_budget = tune(spec.band, {k: v["tune"] for k, v in sweep.items()})
         info[m, kd] = {"spec": spec, "status": "ok" if knob is not None else "skipped", "ok": ok, "sweep": sweep,
-                       "days": days, "knob": knob, "in_budget": in_budget}
+                       "days": days, "key": key, "knob": knob, "in_budget": in_budget}
 
     conn.commit()           # the store's transactions must be the outermost ones (the runner's connection is not autocommit)
     with conn.transaction():
@@ -165,7 +170,7 @@ def finish_all(results_conn, run_id, *, seed: int, cfg) -> None:
 def _service_ratios(i, sig) -> list[float]:
     """Per service: test interval score of the method at its knob / sigma's at its knob."""
     def per(x):
-        return {r["scope"]: r["metrics"]["knobs"].get(str(x["knob"]), {}).get("test", {}).get("interval_score")
+        return {r["scope"]: r["metrics"]["knobs"].get(x["key"][x["knob"]], {}).get("test", {}).get("interval_score")
                 for r in x["ok"]}
     mine, base = per(i), per(sig)
     return [mine[s] / base[s] for s in mine if mine.get(s) is not None and base.get(s)]
@@ -186,9 +191,8 @@ def _decide_kind(conn, run_id, run, kd, window, info, recalls, prev, seed) -> No
             continue
         knob, test = i["knob"], i["sweep"][i["knob"]]["test"]
         ratio = ci = worse = None
-        if sig and test["interval_score"] is not None and sig["sweep"][sig["knob"]]["test"]["interval_score"]:
-            ratio = test["interval_score"] / sig["sweep"][sig["knob"]]["test"]["interval_score"]
         if sig:
+            ratio = point_ratio(i["days"][knob], sig["days"][sig["knob"]])
             ci = ci90(i["days"][knob], sig["days"][sig["knob"]], kd, seed)
             sr = _service_ratios(i, sig)
             worse = sum(x > 1.0 for x in sr) / len(sr) if sr and m != SIGMA else None
@@ -209,11 +213,15 @@ def _decide_kind(conn, run_id, run, kd, window, info, recalls, prev, seed) -> No
         text += f" (sigma k = {sk:g}" + (", recalibrated)" if sk != dk else ")")
     stability = "no previous run"
     if prev:
+        stability = "previous run had no leader"
         old = conn.execute("SELECT metrics FROM lab_results WHERE run_id = %s AND method = %s AND kind = %s "
                            "AND scope = 'all'", (prev["id"], DECISION, kd)).fetchone()
         if old and old["metrics"].get("leader") and d["leader"]:
             same = old["metrics"]["leader"] == d["leader"] or old["metrics"]["leader"] in d["tied"]
             stability = "stable" if same else "unstable"
+    if kd in ("M6", "M7"):
+        d = {**d, "verdict": "pending", "note": "decided on Test A detection (bk10)"}
+        text = "pending: " + d["note"]
     store.put_result(conn, run_id, DECISION, kd, "all", None, "ok",
                      {"leader": d["leader"], "tied": d["tied"], "text": text, "note": d["note"],
                       "sigma_knob": sig["knob"] if sig else None, "stability": stability, "test_days": len(dates)},
