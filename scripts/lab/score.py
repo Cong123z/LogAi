@@ -11,7 +11,7 @@ from datetime import timedelta
 
 from logai2.links import level_class
 from scripts.lab import store
-from scripts.lab.data import UNOBSERVED, minute_at, slot_of
+from scripts.lab.data import MIX, UNOBSERVED, minute_at, slot_of
 from scripts.lab.episodes import Tracker
 from scripts.lab.kinds import has_new, is_new
 
@@ -137,7 +137,8 @@ class ScoreSink:
             for inc in sd.incidents:
                 lvl = LEVEL_KEY[level_class(sd.levels.get(inc.key))] if inc.key else None
                 if (inc.key in (None, "*total", key) or key == "*total" or key == lvl
-                        or (key.startswith("doc:") and inc.key in sd.docs.get(key, []))):
+                        or (key.startswith("doc:") and inc.key in sd.docs.get(key, []))
+                        or (key == MIX and not inc.key.startswith(("*", "doc:")))):
                     w.append((inc.start - MARGIN, inc.end + MARGIN))
             self._win[key] = w
         return self._win[key]
@@ -331,3 +332,40 @@ class ScoreSink:
 
 def score_collect(results_conn, run_id, service, method, spec, kinds, ctx) -> ScoreSink:
     return ScoreSink(results_conn, run_id, service, method, spec, kinds, ctx)
+
+
+HIT_WINDOW = 15            # minutes after an injection's start in which an episode of its key counts as a hit
+
+
+class InjectSink(ScoreSink):
+    """Test A: the Test B sink run on one injection pass (ctx.sd is the injected copy, ctx.injections its injections).
+    Writes nothing: `summary()` gives the recall counters and `test_a.write_service` stores them. A hit is an episode of the
+    injection's key starting in [start, start + HIT_WINDOW); its delay is episode start - injection start. The tune part
+    is never injected, so `build()`'s tune metrics are the clean alert rate of the knob."""
+
+    def _drawn(self) -> set:
+        return set()
+
+    def _draw(self, key, day, arr, outs) -> None:
+        pass
+
+    def end(self) -> None:
+        pass
+
+    def summary(self) -> dict:
+        """knob -> kind -> type -> size name -> {"n", "hits", "delays"}."""
+        self.build()
+        out = {}
+        for knob in self.knobs:
+            cells = out[str(knob)] = {}
+            for i in self.ctx.injections:
+                if i.kind not in self.spec.kinds:
+                    continue
+                cell = cells.setdefault(i.kind, {}).setdefault(i.type, {}).setdefault(
+                    i.size_name, {"n": 0, "hits": 0, "delays": []})
+                cell["n"] += 1
+                hit = next((e for e in self.episodes.get((i.key, knob), ()) if i.start <= e.start < i.start + HIT_WINDOW), None)
+                if hit:
+                    cell["hits"] += 1
+                    cell["delays"].append(hit.start - i.start)
+        return out

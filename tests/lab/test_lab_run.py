@@ -346,3 +346,65 @@ def test_finish_hook_runs_before_finish_run(monkeypatch, conn, cfg):
     assert labrun.run(args(), cfg, conn, conn, finish=boom) == 1
     last = conn.execute("SELECT status, error FROM lab_runs ORDER BY id DESC LIMIT 1").fetchone()
     assert last["status"] == "failed" and "tune failed" in last["error"]
+
+
+# Test A --------------------------------------------------------------------------------------------------------
+def args_a(methods="rec"):
+    return labrun.parse_args(["--site", "laptop", "--test", "A", "--methods", methods, "--from", "2026-10-01",
+                              "--to", "2026-10-14"])
+
+
+class Rec(Const):
+    """Score method: flags any count above 8. Records the ServiceData each call saw."""
+    spec = Spec("rec", "T9", "rec", frozenset({"M1", "M3", "M6"}), (1.0, 2.0), 1.0, False, False, 1)
+    fits, days = [], []
+
+    def fit(self, sd, day, cfg):
+        Rec.fits.append((id(sd), day, [i.source for i in sd.incidents], sum(sum(a) for a in sd.minutes["busy"].values())))
+        return {"day": day}
+
+    def day(self, model, prev, sd, key, day, knobs, cfg):
+        Rec.days.append((id(sd), key, day))
+        a = sd.minutes[key][day]
+        flag = bytearray(1 if x > 8 else 0 for x in a)
+        return {k: DayOut(None, None, None, array("d", a), flag) for k in knobs}
+
+
+def run_a(monkeypatch, conn, cfg):
+    from scripts.lab import test_a
+    Rec.fits, Rec.days = [], []
+    monkeypatch.setattr(methods, "METHODS", {"rec": Rec})
+    seed(conn)
+    assert labrun.run(args_a(), cfg, conn, conn, finish=test_a.finish) == 0
+
+
+def test_a_fits_once_on_clean_data_and_days_see_five_injected_copies(monkeypatch, conn, cfg):
+    run_a(monkeypatch, conn, cfg)
+    assert len(Rec.fits) == len(DAYS) + 1                                  # D-1 and every day, not x5
+    assert len({f[0] for f in Rec.fits}) == 1                              # always the clean ServiceData
+    assert all(f[2] == [] for f in Rec.fits)                               # no injected incident visible to a fit
+    assert len({f[3] for f in Rec.fits}) == 1                              # and its counts are the recorded ones
+    assert len({d[0] for d in Rec.days}) == 5 and Rec.fits[0][0] not in {d[0] for d in Rec.days}
+
+
+def test_a_records_incidents_and_writes_recall_rows(monkeypatch, conn, cfg):
+    run_a(monkeypatch, conn, cfg)
+    rid = conn.execute("SELECT id FROM lab_runs").fetchone()["id"]
+    inc = conn.execute("SELECT * FROM lab_incidents WHERE source = 'test-a'").fetchall()
+    assert len(inc) >= 20 and {i["run_id"] for i in inc} == {rid}
+    assert {i["type"] for i in inc} >= {"spike", "drop", "ramp", "level_shift", "burst"}
+    assert all(i["service"] == "s" for i in inc)
+    rows = {r["kind"]: r for r in conn.execute("SELECT * FROM lab_results WHERE scope = 'all'")}
+    assert set(rows) == {"M1", "M3", "M6"}
+    m = rows["M6"]["metrics"]
+    assert set(m["recall"]) == {"small", "medium", "large"} and rows["M6"]["knob"] == 1.0
+    assert m["recall"]["medium"] == 1.0 and m["by_type"]["burst"]["medium"] == 1.0
+    assert set(m["delay"]) == {"median", "p90"} and m["delay"]["median"] == 0
+    assert m["alert_rate"] is None and rows["M3"]["metrics"]["alert_rate"] == 0.0     # M6 has no normal minutes in the tune part
+    assert set(rows["M1"]["metrics"]["by_type"]) <= {"drop", "ramp", "level_shift"}
+    assert rows["M1"]["metrics"]["recall"]["medium"] is not None
+
+
+def test_company_test_a_still_exits_2(monkeypatch):
+    monkeypatch.setattr(labrun, "connect", lambda *a, **k: pytest.fail("connected"))
+    assert labrun.main(["--site", "company", "--test", "A", "--methods", "core", "--days", "3"]) == 2

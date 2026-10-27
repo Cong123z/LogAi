@@ -211,7 +211,7 @@ def test_out_of_order_days_assert():
 
 
 def test_episode_counts_only_when_it_starts_on_a_shared_normal_minute():
-    sd = make_sd({D0: [1] * 1440}, incidents=[Incident("k", minute_at(D0, 500), minute_at(D0, 510), "synthetic")])
+    sd = make_sd({D0: [1] * 1440}, extra={"*mix": {D0: array("i", [1] * 1440)}}, incidents=[Incident("k", minute_at(D0, 500), minute_at(D0, 510), "synthetic")])
     # episode 1 starts at 490 (inside incident +-15: not normal), episode 2 at 700
     hs = flags_for([(490, 495), (700, 705)])
     s = sink_for(sd, {"k": "M3"}, {D0: {1.0: out(flags=hs)}})
@@ -419,3 +419,16 @@ def test_sink_write_is_one_transaction(monkeypatch, conn, cfg):
         assert conn.execute(f"SELECT count(*) AS n FROM {t}").fetchone()["n"] == 0
     rows = conn.execute("SELECT status, metrics FROM lab_results").fetchall()
     assert rows and all(r["status"] == "failed" for r in rows) and "bands down" in rows[0]["metrics"]["error"]
+
+
+def test_total_incident_or_null_masks_mix_too():
+    t0 = minute_at(D0, 600)
+    for key in ("*total", None):
+        sd = make_sd({D0: [1] * 1440}, extra={"*mix": {D0: array("i", [1] * 1440)}}, incidents=[Incident(key, t0, t0 + 10, "test-a")])
+        s = score.ScoreSink(None, 1, "s", "t", spec(("M7",)), {"*mix": "M7"}, ctx_for(sd))
+        assert s.windows("*mix") == [(t0 - score.MARGIN, t0 + 10 + score.MARGIN)]
+        assert s.bad_mask("*mix", D0)[600] == 1
+    for key in ("A", "*error", "doc:d"):       # a template incident masks the mix (it changes it); a level or doc key does not
+        sd = make_sd({D0: [1] * 1440}, extra={"*mix": {D0: array("i", [1] * 1440)}}, incidents=[Incident(key, t0, t0 + 10, "test-a")])
+        w = score.ScoreSink(None, 1, "s", "t", spec(("M7",)), {"*mix": "M7"}, ctx_for(sd)).windows("*mix")
+        assert w == ([(t0 - score.MARGIN, t0 + 10 + score.MARGIN)] if key == "A" else [])

@@ -283,8 +283,9 @@ def test_test_a_run_writes_no_decision_rows(conn, schema):
     seed(conn)
     argv = ["--site", "laptop", "--test", "A", "--methods", "sigma", "--from", DAYS[0].isoformat(),
             "--to", DAYS[-1].isoformat(), "--dsn", TEST_DSN, "--schema", schema, "--results-schema", schema]
-    labrun.main(argv)
-    assert conn.execute("SELECT count(*) AS n FROM lab_results WHERE scope = 'all'").fetchone()["n"] == 0
+    assert labrun.main(argv) == 0
+    assert conn.execute("SELECT count(*) AS n FROM lab_results WHERE method = '_decision'").fetchone()["n"] == 0
+    assert conn.execute("SELECT count(*) AS n FROM lab_incidents WHERE source = 'test-a'").fetchone()["n"] > 0
 
 
 def test_m6_decision_is_pending(conn, cfg, two):
@@ -296,6 +297,74 @@ def test_m6_decision_is_pending(conn, cfg, two):
     finish_all(conn, rid, seed=7, cfg=cfg)
     dec = all_rows(conn, rid)["_decision", "M6"]
     assert dec["verdict"] == "pending" and "bk10" in dec["metrics"]["note"]
+    assert dec["metrics"]["leader"] is None and dec["metrics"]["tied"] == []        # no ranking on a pending row
+
+
+def board_kind(conn, rid, kind, eps=0, kd=10.0, flap=None):
+    """sigma and alt, two services, one kind; alt's episodes, key-days and flap share (alert rate = eps * 2 / (2 * kd) * 100)."""
+    for (m, s), sc in scores(5.0, 6.0).items():
+        e, k_d, f = (eps, kd, flap) if m == "alt" else (0, 10.0, None)
+        kn = {k: (M(cov=0.995, score=sc, eps=e, kd=k_d, flap=f), M(cov=0.995, score=sc, eps=e, kd=k_d, flap=f))
+              for k in (1.0, 2.0)}
+        dy = {k: {D0 + timedelta(14 + i): D(wink=sc * 100) for i in range(14)} for k in (1.0, 2.0)}
+        put(conn, rid, m, s, metrics(kn, dy), kind=kind)
+
+
+def put_test_a(conn, kind, recalls, code="abc"):
+    a = new_run(conn, test="A", code=code)
+    for m, r in recalls.items():
+        store.put_result(conn, a, m, kind, "all", 2.0, "ok", {"recall": {"medium": r}})
+    store.finish_run(conn, a, "ok")
+    return a
+
+
+def m6(conn, cfg, recalls, **kw):
+    put_test_a(conn, "M6", recalls)
+    rid = new_run(conn)
+    board_kind(conn, rid, "M6", **kw)
+    finish_all(conn, rid, seed=7, cfg=cfg)
+    return all_rows(conn, rid)["_decision", "M6"]
+
+
+def test_m6_adopts_when_recall_beats_sigma_by_ten_points(conn, cfg, two):
+    dec = m6(conn, cfg, {"sigma": 0.50, "alt": 0.62})
+    assert dec["verdict"] == "adopt candidate" and dec["metrics"]["leader"] == "alt"
+    assert "0.62" in dec["metrics"]["text"]
+
+
+def test_m6_sigma_stays_when_gain_is_small_or_gate_fails(conn, cfg, two):
+    assert m6(conn, cfg, {"sigma": 0.50, "alt": 0.55})["verdict"] == "sigma stays"
+    dec = m6(conn, cfg, {"sigma": 0.50, "alt": 0.90}, eps=1)                  # alert-rate gate fails: not a leader
+    assert dec["verdict"] == "sigma stays" and dec["metrics"]["leader"] is None
+    dec = m6(conn, cfg, {"sigma": 0.50, "alt": 0.90}, eps=1, kd=1000.0, flap=0.5)                  # flap gate fails
+    assert dec["verdict"] == "sigma stays" and dec["metrics"]["leader"] is None
+
+
+def test_m7_adopts_at_half_recall_else_no_method(conn, cfg, two):
+    for r, want in ((0.5, "adopt candidate"), (0.4, "no method")):
+        put_test_a(conn, "M7", {"alt": r})
+        rid = new_run(conn)
+        board_kind(conn, rid, "M7")
+        finish_all(conn, rid, seed=7, cfg=cfg)
+        dec = all_rows(conn, rid)["_decision", "M7"]
+        assert dec["verdict"] == want, r
+    assert dec["metrics"]["leader"] == "alt"
+
+
+def test_m7_failed_gate_means_no_method(conn, cfg, two):
+    put_test_a(conn, "M7", {"alt": 0.9})
+    rid = new_run(conn)
+    board_kind(conn, rid, "M7", eps=1, kd=1000.0, flap=0.5)
+    finish_all(conn, rid, seed=7, cfg=cfg)
+    assert all_rows(conn, rid)["_decision", "M7"]["verdict"] == "no method"
+
+
+def test_m6_m7_stay_pending_without_a_test_a_run_of_this_code_version(conn, cfg, two):
+    put_test_a(conn, "M6", {"sigma": 0.5, "alt": 0.9}, code="other")
+    rid = new_run(conn)
+    board_kind(conn, rid, "M6")
+    finish_all(conn, rid, seed=7, cfg=cfg)
+    assert all_rows(conn, rid)["_decision", "M6"]["verdict"] == "pending"
 
 
 def test_note_explains_cheaper_tied_method_and_heavy_loses_to_core():
