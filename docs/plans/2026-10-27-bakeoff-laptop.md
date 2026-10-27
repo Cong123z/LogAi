@@ -82,37 +82,36 @@ Team workflow (`docs/TEAM_WORKFLOW.md`). Approved by the user on 2026-10-27 toge
 | Role | Who | Does |
 |---|---|---|
 | Tech lead | Claude Opus 5.5 (this session) | Task 0; writes each brief just before dispatch (names the interfaces merged code really has); answers `QUESTION:`; assigns the reviewer; final review (seams, full suite, docs); merges **after the user confirms each branch**; keeps `.team/ledger.md` |
-| Implementer S | Claude Sonnet 5.5 subagent (`model: sonnet`) | Tasks with judgment: exactly-once writes, owner/lane/engine, detection math, statistics, anything crossing modules |
-| Implementer G | Gemini 3.8 Flash (High) via `scripts/agy-task.sh` | Bounded tasks with formulas or interfaces fixed by the spec: pure functions, parsers, web routes and views, compose and docs |
-| Reviewer | the other model, fresh conversation | Brief + PR file + diff → `Spec ✅/❌`, Critical / Important / Minor, `Approved / Needs fixes`; adversarial tests where the table says so |
+| Implementer | Claude Sonnet 5.5 subagent (`model: sonnet`), one per task | Tests first, code, full suite, PR file; asks `QUESTION:` when unsure |
+| Reviewer O | Claude Opus 5.5 subagent (`model: opus`), fresh | Reviews the high-risk tasks: a different model from the implementer catches what a same-model review shares as a blind spot |
+| Reviewer S | Claude Sonnet 5.5 subagent (`model: sonnet`), fresh, never the implementer | Reviews the bounded tasks (as in the retrain build) |
 | User | – | Confirms each branch before merge; starts/stops containers; runs the laptop operations steps |
 
-**Gemini trial:** Gemini has not built anything in this repo yet. Its first task (5) is the trial. If it needs more
-than 2 fix rounds on a Critical/Important finding, or touches files outside its brief, the remaining G tasks move to
-Sonnet with fresh Sonnet reviewers (as in the retrain build). That switch is a ledger ruling.
+Only Opus and Sonnet are used (user ruling, 2026-10-27): no Gemini / `agy`. A review returns `Spec ✅/❌`,
+Critical / Important / Minor, `Approved / Needs fixes`; up to 3 fix rounds by the same implementer, then the tech lead rules.
 
 ### Per task
 
-| # | Task | Implementer | Reviewer | Why this split | Extra checks by the tech lead |
+| # | Task | Implementer | Reviewer | Why | Extra checks by the tech lead |
 |---|---|---|---|---|---|
 | 0 | Preflight | Tech lead | User | Docs and facts only, no feature code | – |
-| 1 | Migration 010 + live recorder | S | G + adversarial crash tests | Exactly-once flush path; one mistake loses or doubles data | Read the flush SQL and pending-clear order; run test 3 (crash mid-hour) myself |
-| 2 | Recorder in the lane | S | G | Lane replace semantics and resume, same risk class as task 57 | Lane equals live on the same docs |
-| 3 | Lab foundation | S | G | Contracts every later task builds on | Interfaces match spec §5–6, 11 exactly before 4–6 start |
-| 4 | σ + episodes + parity | S | G + tech-lead adversarial review | Must reproduce live detection exactly; the trust gate for all results | Run parity myself; inspect every mismatch inside commit windows |
-| 5 | Scoring (Test B metrics) | **G (trial)** | S | Pure functions, formulas fixed in the judging doc | Hand-check one Winkler and one flap example |
-| 6 | Synthetic world, counts | S | G | Derived keys must equal `OpenMinutes`; schema handling; feeds every laptop result | `*total` = Σ templates and seed determinism on a real run |
-| 7 | Tune, bootstrap, decide | S | G | Statistics and the decision tree: subtle tie and CI rules | Verdict table on a hand-made scoreboard |
-| 8 | Core methods A (#2, #3, #4, #7) | G | S | Pure functions with formulas and knob grids given | NB quantile vs brute force |
-| 9 | Core methods B (#5, #6, #13, E1) | G | S | As 8; E1 wiring is small | PCA on a mix swap |
-| 10 | Test A injector | S | G | Consistency of derived keys and placement rules | `*total` = Σ templates after injection |
-| 11 | Lab image + heavy methods | S | G | Offline packaging, torch/Prophet/Chronos quirks | `--check` with `--network none` |
-| 12 | Synthetic world, engine | S | G | Drives the real Engine on an injected clock (stress harness) | ≥ 99.9 % match run myself |
-| 13 | Test C loader | G | S | Bounded parser of the `incident_test.py` run dir | One real run dir loads |
-| 14 | Evaluation API | G | S | Routes following `baseline_view.py` | Live tables untouched by POSTs |
-| 15 | Evaluation page | G | S | View following the mockup and `baseline.js` | Check every board in Chrome |
-| 16 | Compose, commands, docs | G | S | Config and docs | Commands run as written |
-| 17 | Laptop proof | S | Tech lead | Long runs and measurements; I validate the report | Re-run one number of each check |
+| 1 | Migration 010 + live recorder | Sonnet | **Opus** + adversarial crash tests | Exactly-once flush path; one mistake loses or doubles data | Read the flush SQL and pending-clear order; run test 3 (crash mid-hour) myself |
+| 2 | Recorder in the lane | Sonnet | **Opus** | Lane replace semantics and resume, same risk class as task 57 | Lane equals live on the same docs |
+| 3 | Lab foundation | Sonnet | **Opus** | Contracts every later task builds on | Interfaces match spec §5–6, 11 exactly before 4–6 start |
+| 4 | σ + episodes + parity | Sonnet | **Opus** + tech-lead adversarial review | Must reproduce live detection exactly; the trust gate for all results | Run parity myself; inspect every mismatch inside commit windows |
+| 5 | Scoring (Test B metrics) | Sonnet | Sonnet | Pure functions, formulas fixed in the judging doc | Hand-check one Winkler and one flap example |
+| 6 | Synthetic world, counts | Sonnet | **Opus** | Derived keys must equal `OpenMinutes`; feeds every laptop result | `*total` = Σ templates and seed determinism on a real run |
+| 7 | Tune, bootstrap, decide | Sonnet | **Opus** | Statistics and the decision tree: subtle tie and CI rules | Verdict table on a hand-made scoreboard |
+| 8 | Core methods A (#2, #3, #4, #7) | Sonnet | Sonnet | Pure functions with formulas and knob grids given | NB quantile vs brute force |
+| 9 | Core methods B (#5, #6, #13, E1) | Sonnet | Sonnet | As 8; E1 wiring is small | PCA on a mix swap |
+| 10 | Test A injector | Sonnet | **Opus** | Consistency of derived keys and placement rules | `*total` = Σ templates after injection |
+| 11 | Lab image + heavy methods | Sonnet | Sonnet | Offline packaging, torch/Prophet/Chronos quirks | `--check` with `--network none` |
+| 12 | Synthetic world, engine | Sonnet | **Opus** | Drives the real Engine on an injected clock (stress harness) | ≥ 99.9 % match run myself |
+| 13 | Test C loader | Sonnet | Sonnet | Bounded parser of the `incident_test.py` run dir | One real run dir loads |
+| 14 | Evaluation API | Sonnet | Sonnet | Routes following `baseline_view.py` | Live tables untouched by POSTs |
+| 15 | Evaluation page | Sonnet | Sonnet | View following the mockup and `baseline.js` | Check every board in Chrome |
+| 16 | Compose, commands, docs | Sonnet | Sonnet | Config and docs | Commands run as written |
+| 17 | Laptop proof | Sonnet | Tech lead | Long runs and measurements; I validate the report | Re-run one number of each check |
 
 ### Waves (parallel only when the briefs' file lists are disjoint; at most 3 agents at once)
 
