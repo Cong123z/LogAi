@@ -92,7 +92,8 @@ def test_run_end_to_end_with_failed_method(monkeypatch, conn, cfg):
     assert run["site"] == "laptop" and run["window_from"] == DAYS[0] and run["tune_to"] == DAYS[6] and run["seed"] == 7
     res = {(r["method"], r["kind"]): r for r in conn.execute("SELECT * FROM lab_results")}
     assert res[("const", "M1")]["status"] == "ok" and res[("const", "M1")]["metrics"]["n_keys"] == 1
-    assert res[("const", "M3")]["metrics"]["n_keys"] == 1 and res[("const", "M3")]["metrics"]["n_minutes"] > 0
+    assert res[("const", "M3")]["metrics"]["n_keys"] == 1
+    assert res[("const", "M3")]["metrics"]["knobs"]["1.0"]["test"]["n_minutes"] > 0     # the scoring sink is the default
     assert res[("boom", "M1")]["status"] == "failed" and "nope" in res[("boom", "M1")]["metrics"]["error"]
 
 
@@ -258,7 +259,7 @@ def test_no_fit_means_skipped_per_kind(monkeypatch, conn, cfg):
     seed(conn)
     labrun.run(args("nofit"), cfg, conn, conn)
     res = {r["kind"]: r for r in conn.execute("SELECT * FROM lab_results WHERE method = 'nofit'")}
-    assert res["M1"]["status"] == "skipped" and res["M1"]["metrics"] == {"n_keys": 1, "n_minutes": 0}
+    assert res["M1"]["status"] == "skipped" and res["M1"]["metrics"]["n_keys"] == 1
     assert res["M4"]["status"] == "skipped" and res["M4"]["metrics"]["n_keys"] == 0
 
 

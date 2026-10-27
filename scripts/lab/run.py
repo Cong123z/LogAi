@@ -26,6 +26,7 @@ from scripts.lab.data import ServiceData
 from scripts.lab.kinds import assign, has_new
 from scripts.lab.load import load_service, services
 from scripts.lab.methods import Unavailable
+from scripts.lab.score import score_collect
 
 
 def parse_args(argv=None):
@@ -87,33 +88,7 @@ def make_part(service: str, days: list[date], tune_days: list[date], by_days: bo
     return lambda key, day: "tune" if zlib.crc32((service + key).encode()) % 2 == 0 else "test"
 
 
-class DefaultSink:
-    """Stub (bk05/bk07 replace it): one result row per kind of the method with n_keys and n_minutes."""
-
-    def __init__(self, conn, run_id, service, method, spec, kinds, ctx):
-        self.conn, self.run_id, self.service, self.method, self.spec = conn, run_id, service, method, spec
-        self.kinds, self.ctx = kinds, ctx
-        self.days: dict[str, int] = {}       # key -> days added
-
-    def add(self, key, day, outs) -> None:
-        self.days[key] = self.days.get(key, 0) + 1
-
-    def skip(self, day) -> None:
-        pass
-
-    def end(self) -> None:
-        for kind in sorted(self.spec.kinds):
-            keys = [k for k, kd in self.kinds.items() if kd == kind or (kind == "M6" and has_new(self.ctx.sd, k))]
-            done = sum(self.days.get(k, 0) for k in keys)
-            store.put_result(self.conn, self.run_id, self.method, kind, self.service, None, "ok" if done else "skipped",
-                             {"n_keys": len(keys), "n_minutes": 1440 * done})
-
-
-def default_collect(conn, run_id, service, method, spec, kinds, ctx) -> DefaultSink:
-    return DefaultSink(conn, run_id, service, method, spec, kinds, ctx)
-
-
-def run(args, cfg, data_conn, results_conn, collect=default_collect, finish=None) -> int:
+def run(args, cfg, data_conn, results_conn, collect=score_collect, finish=None) -> int:
     """collect(results_conn, run_id, service, method, spec, kinds, ctx) returns a sink: sink.add(key, day, {knob: DayOut})
     for each walked key and fitted day in ascending day order, sink.skip(day) for a day the fit refused, sink.end()
     after the last day. A sink should write only in end(), in one transaction (all-or-nothing); if add/end raises

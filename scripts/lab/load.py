@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from logai2.links import ALERTING_SOURCES
 from logai2.timeutil import minute_of
-from scripts.lab.data import UNOBSERVED, ServiceData
+from scripts.lab.data import UNOBSERVED, Incident, ServiceData, minute_at
 
 
 def services(conn, window_from: date, window_to: date) -> list[str]:
@@ -63,6 +63,10 @@ def load_service(conn, service: str, window_from: date, window_to: date, history
     for r in conn.execute("SELECT day, hour_from, hour_to FROM review_exclusions WHERE service = %s "
                           "AND decision = 'exclude' AND day BETWEEN %s AND %s", args):
         excluded |= {(r["day"], h) for h in range(r["hour_from"], r["hour_to"])}
+    lo, hi = minute_at(window_from, 0), minute_at(window_to, 0) + 1440      # +-15 min: score.py's margin
+    incidents = [Incident(r["key"], r["start_minute"], r["end_minute"], r["source"]) for r in conn.execute(
+        "SELECT key, start_minute, end_minute, source FROM lab_incidents WHERE service = %s AND start_minute < %s "
+        "AND end_minute > %s ORDER BY start_minute, id", (service, hi + 15, lo - 15))]
     return ServiceData(
         service, days, minutes, observed,
         {(r["key"], r["day"], r["hour"]): (r["sum"], r["sumsq"]) for r in conn.execute(
@@ -74,4 +78,4 @@ def load_service(conn, service: str, window_from: date, window_to: date, history
         excluded,
         {t["template_id"]: t["level"] for t in templates},
         {t["template_id"]: minute_of(t["first_seen"].timestamp()) for t in templates},
-        docs)
+        docs, incidents)
