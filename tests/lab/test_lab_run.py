@@ -1,28 +1,23 @@
+import gc
+import weakref
+import zlib
 from array import array
-from datetime import date
+from datetime import date, datetime
 
+import psycopg
 import pytest
 
 import scripts.lab.methods as methods
+from logai2.timeutil import TZ
 from scripts.lab import run as labrun
+from scripts.lab.data import minute_at  # noqa: F401
 from scripts.lab.methods import DayOut, Spec, apply_d4, floor_for, select
 from scripts.lab.store import prune, start_run
-from logai2.timeutil import TZ
 from tests.conftest import TEST_DSN
 from tests.test_links import tmpl
 from test_lab_load import D1, D2, put
 
 DAYS = [date(2026, 10, d) for d in range(1, 15)]
-
-
-import gc
-import weakref
-import zlib
-from datetime import datetime
-
-import psycopg
-
-from scripts.lab.data import minute_at
 
 
 def count(conn, table="lab_runs"):
@@ -269,3 +264,65 @@ def test_main_connections_are_read_only_and_schema_scoped(monkeypatch, conn, sch
     rc = labrun.main(argv)
     assert rc == 0
     assert count(conn) == 1 and count(conn, "lab_minute_counts") > 0
+
+
+def test_only_one_service_data_alive(monkeypatch, conn, cfg):
+    monkeypatch.setattr(methods, "METHODS", {"fresh": Fresh})
+    seed(conn)
+    for d in DAYS[:2]:
+        put(conn, "*minutes", d, 0, [1] * 60, service="s2")
+        put(conn, "*total", d, 0, [6] * 60, service="s2")
+    conn.commit()
+    refs, alive = [], []
+
+    def collect(c, run_id, service, name, spec, kinds, ctx):
+        if refs:
+            gc.collect()
+            alive.append(refs[0]() is not None)
+        refs.append(weakref.ref(ctx.sd))
+        return Recorder()
+
+    assert labrun.run(args("fresh"), cfg, conn, conn, collect=collect) == 0
+    assert len(refs) == 2 and alive == [False]
+
+
+def test_failing_sink_leaves_only_failed_rows(monkeypatch, conn, cfg):
+    from scripts.lab import store
+    monkeypatch.setattr(methods, "METHODS", {"fresh": Fresh})
+    seed(conn)
+
+    class Bad(Recorder):
+        def __init__(self, c, run_id, service):
+            super().__init__()
+            self.c, self.run_id, self.service = c, run_id, service
+
+        def end(self):
+            store.put_result(self.c, self.run_id, "fresh", "M1", self.service, None, "ok", {})
+            raise RuntimeError("late")
+
+    rc = labrun.run(args("fresh"), cfg, conn, conn, collect=lambda c, r, s, *a: Bad(c, r, s))
+    assert rc == 0
+    rows = conn.execute("SELECT kind, status, metrics FROM lab_results ORDER BY kind").fetchall()
+    assert [(r["kind"], r["status"]) for r in rows] == [("M1", "failed"), ("M6", "failed")]
+    assert "late" in rows[0]["metrics"]["error"]
+    assert conn.execute("SELECT status FROM lab_runs").fetchone()["status"] == "ok"
+
+
+def test_finish_hook_runs_before_finish_run(monkeypatch, conn, cfg):
+    monkeypatch.setattr(methods, "METHODS", {"const": Const})
+    seed(conn)
+    seen = []
+
+    def hook(c, run_id):
+        seen.append((run_id, c.execute("SELECT status FROM lab_runs WHERE id = %s", (run_id,)).fetchone()["status"]))
+
+    assert labrun.run(args(), cfg, conn, conn, finish=hook) == 0
+    assert len(seen) == 1 and seen[0][1] == "running"
+    assert conn.execute("SELECT status FROM lab_runs").fetchone()["status"] == "ok"
+
+    def boom(c, run_id):
+        raise RuntimeError("tune failed")
+
+    assert labrun.run(args(), cfg, conn, conn, finish=boom) == 1
+    last = conn.execute("SELECT status, error FROM lab_runs ORDER BY id DESC LIMIT 1").fetchone()
+    assert last["status"] == "failed" and "tune failed" in last["error"]

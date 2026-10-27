@@ -113,10 +113,13 @@ def default_collect(conn, run_id, service, method, spec, kinds, ctx) -> DefaultS
     return DefaultSink(conn, run_id, service, method, spec, kinds, ctx)
 
 
-def run(args, cfg, data_conn, results_conn, collect=default_collect) -> int:
+def run(args, cfg, data_conn, results_conn, collect=default_collect, finish=None) -> int:
     """collect(results_conn, run_id, service, method, spec, kinds, ctx) returns a sink: sink.add(key, day, {knob: DayOut})
     for each walked key and fitted day in ascending day order, sink.skip(day) for a day the fit refused, sink.end()
-    after the last day. The runner keeps no output. A key is walked when its kind is in spec.kinds, or "M6" is and the
+    after the last day. A sink should write only in end(), in one transaction (all-or-nothing); if add/end raises
+    anyway, the runner deletes the method's lab_results rows for the service and writes `failed` rows. The runner keeps no output.
+    finish(results_conn, run_id), when given, runs after the last service and before the run is marked ok (cross-service
+    work such as tuning); an exception in it fails the run. A key is walked when its kind is in spec.kinds, or "M6" is and the
     key has a new minute in the window."""
     names = methods.select(args.methods)
     if args.days is not None:
@@ -165,10 +168,14 @@ def run(args, cfg, data_conn, results_conn, collect=default_collect) -> int:
                         prev = model
                     sink.end()
                 except Exception as exc:
+                    store.clear_results(results_conn, run_id, name, service)
                     for kind in sorted(m.spec.kinds):
                         store.put_result(results_conn, run_id, name, kind, service, None, "failed",
                                          {"error": repr(exc)})
-            del sd, ctx
+                sink = model = prev = None
+            sd = ctx = None         # only one ServiceData alive: nothing of this service survives into the next load
+        if finish is not None:
+            finish(results_conn, run_id)
         store.finish_run(results_conn, run_id, "ok", {"counts": counts, "hash": digest.hexdigest()})
         store.prune(results_conn, args.site)
         return 0

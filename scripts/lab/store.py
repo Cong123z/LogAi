@@ -27,6 +27,11 @@ def put_result(conn, run_id, method, kind, scope, knob, status, metrics: dict, v
                      (run_id, method, kind, scope, knob, status, Jsonb(metrics), verdict, strength))
 
 
+def clear_results(conn, run_id, method, scope) -> None:
+    with conn.transaction():
+        conn.execute("DELETE FROM lab_results WHERE run_id = %s AND method = %s AND scope = %s", (run_id, method, scope))
+
+
 def put_episodes(conn, run_id, method, service, key, episodes) -> None:
     """episodes: rows (start, end, peak, alerted)."""
     with conn.transaction(), conn.cursor() as cur:
