@@ -1,5 +1,8 @@
 """Methods #2 (negative-binomial tail) and #3 (the same with outliers clipped at rebuild), plus `run_day`,
-the minute loop the band methods #4 and #7 share."""
+the minute loop the band methods #4 and #7 share.
+
+nb/nb_clip take sigma's `*total` drop guards (no drop on a borrowed weekend or a young baseline) but have no
+young-baseline widening on the upper side (a method difference)."""
 from __future__ import annotations
 
 import math
@@ -7,7 +10,7 @@ from array import array
 from datetime import date
 from functools import lru_cache
 
-from logai2.owner.baseline import DAY_CAP, Baseline, Stat
+from logai2.owner.baseline import DAY_CAP, Baseline, Stat, full_after
 from logai2.owner.detect import VIEW_ONLY_KEYS
 from logai2.timeutil import daytype
 from scripts.lab.data import UNOBSERVED, ServiceData
@@ -19,7 +22,8 @@ TAILS = (1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 1e-5)
 
 
 def run_day(model, prev_model, sd: ServiceData, key: str, day: date, knobs, cfg, bands) -> dict[float, DayOut]:
-    """bands(model, hour) -> (expected, {knob: (low, high)}) or None (NaN band, score 0, no flag).
+    """bands(model, hour) -> (expected, {knob: (low, high)}[, drop_ok]) or None (NaN band, score 0, no flag).
+    drop_ok=False keeps the band but suppresses the `*total` drop flag.
     Minutes before the 02:00 commit use prev_model, as sigma does."""
     h, m = cfg.baseline.commit_time.split(":")
     switch = int(h) * 60 + int(m)
@@ -33,7 +37,8 @@ def run_day(model, prev_model, sd: ServiceData, key: str, day: date, knobs, cfg,
             b = bands(mdl, hour) if lo < hi else None
             if b is None:
                 continue
-            exp, kb = b
+            exp, kb, *rest = b
+            drop_ok = rest[0] if rest else True
             for slot in range(lo, hi):
                 n = counts[slot]
                 if n == UNOBSERVED:
@@ -42,7 +47,7 @@ def run_day(model, prev_model, sd: ServiceData, key: str, day: date, knobs, cfg,
                     low, high = kb[k]
                     e[slot], l[slot], h_[slot] = exp, low, high
                     s[slot] = n / high if high > 0 else float(n > 0)
-                    f[slot] = apply_d4(n, low, high, exp, key, level, cfg) and not view_only
+                    f[slot] = apply_d4(n, low if drop_ok else None, high, exp, key, level, cfg) and not view_only
     return {k: DayOut(*o) for k, o in outs.items()}
 
 
@@ -98,7 +103,7 @@ class NB:
             for p in knobs:
                 qs = [nb_quantiles(s.mean, s.std ** 2, p) for s in stats]
                 kb[p] = (min(q[0] for q in qs), max(q[1] for q in qs))
-            return exp, kb
+            return exp, kb, not lk.upper_only and lk.days >= full_after(cfg, lk.daytype)
 
         return run_day(model, prev_model, sd, key, day, knobs, cfg, bands)
 

@@ -262,3 +262,42 @@ def test_commit_time_switch_uses_prev_model(cfg):
     a = methods.METHODS["nb"]().day(old, None, sd, "E", D, (1e-3,), cfg)[1e-3]
     b = methods.METHODS["nb"]().day(new, None, sd, "E", D, (1e-3,), cfg)[1e-3]
     assert mid.high[60] == a.high[60] and mid.high[1000] == b.high[1000]
+
+
+# --- fix round 1: drop guards and _picks ----------------------------------------------------------------
+
+@pytest.mark.parametrize("name", ["nb", "nb_clip"])
+@pytest.mark.parametrize("start,day,flagged", [
+    (date(2026, 9, 14), D, True),                    # full weekday baseline
+    (date(2026, 10, 12), date(2026, 10, 17), False),  # Saturday with no weekend history: borrows weekdays
+    (date(2026, 10, 8), D, False),                   # 2 weekdays: young baseline
+])
+def test_total_drop_guards(name, start, day, flagged, cfg):
+    sd = make({"*total": flat(30)}, start=start, end=day + timedelta(days=1), mods=[("*total", day, 600, 630, 9)])
+    o = run(name, sd, "*total", day, cfg)
+    assert (sum(o.high_flag[600:630]) >= 24) == flagged and (flagged or sum(o.high_flag) == 0)
+    assert not math.isnan(o.low[610])                # the plotted band keeps its low
+
+
+def test_picks_equal_sigma_picks(cfg):
+    from scripts.lab.methods.nb import _picks
+    from scripts.lab.methods.sigma import rebuild_stats
+    from logai2.timeutil import daytype
+    sd = make({"k": flat(1)}, start=date(2026, 9, 28), end=date(2026, 10, 14))
+    for d in (date(2026, 10, 1), date(2026, 10, 6)):             # gaps
+        for h in range(24):
+            sd.n_minutes.pop((d, h), None)
+    for d, h in ((date(2026, 10, 7), 9), (date(2026, 10, 3), 4)):  # n_minutes = 0
+        sd.n_minutes[d, h] = 0
+    sd.excluded |= {(date(2026, 10, 8), 10), (date(2026, 10, 4), 4)}
+    # one distinct hourly sum per (day, hour): the profile mean tells which days sigma used
+    for (k, d, h) in list(sd.hourly):
+        sd.hourly[k, d, h] = (d.toordinal() * 24 + h, 0)
+    for day in (date(2026, 10, 9), date(2026, 10, 12), date(2026, 10, 14)):
+        got = rebuild_stats(sd, day).stats
+        picks = _picks(sd, day)
+        want = {("s", "k", dt, h): sum(sd.hourly["k", d, h][0] for d in ds) / sum(sd.n_minutes[d, h] for d in ds)
+                for (dt, h), ds in picks.items()}
+        assert {k: v.mean for k, v in got.items() if k[1] == "k"} == pytest.approx(want, abs=1e-9, rel=0) and want
+        assert all(d < day and daytype(d) == dt and (d, h) not in sd.excluded and sd.n_minutes[d, h] > 0
+                   for (dt, h), ds in picks.items() for d in ds)
