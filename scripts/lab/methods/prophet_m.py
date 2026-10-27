@@ -5,6 +5,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from scripts.lab.data import ServiceData
+from scripts.lab.holidays import is_holiday
 from scripts.lab.methods import Spec, Unavailable
 from scripts.lab.methods import heavy
 
@@ -43,7 +44,9 @@ class ProphetM:
         df = pd.DataFrame({"ds": [t0 + timedelta(hours=i) for i in range(len(y))], "y": y}).dropna()
         if len(df) < 48:
             return None
-        hol = pd.DataFrame({"holiday": "vn", "ds": pd.to_datetime(list(cfg.lab.holidays))}) if cfg.lab.holidays else None
+        days = [t0.date() + timedelta(n) for n in range(model.days + 1)]
+        hd = [d for d in days if is_holiday(d, cfg)]
+        hol = pd.DataFrame({"holiday": "vn", "ds": pd.to_datetime(hd)}) if hd else None
         m = self._prophet(daily_seasonality=True, weekly_seasonality=True, yearly_seasonality=False,
                           holidays=hol, uncertainty_samples=300)
         try:

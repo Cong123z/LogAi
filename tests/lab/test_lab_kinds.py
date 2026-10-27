@@ -22,7 +22,7 @@ def busy(rate):      # `rate`/min during hour 3 only, zero elsewhere
 
 
 def make():
-    keys = {"*total": busy(5), "*error": busy(1), "*warn": busy(1), "*info": busy(1), "*minutes": arr(1),
+    keys = {"*total": busy(5), "*error": busy(1), "*warn": busy(1), "*info": busy(1), "*minutes": arr(1), MIX: busy(5),
             "big": busy(4), "quiet_err": busy(1), "quiet_warn": busy(1), "quiet_info": busy(1),
             "svc:unparsed": busy(9), "doc:D": busy(1), "gone_err": arr(UNOBSERVED), "gone_info": arr(UNOBSERVED)}
     sd = ServiceData("s", [D1, D2], {k: {D1: v, D2: arr()} for k, v in keys.items()}, {D1: arr(1), D2: arr(1)},
@@ -37,7 +37,7 @@ def test_assign_kinds():
     sd = make()
     for k in ("gone_err", "gone_info"):
         sd.minutes[k][D2] = arr(UNOBSERVED)
-    assert assign(sd, [D1]) == {"*total": "M1", "*error": "M2", "doc:D": "M5", "big": "M3",
+    assert assign(sd, [D1]) == {"*total": "M1", "*error": "M2", MIX: "M7", "doc:D": "M5", "big": "M3",
                                 "quiet_err": "M4", "quiet_warn": "M4", "gone_err": "M4"}
     assert KINDS == ("M1", "M2", "M3", "M4", "M5", "M6", "M7") and MIX == "*mix"
 

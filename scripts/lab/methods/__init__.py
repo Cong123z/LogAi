@@ -9,7 +9,7 @@ from typing import NamedTuple, Protocol
 
 from logai2.config import AppConfig
 from logai2.owner.baseline import FLOOR_LEVEL, KEY_LEVEL
-from scripts.lab.data import ServiceData
+from scripts.lab.data import MIX, ServiceData
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,8 @@ def apply_d4(count, low, high, expected, key, level, cfg, score=None) -> bool:
     Band methods: upper test is `count > high`. Score methods pass `score` and `high` = threshold: the upper test is
     `score > high`, the floor test still uses the raw `count`. Live also needs a full baseline and not upper_only for
     the drop; those are sigma-specific and bk04's sigma handles them through its own judge call, not here."""
+    if key == MIX:      # M7: a mix alert is not a count, so no floor
+        return high is not None and score is not None and score > high
     floor = floor_for(key, level, cfg)
     value = count if score is None else score
     if floor is not None and high is not None and value > high and count >= floor:
@@ -104,3 +106,15 @@ for _n, _m, _c in (("ets", "ets", "Ets"), ("prophet", "prophet_m", "ProphetM"), 
                    ("chronos", "chronos_m", "ChronosM"), ("mprofile", "mprofile", "MProfile")):
     METHODS[_n] = _lazy(_m, _c)
     GROUPS["heavy"].append(_n)
+
+from scripts.lab.methods.mad import Mad  # noqa: E402
+from scripts.lab.methods.nb import NB, NBClip  # noqa: E402
+from scripts.lab.methods.weekly import Weekly  # noqa: E402
+from scripts.lab.methods.cusum import Cusum  # noqa: E402
+from scripts.lab.methods.pca import Pca  # noqa: E402
+from scripts.lab.methods.ratio import Ratio  # noqa: E402
+from scripts.lab.methods.vote import Vote  # noqa: E402
+
+for _cls in (NB, NBClip, Mad, Weekly, Ratio, Cusum, Pca, Vote):
+    METHODS[_cls.spec.name] = _cls
+    GROUPS["core"].append(_cls.spec.name)

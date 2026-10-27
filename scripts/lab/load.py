@@ -6,7 +6,7 @@ from datetime import date, timedelta
 
 from logai2.links import ALERTING_SOURCES
 from logai2.timeutil import minute_of
-from scripts.lab.data import UNOBSERVED, Incident, ServiceData, minute_at
+from scripts.lab.data import MIX, UNOBSERVED, Incident, ServiceData, minute_at
 
 
 def services(conn, window_from: date, window_to: date) -> list[str]:
@@ -58,6 +58,7 @@ def load_service(conn, service: str, window_from: date, window_to: date, history
                         if n != UNOBSERVED:
                             a[i] += n
             minutes[doc][d] = a
+    minutes[MIX] = minutes["*total"]       # M7 judges the mix of a service whose total looks normal: same arrays
     args = (service, since, window_to)
     excluded = set()
     for r in conn.execute("SELECT day, hour_from, hour_to FROM review_exclusions WHERE service = %s "

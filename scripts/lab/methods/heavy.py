@@ -68,6 +68,9 @@ def within_var(sd: ServiceData, key: str, day: date, hour: int, days: int = 14) 
     return sum(vs) / len(vs) if vs else 0.0
 
 
+# Method choice (bk11): an hourly forecast interval says where the hour's MEAN count per minute will be, far narrower than
+# where a single minute falls. So the per-minute band half-width combines the method's own interval and the minute-level
+# noise (the within-hour variance seen at that hour in the last 14 days) in quadrature.
 def widen(half: float, z: float, var: float) -> float:
     """Half-width of the per-minute band: forecast uncertainty `half` and minute noise z*sqrt(var), in quadrature."""
     return math.sqrt(half * half + z * z * var)

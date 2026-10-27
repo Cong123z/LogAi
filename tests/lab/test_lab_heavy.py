@@ -128,7 +128,7 @@ def test_to_day_all_nan_without_minutes():
 
 # ---- per-method behaviour (needs the package) ----------------------------------------------------------------
 
-def make_sd(base=30.0, days=21, seed=0, d_scale=1.0, spike=None, keys=("*total", "*error")):
+def make_sd(base=30.0, days=21, seed=0, d_scale=1.0, spike=None, keys=("*total", "*error"), batch=False, flat=None, levels=None):
     np = pytest.importorskip("numpy")
     all_days = [D - timedelta(k) for k in range(days, -1, -1)]
     minutes, hourly, n_min = {}, {}, {}
@@ -139,7 +139,11 @@ def make_sd(base=30.0, days=21, seed=0, d_scale=1.0, spike=None, keys=("*total",
             lam = base * (1 + 0.5 * np.sin(2 * np.pi * (np.arange(1440) / 60 - 6) / 24))
             if d == D:
                 lam = lam * d_scale
+            if batch:                                    # an hourly batch: x3 in the first 10 minutes of every hour
+                lam = lam * np.where(np.arange(1440) % 60 < 10, 3.0, 1.0)
             c = rng.poisson(lam).astype("int64")
+            if d == D and flat:                          # a flat line where traffic should oscillate
+                c[flat[0]:flat[1]] = int(base)
             if d == D and spike == key:
                 c[600:630] *= 3
             minutes[key][d] = array("i", c.tolist())
@@ -150,7 +154,7 @@ def make_sd(base=30.0, days=21, seed=0, d_scale=1.0, spike=None, keys=("*total",
         for h in range(24):
             n_min[(d, h)] = 60
     obs = {d: array("i", [1] * 1440) for d in all_days}
-    return ServiceData("s", all_days, minutes, obs, hourly, n_min, set(all_days[:-1]), set(), {}, {}, {})
+    return ServiceData("s", all_days, minutes, obs, hourly, n_min, set(all_days[:-1]), set(), levels or {}, {}, {})
 
 
 def run_day(name, sd, key="*total", knob=None):
@@ -206,13 +210,31 @@ def test_no_look_ahead(name):
         assert list(a.high) == pytest.approx(list(b.high), nan_ok=True)
 
 
-def test_mprofile_scores_a_spike():
+def mp_day(**kw):
+    sd = make_sd(base=20.0, batch=True, keys=("*total", "t1"), levels={"t1": "ERROR"}, **kw)
+    m = methods.METHODS["mprofile"]()
+    model = m.fit(sd, D, CFG)
+    outs = m.day(model, None, sd, "t1", D, (0.99, 0.999, 0.9999), CFG)
+    ds = model.dist["t1"]
+    return outs, {q: ds[int(q * len(ds))] for q in outs}
+
+
+def test_mprofile_threshold_is_a_history_quantile():
     pytest.importorskip("stumpy")
-    sd = make_sd(base=100000.0, spike="*total")      # smooth: Poisson noise at low counts alone gives distance ~7
-    m, out = run_day("mprofile", sd, key="*total", knob=4.0)
-    assert out.expected is None and out.low is None and out.high is None
-    assert sum(s > 4.0 for s in out.score[600:660]) >= 20
-    assert sum(out.score[100:500]) / 400 < 4.0
+    outs, thr = mp_day()
+    assert outs[0.999].expected is None and outs[0.999].low is None and outs[0.999].high is None
+    assert thr[0.99] <= thr[0.999] <= thr[0.9999]
+    assert sum(outs[0.999].high_flag) / 1440 <= 0.01          # clean day: about 1 - 0.999 flagged
+    assert sum(outs[0.99].high_flag) >= sum(outs[0.9999].high_flag)
+
+
+def test_mprofile_flags_a_flat_line():
+    pytest.importorskip("stumpy")
+    outs, thr = mp_day(flat=(600, 700))
+    out = outs[0.999]
+    assert max(out.score[600:760]) > thr[0.999]
+    assert sum(out.high_flag[600:760]) >= 1
+    assert sum(out.high_flag) <= 144
 
 
 def test_chronos_samples_m6():

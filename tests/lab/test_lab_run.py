@@ -268,7 +268,7 @@ def test_main_connections_are_read_only_and_schema_scoped(monkeypatch, conn, sch
     seed(conn)
     real = labrun.run
 
-    def probe(a, cfg, data, results):
+    def probe(a, cfg, data, results, **kw):
         for _ in range(2):                  # still read-only after a rollback
             with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
                 data.execute("DELETE FROM lab_minute_counts")
@@ -276,7 +276,7 @@ def test_main_connections_are_read_only_and_schema_scoped(monkeypatch, conn, sch
         assert data.execute("SHOW search_path").fetchone()["search_path"] == f"{schema}, public"
         assert results.execute("SHOW search_path").fetchone()["search_path"] == schema
         results.commit()                    # the store's own transactions must be the outermost ones
-        return real(a, cfg, data, results)
+        return real(a, cfg, data, results, **kw)
 
     monkeypatch.setattr(labrun, "run", probe)
     argv = ["--site", "laptop", "--test", "B", "--methods", "const", "--from", "2026-10-01", "--to", "2026-10-14",

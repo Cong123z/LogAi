@@ -23,6 +23,7 @@ from logai2.db import connect
 from logai2.timeutil import TZ
 from scripts.lab import store
 from scripts.lab.data import ServiceData
+from scripts.lab.decide import finish_all
 from scripts.lab.kinds import assign, has_new
 from scripts.lab.load import load_service, services
 from scripts.lab.methods import Unavailable
@@ -200,7 +201,7 @@ def main(argv=None) -> int:
     dsn = a.dsn or cfg.database.dsn
     data, results = _open(dsn, a.schema, read_only=True), _open(dsn, a.results_schema)
     try:
-        return run(a, cfg, data, results)
+        return run(a, cfg, data, results, finish=(lambda conn, rid: finish_all(conn, rid, seed=a.seed, cfg=cfg)) if a.test == "B" else None)
     finally:
         data.close()
         results.close()

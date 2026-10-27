@@ -10,6 +10,7 @@ import math
 from datetime import date, timedelta
 
 from scripts.lab.data import ServiceData
+from scripts.lab.holidays import is_holiday
 from scripts.lab.methods import Spec, Unavailable
 from scripts.lab.methods import heavy
 
@@ -27,8 +28,8 @@ def _klass(sd: ServiceData, key: str) -> float:
 
 
 class _Model:
-    def __init__(self, models, holidays):
-        self.models, self.holidays = models, holidays      # models: {"med": m, (q, "lo"|"hi"): m}
+    def __init__(self, models):
+        self.models = models      # models: {"med": m, (q, "lo"|"hi"): m}
 
 
 class Lgbm:
@@ -43,9 +44,9 @@ class Lgbm:
             raise Unavailable("lightgbm not installed") from e
         self._lgb, self._np = lightgbm, numpy
 
-    def _row(self, sd, key, day, h, hist, mean, holidays):
+    def _row(self, sd, key, day, h, hist, mean, cfg):
         d1, d7 = day - timedelta(1), day - timedelta(7)
-        return [h, day.weekday(), float(day.isoformat() in holidays), hist.get((d1, 23), NAN), hist.get((d1, h), NAN),
+        return [h, day.weekday(), float(is_holiday(day, cfg)), hist.get((d1, 23), NAN), hist.get((d1, h), NAN),
                 hist.get((d7, h), NAN), math.log1p(mean) if mean == mean else NAN, _klass(sd, key)]
 
     def _history(self, sd, key, day):
@@ -62,14 +63,13 @@ class Lgbm:
         if heavy.hist_days(sd, day) < self.spec.min_hour_days:
             return None
         np = self._np
-        holidays = set(map(str, cfg.lab.holidays))
         keys = sorted({k for (k, d, _) in sd.hourly if d < day})
         X, y = [], []
         for key in keys:
             hist, mean = self._history(sd, key, day)
             for (d, h), v in hist.items():
                 if d >= day - timedelta(TRAIN_DAYS):
-                    X.append(self._row(sd, key, d, h, hist, mean, holidays))
+                    X.append(self._row(sd, key, d, h, hist, mean, cfg))
                     y.append(v)
         X, y = np.array(X, dtype=float), np.array(y, dtype=float)
         ds = self._lgb.Dataset(X, y, free_raw_data=False)
@@ -77,12 +77,12 @@ class Lgbm:
         models = {"med": mk(0.5)}
         for q in TAILS:
             models[(q, "lo")], models[(q, "hi")] = mk(q), mk(1 - q)
-        return _Model(models, holidays)
+        return _Model(models)
 
     def day(self, model, prev_model, sd: ServiceData, key: str, day: date, knobs, cfg):
         np = self._np
         hist, mean = self._history(sd, key, day)
-        X = np.array([self._row(sd, key, day, h, hist, mean, model.holidays) for h in range(24)], dtype=float)
+        X = np.array([self._row(sd, key, day, h, hist, mean, cfg) for h in range(24)], dtype=float)
         exp = [max(float(v), 0.0) for v in model.models["med"].predict(X)]
         sh = heavy.shape(sd, key, day)
         var = [heavy.within_var(sd, key, day, h) for h in range(24)]
