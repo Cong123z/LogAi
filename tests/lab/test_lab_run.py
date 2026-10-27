@@ -64,6 +64,7 @@ def test_company_a_or_c_exits_2_before_connecting(monkeypatch, conn):
 
 
 def test_check_with_no_methods(monkeypatch, capsys):
+    monkeypatch.setattr(methods, "GROUPS", {"core": [], "heavy": []})     # bk04 registered sigma: empty the registry
     monkeypatch.setattr(labrun, "connect", lambda *a, **k: pytest.fail("connected"))
     assert labrun.main(["--site", "laptop", "--test", "B", "--methods", "all", "--days", "3", "--check"]) == 1
     assert "available" not in capsys.readouterr().out.replace("unavailable", "")
