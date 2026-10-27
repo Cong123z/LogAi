@@ -127,7 +127,7 @@ def run(args, cfg, data_conn, results_conn, collect=None, finish=None) -> int:
         digest = hashlib.sha1()
         for service in services(data_conn, d0, d1):
             sd = load_service(data_conn, service, d0, d1, HISTORY_DAYS)
-            kinds = assign(sd, tune_days)       # ponytail: M7 (*mix) is not walked yet; bk09 adds it
+            kinds = assign(sd, tune_days)     
             for key, kind in sorted(kinds.items()):
                 counts[kind] = counts.get(kind, 0) + 1
                 digest.update(f"{service}\0{key}\0{kind}\n".encode())
