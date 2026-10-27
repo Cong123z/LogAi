@@ -370,7 +370,7 @@ def _rename(gen: Generated, ids: dict, texts: dict, keep_days: int) -> Generated
         inc = [{**o, "key": m.get(o["key"], o["key"]), "meta": {k: m.get(v, v) for k, v in o["meta"].items()} if o["meta"] else None}
                for o in s.incidents]
         out.append(Svc(s.name, tpl, counts, inc))
-    return Generated(gen.days, out)
+    return Generated(gen.days[:keep_days], out)      # write() commits all but the last of these days: the history only
 
 
 def _events(gen: Generated, first_day: int, seed: int) -> list[Events]:

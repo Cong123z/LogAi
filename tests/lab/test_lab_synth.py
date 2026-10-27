@@ -409,28 +409,48 @@ def lab_cells(conn, schema, days):
     return out
 
 
-def test_engine_mode_matches_counts_mode(conn, two_schemas):
+def test_engine_mode_matches_counts_mode(conn, two_schemas, monkeypatch):
+    """2 history days + 2 engine days: the second engine day starts after a 02:00 commit and a day rollover."""
+    from scripts.lab import synth
+    import logai2.jobs.commit as commit_mod
+    monkeypatch.setattr(synth, "HISTORY_DAYS", 2)
+    seen = []
+    real = commit_mod.commit
+
+    def spy(c, cfg, today, *args, **kw):
+        if not seen:        # the seed commit of run_engine, before the engine's first tick
+            seen.append([r["day"] for r in c.execute("SELECT DISTINCT day FROM day_status WHERE committed")])
+        return real(c, cfg, today, *args, **kw)
+    monkeypatch.setattr(commit_mod, "commit", spy)
     a, b = two_schemas
-    s = one_service(days=3)
-    gen = generate(engine_world(), s, END)
+    s, scale = one_service(days=4), 0.5
+    gen = generate(engine_world(), s, END, scale)
     write(conn, a, gen)
     conn.commit()
     t0 = time.time()
-    summary = run_engine(engine_world(), s, END, b, TEST_DSN)
+    summary = run_engine(engine_world(), s, END, b, TEST_DSN, scale)
     took = time.time() - t0
-    ca, cb = lab_cells(conn, a, set(gen.days)), lab_cells(conn, b, set(gen.days))
+    eng_days = set(gen.days[2:])
+    ca, cb = lab_cells(conn, a, eng_days), lab_cells(conn, b, eng_days)
     keys = set(ca) | set(cb)
     bad = [k for k in keys if ca.get(k, 0) != cb.get(k, 0)]
-    print(f"\nENGINE-vs-COUNTS cells={len(keys)} mismatches={len(bad)} seconds={took:.0f} summary={summary}")
-    assert len(bad) <= len(keys) * 0.001, sorted(bad)[:10]
+    print(f"\nENGINE-vs-COUNTS engine days only: cells={len(keys)} mismatches={len(bad)} seconds={took:.0f} summary={summary}")
+    assert len(keys) > 10_000 and len(bad) <= len(keys) * 0.001, sorted(bad)[:10]
     assert not [k for k in bad if k[0] == "*total"], sorted(bad)[:10]
-    assert summary["events"] == sum(ca[k] for k in ca if k[0] == "*total" and k[1] == gen.days[-1])
-    assert took < 180
+    assert summary["events"] == sum(c for k, c in ca.items() if k[0] == "*total")
+    assert took < 240
+    # only history days were committed before the engine ran; the engine's own commits did the rest
+    assert seen[0] and max(seen[0]) <= gen.days[1], seen
+    done = {r["day"] for r in rows(conn, b, "SELECT day FROM S.day_status WHERE committed")}
+    assert done == set(gen.days[:3]), done           # the last engine day is still open
+    assert rows(conn, b, "SELECT 1 FROM S.baseline LIMIT 1")
 
 
 def test_engine_mode_writes_incidents_and_alerts(conn, two_schemas):
     _, b = two_schemas
-    n_public = conn.execute("SELECT count(*) AS n FROM pg_tables WHERE schemaname = 'public'").fetchone()["n"]
+    public = lambda: {r["tablename"]: conn.execute(f'SELECT count(*) AS n FROM public."{r["tablename"]}"').fetchone()["n"]
+                      for r in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'").fetchall()}
+    before = public()
     s = one_service(days=7, incidents=[{"type": "spike", "size": 8, "minutes": 10, "every_days": 7, "key": "w0"}])
     run_engine(engine_world(), s, END, b, TEST_DSN)
     inc = rows(conn, b, "SELECT * FROM S.lab_incidents")
@@ -438,4 +458,4 @@ def test_engine_mode_writes_incidents_and_alerts(conn, two_schemas):
     alerts = rows(conn, b, "SELECT key, to_state, extract(epoch FROM at)::float8 AS at FROM S.alert_changes")
     assert alerts, "the planted spike must raise alert_changes"
     assert any(inc[0]["start_minute"] * 60 <= a["at"] <= (inc[0]["end_minute"] + 15) * 60 for a in alerts)
-    assert conn.execute("SELECT count(*) AS n FROM pg_tables WHERE schemaname = 'public'").fetchone()["n"] == n_public   # public untouched
+    assert public() == before       # public untouched
