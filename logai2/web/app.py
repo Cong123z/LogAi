@@ -24,7 +24,7 @@ from logai2.links import ALERTING_SOURCES, LEVEL_ORDER, class_sql, cluster_edges
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
-from logai2.web import modules_view
+from logai2.web import eval_view, modules_view
 from logai2.web.baseline_view import UnknownKey, incident, inspect, left_days, matrix, series
 from logai2.web.pipeline_view import stage_states, throughput
 from logai2.web.pipeline_view import services as service_rows
@@ -527,6 +527,57 @@ def create_app(cfg: AppConfig) -> Flask:
                                    hour_from, hour_to, time.time()))
         except UnknownKey:
             abort(404, "Unknown key")
+
+    def eval_bad_param(name: str):
+        raise eval_view.BadRequest(f"{name} is required")
+
+    # ---- evaluation (lab_* tables only; eval_view.py)
+    def lab_run():
+        return eval_view.get_run(conn(), request.args.get("run"))
+
+    @app.errorhandler(eval_view.BadRequest)
+    def eval_bad(exc):
+        return jsonify({"error": str(exc)}), 400
+
+    @app.errorhandler(eval_view.NoRun)
+    def eval_no_run(exc):
+        return jsonify({"error": str(exc)}), 404
+
+    @app.get("/api/eval/runs")
+    def eval_runs():
+        return jsonify(eval_view.runs(conn(), iso))
+
+    @app.get("/api/eval/scoreboard")
+    def eval_scoreboard():
+        return jsonify(eval_view.scoreboard(conn(), lab_run()))
+
+    @app.get("/api/eval/keys")
+    def eval_keys():
+        run = lab_run()
+        return jsonify(eval_view.keys(conn(), run, request.args.get("kind") or eval_bad_param("kind")))
+
+    @app.get("/api/eval/series")
+    def eval_series():
+        run, a = lab_run(), request.args
+        for name in ("kind", "service", "key", "from", "to"):
+            if not a.get(name):
+                eval_bad_param(name)
+        try:
+            d_from, d_to = date.fromisoformat(a["from"]), date.fromisoformat(a["to"])
+            knob = float(a["knob"]) if a.get("knob") else None
+        except ValueError:
+            raise eval_view.BadRequest("from/to must be ISO dates and knob a number") from None
+        methods = [m for m in a.get("methods", "").split(",") if m] or None
+        return jsonify(eval_view.series(conn(), run, iso, a["kind"], a["service"], a["key"], methods, knob, d_from, d_to))
+
+    @app.get("/api/eval/sweep")
+    def eval_sweep():
+        run = lab_run()
+        return jsonify(eval_view.sweep(conn(), run, request.args.get("kind") or eval_bad_param("kind")))
+
+    @app.post("/api/eval/choices")
+    def eval_choices():
+        return jsonify(eval_view.choose(conn(), body()))
 
     @app.get("/api/baseline/series")
     def baseline_series():

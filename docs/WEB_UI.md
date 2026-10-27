@@ -882,6 +882,28 @@ hour_from < hour_to <= 24"`), decision (400 `"decision must be 'exclude' or
 day are deleted first. For an `exclude`, `warning` lists the hours left with
 fewer than 3 usable days.
 
+### Evaluation (`/api/eval/*`)
+
+Read the `lab_*` tables only (never live tables or count tables); no token. Times are ISO UTC (`Z`); a bad or unknown `run`
+is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `null`.
+
+- `GET /api/eval/runs`: the newest 20 runs `{id, site, test, status, started_at, finished_at, window_from, window_to,
+  tune_to, data_schema, code_version, strength, kinds}`; `strength` comes from any `_decision` row.
+- `GET /api/eval/scoreboard?run=`: `{M1: {decision: {verdict, strength, leader, tied, note, text, stability, sigma_knob,
+  test_days}, methods: [...]}}`, methods sigma first then the run's order. Test B rows: `{method, knob, status, verdict,
+  ratio_vs_sigma, ci90, gates, coverage, interval_score, sharpness, mase, alert_rate, flap_share}`; Test A rows:
+  `{method, knob, status, verdict, recall, delay}`.
+- `GET /api/eval/keys?run=&kind=`: `[{service, key, kind, methods}]` of the drawn keys. The lab stores no per-key kind, so it
+  is rebuilt from the key name (`*total` M1, `*error` M2, `*mix` M7, `doc:` M5) and, for template keys, the mean drawn count
+  (>= 2 M3, else M4; M6 keys read as M4).
+- `GET /api/eval/series?run=&kind=&service=&key=&from=&to=[&methods=a,b][&knob=]`: `{method: {knob, points: [{t, count, expected,
+  low, high, flag}], episodes: [{start_minute, end_minute, start, end, peak_score, alerted_minutes}]}}`. `from`/`to` are
+  inclusive local days, at most 7 (400 beyond). `kind` (M1 to M7, required; the page knows it from `/keys`) picks the chosen knob. Default knob: the method's `scope='all'` knob for that kind, else the first grid knob
+  that has bands. Step-5 days give 288 points, step-1 days 1440.
+- `GET /api/eval/sweep?run=&kind=`: `{method: [{knob, chosen, tune, test}]}`, knobs ascending.
+- `POST /api/eval/choices` `{kind, method, knob, run_id, note}`: upserts `lab_choices` and returns it. 400 unless `kind` is
+  M1 to M7, `method` is in that run with a `scope='all'` result for that kind, `knob` is in its grid (`lab_runs.params.knobs`) and `note` is at most 500 characters; an unknown `kind` is also 400 on keys, sweep and series; 404 for an unknown `run_id`.
+
 ### Commands
 
 `POST /api/baseline/recompute` returns `202 {"id"}`; poll
@@ -907,6 +929,7 @@ returned.
 | Views | `static/js/views/{alerting,pipeline,templates,documentation,sources,baseline,review,llm}.js` |
 | Charts | `static/js/charts.js` (ECharts helpers, colour tokens); `static/vendor/echarts.min.js` (ECharts 5.5.1, Apache-2.0, `ECHARTS-LICENSE`, self-hosted) |
 | Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, throughput, stage states) |
+| Evaluation API | `logai2/web/eval_view.py` (runs, scoreboard, keys, series, sweep, choices); tests `tests/test_web_eval_view.py` |
 | Styles | `static/css/tokens.css`, `app.css` (copied from logai-engine) |
 | Shared with the engine | `logai2/alerts.py` (alert rows), `logai2/owner/baseline.py` (bands), `logai2/review.py` (suggestions; minutes and keys per hour), `logai2/commands.py` |
 | Tests | `tests/test_web_sources.py`, `test_web_alerts_templates.py`, `test_web_docs_baseline.py` |
