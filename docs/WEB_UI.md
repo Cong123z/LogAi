@@ -891,11 +891,12 @@ is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `nu
   tune_to, data_schema, code_version, strength, kinds}`; `strength` comes from any `_decision` row.
 - `GET /api/eval/scoreboard?run=`: `{M1: {decision: {verdict, strength, leader, tied, note, text, stability, sigma_knob,
   test_days}, methods: [...]}}`, methods sigma first then the run's order. Test B rows: `{method, knob, status, verdict,
-  ratio_vs_sigma, ci90, gates, coverage, interval_score, sharpness, mase, alert_rate, flap_share}`; Test A rows:
+  ratio_vs_sigma, ci90, gates, coverage, interval_score, sharpness, mase, alert_rate, flap_share}`; Test A and Test C rows:
   `{method, knob, status, verdict, recall, delay}`.
-- `GET /api/eval/keys?run=&kind=`: `[{service, key, kind, methods}]` of the drawn keys. The lab stores no per-key kind, so it
-  is rebuilt from the key name (`*total` M1, `*error` M2, `*mix` M7, `doc:` M5) and, for template keys, the mean drawn count
-  (>= 2 M3, else M4; M6 keys read as M4).
+- `GET /api/eval/keys?run=&kind=`: `[{service, key, kind, methods}]` of the drawn keys. The sink stores `{key: kind}` of its
+  drawn keys in the per-service `lab_results.metrics` (`"drawn"`) and this reads it, so M6 keys are listed under M6. Runs
+  from before that (no `drawn` anywhere in the run) fall back to a guess from the key name (`*total` M1, `*error` M2, `*mix`
+  M7, `doc:` M5) and, for template keys, the mean drawn count (>= 2 M3, else M4; M6 keys read as M4).
 - `GET /api/eval/series?run=&kind=&service=&key=&from=&to=[&methods=a,b][&knob=]`: `{method: {knob, points: [{t, count, expected,
   low, high, flag}], episodes: [{start_minute, end_minute, start, end, peak_score, alerted_minutes}]}}`. `from`/`to` are
   inclusive local days, at most 7 (400 beyond). `kind` (M1 to M7, required; the page knows it from `/keys`) picks the chosen knob. Default knob: the method's `scope='all'` knob for that kind, else the first grid knob

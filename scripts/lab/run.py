@@ -22,7 +22,7 @@ from logai2.config import load_config
 from logai2.db import connect
 from logai2.timeutil import TZ
 from scripts.lab import inject, store, test_a
-from scripts.lab.data import ServiceData
+from scripts.lab.data import ServiceData, minute_at
 from scripts.lab.decide import finish_all
 from scripts.lab.kinds import assign, has_new
 from scripts.lab.load import load_service, services
@@ -95,12 +95,14 @@ def run(args, cfg, data_conn, results_conn, collect=None, finish=None) -> int:
     for each walked key and fitted day in ascending day order, sink.skip(day) for a day the fit refused, sink.end()
     after the last day. A sink should write only in end(), in one transaction (all-or-nothing); if add/end raises
     anyway, the runner deletes the method's lab_results rows for the service and writes `failed` rows. The runner keeps no output.
+    Test C (args.test == "C"): Test B data walked once; the `test-c` lab_incidents of the window (data schema) are scored
+    (test_a.collect_c, one sink per service, stored by test_a.write_service); none -> the run ends ok with a note.
     Test A (args.test == "A", collect defaults to test_a.collect): the method is fitted once per day on the clean data and
     walked over 5 injected copies of it, one sink per copy; test_a.write_service stores the service's rows.
     finish(results_conn, run_id), when given, runs after the last service and before the run is marked ok (cross-service
     work such as tuning); an exception in it fails the run. A key is walked when its kind is in spec.kinds, or "M6" is and the
     key has a new minute in the window."""
-    collect = collect or (test_a.collect if args.test == "A" else score_collect)
+    collect = collect or {"A": test_a.collect, "C": test_a.collect_c}.get(args.test, score_collect)
     names = methods.select(args.methods)
     if args.days is not None:
         end = today() - timedelta(1)
@@ -123,6 +125,13 @@ def run(args, cfg, data_conn, results_conn, collect=None, finish=None) -> int:
                              image_tag=os.environ.get("LOGAI2_IMAGE_TAG"), data_schema=args.schema or "public",
                              window_from=d0, window_to=d1, tune_to=tune_days[-1], seed=args.seed, params=params)
     try:
+        lo, hi = minute_at(d0, 0), minute_at(d1, 0) + 1440
+        if args.test == "C" and not data_conn.execute(
+                "SELECT 1 FROM lab_incidents WHERE source = 'test-c' AND data_schema = %s AND start_minute < %s "
+                "AND end_minute > %s LIMIT 1", (args.schema or "public", hi, lo)).fetchone():
+            store.finish_run(results_conn, run_id, "ok", {"note": "no Test C incidents in the window"})
+            print("no Test C incidents in the window", file=sys.stderr)
+            return 0
         counts: dict[str, int] = {}
         digest = hashlib.sha1()
         for service in services(data_conn, d0, d1):
@@ -133,6 +142,9 @@ def run(args, cfg, data_conn, results_conn, collect=None, finish=None) -> int:
                 digest.update(f"{service}\0{key}\0{kind}\n".encode())
             ctx = RunCtx(days, tune_days, params["split"], make_part(service, days, tune_days, by_days), cfg, sd)
             variants, ps = [(sd, kinds, ctx)], None
+            if args.test == "C":
+                variants = [(sd, kinds, replace(ctx, injections=test_a.incidents_c(data_conn, service, kinds, lo, hi,
+                                                                                    args.schema)))]
             if args.test == "A":
                 ps = inject.passes(sd, kinds, args.seed)
                 inject.record(results_conn, run_id, args.schema, service, [injs for _, _, injs in ps])
@@ -156,7 +168,7 @@ def run(args, cfg, data_conn, results_conn, collect=None, finish=None) -> int:
                         prev = model
                     for sink in sinks:
                         sink.end()
-                    if args.test == "A":
+                    if args.test in ("A", "C"):
                         test_a.write_service(results_conn, run_id, service, name, m.spec, sinks)
                 except Exception as exc:
                     store.clear_results(results_conn, run_id, name, service)
@@ -216,7 +228,7 @@ def main(argv=None) -> int:
     dsn = a.dsn or cfg.database.dsn
     data, results = _open(dsn, a.schema, read_only=True), _open(dsn, a.results_schema)
     try:
-        finish = {"A": test_a.finish, "B": lambda conn, rid: finish_all(conn, rid, seed=a.seed, cfg=cfg)}.get(a.test)
+        finish = {"A": test_a.finish, "C": test_a.finish_c, "B": lambda conn, rid: finish_all(conn, rid, seed=a.seed, cfg=cfg)}.get(a.test)
         return run(a, cfg, data, results, finish=finish)
     finally:
         data.close()

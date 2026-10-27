@@ -69,7 +69,7 @@ def scoreboard(conn, run: dict) -> dict:
         for m in order(run, by):
             r = by[m]
             row = {"method": m, "knob": r["knob"], "status": r["status"], "verdict": r["verdict"]}
-            if run["test"] == "A":
+            if run["test"] in ("A", "C"):
                 row.update(recall=r["metrics"].get("recall"), delay=r["metrics"].get("delay"))
             else:
                 row.update({f: r["metrics"].get(f) for f in SCORE_FIELDS})
@@ -81,7 +81,7 @@ def scoreboard(conn, run: dict) -> dict:
 
 
 def key_kind(service_key: str, mean: float) -> str:
-    """The lab stores no per-key kind; rebuild scripts/lab/kinds.assign from the key name and the drawn mean.
+    """Runs before bk13 stored no per-key kind; rebuild scripts/lab/kinds.assign from the key name and the drawn mean.
     ponytail: M3 vs M4 uses the mean of the drawn days (not the tune-window busy mean); M6 keys read as M4."""
     if service_key == "*total":
         return "M1"
@@ -102,12 +102,18 @@ def check_kind(kind) -> str:
 
 def keys(conn, run: dict, kind: str) -> list[dict]:
     check_kind(kind)
+    stored = {(r["method"], r["service"], k) for r in conn.execute(
+        "SELECT method, scope AS service, metrics FROM lab_results WHERE run_id = %s AND kind = %s AND scope <> 'all' "
+        "AND metrics ? 'drawn'", (run["id"], kind)) for k, kd in r["metrics"]["drawn"].items() if kd == kind}
+    new = conn.execute("SELECT 1 FROM lab_results WHERE run_id = %s AND metrics ? 'drawn' LIMIT 1", (run["id"],)).fetchone()
     out: dict[tuple, dict] = {}
     for r in conn.execute("SELECT method, service, key, avg((SELECT avg(c) FROM unnest(counts) c)) AS mean "
                           "FROM lab_bands WHERE run_id = %s GROUP BY method, service, key", (run["id"],)):
+        if new and (r["method"], r["service"], r["key"]) not in stored:
+            continue
         k = out.setdefault((r["service"], r["key"]), {"mean": r["mean"] or 0.0, "methods": []})
         k["methods"].append(r["method"])
-    res = [{"service": s, "key": k, "kind": key_kind(k, v["mean"]), "methods": order(run, v["methods"])}
+    res = [{"service": s, "key": k, "kind": kind if new else key_kind(k, v["mean"]), "methods": order(run, v["methods"])}
            for (s, k), v in sorted(out.items())]
     return [x for x in res if x["kind"] == kind]
 

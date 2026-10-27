@@ -311,7 +311,8 @@ class ScoreSink:
                 days[str(k)] = {d.isoformat(): day_from(a, naive) for (kind, kn, d), a in sorted(self.day_acc.items())
                                 if kind == kd and kn == k}
             nb, den = self.nb[kd]
-            out[kd] = {"n_keys": len(self.keys_of[kd]), "no_band_share": nb / den if self.spec.band and den else None,
+            out[kd] = {"n_keys": len(self.keys_of[kd]),
+                       "drawn": {k: kd for k in sorted(self.drawn) if k in self.keys_of[kd]}, "no_band_share": nb / den if self.spec.band and den else None,
                        "knobs": knobs, "days": days}
         self._built = out
         return out
@@ -368,4 +369,34 @@ class InjectSink(ScoreSink):
                 if hit:
                     cell["hits"] += 1
                     cell["delays"].append(hit.start - i.start)
+        return out
+
+
+SIZE_BREAKS = (20, 100)    # Test C size names by the inject rate per minute: < 20 small, < 100 medium, else large
+
+
+class IncidentSink(InjectSink):
+    """Test C: the Test B data and the stored `test-c` incidents (ctx.injections, built by test_a.incidents_c). Same hit
+    rule as InjectSink; an incident on a template also counts a hit on a doc key that holds it, and it belongs to every
+    kind the template is walked under (its own, M6 for a new template) plus M5 when a doc holds it."""
+
+    def summary(self) -> dict:
+        self.build()
+        sd, out = self.sd, {}
+        for knob in self.knobs:
+            cells = out[str(knob)] = {}
+            for i in self.ctx.injections:
+                docs = [d for d, ts in sd.docs.items() if i.key in ts]
+                keys = {i.key, *docs}
+                for kd in self.spec.kinds:
+                    if i.key not in self.keys_of[kd] and not (kd == "M5" and docs):
+                        continue
+                    cell = cells.setdefault(kd, {}).setdefault(i.type, {}).setdefault(
+                        i.size_name, {"n": 0, "hits": 0, "delays": []})
+                    cell["n"] += 1
+                    hit = min((e for k in keys for e in self.episodes.get((k, knob), ())
+                               if i.start <= e.start < i.start + HIT_WINDOW), key=lambda e: e.start, default=None)
+                    if hit:
+                        cell["hits"] += 1
+                        cell["delays"].append(hit.start - i.start)
         return out
