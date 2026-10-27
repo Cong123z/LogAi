@@ -134,6 +134,16 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Fix idea:** on a pattern failure, fall back to searching its resolved indices one by one.
 - **Likelihood:** low.
 
+### B15. A flush can get stuck on a dropped lab / module-hours partition
+- **Where:** `Owner.handle` (`lab_cutoff`, `mod_cutoff`), `jobs/commit.py` housekeeping, `Owner.flush`.
+- **What:** the cutoff day is computed in `handle()`. If the nightly commit drops the oldest
+  `lab_minute_counts` (or `template_module_hours`) partition while pending rows for that day wait
+  for the next flush, the flush fails on the missing partition. Pending rows are kept, so every
+  retry fails until the engine restarts. Needs a catch-up over ~28-day-old (7-day for module hours)
+  data across local midnight.
+- **Fix idea:** re-check the cutoff in `flush()` and drop pending rows older than it.
+- **Likelihood:** low.
+
 ## Fixed
 
 ### F1. NUL byte in an ES field stalled the flush

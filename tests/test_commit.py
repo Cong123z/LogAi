@@ -145,3 +145,13 @@ def test_old_runs_deleted(conn, cfg):
     conn.commit()
     commit(conn, cfg, today=date(2026, 10, 13))
     assert [r["kind"] for r in conn.execute("SELECT kind FROM retrain_runs")] == ["new"]
+
+
+def test_commit_drops_old_lab_partitions(conn, cfg):
+    ensure_partitions(conn, date(2026, 10, 1), date(2026, 10, 31))
+    cfg.lab.days = 7
+    commit(conn, cfg, today=date(2026, 10, 20))
+    tables = {r["tablename"] for r in conn.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
+    assert "lab_minute_counts_20261012" not in tables           # today-8
+    assert "lab_minute_counts_20261013" in tables               # today-7 (boundary)

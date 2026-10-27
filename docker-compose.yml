@@ -18,6 +18,7 @@ x-logai2-env: &logai2-env
   LOGAI2_ES_USER: ${LOGAI2_ES_USER:-}
   LOGAI2_ES_PASSWORD: ${LOGAI2_ES_PASSWORD:-}
   LOGAI2_ES_VERIFY_CERTS: ${LOGAI2_ES_VERIFY_CERTS:-true}
+  LOGAI2_LAB_RECORD: ${LOGAI2_LAB_RECORD:-true}
 
 services:
   postgres:

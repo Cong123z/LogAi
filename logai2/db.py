@@ -11,7 +11,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
-PARTITIONED = ("service_hours", "hourly_counts", "alert_minutes", "template_module_hours")
+PARTITIONED = ("service_hours", "hourly_counts", "alert_minutes", "template_module_hours",
+               "lab_minute_counts")
 
 
 class StaleRevision(Exception):

@@ -27,7 +27,7 @@ from logai2.owner.counts import ERROR_LEVELS, SEVERITY, OpenMinutes
 from logai2.owner.detect import AlertRow, Detector
 from logai2.owner.miners import Miners
 from logai2.reader.reader import MinuteBatch
-from logai2.timeutil import day_hour
+from logai2.timeutil import day_hour, local
 
 logger = logging.getLogger("logai2.owner")
 
@@ -70,6 +70,11 @@ SQL = {
         "INSERT INTO hourly_counts (service, key, day, hour, sum, sumsq) VALUES (%s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (service, key, day, hour) DO UPDATE SET "
         "sum = hourly_counts.sum + EXCLUDED.sum, sumsq = hourly_counts.sumsq + EXCLUDED.sumsq"),
+    # element-wise add of the minutes closed since the last flush; reads tmp_lab_minute_counts (copy_upsert)
+    "lab_minute_counts": (
+        "INSERT INTO lab_minute_counts (service, key, day, hour, counts) SELECT * FROM tmp_lab_minute_counts "
+        "ON CONFLICT (service, key, day, hour) DO UPDATE SET counts = ARRAY("
+        "SELECT a + b FROM unnest(lab_minute_counts.counts, EXCLUDED.counts) WITH ORDINALITY AS t(a, b, i) ORDER BY i)"),
     "alert_minutes": (
         "INSERT INTO alert_minutes (service, key, module_code, day, minute, count) "
         "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING"),
@@ -163,6 +168,7 @@ class Owner:
         self._hours: Counter = Counter()
         self._sums: dict[tuple, list[int]] = {}
         self._alert_minutes: list[tuple] = []
+        self._lab: dict[tuple, list[int]] = {}   # (service, key, day, hour) -> 60 counts of minutes closed since the last flush
         self._mod_hours: dict[tuple, int] = {}                 # (service, template_id, module, day, hour) -> n
         self._pairs: dict[tuple[str, str, str], list[int]] = {}  # (service, template_id, module) -> [first, last] minute
         self._changes: list = []
@@ -211,6 +217,7 @@ class Owner:
 
         today = day_hour(int(self.now() // 60))[0]
         mod_cutoff = today - timedelta(days=self.cfg.retention.module_hours_days)
+        lab_cutoff = today - timedelta(days=self.cfg.lab.days)
         for cm in self.minutes.close_before(batch["watermark_ms"] // 60_000, self.services):
             for service, template_id, sample in self._open_samples.pop(cm.minute, ()):
                 if self.levels[(service, template_id)].upper() in ERROR_LEVELS:
@@ -231,6 +238,13 @@ class Owner:
                     self._mod_hours[k] = self._mod_hours.get(k, 0) + n
                 pair = self._pairs.setdefault(k[:3], [cm.minute, cm.minute])
                 pair[0], pair[1] = min(pair[0], cm.minute), max(pair[1], cm.minute)
+            if self.cfg.lab.record and cm.day >= lab_cutoff:
+                slot = local(cm.minute).minute
+                for (service, key), n in cm.keys.items():
+                    if n:
+                        self._lab_row(service, key, cm.day, cm.hour)[slot] += n
+                    if key == "*total":
+                        self._lab_row(service, "*minutes", cm.day, cm.hour)[slot] = 1
             if not self.detection_enabled:
                 continue
             historic = self.now() - (cm.minute + 1) * 60 > self.cfg.baseline.historic_after_minutes * 60
@@ -242,6 +256,9 @@ class Owner:
                 if row is not None and (row.state != "NORMAL" or row.streak):
                     self._alert_minutes.append((service, template_id, module, cm.day, _ts(cm.minute * 60), n))
         return resolved
+
+    def _lab_row(self, service: str, key: str, day, hour: int) -> list[int]:
+        return self._lab.setdefault((service, key, day, hour), [0] * 60)
 
     def _see(self, service: str, template_id: str, text: str | None, level: str, module: str, minute: int) -> None:
         first = self.services.get(service)
@@ -335,6 +352,7 @@ class Owner:
             cur.executemany(SQL["drain3_state"], list(self._blobs.items()))
             cur.executemany(SQL["service_hours"], [(*k, n) for k, n in self._hours.items()])
             cur.executemany(SQL["hourly_counts"], [(*k, s, sq) for k, (s, sq) in self._sums.items()])
+            copy_upsert(cur, "lab_minute_counts", [(*k, v) for k, v in self._lab.items() if any(v)])
             copy_upsert(cur, "template_module_hours", [(*k, n) for k, n in self._mod_hours.items()])
             copy_upsert(cur, "template_modules", [(*k, _ts(a * 60), _ts(b * 60)) for k, (a, b) in self._pairs.items()])
             cur.executemany(SQL["alert_minutes"], self._alert_minutes)
