@@ -55,3 +55,11 @@ Check `docker compose --profile lab config` parses; do not start the service.
 - [ ] commits on the branch, explicit-path staging, no attribution lines
 - [ ] PR file filled in
 - [ ] reply: `DONE <last sha>` (or `QUESTION: ...`), plus a list of any deviations
+
+## Added after bk15 (page follow-ups)
+- `/api/eval/runs` returns `error` for failed runs; the page shows it (eval_view.py, evaluation.js, test).
+- `GET /api/eval/choices` (current `lab_choices`); the page shows saved choices and updates the chosen star after Choose.
+- evaluation.js minors: disable Choose until a knob is picked; on a failed keys/sweep fetch after a kind switch, keep
+  the old kind (or clear the fit panel); neutral status class for "No method selected"; escape window dates.
+Files added to this task: `logai2/web/eval_view.py`, `logai2/web/app.py`, `tests/test_web_eval_view.py`,
+`logai2/web/static/js/views/evaluation.js`, `docs/WEB_UI.md`.
