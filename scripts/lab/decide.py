@@ -4,7 +4,8 @@ the `_decision` rows and lab_sweeps.
 
 Scope: Test B only (`main` passes the hook only for `--test B`; Tests A and C get their own finish). M6 and M7 get
 no ranking here: sigma has no band for new templates (M6) and does not judge the mix (M7), so interval score against sigma
-means nothing; their `_decision` row is `pending` ("decided on Test A detection (bk10)"). Score-only methods get no
+means nothing; their `_decision` row comes from the Test A recall (`_detect_decision`), `pending` when no Test A run of this
+code_version exists. Score-only methods get no
 interval score, so they are never adopt candidates for M1-M5 (they feed E1).
 
 Test A recall is read from the latest ok `lab_runs` row with test = 'A' and this run's code_version: its
@@ -176,6 +177,35 @@ def _service_ratios(i, sig) -> list[float]:
     return [mine[s] / base[s] for s in mine if mine.get(s) is not None and base.get(s)]
 
 
+RECALL_GAIN, MIX_RECALL = 0.10, 0.5
+
+
+def _detect_decision(kd, cands: list[Cand], recalls) -> dict:
+    """M6 / M7 on Test A recall (sigma's interval score means nothing for them). Pending without a Test A run.
+    M6: leader = highest medium burst recall among methods passing the alert-rate and flap gates; adopt candidate if it beats
+    sigma's recall by RECALL_GAIN (no sigma recall: sigma stays). M7: sigma does not judge the mix; adopt candidate if the leader
+    (no failed gate) has medium mix_swap recall >= MIX_RECALL, else no method. The ranking fields stay empty when nobody leads."""
+    if recalls is None:
+        return {"verdict": "pending", "leader": None, "tied": [], "note": "decided on Test A detection (bk10)"}
+    no = "sigma stays" if kd == "M6" else "no method"
+    live = [(recalls.get((c.name, kd)), c) for c in cands
+            if (c.gates["alert_rate"] == "pass" and c.gates["flaps"] == "pass" if kd == "M6" else "fail" not in c.gates.values())]
+    live = sorted(((r, c) for r, c in live if r is not None), key=lambda x: (-x[0], x[1].heavy, x[1].cost, x[1].name))
+    if not live:
+        return {"verdict": no, "leader": None, "tied": [], "note": "no method passed the gates with a Test A recall"}
+    r, lead = live[0]
+    out = {"leader": lead.name, "tied": [c.name for q, c in live if q == r]}
+    if kd == "M7":
+        win = r >= MIX_RECALL
+        note = f"{lead.name} mix_swap recall {r:.2f} " + (f">= {MIX_RECALL}" if win else f"< {MIX_RECALL}")
+    else:
+        base = recalls.get((SIGMA, kd))
+        win = base is not None and r >= base + RECALL_GAIN - 1e-9
+        note = (f"{lead.name} burst recall {r:.2f} vs sigma {base:.2f}" if base is not None
+                else f"no sigma recall to compare {lead.name} with")
+    return {**out, "verdict": "adopt candidate" if win else no, "note": note}
+
+
 def _decide_kind(conn, run_id, run, kd, window, info, recalls, prev, seed) -> None:
     sig = info.get((SIGMA, kd))
     sig = sig if sig and sig["status"] == "ok" else None
@@ -205,6 +235,8 @@ def _decide_kind(conn, run_id, run, kd, window, info, recalls, prev, seed) -> No
             cands.append(Cand(m, i["spec"].cost, i["spec"].heavy, ratio, ci["ratio"] if ci else None, test["mase"],
                               gates, worse))
     d = judge_kind(cands)
+    if kd in ("M6", "M7"):
+        d = _detect_decision(kd, cands, recalls)
     text = d["verdict"] + (f": {d['note']}" if d["note"] else "")
     if sig is None:
         text += " (no sigma result)"
@@ -219,9 +251,6 @@ def _decide_kind(conn, run_id, run, kd, window, info, recalls, prev, seed) -> No
         if old and old["metrics"].get("leader") and d["leader"]:
             same = old["metrics"]["leader"] == d["leader"] or old["metrics"]["leader"] in d["tied"]
             stability = "stable" if same else "unstable"
-    if kd in ("M6", "M7"):
-        d = {**d, "verdict": "pending", "note": "decided on Test A detection (bk10)"}
-        text = "pending: " + d["note"]
     store.put_result(conn, run_id, DECISION, kd, "all", None, "ok",
                      {"leader": d["leader"], "tied": d["tied"], "text": text, "note": d["note"],
                       "sigma_knob": sig["knob"] if sig else None, "stability": stability, "test_days": len(dates)},
