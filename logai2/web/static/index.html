@@ -25,6 +25,7 @@
   <script defer src="/static/js/views/review.js"></script>
   <script defer src="/static/js/views/llm.js"></script>
   <script defer src="/static/js/views/retrain.js"></script>
+  <script defer src="/static/js/views/evaluation.js"></script>
   <script defer src="/static/js/main.js"></script>
 </head>
 <body>
@@ -45,6 +46,7 @@
           <a href="#documentation" data-view="documentation" title="Documentation"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span class="nav-label">Documentation</span></a>
           <a href="#baseline" data-view="baseline" title="Baseline"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5"/><path d="M9 2h6"/></svg><span class="nav-label">Baseline</span></a>
           <a href="#review" data-view="review" title="Review"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/></svg><span class="nav-label">Review</span></a>
+          <a href="#evaluation" data-view="evaluation" title="Evaluate"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg><span class="nav-label">Evaluate</span></a>
         </div>
         <div class="nav-section"><div class="nav-heading">Settings</div>
           <a href="#sources" data-view="sources" title="Data sources"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg><span class="nav-label">Data sources</span></a>
@@ -362,6 +364,65 @@
             <tbody id="rt-history"><tr><td colspan="6" class="loading">Loading...</td></tr></tbody>
           </table></div>
         </section>
+      </section>
+      <section class="view groups-section" id="view-evaluation" aria-label="Evaluate">
+        <div class="section-heading">
+          <div class="filter-bar">
+            <label for="ev-run" class="filter-label">Run</label>
+            <select class="filter-select" id="ev-run"></select>
+            <span id="ev-strength"></span>
+            <div class="toggle-group" id="ev-boards" role="group" aria-label="Board">
+              <button type="button" class="toggle-btn" data-board="eval" aria-pressed="false">Evaluation</button>
+              <button type="button" class="toggle-btn" data-board="cal" aria-pressed="false">Calibrate</button>
+            </div>
+          </div>
+          <span class="sync-status" id="ev-counts"></span>
+        </div>
+        <p class="ins-toast" id="ev-status" role="status" aria-live="polite"></p>
+        <div id="ev-empty" class="rv-panel" hidden></div>
+        <div id="ev-body">
+          <div class="stats-row" id="ev-cards" role="group" aria-label="Decision per kind"></div>
+          <div class="rv-panel" id="ev-board-eval">
+            <div class="rv-head"><h3 id="ev-score-title">Scoreboard</h3></div>
+            <p class="sync-status" id="ev-decision"></p>
+            <div class="table-wrap"><table id="ev-score"></table></div>
+          </div>
+          <div class="rv-panel" id="ev-board-cal" hidden>
+            <div class="rv-head"><h3 id="ev-cal-title">Calibrate</h3></div>
+            <p class="sync-status">Coverage and alert rate against the knob for one method (solid: test window, dashed: tune window; &#9733; marks the chosen knob). Pick a knob to redraw its band in the fit chart below; Choose saves it for this kind.</p>
+            <div class="filter-bar">
+              <label for="ev-cal-method" class="filter-label">Method</label>
+              <select class="filter-select" id="ev-cal-method"></select>
+              <div class="toggle-group" id="ev-pills" role="group" aria-label="Knob"></div>
+            </div>
+            <div id="ev-sweep" class="rv-chart rv-chart-sm" role="img" aria-label="Coverage and alert rate against the knob"></div>
+            <div class="filter-bar">
+              <label for="ev-note" class="filter-label">Note</label>
+              <input type="text" id="ev-note" class="filter-select ev-note" maxlength="500" autocomplete="off">
+              <button type="button" class="btn btn-primary" id="ev-choose">Choose</button>
+            </div>
+            <p class="ins-toast" id="ev-choice" role="status" aria-live="polite"></p>
+          </div>
+          <div class="rv-panel">
+            <div class="rv-head"><h3 id="ev-fit-title">Fit</h3></div>
+            <p class="sync-status">Count (line), expected (dashed) and the band (shaded) per method over the picked days. Red dots are flagged minutes; shaded stripes are episodes. Scroll or drag the slider to zoom all panels together.</p>
+            <div class="filter-bar">
+              <label for="ev-key" class="filter-label">Key</label>
+              <select class="filter-select" id="ev-key"></select>
+              <label for="ev-from" class="filter-label">From</label>
+              <input type="date" id="ev-from" class="filter-select">
+              <label for="ev-to" class="filter-label">To</label>
+              <input type="date" id="ev-to" class="filter-select">
+              <div class="toggle-group" id="ev-mode" role="group" aria-label="Layout">
+                <button type="button" class="toggle-btn" data-mode="multi" aria-pressed="false">Panels</button>
+                <button type="button" class="toggle-btn" data-mode="overlay" aria-pressed="false">Overlay</button>
+              </div>
+            </div>
+            <div class="filter-bar" id="ev-methods" role="group" aria-label="Methods"></div>
+            <p class="ins-toast ins-toast-error" id="ev-fit-status" role="status" aria-live="polite"></p>
+            <div class="rv-scroll"><div id="ev-fit" class="rv-chart" tabindex="0" role="img" aria-label="Count, expected value and band per method"></div></div>
+          </div>
+        </div>
       </section>
       <section class="view groups-section" id="view-baseline" aria-label="Baseline">
         <div class="section-heading">

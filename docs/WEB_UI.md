@@ -392,6 +392,25 @@ timezone (`timezone` of `GET /api/retrain`).
   estimate (`POST /api/retrain/estimate`, polled as a command) refreshes 0.4 s after each change. Start posts the
   run, polls the command, shows its `error` in the dialog, and on success opens the new run.
 
+## Evaluate
+
+`#evaluation` (nav "Evaluate", no polling): shows a lab run from `/api/eval/*`. Read-only except "Choose".
+
+- **Run bar**: run picker (newest first: id, site, test, window, status), strength badge, kind counts. No runs: the empty
+  state gives the `python -m scripts.lab.run ...` command; a run whose status is not `ok` shows its status (the API does not
+  return the run's error text).
+- **Evaluation board**: one card per kind (M1 to M7: verdict, leader, strength, stability; Test A runs show "Test A"),
+  click one to pick the kind. The scoreboard has one row per method (sigma first): knob, ratio vs sigma with its 90 % CI as a
+  small bar, coverage, interval score, sharpness, MASE, alert rate, flap share and a pass/fail/n.a. badge per gate (text and
+  colour). Test A runs show recall small/medium/large and delay median/p90 instead.
+- **Fit chart** (both boards): key select (`/api/eval/keys` for the kind; a plain select, not `keypicker.js`, whose groups
+  and template search are Baseline's), method toggles, from/to days (at most 7, the API's 400 is shown), Panels (one per
+  method, shared zoom) or Overlay. Count line, expected (dashed), band area, flagged minutes (red diamonds) and episodes
+  (shaded); step-5 and step-1 days both draw.
+- **Calibrate board**: for the picked kind and a method, coverage and alert rate against the knob (test solid, tune dashed,
+  chosen knob marked). Knob pills redraw that method's band in the fit chart at that knob; "Choose" posts
+  `/api/eval/choices` with the note and shows the saved choice, or the API's error message.
+
 ## Baseline
 
 Route `#baseline/<service>/<key>/<days>` (days 1, 7 or 14). Read-only: it
@@ -930,6 +949,7 @@ returned.
 | Charts | `static/js/charts.js` (ECharts helpers, colour tokens); `static/vendor/echarts.min.js` (ECharts 5.5.1, Apache-2.0, `ECHARTS-LICENSE`, self-hosted) |
 | Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, throughput, stage states) |
 | Evaluation API | `logai2/web/eval_view.py` (runs, scoreboard, keys, series, sweep, choices); tests `tests/test_web_eval_view.py` |
+| Evaluate page | `logai2/web/static/js/views/evaluation.js` (+ its section in `index.html`, `.ev-*` styles in `app.css`); manual check in the PR |
 | Styles | `static/css/tokens.css`, `app.css` (copied from logai-engine) |
 | Shared with the engine | `logai2/alerts.py` (alert rows), `logai2/owner/baseline.py` (bands), `logai2/review.py` (suggestions; minutes and keys per hour), `logai2/commands.py` |
 | Tests | `tests/test_web_sources.py`, `test_web_alerts_templates.py`, `test_web_docs_baseline.py` |

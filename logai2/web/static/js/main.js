@@ -10,8 +10,9 @@ const viewTitles = {
   retrain: 'Retrain',
   baseline: 'Baseline',
   review: 'Review',
+  evaluation: 'Evaluate',
 };
-// Templates polls only through its Auto-refresh toggle; Documentation, Baseline and
+// Templates polls only through its Auto-refresh toggle; Documentation, Baseline, Evaluate and
 // Review load on entry and after each change (Review polls a running recompute).
 const POLL_MS = {alerting: 5000, pipeline: 2000, sources: 2000, llm: 5000, retrain: 15000};   // retrain: 2 s while a run is running (loadRetrain adjusts it)
 const viewOrder = Object.keys(viewTitles);
@@ -175,6 +176,8 @@ async function loadData() {
       await loadBaseline();
     } else if (state.activeView === 'review') {
       await loadReview();
+    } else if (state.activeView === 'evaluation') {
+      await loadEvaluation();
     }
     document.getElementById('connection-status').hidden = true;
     if (state.reconnectTimer) {

@@ -1192,3 +1192,17 @@ button.mod-chip { cursor:pointer; font-family:inherit; }
 .rt-warn { margin: 0 0 12px; padding: 9px 12px; border: 1px solid var(--yellow); border-radius: var(--radius); background: var(--yellow-bg); font-size: 13px; }
 .rt-warn[hidden], #rt-reread[hidden] { display: none; }
 @media (max-width: 600px) { .rt-kinds { grid-template-columns: 1fr; } .rt-kinds label + label { border-left: 0; border-top: 1px solid var(--border-input); } }
+
+/* ── Evaluate ── */
+.stat-card.pl-ok { border-color: var(--green); }
+.stat-card.ev-on { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.stat-card:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+#view-evaluation > .section-heading { flex-wrap: wrap; }
+#view-evaluation .filter-bar { flex-wrap: wrap; margin-bottom: 10px; }
+#view-evaluation .filter-select { max-width: 100%; min-width: 0; }
+.ev-note { flex: 1 1 260px; }
+.ev-dim { color: var(--text-dim); }
+.ev-ci { display: inline-block; position: relative; width: 70px; height: 8px; margin-right: 6px; background: var(--bg-table); border: 1px solid var(--border); border-radius: 3px; vertical-align: middle; }
+.ev-ci i { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .45; }
+.ev-ci b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); }
+.ev-sub { display: block; font-size: 11px; color: var(--text-dim); }
