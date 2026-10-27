@@ -308,7 +308,7 @@ read-only for this.
 | `MinuteBatch` | `reader/reader.py` | `counts: [Count]`, `watermark_ms`, `events`, `positions: {index: {pos_ms, caught_up, failing}}`, `sources: [(pattern, service)]` (distinct pairs of the lines read in the poll; the owner records new ones in `index_services`) |
 | `ClosedMinute` | `owner/counts.py` | `minute` (epoch s // 60), local `day`, `hour`, `keys {(service, key): n}`, `modules {(service, template_id, module): n}`, `levels {(service, template_id): worst level}` |
 | `Scope`, `Plan`, `Window` | `jobs/reread.py` | a re-read's choice (`services` or all, local `days`, `hour_from` < `hour_to`), its time-ordered local-hour windows (patterns to read, services to replace) and counts (`hours_chosen`, `hours_not_in_es`, `hours_live`, `hours_to_read`) |
-| `LaneHour` | `jobs/reread.py` | one closed (service, day, hour) of a re-read: `n_minutes`, `sums {key: (sum, sumsq)}`, `module_hours`, `pairs`, `samples`, `templates`; what `Owner.add_lane` replaces the stored hour with |
+| `LaneHour` | `jobs/reread.py` | one closed (service, day, hour) of a re-read: `n_minutes`, `sums {key: (sum, sumsq)}`, `module_hours`, `pairs`, `samples`, `templates`, `minutes {key: 60 counts}`; what `Owner.add_lane` replaces the stored hour with |
 | `Stat` | `owner/baseline.py` | `mean`, `std` |
 | `Lookup` | `owner/baseline.py` | `this`, `next` (Stat or None for this and the next hour), `days` (committed days of the profile used, capped), `upper_only`, `daytype` (profile used) |
 | `Verdict` | `owner/baseline.py` | `high`, `score`, `band_low`, `band_high` |
@@ -881,7 +881,7 @@ service-scoped primary key.
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
 | `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
-| `lab_minute_counts`\* | `service, key, day, hour` | `counts int[60]`: per-minute counts of the local hour; key `*minutes` = 1 per observed minute | flush (only when `lab.record`) |
+| `lab_minute_counts`\* | `service, key, day, hour` | `counts int[60]`: per-minute counts of the local hour; key `*minutes` = 1 per observed minute | flush (only when `lab.record`); a re-read lane hour always deletes its rows and writes its own when `lab.record` |
 | `lab_runs` | `id` | one bake-off run: site, test, status, window, seed, params, kinds, error | lab |
 | `lab_results` | `run_id, method, kind, scope` | knob, status, metrics, verdict, strength | lab |
 | `lab_episodes` | `run_id, method, service, key, start_minute` | `end_minute`, `peak_score`, `alerted_minutes` | lab |
