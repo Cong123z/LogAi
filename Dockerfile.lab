@@ -1,0 +1,13 @@
+# Lab image: the app image plus the bake-off's heavy packages and the Chronos weights (baked in; runs with no network).
+# Build the app image first: docker build -t logai2:latest .   (--build-arg TAG=x uses logai2:x)   then: docker build -f Dockerfile.lab -t logai2-lab:latest .
+ARG TAG=latest
+FROM logai2:${TAG}
+COPY requirements-lab.txt .
+RUN pip install --no-cache-dir -r requirements-lab.txt
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+RUN python -c "from huggingface_hub import snapshot_download as s; s('amazon/chronos-bolt-small', local_dir='/models/chronos-bolt-small')"
+# current code over the base, last, so a code change rebuilds only these layers
+COPY config.yaml .
+COPY logai2/ logai2/
+COPY scripts/ scripts/
+ENV HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 LOGAI2_CHRONOS_PATH=/models/chronos-bolt-small

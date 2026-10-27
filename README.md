@@ -132,6 +132,14 @@ A multi-week history made from the laptop's own templates and hourly shapes, wri
 
 `lab/world.json` holds template texts and is git-ignored. It uses only hours with counts (at least 30 observed minutes and `*total` above 0) and warns when fewer than 8 exist: rebuild it after a full overnight replay. `lab/scenarios/tiny.yaml` is the quick one.
 
+### Lab image (heavy bake-off methods)
+
+Five methods (ETS, Prophet, LightGBM, Chronos-Bolt, Matrix Profile) need packages the app image must not carry. The lab image adds them plus the Chronos weights (downloaded at build time; runs with no network). Build the app image from this checkout, then the lab image:
+
+`docker build -t logai2:latest . && docker build -f Dockerfile.lab -t logai2-lab:latest .`
+
+`docker run --rm --network none logai2-lab:latest python -m scripts.lab.run --site laptop --test B --methods heavy --days 1 --check` lists every heavy method `available` (outside the image: `unavailable`).
+
 ### Upgrading to migrations 008 and 009 (Retrain)
 
 1. Deploy the **engine** first: it runs 008 (`retrain_runs`) and 009

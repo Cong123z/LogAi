@@ -93,6 +93,20 @@ from scripts.lab.methods.sigma import Sigma  # noqa: E402  (registered last: sig
 METHODS["sigma"] = Sigma
 GROUPS["core"].append("sigma")
 
+
+def _lazy(module: str, cls: str) -> Callable[[], Method]:
+    """Heavy methods: the module is imported on first use; a missing package raises Unavailable from the class."""
+    def make():
+        from importlib import import_module
+        return getattr(import_module(f"scripts.lab.methods.{module}"), cls)()
+    return make
+
+
+for _n, _m, _c in (("ets", "ets", "Ets"), ("prophet", "prophet_m", "ProphetM"), ("lgbm", "lgbm", "Lgbm"),
+                   ("chronos", "chronos_m", "ChronosM"), ("mprofile", "mprofile", "MProfile")):
+    METHODS[_n] = _lazy(_m, _c)
+    GROUPS["heavy"].append(_n)
+
 from scripts.lab.methods.mad import Mad  # noqa: E402
 from scripts.lab.methods.nb import NB, NBClip  # noqa: E402
 from scripts.lab.methods.weekly import Weekly  # noqa: E402
