@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 
 from logai2.links import level_class
-from scripts.lab.data import UNOBSERVED, ServiceData, minute_at
+from scripts.lab.data import MIX, UNOBSERVED, ServiceData, minute_at
 
 KINDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7")
 
@@ -36,6 +36,8 @@ def assign(sd: ServiceData, tune_days: list[date]) -> dict[str, str]:
             kinds[key] = "M1"
         elif key == "*error":
             kinds[key] = "M2"
+        elif key == MIX:
+            kinds[key] = "M7"
         elif key.startswith("doc:"):
             kinds[key] = "M5"
         elif key.startswith("*") or key.endswith(":unparsed"):

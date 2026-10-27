@@ -56,6 +56,7 @@ def test_load_exact_arrays_and_history(conn):
     assert sd.count("A", m) == UNOBSERVED and sd.count("A", minute_at(D1, 0)) == 3 and sd.count("nope", m) == UNOBSERVED
     # *error was never recorded: still present, zeros where observed, UNOBSERVED elsewhere
     assert sd.minutes["*error"][D1][0] == 0 and sd.minutes["*error"][D2][5 * 60] == UNOBSERVED
+    assert sd.minutes["*mix"] is sd.minutes["*total"]                  # M7 walks the total's arrays
     # doc key: element-wise sum of its linked templates (A + B); the draft link is ignored
     assert sd.docs == {"doc:D1": ["A", "B"]}
     d1 = sd.minutes["doc:D1"][D1]
