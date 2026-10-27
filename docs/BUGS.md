@@ -5,7 +5,7 @@ Open items to fix, newest findings included. When one is fixed, move it to
 
 ## Open
 
-### B-lab1. M6 decisions need a Test B M6 tune alert rate
+### B16. M6 decisions need a Test B M6 tune alert rate
 - **Where:** `scripts/lab/decide.py` (`_gates`, `_detect_decision`), `scripts/lab/tune.py`.
 - **What:** the M6 alert-rate gate reads the Test B M6 tune alert rate. When no template was born in the tune part there are no
   M6 normal minutes there, the rate is None, the gate fails, and M6 is always "sigma stays" on such data.
