@@ -121,13 +121,18 @@ GAP = 0.10
 def flag_gap(conn, run_id) -> None:
     """Per method and kind: Test C medium recall against the latest ok Test A run of the same code_version (its `spike`
     medium recall, `burst` for M6, which has no spike). A gap above GAP sets injector_flag with both numbers."""
+    conn.commit()           # the store's transactions must be the outermost ones (else they are savepoints, lost on close)
     a = conn.execute("SELECT a.id FROM lab_runs a, lab_runs c WHERE c.id = %s AND a.test = 'A' AND a.status = 'ok' "
-                     "AND a.code_version = c.code_version ORDER BY a.id DESC LIMIT 1", (run_id,)).fetchone()
+                     "AND a.code_version = c.code_version AND a.site = c.site ORDER BY a.id DESC LIMIT 1", (run_id,)).fetchone()
     if a is None:
+        conn.commit()
         return
+    conn.commit()
+    rows = conn.execute("SELECT method, kind, metrics FROM lab_results WHERE run_id = %s AND scope = 'all' "
+                        "AND status = 'ok'", (run_id,)).fetchall()
+    conn.commit()
     with conn.transaction():
-        for r in conn.execute("SELECT method, kind, metrics FROM lab_results WHERE run_id = %s AND scope = 'all' "
-                              "AND status = 'ok'", (run_id,)).fetchall():
+        for r in rows:
             ra = conn.execute("SELECT metrics FROM lab_results WHERE run_id = %s AND method = %s AND kind = %s "
                               "AND scope = 'all' AND status = 'ok'", (a["id"], r["method"], r["kind"])).fetchone()
             by_type = ra["metrics"].get("by_type", {}) if ra else {}

@@ -130,6 +130,40 @@ class RecDoc(Rec):
     spec = Spec("rec", "T9", "rec", frozenset({"M3", "M5"}), (1.0, 2.0), 1.0, False, False, 1)
 
 
+def test_c_counts_incidents_in_the_tune_days_and_commits(monkeypatch, conn, cfg):
+    run_c(monkeypatch, conn, cfg)
+    bump(conn, DAYS[2], 10, 5, 15, 20)                     # tune part (first 7 days)
+    add_inc(conn, DAYS[2])
+    conn.commit()
+    assert labrun.run(args_c(), cfg, conn, conn, finish=test_a.finish_c) == 0
+    m = {r["kind"]: r for r in conn.execute("SELECT * FROM lab_results WHERE scope = 'all'")}["M3"]["metrics"]
+    assert m["recall"]["medium"] == 1.0 and m["alert_rate"] == 0.0     # the incident is masked from the tune alert rate
+
+
+def test_c_run_and_gap_are_committed(monkeypatch, conn, cfg):
+    """Everything must be visible from a second connection (the runner closes its own without a final commit)."""
+    from logai2.db import connect
+    from tests.conftest import TEST_DSN
+    run_c(monkeypatch, conn, cfg)
+    bump(conn, DAYS[11], 10, 5, 15, 20)
+    add_inc(conn, DAYS[11])
+    a = mk_run(conn, "A")
+    row(conn, a, "rec", "M3", 0.8, {"spike": {"medium": 0.1}})
+    conn.execute("UPDATE lab_runs SET code_version = %s WHERE id = %s", (labrun.code_version(), a))
+    conn.commit()
+    assert labrun.run(args_c(), cfg, conn, conn, finish=test_a.finish_c) == 0
+    conn.rollback()                                        # what closing without a commit does
+    other = connect(TEST_DSN)
+    try:
+        other.execute(f"SET search_path TO {conn.execute('SHOW search_path').fetchone()['search_path']}")
+        r = other.execute("SELECT status FROM lab_runs WHERE test = 'C'").fetchone()
+        m = other.execute("SELECT metrics FROM lab_results WHERE scope = 'all' AND kind = 'M3' AND run_id = "
+                          "(SELECT id FROM lab_runs WHERE test = 'C')").fetchone()["metrics"]
+    finally:
+        other.close()
+    assert r["status"] == "ok" and m["injector_flag"] is True and m["a_recall"] == 0.1
+
+
 def test_c_doc_key_hit_counts(monkeypatch, conn, cfg):
     """The incident is on `busy`, which stays quiet; its doc (busy + other) flags: a hit."""
     run_c(monkeypatch, conn, cfg)
@@ -177,6 +211,9 @@ def flag(conn, rid, method, kind):
 def test_gap_flag(conn):
     a_old, a = mk_run(conn, "A"), mk_run(conn, "A")
     a_other, a_failed = mk_run(conn, "A", version="v2"), mk_run(conn, "A", status="failed")
+    a_site = mk_run(conn, "A")
+    conn.execute("UPDATE lab_runs SET site = 'company' WHERE id = %s", (a_site,))
+    row(conn, a_site, "m", "M3", 0.8, {"spike": {"medium": 0.0}})
     row(conn, a_old, "m", "M3", 0.1, {"spike": {"medium": 0.1}})
     row(conn, a, "m", "M3", 0.8, {"spike": {"medium": 0.9}, "ramp": {"medium": 0.0}})
     row(conn, a, "n", "M3", 0.8, {"spike": {"medium": 0.5}})
