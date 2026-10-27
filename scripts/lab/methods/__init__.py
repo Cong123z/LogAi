@@ -90,3 +90,11 @@ from scripts.lab.methods.sigma import Sigma  # noqa: E402  (registered last: sig
 
 METHODS["sigma"] = Sigma
 GROUPS["core"].append("sigma")
+
+from scripts.lab.methods.mad import Mad  # noqa: E402
+from scripts.lab.methods.nb import NB, NBClip  # noqa: E402
+from scripts.lab.methods.weekly import Weekly  # noqa: E402
+
+for _cls in (NB, NBClip, Mad, Weekly):
+    METHODS[_cls.spec.name] = _cls
+    GROUPS["core"].append(_cls.spec.name)
