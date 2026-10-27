@@ -86,20 +86,19 @@ def lab_transitions(c):
     cfg = load_config(None)
     sd = load_service(c, KEY_SERVICE, days[0], days[-1], 35)
     m, out, minutes = Sigma(), set(), 0
+    trackers = {key: Tracker(cfg.alert) for key in sd.keys() if key != "*minutes"}     # one per key: state crosses midnight
     prev = m.fit(sd, days[0], cfg)
     for d in days[1:]:
         model = m.fit(sd, d, cfg)
-        for key in sd.keys():
-            if key in ("*minutes",):
-                continue
+        for key, tr in trackers.items():
             o = m.day(model, prev, sd, key, d, (3.0,), cfg)[3.0]
-            tr = Tracker(cfg.alert)
             for slot in range(1440):
                 if sd.observed[d][slot]:
                     tr.step(minute_at(d, slot), bool(o.high_flag[slot]), o.score[slot])
-            out |= {(key, mn, st) for mn, st in tr.changes}
             minutes += 1
         prev = model
+    for key, tr in trackers.items():
+        out |= {(key, mn, st) for mn, st in tr.changes}
     return out, minutes, days
 
 
@@ -132,4 +131,5 @@ def test_lab_sigma_equals_engine_alerts():
     assert {"doc:stress", "*error"} <= {k for k, _, _ in eng}, "doc and *error must alert"
     assert {"ALERTING", "COOLING", "NORMAL", "WARMING"} <= {st for _, _, st in eng}
     assert not outside, outside[:20]
-    assert len(in_win) <= 10 * len(commits)
+    for lo, hi in window:                                                           # at most 10 per commit window
+        assert sum(lo <= x[1] <= hi for x in in_win) <= 10, (lo, hi)

@@ -70,6 +70,8 @@ def lab_changes(conn, cfg, days, prev=None, per_day=False):
     sd = load_service(conn, SVC, days[0], days[-1], 30)
     conn.commit()
     m, trackers, done = Sigma(), {}, set()
+    if prev is None:
+        prev = m.fit(sd, days[0] - timedelta(1), cfg)       # as run.py does
     for d in days:
         if per_day:
             done |= {(k, mn, st) for k, tr in trackers.items() for mn, st in tr.changes}
@@ -226,8 +228,6 @@ def test_level_escalation_parity(conn, cfg):
     assert keyed(lab, "X") == keyed(live, "X")       # lab: WARMING 11:01, ALERTING 11:04, COOLING 11:06, NORMAL 11:08
 
 
-@pytest.mark.xfail(strict=True, reason="GAP: run.py passes prev_model=None on the first window day, so 00:00-01:59 "
-                   "use the day's own commit; live used the previous commit's baseline")
 def test_first_window_day_prev_none(conn, cfg):
     days = [D[6], D[7], D[8]]
     drive_live(conn, cfg, days, gen_small(False, True), {"A": "INFO", "E1": "ERROR"})

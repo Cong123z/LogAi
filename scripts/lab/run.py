@@ -157,7 +157,7 @@ def run(args, cfg, data_conn, results_conn, collect=default_collect, finish=None
                           if kd in m.spec.kinds or ("M6" in m.spec.kinds and has_new(sd, k))]
                 try:
                     sink = collect(results_conn, run_id, service, name, m.spec, kinds, ctx)
-                    prev = None
+                    prev = m.fit(sd, days[0] - timedelta(1), cfg)    # live ran D-1's commit before 02:00 of day 1
                     for d in days:
                         model = m.fit(sd, d, cfg)
                         if model is None:

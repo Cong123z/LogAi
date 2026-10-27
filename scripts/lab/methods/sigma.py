@@ -1,4 +1,8 @@
-"""Method #1, today's sigma: the live engine's Baseline and judge, replayed on recorded counts."""
+"""Method #1, today's sigma: the live engine's Baseline and judge, replayed on recorded counts.
+
+Known limit: the lab uses templates.level and the doc links as of the load; live uses the most severe level seen so far
+and the links of each minute (tests/lab/test_lab_sigma_adversarial.py::test_level_escalation_parity documents it).
+"""
 from __future__ import annotations
 
 import math
