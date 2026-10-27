@@ -198,6 +198,9 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `embedding.timeout_seconds` / `max_retries` / `retry_backoff_seconds` | 30 / 2 / 1 | per request; network errors, timeouts, 5xx and 429 are retried, waiting backoff × attempt; other 4xx fail at once |
 | `embedding.dimension` | 1024 | checked on every reply; the DB columns are `vector(1024)`, so another value needs a migration |
 | `llm.candidate_similarity` / `candidates` | 0.60 / 3 | documents the LLM may confirm |
+| `lab.record` | `false` (env `LOGAI2_LAB_RECORD`; compose: `true`) | the owner also stores per-minute counts in `lab_minute_counts` |
+| `lab.days` | 28 | partitions of `lab_minute_counts` kept |
+| `lab.holidays` | core Vietnamese holidays 2025-2027 (repo `config.yaml`) | ISO dates the lab treats as holidays |
 | `llm.per_service_hour` / `daily_max` | 0 / 0 | LLM results per service per hour, in all per day; 0 = no limit |
 | `llm.max_input_chars` | 8000 | prompt size (candidate texts are cut) |
 
@@ -533,6 +536,9 @@ Everything goes in **one** transaction, in this order:
    is enabled; `:unparsed` templates skipped; no module is `''`. Both are
    `COPY`ed into session temp tables (`ON COMMIT DELETE ROWS`) and upserted
    with one `INSERT … SELECT` each (`owner.copy_upsert`)
+4b. Only when `lab.record`: `lab_minute_counts` (`COPY`ed, element-wise `counts +=` of the
+   minutes closed since the last flush, so an hour built over many flushes, or
+   across a crash, holds each minute once; pending rows are kept by a failed flush)
 6. `alert_minutes` (insert, ignore conflicts)
 7. `alert_state` (upsert every key stepped since the last flush, so streaks
    survive a restart), `alert_changes` (insert)
@@ -855,7 +861,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs, 009 index services), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs, 009 index services, 010 lab), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -873,6 +879,14 @@ service-scoped primary key.
 | `hourly_counts` * | `service, key, day, hour` | `sum`, `sumsq` (only hours with events) | flush |
 | `alert_minutes` * | `service, key, module_code, minute, day` | `count` | flush |
 | `template_module_hours` * | `service, template_id, module_code, day, hour` | `count` (local day and hour, as `hourly_counts`) | flush (seeded by migration 007 from the last 7 days of `alert_minutes`) |
+| `lab_minute_counts` | `service, key, day, hour` (partitioned by `day`) | `counts int[60]`: per-minute counts of the local hour; key `*minutes` = 1 per observed minute | flush (only when `lab.record`) |
+| `lab_runs` | `id` | one bake-off run: site, test, status, window, seed, params, kinds, error | lab |
+| `lab_results` | `run_id, method, kind, scope` | knob, status, metrics, verdict, strength | lab |
+| `lab_episodes` | `run_id, method, service, key, start_minute` | `end_minute`, `peak_score`, `alerted_minutes` | lab |
+| `lab_bands` | `run_id, method, service, key, step, minute` | `count`, `expected`, `low`, `high`, `high_flag` | lab |
+| `lab_sweeps` | `run_id, method, kind, knob, part` | `metrics` on tune and test | lab |
+| `lab_choices` | `kind` | chosen `method`, `knob`, `run_id`, `note` | lab |
+| `lab_incidents` | `id` | injected or known incidents: source, service, key, type, size, start/end minute, meta | lab |
 | `retrain_runs` | `id` (index `started_at DESC`) | `kind`, `trigger`, `scope`, `state`, `started_at`, `finished_at`, `pos_ms`, `steps`, `result`, `error`, `error_type`, `failed_step`, `log` (jsonb) | engine (`jobs/runs.py`); deleted after 365 days by the commit |
 | `template_modules` | `service, template_id, module_code` (index `service, module_code`) | `first_seen`, `last_seen` | flush (seeded by migration 007 from all `alert_minutes`; keys `*…` and `doc:…`, and `…:unparsed` templates, skipped) |
 | `day_status` | `service, day` | `committed`, `daytype` | commit |

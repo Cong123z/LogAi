@@ -110,6 +110,15 @@ or run the script from a checkout with `LOGAI2_DATABASE_DSN` set).
 4. Reload open UI tabs: a tab keeps its old JS, and the old Pipeline view
    expects removed fields and loops on "connection lost".
 
+### Upgrading to migration 010 (lab recorder)
+
+Deploy the **engine** first: it runs 010 (eight empty `lab_*` tables, seconds).
+Nothing else changes unless `lab.record` is on (`LOGAI2_LAB_RECORD=true`, set
+in `docker-compose.yml`; `false` in `config.yaml`): then each flush also writes
+the 60 per-minute counts of every key-hour to `lab_minute_counts`, kept
+`lab.days` (28) days. Size: about 0.3-0.6 GB per 28 days at 3k keys, about
+30 MB on the laptop (180 templates).
+
 ### Upgrading to migrations 008 and 009 (Retrain)
 
 1. Deploy the **engine** first: it runs 008 (`retrain_runs`) and 009
@@ -154,6 +163,7 @@ connection and index selection saved on the **Data sources** page.
 |---|---|
 | `LOGAI2_DATABASE_DSN` | Postgres DSN |
 | `LOGAI2_ES_HOSTS`, `LOGAI2_ES_USER`, `LOGAI2_ES_PASSWORD`, `LOGAI2_ES_VERIFY_CERTS` | ES connection (until one is saved on the web) |
+| `LOGAI2_LAB_RECORD` | `true`/`false`: store per-minute counts for the bake-off (`lab.record`; default false, compose sets true) |
 | `LOGAI2_ES_INDEX` | index or pattern read until a selection is saved |
 | `LOGAI2_METRICS_PORT`, `LOGAI2_WEB_PORT` | container ports |
 | `LOGAI2_DOC_SEED_PATH` | documentation corpus to seed |
@@ -232,7 +242,7 @@ baseline.
 logai2/
   config.py, timeutil.py, db.py      config layers, local time, Postgres (migrate, partitions, settings)
   migrations/                        001 core, 002 document links, 003 LLM failover, 004 document service, 005 document level, 006 modules per service,
-                                     007 template modules, 008 retrain runs, 009 index services
+                                     007 template modules, 008 retrain runs, 009 index services, 010 lab
   reader/                            es_source.py (ES query, hit → Line), normalize.py, cache.py, reader.py (watermark)
   owner/                             miners.py (Drain3 per service), counts.py (open minutes), baseline.py (bands),
                                      detect.py (hysteresis), owner.py (flush transaction)
