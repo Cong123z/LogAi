@@ -119,6 +119,17 @@ the 60 per-minute counts of every key-hour to `lab_minute_counts`, kept
 `lab.days` (28) days. Size: about 0.3-0.6 GB per 28 days at 3k keys, about
 30 MB on the laptop (180 templates).
 
+### Synthetic world (bake-off lab)
+
+A multi-week history made from the laptop's own templates and hourly shapes, written into its own schema
+`lab_s_<scenario>` (never into `public`). Run from the host, so pass `--dsn`:
+
+`python -m scripts.lab.world --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
+
+`python -m scripts.lab.synth --mode counts --scenario lab/scenarios/default.yaml --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
+
+`lab/world.json` holds template texts and is git-ignored. It uses only hours with counts (at least 30 observed minutes and `*total` above 0) and warns when fewer than 8 exist: rebuild it after a full overnight replay. `lab/scenarios/tiny.yaml` is the quick one.
+
 ### Upgrading to migrations 008 and 009 (Retrain)
 
 1. Deploy the **engine** first: it runs 008 (`retrain_runs`) and 009

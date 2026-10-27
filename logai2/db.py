@@ -30,7 +30,7 @@ def connect(dsn: str) -> psycopg.Connection:
 def migrate(conn: psycopg.Connection) -> list[int]:
     with conn.transaction():
         done = set()
-        if conn.execute("SELECT to_regclass('schema_migrations') AS t").fetchone()["t"]:
+        if conn.execute("SELECT to_regclass(format('%I.schema_migrations', current_schema())) AS t").fetchone()["t"]:
             done = {r["version"] for r in conn.execute("SELECT version FROM schema_migrations")}
     applied = []
     for path in sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql")):

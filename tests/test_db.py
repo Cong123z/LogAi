@@ -114,3 +114,21 @@ def test_migration_010_on_an_empty_database(schema):
         c.execute(f"DROP SCHEMA {schema} CASCADE")
         c.commit()
         c.close()
+
+
+def test_migrate_checks_only_the_current_schema(conn, schema):
+    b = schema + "_b"          # fresh schema B in front of the migrated one on the search_path
+    conn.execute(f"CREATE SCHEMA {b}")
+    conn.execute(f"SET search_path TO {b}, {schema}, public")
+    conn.commit()
+    try:
+        versions = lambda s: [r["version"] for r in conn.execute(f"SELECT version FROM {s}.schema_migrations ORDER BY 1")]
+        a_before = versions(schema)
+        assert migrate(conn) == a_before
+        assert versions(b) == a_before and versions(schema) == a_before
+        assert conn.execute(f"SELECT to_regclass('{b}.templates') AS t").fetchone()["t"]
+    finally:
+        conn.rollback()
+        conn.execute(f"SET search_path TO {schema}, public")
+        conn.execute(f"DROP SCHEMA {b} CASCADE")
+        conn.commit()

@@ -5,3 +5,4 @@ __pycache__/
 reports/
 agents.md
 .team/
+lab/world.json
