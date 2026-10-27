@@ -4,7 +4,7 @@ Status: **draft for review** (2026-10-27). Agent roles are not assigned yet (to 
 Replaces the task list of `docs/plans/2026-10-26-baseline-bakeoff.md` (61–72) for the laptop build; the company
 deployment (k8s Job, read-only role, company smoke) is deferred to a later plan once the laptop proof passes.
 
-Design: `docs/specs/2026-10-26-baseline-bakeoff.md`. Methods and reasons: `docs/specs/2026-10-26-bakeoff-methods.md`.
+Spec: `docs/specs/2026-10-27-bakeoff-laptop.md` (contracts, environment, container modes). Parent design: `docs/specs/2026-10-26-baseline-bakeoff.md`. Methods and reasons: `docs/specs/2026-10-26-bakeoff-methods.md`.
 Criteria: `docs/specs/2026-10-26-bakeoff-judging.md`. Mockup: https://claude.ai/artifact/EXqQaUkx4aAZTsEmj1A2be.
 
 **Goal on the laptop:** record per-minute counts, build multi-week synthetic history from the laptop's own data,
