@@ -89,7 +89,7 @@ SQL = {
     "error_samples": "INSERT INTO error_samples (service, template_id, at, line) VALUES (%s, %s, %s, %s)",
     # re-read lane: replace one whole (service, day, hour)
     "lane_had": "SELECT EXISTS (SELECT 1 FROM service_hours WHERE service = %s AND day = %s AND hour = %s) AS had",
-    "lane_delete": ("service_hours", "hourly_counts", "template_module_hours"),
+    "lane_delete": ("service_hours", "hourly_counts", "template_module_hours", "lab_minute_counts"),
     "retrain_run": "UPDATE retrain_runs SET pos_ms = %s, steps = %s, log = COALESCE(%s, log) WHERE id = %s",
     "error_samples_trim": (
         "DELETE FROM error_samples WHERE ctid IN (SELECT ctid FROM error_samples "
@@ -309,7 +309,8 @@ class Owner:
     def _flush_lane(self, cur) -> None:
         today = day_hour(int(self.now() // 60))[0]
         mod_cutoff = today - timedelta(days=self.cfg.retention.module_hours_days)
-        mod_rows, sample_rows, trims = [], [], set()
+        lab_cutoff = today - timedelta(days=self.cfg.lab.days)
+        mod_rows, sample_rows, trims, lab_rows = [], [], set(), []
         for h in self._lane_hours:
             k = (h.service, h.day, h.hour)
             had = cur.execute(SQL["lane_had"], k).fetchone()["had"]
@@ -320,10 +321,13 @@ class Owner:
                                                    for key, (s, sq) in h.sums.items()])
             if h.day >= mod_cutoff:
                 mod_rows += [(h.service, tid, module, h.day, h.hour, n) for (tid, module), n in h.module_hours.items()]
+            if self.cfg.lab.record and h.day >= lab_cutoff:
+                lab_rows += [(h.service, key, h.day, h.hour, v) for key, v in h.minutes.items() if any(v)]
             if not had:   # an hour that had rows has its samples already
                 sample_rows += [(h.service, tid, _ts(m * 60), line) for tid, m, line in h.samples]
                 trims |= {(h.service, tid) for tid, _, _ in h.samples}
         copy_upsert(cur, "template_module_hours", mod_rows)
+        copy_upsert(cur, "lab_minute_counts", lab_rows)   # live pending rows of these hours were written first and just deleted: the lane wins
         cur.executemany(SQL["error_samples"], sample_rows)
         cur.executemany(SQL["error_samples_trim"], sorted(trims))
         if self._lane_run:

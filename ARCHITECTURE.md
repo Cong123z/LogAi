@@ -544,8 +544,9 @@ Everything goes in **one** transaction, in this order:
    survive a restart), `alert_changes` (insert)
 9. `error_samples` (insert, then trim to the newest 20 per template)
 10. **Re-read hours** (`Owner.add_lane`, §9): per queued `LaneHour`, delete its
-   (service, day, hour) from `service_hours`, `hourly_counts` and
-   `template_module_hours` and insert the lane's rows (after every live write, so a
+   (service, day, hour) from `service_hours`, `hourly_counts`,
+   `template_module_hours` and `lab_minute_counts` and insert the lane's rows
+   (`lab_minute_counts` only when `lab.record` and the day is within `lab.days`) (after every live write, so a
    live minute pending for that hour is replaced too); `error_samples` only when the
    hour had no `service_hours` row; then `retrain_runs.pos_ms` and `steps`
 11. `es_cursors` (upsert per selected index; delete rows of unselected ones)

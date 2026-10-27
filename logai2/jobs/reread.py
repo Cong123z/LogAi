@@ -16,7 +16,7 @@ from logai2.config import AppConfig
 from logai2.owner.counts import ERROR_LEVELS, SEVERITY, OpenMinutes
 from logai2.reader.es_source import hit_to_line
 from logai2.reader.normalize import normalize
-from logai2.timeutil import TZ, minute_of
+from logai2.timeutil import TZ, local, minute_of
 
 logger = logging.getLogger("logai2.reread")
 
@@ -104,6 +104,7 @@ class LaneHour:
     pairs: dict[tuple[str, str], tuple[int, int]] = field(default_factory=dict)          # -> (first, last) minute
     samples: list[tuple[str, int, str]] = field(default_factory=list)                    # (template_id, minute, line)
     templates: dict[str, dict] = field(default_factory=dict)                             # id -> text/level/first/last
+    minutes: dict[str, list[int]] = field(default_factory=dict)                          # key -> 60 counts (slot = local minute)
 
 
 class Lane:
@@ -304,11 +305,14 @@ class Lane:
                 if service in gone:
                     continue
                 h = hours.get(service) or hours.setdefault(service, LaneHour(service, cm.day, cm.hour))
+                slot = local(cm.minute).minute
                 if key == "*total":
                     h.n_minutes += 1
+                    h.minutes.setdefault("*minutes", [0] * 60)[slot] = 1
                 if n:
                     s, sq = h.sums.get(key, (0, 0))
                     h.sums[key] = (s + n, sq + n * n)
+                    h.minutes.setdefault(key, [0] * 60)[slot] += n
             for (service, tid, module), n in cm.modules.items():
                 if tid.endswith(":unparsed") or service in gone:
                     continue

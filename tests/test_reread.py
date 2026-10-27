@@ -703,3 +703,73 @@ def test_estimate_counts_docs(conn, ready):
 def test_commands_are_registered(conn):
     for kind in ("retrain_run", "retrain_cancel", "retrain_estimate"):
         assert kind in commands.KINDS
+
+
+# --- lab recorder in the lane (bk02) -------------------------------------------
+
+def lab_rows(conn):
+    return {(r["service"], r["key"], r["day"], r["hour"]): r["counts"] for r in
+            rows(conn, "SELECT service, key, day, hour, counts FROM lab_minute_counts")}
+
+
+def seed_lab(conn, service="s", key="stale", hour=10):
+    conn.execute("INSERT INTO lab_minute_counts (service, key, day, hour, counts) VALUES (%s, %s, %s, %s, %s)",
+                 (service, key, DAY, hour, [1] * 60))
+    conn.commit()
+
+
+def test_lane_replaces_lab_rows(conn, cfg):
+    cfg.lab.record = True
+    seed_lab(conn)
+    owner, lane, rid = lane_of(conn, cfg, FakeSource({"a": docs(10, per=2)}), hour_to=11)
+    drive(owner, lane, rid)
+    got = lab_rows(conn)
+    assert ("s", "stale", DAY, 10) not in got
+    assert got[("s", "*minutes", DAY, 10)] == [1] * 60
+    assert got[("s", "*total", DAY, 10)] == [2] * 60
+
+
+def test_lane_lab_rows_equal_live(conn, cfg):
+    cfg.lab.record = True
+    hits = mixed()
+    run_minutes(conn, cfg, hits, T0 + 2 * H)
+    live = lab_rows(conn)
+    assert live
+    wipe(conn)
+    conn.execute("DELETE FROM lab_minute_counts")
+    conn.commit()
+    owner, lane, rid = lane_of(conn, cfg, FakeSource({"a": hits}))
+    drive(owner, lane, rid)
+    assert lab_rows(conn) == live
+    for hour in (10, 11):
+        n = rows(conn, f"SELECT n_minutes FROM service_hours WHERE hour = {hour}")[0]["n_minutes"]
+        assert sum(live[("s", "*minutes", DAY, hour)]) == n
+
+
+def test_lane_gone_service_writes_nothing(conn, cfg):
+    cfg.lab.record = True
+    src = FakeSource({"a": docs(10, service="x") + docs(10, service="z", prefix="za"),
+                      "b": docs(10, service="y", prefix="yb") + docs(10, service="z", prefix="zb")})
+    owner, lane, rid = lane_of(conn, cfg, src, hour_to=11, patterns={"a": ["x", "z"], "b": ["y", "z"]})
+    src.delete_index("b")
+    drive(owner, lane, rid)
+    assert {k[0] for k in lab_rows(conn)} == {"x"}
+
+
+def test_lane_flag_off_deletes_only(conn, cfg):
+    cfg.lab.record = False
+    seed_lab(conn)
+    owner, lane, rid = lane_of(conn, cfg, FakeSource({"a": docs(10)}), hour_to=11)
+    drive(owner, lane, rid)
+    assert lab_rows(conn) == {}
+    assert rows(conn, "SELECT count(*) AS n FROM service_hours")[0]["n"] == 1
+
+
+def test_lane_old_day_not_written(conn, cfg):
+    cfg.lab.record = True
+    cfg.lab.days = 5
+    owner, lane, rid = lane_of(conn, cfg, FakeSource({"a": docs(10)}), hour_to=11)
+    owner.now = lambda: (T0 + 10 * 86_400_000) / 1000
+    drive(owner, lane, rid)
+    assert lab_rows(conn) == {}
+    assert rows(conn, "SELECT n_minutes FROM service_hours")[0]["n_minutes"] == 60
