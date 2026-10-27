@@ -1,5 +1,6 @@
 """Synthetic world, `counts` mode: write what the engine would have recorded for a made-up multi-week history,
-from the world file's hourly shapes, into its own schema. Pure `generate`, then `write`."""
+from the world file's hourly shapes, into its own schema. Pure `generate`, then `write`.
+`engine` mode: the same `generate` result, sent as log lines through the real Engine on an injected clock."""
 from __future__ import annotations
 
 import argparse
@@ -9,11 +10,14 @@ import random
 import re
 import sys
 import time
+import zlib
 from array import array
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from math import exp
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -22,6 +26,7 @@ from logai2.db import connect, ensure_partitions, migrate
 from logai2.links import level_class
 from logai2.timeutil import TZ
 from scripts.lab.data import minute_at
+from scripts.stress_pipeline import mix
 
 MIN_DAY = 1440
 DERIVED = ("*total", "*error", "*warn", "*info")
@@ -117,7 +122,8 @@ def _place_incidents(rng, name, tpl, specs, days, d_start, expected, gap_minutes
     return sorted(out, key=lambda o: o["start_minute"])
 
 
-def generate(world: dict, scenario: dict, end: date) -> Generated:
+def generate(world: dict, scenario: dict, end: date, lam_scale: float = 1.0) -> Generated:
+    """`lam_scale` multiplies every lambda (the --scale of engine mode); 1.0 changes nothing."""
     sc, rng = scenario, random.Random(scenario["seed"])
     n_days = sc["days"]
     days = [end - timedelta(n_days - 1 - i) for i in range(n_days)]
@@ -139,7 +145,7 @@ def generate(world: dict, scenario: dict, end: date) -> Generated:
         base = world["services"][src_names[si % len(src_names)]]
         keep = sorted(rng.sample(range(len(base)), max(1, round(len(base) * sv_cfg["subset"]))))
         tpl = [base[i] for i in keep]
-        scale, phase = sv_cfg["scale"][si % len(sv_cfg["scale"])], sv_cfg["phase_minutes"][si % len(sv_cfg["phase_minutes"])]
+        scale, phase = sv_cfg["scale"][si % len(sv_cfg["scale"])] * lam_scale, sv_cfg["phase_minutes"][si % len(sv_cfg["phase_minutes"])]
         hour_of = [((i + phase) % MIN_DAY) // 60 for i in range(MIN_DAY)]
         def expected(t, d, lo, hi, scale=scale, hour_of=hour_of):
             k = scale * facs[d] * (1 + sc["trend"]["per_week"] * d / 7)
@@ -199,7 +205,7 @@ def generate(world: dict, scenario: dict, end: date) -> Generated:
                 arr = array("i", [0]) * MIN_DAY
                 first = max(born[tid] - d0, 0) if is_new else 0
                 if is_new:
-                    lam_h = [nt["rate"] * fac] * 24
+                    lam_h = [nt["rate"] * lam_scale * fac] * 24
                     nbh = [0.0] * 24
                 else:
                     mean, nbh = rates[tid]
@@ -296,6 +302,151 @@ def write(conn, schema: str, gen: Generated) -> None:
         conn.commit()
 
 
+# --- engine mode -----------------------------------------------------------------------------------------
+
+HISTORY_DAYS = 7        # days before the engine's first day that are seeded from the counts (sigma needs a baseline)
+RENDER_SEED = 0x5EED
+
+
+def render(text: str, h: int) -> str:
+    """The template's `<*>` wildcards filled with seeded numbers (the normalizer turns them back into `<*>`)."""
+    return "".join(p + (str(mix(h ^ i) % 10 ** 8) if i < text.count("<*>") else "")
+                   for i, p in enumerate(text.split("<*>")))
+
+
+class Events:
+    """Sorted events of one service, shaped like stress_pipeline.Stream for GenSource: event k at ts[k] (ms) is
+    template tpl[k] of `templates` [(level, text, module)]; its tokens come from mix(seed ^ k)."""
+
+    def __init__(self, service: str, ts: array, tpl: array, templates: list[tuple]):
+        self.sid, self.service, self.ts, self.tpl, self.templates = f"ev-{service}", service, ts, tpl, templates
+        self.a_ms, self.b_ms = (ts[0], ts[-1] + 1) if ts else (0, 0)
+        self.delay_ms, self.index = 0, f"stress-{service}"
+        self.seed = mix(RENDER_SEED ^ zlib.crc32(service.encode()))
+
+    def count(self, a_ms: int, b_ms: int) -> int:
+        return bisect_left(self.ts, b_ms) - bisect_left(self.ts, a_ms)
+
+    def hits(self, from_ms: int, upper_ms: int, limit: int, now_ms: int) -> list[dict]:
+        hi, out, k = min(upper_ms, now_ms), [], bisect_left(self.ts, from_ms)
+        while k < len(self.ts) and len(out) < limit and self.ts[k] <= hi:
+            ts, h = self.ts[k], mix(self.seed ^ k)
+            level, text, module = self.templates[self.tpl[k]]
+            when = datetime.fromtimestamp(ts // 1000, TZ).strftime("%Y-%m-%d %H:%M:%S")
+            out.append({"_id": f"{self.sid}-{k}", "sort": [ts, k], "_source": {
+                "@timestamp": ts, "service_code2": self.service, "moduleCode": module,
+                "message": f"{when},{ts % 1000:03d} {level} [main] {render(text, h)}"}})
+            k += 1
+        return out
+
+
+def _pretrain(cfg, gen: Generated) -> tuple[dict, dict, dict]:
+    """Every template through Drain3 once, as stress_pipeline.pretrain does: (blobs, {service: {world id: engine
+    id}}, {service: {engine id: text}})."""
+    from logai2.owner.miners import Miners
+    from logai2.reader.normalize import normalize
+    miners = Miners(cfg.drain3, {})
+    line = lambda t: normalize(f"2026-10-21 10:00:00,000 {t['level']} [main] " + render(t["text"], RENDER_SEED))
+    ids, texts = {}, {}
+    for _ in range(2):      # the second pass reads the final text of each cluster (a later template may widen it)
+        for s in gen.services:
+            ids[s.name], texts[s.name] = {}, {}
+            for t in s.templates:
+                tid, text, _new = miners.match(s.name, line(t))
+                ids[s.name][t["template_id"]], texts[s.name][tid] = tid, text
+            if len(set(ids[s.name].values())) < len(s.templates):
+                raise ValueError(f"{s.name}: templates merged in Drain3 (ids {ids[s.name]}); engine mode needs "
+                                 "templates the miner keeps apart")
+    return miners.dirty(), ids, texts
+
+
+def _rename(gen: Generated, ids: dict, texts: dict, keep_days: int) -> Generated:
+    """`gen` with the engine's template ids and texts and only counts of days below keep_days."""
+    out = []
+    for s in gen.services:
+        m = ids[s.name]
+        tpl = [{**t, "template_id": m[t["template_id"]], "text": texts[s.name][m[t["template_id"]]]} for t in s.templates]
+        counts = {m.get(k, k): {d: a for d, a in pd.items() if d < keep_days} for k, pd in s.counts.items()}
+        inc = [{**o, "key": m.get(o["key"], o["key"]), "meta": {k: m.get(v, v) for k, v in o["meta"].items()} if o["meta"] else None}
+               for o in s.incidents]
+        out.append(Svc(s.name, tpl, counts, inc))
+    return Generated(gen.days, out)
+
+
+def _events(gen: Generated, first_day: int, seed: int) -> list[Events]:
+    # ponytail: every event of the run is held in memory (12 bytes each); chunk per day if --scale 1.0 runs get too big
+    rng, out = random.Random(f"{seed}-engine"), []
+    for s in gen.services:
+        tpl = [(t["level"], t["text"], f"mod{i % 3}") for i, t in enumerate(s.templates)]
+        ev = []
+        for i, t in enumerate(s.templates):
+            for d in range(first_day, len(gen.days)):
+                for slot, c in enumerate(s.counts[t["template_id"]][d]):
+                    base = (minute_at(gen.days[d], 0) + slot) * 60_000
+                    ev += [(base + rng.randrange(60_000), i) for _ in range(c)]
+        ev.sort()
+        out.append(Events(s.name, array("q", [e[0] for e in ev]), array("i", [e[1] for e in ev]), tpl))
+    return out
+
+
+def run_engine(world: dict, scenario: dict, end: date, schema: str, dsn: str, scale: float = 1.0) -> dict:
+    """The real Engine over the generated lines for the last days of the scenario (the earlier ones, up to
+    HISTORY_DAYS, are written from the counts as history). Gaps are not unobserved here: the engine closes
+    every minute, so a gap is only silent."""
+    import psycopg
+    from psycopg.rows import dict_row
+    from logai2.db import put_setting
+    from logai2.engine import Engine
+    from logai2.jobs.commit import commit
+    from scripts.stress_modules import schema_dsn
+    from scripts.stress_pipeline import Clock, GenSource, Run
+    t_start = time.time()
+    gen = generate(world, scenario, end, scale)
+    hist = min(HISTORY_DAYS, len(gen.days) - 1)
+    cfg = load_config(None)
+    cfg.lab.record, cfg.elasticsearch.index, cfg.database.dsn = True, "stress-*", schema_dsn(dsn, schema)
+    blobs, ids, texts = _pretrain(cfg, gen)
+    # the engine's ids and texts, with what the counts say for the history days (lab_incidents for all days)
+    admin = connect(dsn)
+    try:
+        write(admin, schema, _rename(gen, ids, texts, hist))
+    finally:
+        admin.close()
+    events = _events(_rename(gen, ids, texts, len(gen.days)), hist, scenario["seed"])
+    day0 = gen.days[hist]
+    t0 = minute_at(day0, 0) * 60
+    t_end = t0 + (len(gen.days) - hist) * 86400
+    with psycopg.connect(cfg.database.dsn, autocommit=False, row_factory=dict_row) as c:
+        ensure_partitions(c, gen.days[0], gen.days[-1] + timedelta(days=2))
+        with c.transaction(), c.cursor() as cur:
+            cur.executemany("INSERT INTO drain3_state (service, blob) VALUES (%s, %s)", list(blobs.items()))
+            cur.executemany("INSERT INTO modules (module_code, service) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                            [(m, e.service) for e in events for _, _, m in e.templates])
+        commit(c, cfg, day0)
+        put_setting(c, "detection_enabled", True)   # as the engine does after its first catch-up
+        put_setting(c, "bootstrap", {"since": t0, "until": t0})
+    a = SimpleNamespace(dsn=dsn, es_ms=2.5, es_us_per_hit=10.0, poll_interval=15.0)
+    clock = Clock(t0)
+    source = GenSource(clock, events, cfg.elasticsearch.batch_size)
+    engine = Engine(cfg, connect(cfg.database.dsn), source, now=clock)
+    engine.start()
+    run = Run(a, engine, clock, source, t0)
+    run.wrap()
+    try:
+        run.until(t_end + 600)
+        engine._flush()
+    finally:
+        for c in (engine.conn, engine.db):
+            c.close()
+    if run.errors or run.stalled:
+        raise RuntimeError(f"engine run failed: {run.errors} stalled={run.stalled}")
+    with connect(cfg.database.dsn) as c:
+        changes = c.execute("SELECT count(*) AS n FROM alert_changes").fetchone()["n"]
+    return {"schema": schema, "scale": scale, "history_days": hist, "minutes": (len(gen.days) - hist) * MIN_DAY,
+            "events": sum(len(e.ts) for e in events), "seconds": round(time.time() - t_start, 1),
+            "alert_changes": changes}
+
+
 def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mode", required=True, choices=["counts", "engine"])
@@ -304,14 +455,17 @@ def main(argv=None) -> None:
     ap.add_argument("--schema")
     ap.add_argument("--dsn")
     ap.add_argument("--end", type=date.fromisoformat, default=None)
+    ap.add_argument("--scale", type=float, default=1.0, help="engine mode: multiplies every lambda")
     a = ap.parse_args(argv)
-    if a.mode == "engine":
-        ap.error("--mode engine is not implemented yet (task bk12); use --mode counts")
     t0 = time.time()
     scenario = yaml.safe_load(Path(a.scenario).read_text())
-    schema = a.schema or f"lab_s_{Path(a.scenario).stem}"
+    schema = a.schema or f"lab_s_{Path(a.scenario).stem}" + ("_engine" if a.mode == "engine" else "")
     end = a.end or datetime.now(TZ).date() - timedelta(days=1)
-    gen = generate(json.loads(Path(a.world).read_text()), scenario, end)
+    world = json.loads(Path(a.world).read_text())
+    if a.mode == "engine":
+        print(run_engine(world, scenario, end, schema, a.dsn or load_config(None).database.dsn, a.scale))
+        return
+    gen = generate(world, scenario, end)
     t1 = time.time()
     conn = connect(a.dsn or load_config(None).database.dsn)
     write(conn, schema, gen)
