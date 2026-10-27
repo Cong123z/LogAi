@@ -182,7 +182,19 @@ to NORMAL. Unobserved minutes do not advance the state.
   Review exclusions removed, `n_minutes > 0`, the `born` rule for `*warn`/`*info`; then the real `Baseline` and `judge`.
 - Commit timing: minutes of D before `baseline.commit_time` (02:00) use D−1's profile.
 - Parity gate: on an engine-driven world, lab σ at k = 3 gives the same transitions as `alert_changes`, except within
-  10 minutes after each commit (the engine reloads at its first tick after the commit).
+  10 minutes after each commit (the engine reloads at its first tick after the commit; window [commit − 2, commit + 10]
+  because the engine may close 01:58–01:59 after its commit). Result (bk04): 64/64 transitions identical; an
+  Owner-driven 12-day world (full baseline, `*total` drop, outage, weekend borrow, floors, doc levels): 82/82 identical.
+- **Known lab-vs-live differences** (found in the bk04 reviews; none occurs in the synthetic worlds):
+  1. Minutes the engine closes late (`historic_after_minutes`) or before `detection_enabled` are recorded but never
+     judged live; the lab judges them (the recorder does not mark them).
+  2. Live rebuilds by the `retrain_schedule` setting (time, weekdays, enabled) and on manual / re-read rebuilds; the
+     lab assumes a daily rebuild at `commit_time`.
+  3. A re-read replaces recorded counts; the lab judges the re-read counts, live judged the originals.
+  4. A service with no committed day: live judges on the floor alone, the lab skips the day.
+  5. Template levels and doc links: the lab uses those at load time; live uses the most severe level seen so far and
+     the links of each minute (adversary test `test_level_escalation_parity`, xfail strict, documents it).
+  6. Idle templates absent from a minute: live skips them, the lab judges 0 — identical while every floor ≥ 1.
 
 ### 6.5 The 14 methods (detail in the methods doc)
 | # | Name | Kinds | Fits on | Band | Knob grid |
