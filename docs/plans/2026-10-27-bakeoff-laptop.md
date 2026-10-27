@@ -1,6 +1,6 @@
 # Baseline Bake-off on the laptop: implementation plan (tasks 0–17)
 
-Status: **draft for review** (2026-10-27). Agent roles are not assigned yet (to discuss).
+Status: **approved** (2026-10-27), roles assigned (see "Agent roles"). Nothing dispatched until the user says start.
 Replaces the task list of `docs/plans/2026-10-26-baseline-bakeoff.md` (61–72) for the laptop build; the company
 deployment (k8s Job, read-only role, company smoke) is deferred to a later plan once the laptop proof passes.
 

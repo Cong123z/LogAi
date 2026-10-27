@@ -1,6 +1,6 @@
 # Baseline bake-off on the laptop: detailed spec
 
-Status: **draft for review** (2026-10-27). Plan: `docs/plans/2026-10-27-bakeoff-laptop.md` (tasks 0–17).
+Status: **approved** (2026-10-27). Plan: `docs/plans/2026-10-27-bakeoff-laptop.md` (tasks 0–17).
 Parent design: `docs/specs/2026-10-26-baseline-bakeoff.md`. Methods: `docs/specs/2026-10-26-bakeoff-methods.md`.
 Criteria: `docs/specs/2026-10-26-bakeoff-judging.md`. Mockup: https://claude.ai/artifact/EXqQaUkx4aAZTsEmj1A2be.
 
