@@ -5,6 +5,8 @@ from array import array
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
+from logai2.owner.baseline import KEY_LEVEL
+from logai2.owner.counts import SEVERITY
 from logai2.timeutil import TZ, local
 
 Key = tuple[str, str]
@@ -42,3 +44,13 @@ class ServiceData:
 
     def keys(self) -> list[str]:
         return list(self.minutes)
+
+    def level(self, key: str) -> str:
+        """The level `judge` needs for any key: `*total`/`*error` by KEY_LEVEL, a doc by its worst linked template
+        (as detect.py), a template by its own, anything else INFO."""
+        if key in KEY_LEVEL:
+            return KEY_LEVEL[key]
+        if key.startswith("doc:"):
+            return max((self.levels.get(t, "INFO") for t in self.docs.get(key, [])),
+                       key=lambda lv: SEVERITY.get(lv.upper(), 0), default="INFO")
+        return self.levels.get(key, "INFO")

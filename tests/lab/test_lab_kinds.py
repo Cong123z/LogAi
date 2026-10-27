@@ -2,7 +2,7 @@ from array import array
 from datetime import date
 
 from scripts.lab.data import MIX, UNOBSERVED, ServiceData, minute_at, slot_of
-from scripts.lab.kinds import KINDS, assign, is_new
+from scripts.lab.kinds import KINDS, assign, has_new, is_new
 
 D1, D2 = date(2026, 10, 13), date(2026, 10, 14)
 
@@ -69,3 +69,26 @@ def test_slot_roundtrip_across_local_midnight():
     for slot in (0, 1, 719, 1439):
         assert slot_of(minute_at(D2, slot)) == (D2, slot)
     assert minute_at(D2, 0) - minute_at(D1, 0) == 1440
+
+
+def test_m6_for_new_templates_otherwise_unscored():
+    sd = make()
+    assert "quiet_info" not in assign(sd, [D1]) and not has_new(sd, "quiet_info")
+    sd.first_seen["quiet_info"] = minute_at(D2, 100)           # born inside the window, INFO < 2/min
+    sd.first_seen["old_info"] = minute_at(D1, 0) - 5000          # 'new' period ended before the window
+    sd.first_seen["gone_info"] = minute_at(D1, 0) - 1000         # still new at the window start
+    sd.minutes["old_info"] = {D1: busy(1), D2: arr()}
+    sd.levels["old_info"] = "INFO"
+    kinds = assign(sd, [D1])
+    assert kinds["quiet_info"] == "M6" and "old_info" not in kinds and kinds["gone_err"] == "M4"
+    assert has_new(sd, "gone_info") and not has_new(sd, "old_info") and not has_new(sd, "*total")
+    assert "gone_info" not in kinds or kinds["gone_info"] == "M6"
+
+
+def test_service_data_level():
+    sd = make()
+    sd.levels.update({"w": "WARNING"})
+    sd.docs.update({"doc:X": ["big", "w"], "doc:Y": ["quiet_err", "w", "big"], "doc:Z": []})
+    assert sd.level("big") == "INFO" and sd.level("quiet_err") == "ERROR" and sd.level("nope") == "INFO"
+    assert sd.level("*total") == "INFO" and sd.level("*error") == "ERROR"
+    assert sd.level("doc:X") == "WARNING" and sd.level("doc:Y") == "ERROR" and sd.level("doc:Z") == "INFO"

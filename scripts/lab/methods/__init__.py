@@ -49,9 +49,9 @@ class Unavailable(Exception):
     """A heavy method whose package is missing."""
 
 
-def floor_for(key: str, level: str, cfg) -> int | None:
-    """The count floor as `judge` maps it: the key's level, else the template's; None = no floor (INFO)."""
-    cls = FLOOR_LEVEL.get(KEY_LEVEL.get(key, level.upper()))
+def floor_for(key: str, level: str | None, cfg) -> int | None:
+    """The count floor as `judge` maps it: the key's level, else the template's (None = INFO); None = no floor."""
+    cls = FLOOR_LEVEL.get(KEY_LEVEL.get(key, (level or "INFO").upper()))
     return cfg.floors[cls] if cls else None
 
 

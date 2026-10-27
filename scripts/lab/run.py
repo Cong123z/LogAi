@@ -9,6 +9,9 @@ import hashlib
 import os
 import subprocess
 import sys
+import zlib
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -19,7 +22,8 @@ from logai2.config import load_config
 from logai2.db import connect
 from logai2.timeutil import TZ
 from scripts.lab import store
-from scripts.lab.kinds import assign
+from scripts.lab.data import ServiceData
+from scripts.lab.kinds import assign, has_new
 from scripts.lab.load import load_service, services
 from scripts.lab.methods import Unavailable
 
@@ -38,8 +42,12 @@ def parse_args(argv=None):
     p.add_argument("--check", action="store_true")
     p.add_argument("--dsn")
     a = p.parse_args(argv)
-    if (a.days is None) == (a.date_from is None or a.date_to is None):
+    if a.days is not None and (a.date_from or a.date_to) or a.days is None and not (a.date_from and a.date_to):
         p.error("give --days N or both --from and --to")
+    if a.days is not None and a.days < 1:
+        p.error("--days must be at least 1")
+    if a.days is None and a.date_from > a.date_to:
+        p.error("--from must not be after --to")
     return a
 
 
@@ -58,21 +66,60 @@ def code_version() -> str:
     return os.environ.get("LOGAI2_CODE_VERSION") or "unknown"
 
 
-def default_collect(conn, run_id, service, method, outputs) -> None:
-    """Stub: one result row per kind of the method (bk05/bk07 replace it with scoring). outputs: see run()."""
-    spec = outputs["spec"]
-    for kind in sorted(spec.kinds):
-        keys = [k for k, kd in outputs["kinds"].items() if kd == kind]
-        done = [k for k in keys if k in outputs["out"]]
-        store.put_result(conn, run_id, method, kind, service, None, "ok" if outputs["out"] else "skipped",
-                         {"n_keys": len(keys), "n_minutes": sum(1440 * len(outputs["out"][k]) for k in done)})
+HISTORY_DAYS = 35      # sigma: 5 weekdays + 4 weekend committed days; weekly profile / forecasters: up to 4 weeks
+
+
+@dataclass
+class RunCtx:
+    """What a sink needs about the run: part(key, day) -> 'tune' | 'test' is the split (by days, or by keys)."""
+    days: list[date]
+    tune_days: list[date]
+    split: str                       # 'days' | 'keys'
+    part: Callable[[str, date], str]
+    cfg: object
+    sd: ServiceData
+
+
+def make_part(service: str, days: list[date], tune_days: list[date], by_days: bool):
+    if by_days:
+        tune = set(tune_days)
+        return lambda key, day: "tune" if day in tune else "test"
+    return lambda key, day: "tune" if zlib.crc32((service + key).encode()) % 2 == 0 else "test"
+
+
+class DefaultSink:
+    """Stub (bk05/bk07 replace it): one result row per kind of the method with n_keys and n_minutes."""
+
+    def __init__(self, conn, run_id, service, method, spec, kinds, ctx):
+        self.conn, self.run_id, self.service, self.method, self.spec = conn, run_id, service, method, spec
+        self.kinds, self.ctx = kinds, ctx
+        self.days: dict[str, int] = {}       # key -> days added
+
+    def add(self, key, day, outs) -> None:
+        self.days[key] = self.days.get(key, 0) + 1
+
+    def skip(self, day) -> None:
+        pass
+
+    def end(self) -> None:
+        for kind in sorted(self.spec.kinds):
+            keys = [k for k, kd in self.kinds.items() if kd == kind or (kind == "M6" and has_new(self.ctx.sd, k))]
+            done = sum(self.days.get(k, 0) for k in keys)
+            store.put_result(self.conn, self.run_id, self.method, kind, self.service, None, "ok" if done else "skipped",
+                             {"n_keys": len(keys), "n_minutes": 1440 * done})
+
+
+def default_collect(conn, run_id, service, method, spec, kinds, ctx) -> DefaultSink:
+    return DefaultSink(conn, run_id, service, method, spec, kinds, ctx)
 
 
 def run(args, cfg, data_conn, results_conn, collect=default_collect) -> int:
-    """outputs given to collect(results_conn, run_id, service, method, outputs):
-    {"spec": Spec, "kinds": {key: kind}, "out": {key: {day: {knob: DayOut}}}} (days a fit refused are absent)."""
+    """collect(results_conn, run_id, service, method, spec, kinds, ctx) returns a sink: sink.add(key, day, {knob: DayOut})
+    for each walked key and fitted day in ascending day order, sink.skip(day) for a day the fit refused, sink.end()
+    after the last day. The runner keeps no output. A key is walked when its kind is in spec.kinds, or "M6" is and the
+    key has a new minute in the window."""
     names = methods.select(args.methods)
-    if args.days:
+    if args.days is not None:
         end = today() - timedelta(1)
         d0, d1 = end - timedelta(args.days - 1), end
     else:
@@ -95,30 +142,33 @@ def run(args, cfg, data_conn, results_conn, collect=default_collect) -> int:
     try:
         counts: dict[str, int] = {}
         digest = hashlib.sha1()
-        for service in services(data_conn):
-            sd = load_service(data_conn, service, d0, d1, cfg.retention.counts_days)
-            kinds = assign(sd, tune_days)       # ponytail: M7 (*mix) is not walked yet; bk05+ add it
+        for service in services(data_conn, d0, d1):
+            sd = load_service(data_conn, service, d0, d1, HISTORY_DAYS)
+            kinds = assign(sd, tune_days)       # ponytail: M7 (*mix) is not walked yet; bk09 adds it
             for key, kind in sorted(kinds.items()):
                 counts[kind] = counts.get(kind, 0) + 1
                 digest.update(f"{service}\0{key}\0{kind}\n".encode())
+            ctx = RunCtx(days, tune_days, params["split"], make_part(service, days, tune_days, by_days), cfg, sd)
             for name, m in instances.items():
+                walked = [k for k, kd in kinds.items()
+                          if kd in m.spec.kinds or ("M6" in m.spec.kinds and has_new(sd, k))]
                 try:
-                    out: dict = {}
+                    sink = collect(results_conn, run_id, service, name, m.spec, kinds, ctx)
                     prev = None
                     for d in days:
                         model = m.fit(sd, d, cfg)
-                        if model is not None:
-                            for key, kind in kinds.items():
-                                if kind in m.spec.kinds:
-                                    out.setdefault(key, {})[d] = m.day(model, prev, sd, key, d, m.spec.knobs, cfg)
+                        if model is None:
+                            sink.skip(d)
+                        else:
+                            for key in walked:
+                                sink.add(key, d, m.day(model, prev, sd, key, d, m.spec.knobs, cfg))
                         prev = model
+                    sink.end()
                 except Exception as exc:
                     for kind in sorted(m.spec.kinds):
                         store.put_result(results_conn, run_id, name, kind, service, None, "failed",
                                          {"error": repr(exc)})
-                    continue
-                collect(results_conn, run_id, service, name, {"spec": m.spec, "kinds": kinds, "out": out})
-            del sd
+            del sd, ctx
         store.finish_run(results_conn, run_id, "ok", {"counts": counts, "hash": digest.hexdigest()})
         store.prune(results_conn, args.site)
         return 0
@@ -141,11 +191,11 @@ def check(names) -> int:
 
 
 def _open(dsn, schema, read_only=False):
+    """read_only: the data connection (sticky for every later transaction); it also sees `public` (pgvector)."""
     c = connect(dsn)
-    c.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema or "public")))
+    c.execute(sql.SQL("SET search_path TO {}" + (", public" if read_only else "")).format(sql.Identifier(schema or "public")))
     c.commit()
-    if read_only:
-        c.execute("SET TRANSACTION READ ONLY")
+    c.read_only = read_only
     return c
 
 

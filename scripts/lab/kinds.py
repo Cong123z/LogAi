@@ -4,10 +4,9 @@ from __future__ import annotations
 from datetime import date
 
 from logai2.links import level_class
-from scripts.lab.data import UNOBSERVED, ServiceData
+from scripts.lab.data import UNOBSERVED, ServiceData, minute_at
 
 KINDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7")
-_NOT_SCORED = frozenset({"*warn", "*info", "*minutes"})
 
 
 def _busy_mean(sd: ServiceData, key: str, tune_days: list[date]) -> float | None:
@@ -28,6 +27,9 @@ def _busy_mean(sd: ServiceData, key: str, tune_days: list[date]) -> float | None
 
 
 def assign(sd: ServiceData, tune_days: list[date]) -> dict[str, str]:
+    """key -> base kind M1..M5; absent = not scored. A template its base kind would not score (INFO < 2/min) but with a
+    new minute (see has_new) inside the window gets "M6". M6 is otherwise a per-minute label: which of a template's
+    minutes count as M6 and which as its base kind is the scorer's job (is_new, bk05)."""
     kinds = {}
     for key in sd.keys():
         if key == "*total":
@@ -36,7 +38,7 @@ def assign(sd: ServiceData, tune_days: list[date]) -> dict[str, str]:
             kinds[key] = "M2"
         elif key.startswith("doc:"):
             kinds[key] = "M5"
-        elif key.startswith("*") or key in _NOT_SCORED or key.endswith(":unparsed"):
+        elif key.startswith("*") or key.endswith(":unparsed"):
             continue
         else:
             mean = _busy_mean(sd, key, tune_days)
@@ -44,6 +46,8 @@ def assign(sd: ServiceData, tune_days: list[date]) -> dict[str, str]:
                 kinds[key] = "M3"
             elif level_class(sd.levels.get(key)) != "INFO":
                 kinds[key] = "M4"
+            elif has_new(sd, key):
+                kinds[key] = "M6"      # INFO < 2/min: scored only for its new minutes
     return kinds
 
 
@@ -51,3 +55,10 @@ def is_new(sd: ServiceData, key: str, minute: int) -> bool:
     """M6: the template's first 1440 minutes."""
     first = sd.first_seen.get(key)
     return first is not None and 0 <= minute - first < 1440
+
+
+def has_new(sd: ServiceData, key: str) -> bool:
+    """The template's first 1440 minutes overlap the loaded window."""
+    first = sd.first_seen.get(key)
+    return (first is not None and first < minute_at(sd.days[-1], 0) + 1440
+            and first + 1440 > minute_at(sd.days[0], 0))

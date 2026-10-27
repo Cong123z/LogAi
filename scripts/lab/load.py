@@ -9,8 +9,11 @@ from logai2.timeutil import minute_of
 from scripts.lab.data import UNOBSERVED, ServiceData
 
 
-def services(conn) -> list[str]:
-    return [r["service"] for r in conn.execute("SELECT DISTINCT service FROM lab_minute_counts ORDER BY 1")]
+def services(conn, window_from: date, window_to: date) -> list[str]:
+    """Services with lab rows in the window."""
+    return [r["service"] for r in conn.execute(
+        "SELECT DISTINCT service FROM lab_minute_counts WHERE day BETWEEN %s AND %s ORDER BY 1",
+        (window_from, window_to))]
 
 
 def load_service(conn, service: str, window_from: date, window_to: date, history_days: int) -> ServiceData:
@@ -21,6 +24,8 @@ def load_service(conn, service: str, window_from: date, window_to: date, history
     by_key: dict[str, dict[tuple[date, int], list[int]]] = {}
     for r in rows:
         by_key.setdefault(r["key"], {})[(r["day"], r["hour"])] = r["counts"]
+    for always in ("*total", "*error"):      # all-zero rows are not stored: a service without errors still has M2
+        by_key.setdefault(always, {})
     obs_rows = by_key.get("*minutes", {})
     observed = {d: array("i", [x for h in range(24) for x in obs_rows.get((d, h), [0] * 60)]) for d in days}
     minutes = {}

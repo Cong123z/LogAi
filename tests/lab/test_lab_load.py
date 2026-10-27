@@ -44,7 +44,7 @@ def fill(conn):
 def test_load_exact_arrays_and_history(conn):
     fill(conn)
     conn.commit()
-    assert services(conn) == ["s"]
+    assert services(conn, D1, D2) == ["s"] and services(conn, date(2026, 10, 20), date(2026, 10, 21)) == []
     sd = load_service(conn, "s", D1, D2, 3)
     assert sd.days == [D1, D2]
     a1, a2 = sd.minutes["A"][D1], sd.minutes["A"][D2]
@@ -54,6 +54,8 @@ def test_load_exact_arrays_and_history(conn):
     assert sd.observed[D1][0] == 1 and sd.observed[D2][5 * 60] == 0 and sd.observed[D2][6 * 60] == 1
     m = minute_at(D2, 5 * 60 + 3)
     assert sd.count("A", m) == UNOBSERVED and sd.count("A", minute_at(D1, 0)) == 3 and sd.count("nope", m) == UNOBSERVED
+    # *error was never recorded: still present, zeros where observed, UNOBSERVED elsewhere
+    assert sd.minutes["*error"][D1][0] == 0 and sd.minutes["*error"][D2][5 * 60] == UNOBSERVED
     # doc key: element-wise sum of its linked templates (A + B); the draft link is ignored
     assert sd.docs == {"doc:D1": ["A", "B"]}
     d1 = sd.minutes["doc:D1"][D1]

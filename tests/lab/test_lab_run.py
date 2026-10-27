@@ -5,12 +5,24 @@ import pytest
 
 import scripts.lab.methods as methods
 from scripts.lab import run as labrun
-from scripts.lab.methods import DayOut, Spec, apply_d4, select
+from scripts.lab.methods import DayOut, Spec, apply_d4, floor_for, select
 from scripts.lab.store import prune, start_run
+from logai2.timeutil import TZ
 from tests.conftest import TEST_DSN
+from tests.test_links import tmpl
 from test_lab_load import D1, D2, put
 
 DAYS = [date(2026, 10, d) for d in range(1, 15)]
+
+
+import gc
+import weakref
+import zlib
+from datetime import datetime
+
+import psycopg
+
+from scripts.lab.data import minute_at
 
 
 def count(conn, table="lab_runs"):
@@ -129,3 +141,131 @@ def test_apply_d4_truth_table(d4cfg):
     assert f(4, None, 1.0, None, "t", "ERROR", score=1.5) is False                   # count below floor 5
     assert f(5, None, 1.0, None, "t", "ERROR", score=1.5) and not f(50, None, 1.0, None, "t", "ERROR", score=1.0)
     assert not f(50, None, 1.0, None, "t", "INFO", score=9.0)                        # INFO: never
+
+
+def test_floor_for_accepts_none(d4cfg):
+    assert floor_for("t", None, d4cfg) is None and floor_for("*error", None, d4cfg) == 5
+    assert floor_for("*total", None, d4cfg) is None and floor_for("t", "warn", d4cfg) == 10
+
+
+def test_parse_args_validation():
+    base = ["--site", "laptop", "--test", "B", "--methods", "core"]
+    for bad in (["--days", "0"], ["--from", "2026-10-05", "--to", "2026-10-04"], [], ["--days", "3", "--from", "2026-10-01"]):
+        with pytest.raises(SystemExit):
+            labrun.parse_args(base + bad)
+
+
+def test_part_by_days_and_by_keys():
+    days = [date(2026, 10, d) for d in range(1, 15)]
+    p = labrun.make_part("s", days, days[:7], True)
+    assert p("k", days[6]) == "tune" and p("k", days[7]) == "test"
+    short = days[:4]
+    p = labrun.make_part("s", short, short, False)
+    for key in ("a", "b", "c", "d", "e"):
+        want = "tune" if zlib.crc32(("s" + key).encode()) % 2 == 0 else "test"
+        assert p(key, short[0]) == want == p(key, short[3])
+    assert {p(k, short[0]) for k in "abcdefgh"} == {"tune", "test"}
+
+
+class Recorder:
+    """A sink that records every call and holds weak refs to the arrays it was handed."""
+    def __init__(self):
+        self.calls, self.refs = [], []
+
+    def add(self, key, day, outs):
+        self.calls.append(("add", key, day))
+        self.refs += [weakref.ref(o.score) for o in outs.values()]
+
+    def skip(self, day):
+        self.calls.append(("skip", day))
+
+    def end(self):
+        self.calls.append(("end",))
+
+
+class Fresh(Const):
+    """Fresh arrays every call; fit returns None on day 3; records fit/prev order."""
+    spec = Spec("fresh", "T3", "fresh", frozenset({"M1", "M6"}), (1.0, 2.0), 1.0, True, False, 1)
+    log: list
+
+    def __init__(self):
+        self.log = []
+
+    def fit(self, sd, day, cfg):
+        self.log.append(("fit", day))
+        return None if day == DAYS[2] else {"day": day}
+
+    def day(self, model, prev, sd, key, day, knobs, cfg):
+        self.log.append(("day", key, day, prev))
+        return {k: DayOut(None, None, None, array("d", [k] * 1440), bytearray(1440)) for k in knobs}
+
+
+def test_streaming_order_prev_model_skip_and_no_references(monkeypatch, conn, cfg):
+    m, sinks = Fresh(), []
+    monkeypatch.setattr(methods, "METHODS", {"fresh": lambda: m})
+    seed(conn)
+    tmpl(conn, "busy", "INFO")             # 3/min (M3), born inside the window: walked because the method serves M6
+    conn.execute("UPDATE templates SET first_seen = %s WHERE template_id = 'busy'", (datetime(2026, 10, 5, tzinfo=TZ),))
+    conn.commit()
+    labrun.run(args("fresh"), cfg, conn, conn, collect=lambda *a: sinks.append(Recorder()) or sinks[-1])
+    (sink,) = sinks
+    assert sink.calls[-1] == ("end",) and sink.calls.count(("end",)) == 1
+    assert sink.calls.count(("skip", DAYS[2])) == 1 and sum(c[0] == "skip" for c in sink.calls) == 1
+    adds = [c for c in sink.calls if c[0] == "add"]
+    assert {c[1] for c in adds} == {"*total", "busy"}                  # M2 (*error) is not served, so not walked
+    assert [c[2] for c in adds] == sorted(c[2] for c in adds)          # ascending days, nothing out of order
+    assert {c[2] for c in adds} == set(DAYS) - {DAYS[2]}
+    assert [e[1] for e in m.log if e[0] == "fit"] == DAYS
+    for _, key, day, prev in (e for e in m.log if e[0] == "day"):
+        i = DAYS.index(day)
+        assert prev == (None if i == 0 or i == 3 else {"day": DAYS[i - 1]})   # day 3 follows the refused fit
+    gc.collect()
+    assert sink.refs and all(r() is None for r in sink.refs)           # the runner kept nothing
+
+
+def test_old_template_not_walked_for_m6(monkeypatch, conn, cfg):
+    m, sinks = Fresh(), []
+    monkeypatch.setattr(methods, "METHODS", {"fresh": lambda: m})
+    seed(conn)
+    tmpl(conn, "busy", "INFO")             # first_seen = now(), after the window: never new inside it
+    conn.commit()
+    labrun.run(args("fresh"), cfg, conn, conn, collect=lambda *a: sinks.append(Recorder()) or sinks[-1])
+    assert {c[1] for c in sinks[0].calls if c[0] == "add"} == {"*total"}
+
+
+def test_no_fit_means_skipped_per_kind(monkeypatch, conn, cfg):
+    class NoFit(Const):
+        spec = Spec("nofit", "T4", "never fits", frozenset({"M1", "M4"}), (1.0,), 1.0, True, False, 1)
+
+        def fit(self, sd, day, cfg):
+            return None
+
+    monkeypatch.setattr(methods, "METHODS", {"nofit": NoFit})
+    seed(conn)
+    labrun.run(args("nofit"), cfg, conn, conn)
+    res = {r["kind"]: r for r in conn.execute("SELECT * FROM lab_results WHERE method = 'nofit'")}
+    assert res["M1"]["status"] == "skipped" and res["M1"]["metrics"] == {"n_keys": 1, "n_minutes": 0}
+    assert res["M4"]["status"] == "skipped" and res["M4"]["metrics"]["n_keys"] == 0
+
+
+def test_main_connections_are_read_only_and_schema_scoped(monkeypatch, conn, schema):
+    monkeypatch.setattr(methods, "METHODS", {"const": Const})
+    seed(conn)
+    real = labrun.run
+
+    def probe(a, cfg, data, results):
+        for _ in range(2):                  # still read-only after a rollback
+            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                data.execute("DELETE FROM lab_minute_counts")
+            data.rollback()
+        assert data.execute("SHOW search_path").fetchone()["search_path"] == f"{schema}, public"
+        assert results.execute("SHOW search_path").fetchone()["search_path"] == schema
+        results.commit()                    # the store's own transactions must be the outermost ones
+        return real(a, cfg, data, results)
+
+    monkeypatch.setattr(labrun, "run", probe)
+    argv = ["--site", "laptop", "--test", "B", "--methods", "const", "--from", "2026-10-01", "--to", "2026-10-14",
+            "--dsn", TEST_DSN, "--schema", schema, "--results-schema", schema]
+    rc = labrun.main(argv)
+    assert rc == 0
+    assert count(conn) == 1 and count(conn, "lab_minute_counts") > 0
