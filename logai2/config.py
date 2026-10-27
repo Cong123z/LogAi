@@ -144,6 +144,13 @@ class LlmConfig:
 
 
 @dataclass
+class LabConfig:
+    record: bool = False        # env LOGAI2_LAB_RECORD
+    days: int = 28              # lab_minute_counts retention
+    holidays: list = field(default_factory=list)   # ISO dates
+
+
+@dataclass
 class AppConfig:
     elasticsearch: ElasticsearchConfig = field(default_factory=ElasticsearchConfig)
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
@@ -162,6 +169,7 @@ class AppConfig:
     documentation: DocumentationConfig = field(default_factory=DocumentationConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
+    lab: LabConfig = field(default_factory=LabConfig)
 
 
 def _merge_dataclass(instance: Any, overrides: Dict[str, Any]) -> Any:
@@ -199,6 +207,8 @@ def load_config(path: str | None = None) -> AppConfig:
         cfg.elasticsearch.verify_certs = env("LOGAI2_ES_VERIFY_CERTS").strip().lower() not in {
             "0", "false", "no", "off"
         }
+    if env("LOGAI2_LAB_RECORD"):
+        cfg.lab.record = env("LOGAI2_LAB_RECORD").strip().lower() not in {"0", "false", "no", "off"}
     if env("LOGAI2_ES_INDEX"):
         cfg.elasticsearch.index = env("LOGAI2_ES_INDEX")
     if env("LOGAI2_METRICS_PORT"):

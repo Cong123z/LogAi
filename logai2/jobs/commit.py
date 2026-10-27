@@ -83,6 +83,7 @@ def commit(conn, cfg: AppConfig, today: date, rebuild: bool = True, on_step=None
                 dropped += drop_partitions_before(conn, table, cutoff)
             dropped += drop_partitions_before(conn, "template_module_hours",
                                               today - timedelta(days=cfg.retention.module_hours_days))
+            dropped += drop_partitions_before(conn, "lab_minute_counts", today - timedelta(days=cfg.lab.days))
             conn.execute("DELETE FROM alert_changes WHERE at < now() - make_interval(days => %s)",
                          (cfg.retention.alert_changes_days,))
             deleted = conn.execute(

@@ -38,3 +38,14 @@ def test_embedding_settings_from_env(monkeypatch):
         monkeypatch.setenv("LOGAI2_EMBEDDING_" + k, v)
     e = load_config(None).embedding
     assert (e.timeout_seconds, e.retry_backoff_seconds, e.batch, e.dimension, e.max_retries) == (12.5, 3.0, 8, 1024, 4)
+
+
+def test_lab_record_env_and_yaml_days(tmp_path, monkeypatch):
+    p = tmp_path / "c.yaml"; p.write_text("lab:\n  days: 9\n")
+    monkeypatch.delenv("LOGAI2_LAB_RECORD", raising=False)
+    cfg = load_config(str(p))
+    assert cfg.lab.days == 9 and cfg.lab.record is False
+    monkeypatch.setenv("LOGAI2_LAB_RECORD", "true")
+    assert load_config(str(p)).lab.record is True
+    monkeypatch.setenv("LOGAI2_LAB_RECORD", "false")
+    assert load_config(str(p)).lab.record is False

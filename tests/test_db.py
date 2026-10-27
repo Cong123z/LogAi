@@ -74,3 +74,24 @@ def test_migration_007_seeds_from_alert_minutes(conn):
                      {"template_id": "s:T1", "module_code": "M1", "day": m3.date(), "hour": 0, "count": 2}]
     pairs = conn.execute("SELECT template_id, first_seen, last_seen FROM template_modules").fetchall()
     assert pairs == [{"template_id": "s:T1", "first_seen": old, "last_seen": m3}]
+
+
+LAB_TABLES = {"lab_minute_counts", "lab_runs", "lab_results", "lab_episodes", "lab_bands", "lab_sweeps",
+              "lab_choices", "lab_incidents"}
+
+
+def test_migration_010_creates_lab_tables_on_009(conn):
+    conn.execute("DROP TABLE lab_minute_counts, lab_results, lab_episodes, lab_bands, lab_sweeps, "
+                 "lab_choices, lab_incidents, lab_runs CASCADE")
+    conn.execute("DELETE FROM schema_migrations WHERE version = 10")
+    assert migrate(conn) == [10]
+    names = {r["tablename"] for r in conn.execute(
+        "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
+    assert LAB_TABLES <= names
+    assert conn.execute("SELECT max(version) AS v FROM schema_migrations").fetchone()["v"] == 10
+
+
+def test_lab_minute_counts_is_partitioned(conn):
+    assert conn.execute("SELECT relkind FROM pg_class WHERE oid = to_regclass('lab_minute_counts')").fetchone()["relkind"] == "p"
+    ensure_partitions(conn, date(2026, 11, 5), date(2026, 11, 5))
+    assert conn.execute("SELECT to_regclass('lab_minute_counts_20261105') AS t").fetchone()["t"]

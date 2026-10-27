@@ -7,3 +7,36 @@ baseline:
 floors:
   ERROR: 5
   WARN: 10
+lab:
+  record: false      # true = the engine also stores per-minute counts (lab_minute_counts) for the bake-off
+  days: 28           # retention of lab_minute_counts
+  # Vietnamese public holidays (core days only: New Year, 30/4, 1/5, 2/9, Tet, Hung Kings).
+  # Official bridge days are added by the user each year.
+  holidays:
+    - 2025-01-01
+    - 2025-04-30
+    - 2025-05-01
+    - 2025-09-02
+    - 2026-01-01
+    - 2026-04-30
+    - 2026-05-01
+    - 2026-09-02
+    - 2027-01-01
+    - 2027-04-30
+    - 2027-05-01
+    - 2027-09-02
+    - 2025-01-28
+    - 2025-01-29
+    - 2025-01-30
+    - 2025-01-31
+    - 2026-02-16
+    - 2026-02-17
+    - 2026-02-18
+    - 2026-02-19
+    - 2027-02-05
+    - 2027-02-06
+    - 2027-02-07
+    - 2027-02-08
+    - 2025-04-07
+    - 2026-04-26
+    - 2027-04-16
