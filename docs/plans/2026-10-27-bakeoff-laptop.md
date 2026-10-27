@@ -102,17 +102,20 @@ Critical / Important / Minor, `Approved / Needs fixes`; up to 3 fix rounds by th
 | 4 | σ + episodes + parity | Sonnet | **Opus** + **Opus adversary** (parity edges: weekend borrow, young k, doc keys, commit instant) + tech-lead review | Must reproduce live detection exactly; the trust gate for all results | Run parity myself; inspect every mismatch inside commit windows |
 | 5 | Scoring (Test B metrics) | Sonnet | **Opus** | The ranking metric: one wrong formula (Winkler, MASE, shared minutes) changes every verdict | Hand-check one Winkler and one flap example |
 | 6 | Synthetic world, counts | Sonnet | **Opus** | Derived keys must equal `OpenMinutes`; feeds every laptop result | `*total` = Σ templates and seed determinism on a real run |
-| 7 | Tune, bootstrap, decide | Sonnet | **Opus** + **Opus adversary** (tie, CI and gate rules) | Statistics and the decision tree: subtle tie and CI rules | Verdict table on a hand-made scoreboard |
-| 8 | Core methods A (#2, #3, #4, #7) | Sonnet | **Opus** | NB quantiles, clipping and MAD scaling must be numerically exact; walk-forward must not peek at the scored day | NB quantile vs brute force |
-| 9 | Core methods B (#5, #6, #13, E1) | Sonnet | **Opus** | CUSUM recursion, binomial tails and PCA convergence are easy to get subtly wrong | PCA on a mix swap |
-| 10 | Test A injector | Sonnet | **Opus** | Consistency of derived keys and placement rules | `*total` = Σ templates after injection |
-| 11 | Lab image + heavy methods | Sonnet | **Opus** | Hourly-to-minute band scaling, quantile use and no look-ahead in refits; offline packaging | `--check` with `--network none` |
-| 12 | Synthetic world, engine | Sonnet | **Opus** | Drives the real Engine on an injected clock (stress harness) | ≥ 99.9 % match run myself |
+| 7 | Tune, bootstrap, decide | Sonnet | **Opus** | Statistics and the decision tree: subtle tie and CI rules | Verdict table on a hand-made scoreboard |
+| 8 | Core methods A (#2, #3, #4, #7) | Sonnet | Sonnet | NB quantiles, clipping and MAD scaling must be numerically exact; walk-forward must not peek at the scored day | NB quantile vs brute force |
+| 9 | Core methods B (#5, #6, #13, E1) | Sonnet | Sonnet | CUSUM recursion, binomial tails and PCA convergence are easy to get subtly wrong | PCA on a mix swap |
+| 10 | Test A injector | Sonnet | Sonnet | Consistency of derived keys and placement rules | `*total` = Σ templates after injection |
+| 11 | Lab image + heavy methods | Sonnet | Sonnet | Hourly-to-minute band scaling, quantile use and no look-ahead in refits; offline packaging | `--check` with `--network none` |
+| 12 | Synthetic world, engine | Sonnet | Sonnet | Drives the real Engine on an injected clock (stress harness) | ≥ 99.9 % match run myself |
 | 13 | Test C loader | Sonnet | Sonnet | Bounded parser of the `incident_test.py` run dir | One real run dir loads |
 | 14 | Evaluation API | Sonnet | Sonnet | Routes following `baseline_view.py` | Live tables untouched by POSTs |
 | 15 | Evaluation page | Sonnet | Sonnet | View following the mockup and `baseline.js` | Check every board in Chrome |
 | 16 | Compose, commands, docs | Sonnet | Sonnet | Config and docs | Commands run as written |
 | 17 | Laptop proof | Sonnet | Tech lead | Long runs and measurements; I validate the report | Re-run one number of each check |
+
+**Cost ruling (user, 2026-10-27 evening):** from bk05 on, Opus reviews only the important tasks (5, 7); every other
+task gets one fresh Sonnet review; no more adversaries; re-review only after a Critical/Important fix.
 
 ### Waves (parallel only when the briefs' file lists are disjoint; at most 3 agents at once)
 
