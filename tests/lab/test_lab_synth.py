@@ -7,9 +7,10 @@ import pytest
 import yaml
 
 from logai2.timeutil import TZ
+from tests.conftest import TEST_DSN
 from scripts.lab.data import minute_at
 from scripts.lab.load import load_service
-from scripts.lab.synth import generate, write
+from scripts.lab.synth import generate, run_engine, write
 from scripts.lab.world import build_world
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -251,12 +252,6 @@ def test_tiny_end_to_end(conn, lab_schema):
     assert yaml.safe_load((ROOT / "lab/scenarios/default.yaml").read_text())["days"] == 28
 
 
-def test_engine_mode_rejected(capsys):
-    from scripts.lab import synth
-    with pytest.raises(SystemExit):
-        synth.main(["--mode", "engine", "--scenario", "x"])
-
-
 def flat(sv, key, d=None):
     days = range(len(sv.counts[key])) if d is None else [d]
     return [x for dd in days for x in sv.counts[key][dd]]
@@ -372,3 +367,95 @@ def test_jitter_shared_by_services():
     gen = generate(mkworld(mean=20.0), s, END)
     a, b = ([sum(sv.counts["*total"][d]) for d in range(5)] for sv in gen.services)
     assert all(abs(x / y - 1) < 0.05 for x, y in zip(a, b))
+
+
+# --- engine mode (bk12) ----------------------------------------------------------------------------------
+
+TEXTS = ["connection <*> refused by upstream gateway", "payment declined for account <*> reason expired",
+         "cache miss on shard <*>", "user <*> logged in from <*> region", "timeout waiting for reply from <*> after retries"]
+
+
+def engine_world():
+    ts = [{"template_id": f"w{i}", "text": TEXTS[i], "level": LEVELS[i % 3], "doc_id": None,
+           "mean": [1.5 + i * 0.5] * 24, "var": [2.0] * 24, "mirrored": [False] * 24} for i in range(5)]
+    ts[0]["mean"] = [4.0] * 24
+    return {"services": {"orders": ts}}
+
+
+def one_service(**kw):
+    return scen(services={"count": 1, "scale": [1.0], "subset": 1.0, "phase_minutes": [0]}, **kw)
+
+
+@pytest.fixture
+def two_schemas(conn):
+    names = [f"lab_s_{uuid.uuid4().hex[:8]}" for _ in range(2)]
+    yield names
+    conn.rollback()
+    for n in names:
+        conn.execute(f"DROP SCHEMA IF EXISTS {n} CASCADE")
+    conn.commit()
+
+
+def lab_cells(conn, schema, days):
+    """(key text-or-name, day, minute) -> count, nonzero cells only; template keys named by their text."""
+    text = {r["template_id"]: r["text"] for r in rows(conn, schema, "SELECT template_id, text FROM S.templates")}
+    out = {}
+    for r in rows(conn, schema, "SELECT key, day, hour, counts FROM S.lab_minute_counts"):
+        if r["day"] not in days:
+            continue
+        for i, c in enumerate(r["counts"]):
+            if c:
+                out[text.get(r["key"], r["key"]), r["day"], r["hour"] * 60 + i] = c
+    return out
+
+
+def test_engine_mode_matches_counts_mode(conn, two_schemas, monkeypatch):
+    """2 history days + 2 engine days: the second engine day starts after a 02:00 commit and a day rollover."""
+    from scripts.lab import synth
+    import logai2.jobs.commit as commit_mod
+    monkeypatch.setattr(synth, "HISTORY_DAYS", 2)
+    seen = []
+    real = commit_mod.commit
+
+    def spy(c, cfg, today, *args, **kw):
+        if not seen:        # the seed commit of run_engine, before the engine's first tick
+            seen.append([r["day"] for r in c.execute("SELECT DISTINCT day FROM day_status WHERE committed")])
+        return real(c, cfg, today, *args, **kw)
+    monkeypatch.setattr(commit_mod, "commit", spy)
+    a, b = two_schemas
+    s, scale = one_service(days=4), 0.5
+    gen = generate(engine_world(), s, END, scale)
+    write(conn, a, gen)
+    conn.commit()
+    t0 = time.time()
+    summary = run_engine(engine_world(), s, END, b, TEST_DSN, scale)
+    took = time.time() - t0
+    eng_days = set(gen.days[2:])
+    ca, cb = lab_cells(conn, a, eng_days), lab_cells(conn, b, eng_days)
+    keys = set(ca) | set(cb)
+    bad = [k for k in keys if ca.get(k, 0) != cb.get(k, 0)]
+    print(f"\nENGINE-vs-COUNTS engine days only: cells={len(keys)} mismatches={len(bad)} seconds={took:.0f} summary={summary}")
+    assert len(keys) > 10_000 and len(bad) <= len(keys) * 0.001, sorted(bad)[:10]
+    assert not [k for k in bad if k[0] == "*total"], sorted(bad)[:10]
+    assert summary["events"] == sum(c for k, c in ca.items() if k[0] == "*total")
+    assert took < 240
+    # only history days were committed before the engine ran; the engine's own commits did the rest
+    assert seen[0] and max(seen[0]) <= gen.days[1], seen
+    done = {r["day"] for r in rows(conn, b, "SELECT day FROM S.day_status WHERE committed")}
+    assert done == set(gen.days[:3]), done           # the last engine day is still open
+    assert rows(conn, b, "SELECT 1 FROM S.baseline LIMIT 1")
+
+
+def test_engine_mode_writes_incidents_and_alerts(conn, two_schemas):
+    _, b = two_schemas
+    public = lambda: {r["tablename"]: conn.execute(f'SELECT count(*) AS n FROM public."{r["tablename"]}"').fetchone()["n"]
+                      for r in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'").fetchall()}
+    before = public()
+    s = one_service(days=7, incidents=[{"type": "spike", "size": 8, "minutes": 10, "every_days": 7, "key": "w0"}])
+    run_engine(engine_world(), s, END, b, TEST_DSN)
+    inc = rows(conn, b, "SELECT * FROM S.lab_incidents")
+    assert len(inc) == 1 and inc[0]["type"] == "spike" and inc[0]["data_schema"] == b and inc[0]["source"] == "synthetic"
+    alerts = rows(conn, b, "SELECT key, to_state, extract(epoch FROM at)::float8 AS at FROM S.alert_changes")
+    assert alerts, "the planted spike must raise alert_changes"
+    assert any(inc[0]["start_minute"] * 60 <= a["at"] <= (inc[0]["end_minute"] + 15) * 60 for a in alerts)
+    assert public() == before       # public untouched
