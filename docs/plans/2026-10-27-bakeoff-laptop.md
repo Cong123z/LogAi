@@ -38,7 +38,7 @@ Evaluation page. Live alerting never changes.
 - **D4. Same alert shape for every method.** A method's minute is *high* when `count > high` **and** the live floor
   for the key's level is met (`cfg.floors`: ERROR 5, WARN 10; none for INFO), or, for `*total` only, when
   `count < low` with `expected ≥ drop.min_mean`. Score-only methods (#6, #12, #13) are high when `score > threshold`,
-  floor included. Then `detect.step` with the live `AlertConfig`. This keeps differences down to the method.
+  floor included. A key with no floor (INFO templates, `*total` upward) is never high, as in live. Then `detect.step` with the live `AlertConfig`. This keeps differences down to the method.
 - **D5. Episode** = a run of states that reaches ALERTING. Start = the minute of its first high minute (the one that
   left NORMAL); end = the minute it returns to NORMAL (or the window end). WARMING → NORMAL without ALERTING is not
   an episode.

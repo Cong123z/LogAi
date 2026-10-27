@@ -167,6 +167,9 @@ A minute is **high** when:
 - band methods: `count > high` and the live floor is met (`cfg.floors`: ERROR 5, WARN 10, by the key's level as in
   `judge`), or, for `*total` only, `count < low` with `expected ≥ drop.min_mean` (20);
 - score methods (#6, #12, #13): `score > threshold(knob)` and the floor is met.
+- A key whose level has **no floor** (INFO templates, and `*total`, whose level is INFO) is never high on the upper
+  side, as in live `judge()`: `*total` alerts only through the drop rule, INFO templates never alert. Their bands are
+  still scored for fit (coverage, interval score). (Ruling 2026-10-27, bk03.)
 `apply_d4()` is the single implementation.
 
 ### 6.3 Episodes (decision D5)
