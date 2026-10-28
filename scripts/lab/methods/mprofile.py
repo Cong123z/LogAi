@@ -1,6 +1,7 @@
 """Method #12: Matrix Profile (STUMPY), window 60, on the last 7 days + the scored day's per-minute series.
 
-Score = z-normalised distance of the window ending at that minute to its nearest other window. Score method: no band.
+Score = z-normalised distance of the window ending at that minute to its nearest EARLIER window (the left matrix profile:
+no look-ahead, not even inside the scored day). Score method: no band.
 Threshold relative to the key's own history (like pca): the knob is a quantile of the matrix-profile distances of the
 7 history days alone (no data of the scored day), so a noisy key gets a high threshold and a smooth one a low one.
 Only the top 200 non-doc keys per service (by mean over the last 7 days) are scored; the others get a zero score.
@@ -50,13 +51,20 @@ class MProfile:
             mean[key] = sum(xs) / len(xs) if xs else 0.0
         return _Model({"*total"} | set(sorted((k for k in mean if k != "*total"), key=lambda k: (-mean[k], k))[:TOP]))
 
-    def _profile(self, series) -> "numpy.ndarray":
-        """Matrix-profile distances of window M; unobserved (-1) minutes are linearly filled first, no neighbour = 0."""
+    def _profile(self, series):
+        """LEFT matrix-profile distances of window M: z-normalised distance of each window to its nearest EARLIER window
+        (so a window never matches a later one); no earlier window = -1. Unobserved (-1) minutes are linearly filled first.
+        Returns (distances, seen mask)."""
         np = self._np
         raw = np.asarray(series, dtype=float)
         seen = raw != UNOBSERVED
         t = np.interp(np.arange(len(raw)), np.flatnonzero(seen), raw[seen])
-        return np.nan_to_num(self._stump(t, M)[:, 0].astype(float), nan=0.0, posinf=0.0), seen
+        left = self._stump(t, M)[:, 2].astype(int)         # stumpy's columns: P, I, left I, right I
+        w = np.lib.stride_tricks.sliding_window_view(t, M)
+        sd = w.std(axis=1, keepdims=True)
+        z = np.where(sd > 1e-9, (w - w.mean(axis=1, keepdims=True)) / np.where(sd > 1e-9, sd, 1.0), 0.0)
+        d = np.sqrt(((z - z[np.maximum(left, 0)]) ** 2).sum(axis=1))
+        return np.where(left >= 0, d, -1.0), seen
 
     def day(self, model, prev_model, sd: ServiceData, key: str, day: date, knobs, cfg):
         np = self._np
@@ -66,18 +74,18 @@ class MProfile:
         thr = {k: float("inf") for k in knobs}
         if key in model.top and counts is not None:
             per, prior = sd.minutes[key], self._prior(sd, day)
-            hist = np.concatenate([np.array(per[d], dtype=float) for d in prior])
+            hist = np.concatenate([np.array(per[d], dtype=float) for d in prior if d in per] or [np.empty(0)])
             if key not in model.dist:
                 if (hist != UNOBSERVED).sum() < 2 * M:
                     model.dist[key] = []
                 else:
-                    model.dist[key] = sorted(self._profile(hist)[0].tolist())
+                    model.dist[key] = sorted(x for x in self._profile(hist)[0][1440:].tolist() if x >= 0)      # day 1 has no real past to match
             ds = model.dist[key]
             if ds:
                 p, seen = self._profile(np.concatenate([hist, np.array(counts, dtype=float)]))
                 start = len(hist)
                 s = p[start - M + 1:start - M + 1 + 1440]
-                score = array("d", np.where(seen[start:], s, 0.0).tolist())
+                score = array("d", np.where(seen[start:] & (s >= 0), s, 0.0).tolist())
                 thr = {k: ds[min(len(ds) - 1, int(k * len(ds)))] for k in knobs}
         level = sd.level(key)
         for k in knobs:
