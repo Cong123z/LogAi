@@ -16,22 +16,29 @@ def services(conn, window_from: date, window_to: date) -> list[str]:
         (window_from, window_to))]
 
 
+MINUTE_HISTORY = 7      # bk17: minute arrays of the 7 days before the window (mad, mprofile and pca fit on 7 prior days)
+
+
 def load_service(conn, service: str, window_from: date, window_to: date, history_days: int) -> ServiceData:
     days = [window_from + timedelta(n) for n in range((window_to - window_from).days + 1)]
     since = window_from - timedelta(history_days)
     rows = conn.execute("SELECT key, day, hour, counts FROM lab_minute_counts "
-                        "WHERE service = %s AND day BETWEEN %s AND %s", (service, window_from, window_to)).fetchall()
+                        "WHERE service = %s AND day BETWEEN %s AND %s", (service, window_from - timedelta(MINUTE_HISTORY),
+                                                                         window_to)).fetchall()
+    # sd.days stays the window; arrays and `observed` also exist for earlier days that have recorded minutes
+    seen = {r["day"] for r in rows if r["key"] == "*minutes"}
+    adays = sorted({d for d in seen if d < window_from} | set(days))
     by_key: dict[str, dict[tuple[date, int], list[int]]] = {}
     for r in rows:
         by_key.setdefault(r["key"], {})[(r["day"], r["hour"])] = r["counts"]
     for always in ("*total", "*error"):      # all-zero rows are not stored: a service without errors still has M2
         by_key.setdefault(always, {})
     obs_rows = by_key.get("*minutes", {})
-    observed = {d: array("i", [x for h in range(24) for x in obs_rows.get((d, h), [0] * 60)]) for d in days}
+    observed = {d: array("i", [x for h in range(24) for x in obs_rows.get((d, h), [0] * 60)]) for d in adays}
     minutes = {}
     for key, hours in by_key.items():
         minutes[key] = per_day = {}
-        for d in days:
+        for d in adays:
             a = array("i", [0 if o else UNOBSERVED for o in observed[d]])
             for h in range(24):
                 counts = hours.get((d, h))
@@ -49,7 +56,7 @@ def load_service(conn, service: str, window_from: date, window_to: date, history
         docs.setdefault(f"doc:{r['doc_id']}", []).append(r["template_id"])
     for doc, tids in docs.items():
         minutes[doc] = {}
-        for d in days:
+        for d in adays:
             a = array("i", [0 if o else UNOBSERVED for o in observed[d]])
             for t in tids:
                 src = minutes.get(t, {}).get(d)

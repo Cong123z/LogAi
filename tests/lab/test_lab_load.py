@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from logai2.timeutil import TZ
 from scripts.lab.data import UNOBSERVED, Incident, minute_at
@@ -101,3 +101,17 @@ def test_load_incidents_of_the_service_and_window(conn):
     conn.execute("DELETE FROM lab_incidents")
     conn.commit()
     assert load_service(conn, "s", D1, D2, 3).incidents == []
+
+
+def test_load_keeps_minute_arrays_for_recorded_days_before_the_window(conn):
+    """bk17: mad, mprofile and pca fit on 7 prior days of minutes: sd.days is the window, sd.observed also the earlier days."""
+    fill(conn)
+    prior = D1 - timedelta(1)
+    for h in range(24):
+        put(conn, "*minutes", prior, h, [1] * 60)
+    put(conn, "A", prior, 0, hour((0, 5)))
+    conn.commit()
+    sd = load_service(conn, "s", D1, D2, 3)
+    assert sd.days == [D1, D2] and set(sd.observed) == {prior, D1, D2}
+    assert sd.minutes["A"][prior][0] == 5 and sd.minutes["*total"][prior][0] == 0
+    assert prior not in sd.minutes["B"] or sd.minutes["B"][prior][0] == 0

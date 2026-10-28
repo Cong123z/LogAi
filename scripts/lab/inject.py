@@ -219,9 +219,9 @@ def apply(sd: ServiceData, injs: list[Injection]) -> ServiceData:
     for inj in injs:
         span = range(inj.start, inj.end)
         if inj.type == "burst":
-            minutes[inj.key] = {d: array("i", [0 if o else UNOBSERVED for o in sd.observed[d]]) for d in sd.days}
+            minutes[inj.key] = {d: array("i", [0 if o else UNOBSERVED for o in sd.observed[d]]) for d in sd.observed}
             owned_keys.add(inj.key)
-            owned |= {(inj.key, d) for d in sd.days}
+            owned |= {(inj.key, d) for d in sd.observed}
             levels[inj.key], first[inj.key] = "ERROR", inj.start     # bk17: an INFO template has no floor and can never alert
         if inj.type == "drop":
             for t in sorted(k for k in minutes if not k.startswith(("*", "doc:"))):
