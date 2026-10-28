@@ -10,5 +10,5 @@ for r in c.execute("select method, kind, knob, status, verdict, metrics from lab
     m = r["metrics"]
     if r["status"] != "ok": print(r["kind"], r["method"], r["status"]); continue
     g = m.get("gates", {}); fl = [k for k, v in g.items() if v == "fail"]
-    ci = m.get("ci90", {}).get("ratio")
+    ci = (m.get("ci90") or {}).get("ratio")
     print(r["kind"], f'{r["method"]:9s}', "knob", r["knob"], "ratio", None if m.get("ratio_vs_sigma") is None else round(m["ratio_vs_sigma"], 3), "ci", None if not ci else [round(x, 3) for x in ci], "cov", None if m.get("coverage") is None else round(m["coverage"], 4), "IS", None if m.get("interval_score") is None else round(m["interval_score"], 2), "rate", m.get("alert_rate") if m.get("alert_rate") is None else round(m["alert_rate"], 2), "failed", fl, r["verdict"])
