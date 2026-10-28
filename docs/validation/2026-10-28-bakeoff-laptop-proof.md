@@ -320,8 +320,8 @@ rule (fixed, F9); M5 is never exercised (B22).
 
 ## 12. Ready for the company plan?
 
-**Yes for the machinery, with three conditions.** The runner, storage, decisions, parity with the live sigma (899 of 899
-matching transitions outside the commit windows) and the Evaluation API all work end to end, and the 14-method roster fits in
+**Yes for the machinery, with three conditions.** The runner, storage, decisions, parity with the live sigma (899 identical
+transitions, 0 mismatches outside the commit windows) and the Evaluation API all work end to end, and the 14-method roster fits in
 1.4 GB and 30 minutes for a 28-day fit. Before the company plan: (1) fix Test A injection sizing (B20) so M3/M4 and ramps
 have meaning, and rebuild the lab image; (2) the company run needs at least window + 14 days of recording (B23); (3) time one
 real 3k-key service for LightGBM and Matrix Profile (the two heavy hitters). Real-data Test B/C then decides the verdicts.
