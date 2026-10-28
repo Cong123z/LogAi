@@ -146,7 +146,7 @@ def run(args, cfg, data_conn, results_conn, collect=None, finish=None) -> int:
                 variants = [(sd, kinds, replace(ctx, injections=test_a.incidents_c(data_conn, service, kinds, lo, hi,
                                                                                     args.schema)))]
             if args.test == "A":
-                ps = inject.passes(sd, kinds, args.seed)
+                ps = inject.passes(sd, kinds, args.seed, cfg=cfg)
                 inject.record(results_conn, run_id, args.schema, service, [injs for _, _, injs in ps])
                 variants = [(p_sd, p_kinds, replace(ctx, sd=p_sd, injections=injs)) for p_sd, p_kinds, injs in ps]
             for name, m in instances.items():
