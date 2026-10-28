@@ -375,6 +375,8 @@ def run_a(monkeypatch, conn, cfg):
     Rec.fits, Rec.days = [], []
     monkeypatch.setattr(methods, "METHODS", {"rec": Rec})
     seed(conn)
+    tmpl(conn, "busy", "ERROR")            # bk17: upward injections go only on keys that can alert (a floor)
+    conn.commit()
     assert labrun.run(args_a(), cfg, conn, conn, finish=test_a.finish) == 0
 
 
