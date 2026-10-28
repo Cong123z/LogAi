@@ -151,7 +151,35 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Fix idea:** re-check the cutoff in `flush()` and drop pending rows older than it.
 - **Likelihood:** low.
 
+### B17. Prophet's `uncertainty_samples` limits the 0.999 / 0.9999 band tails
+- **Where:** `scripts/lab/methods/prophet_m.py`.
+- **What:** Prophet's band comes from simulated samples; with the default sample count the 0.999 and 0.9999 quantiles
+  rest on a handful of draws, so the noise-widening term dominates the tails and the two knobs differ little.
+- **Fix idea:** raise `uncertainty_samples` (cost grows with it) or use the analytic interval for the extreme knobs.
+- **Likelihood:** certain for the extreme knobs; only matters if Prophet reaches the decision.
+
+### B18. LightGBM cost at 3k keys is unmeasured
+- **Where:** `scripts/lab/methods/lgbm.py`; spec `docs/specs/2026-10-27-bakeoff-laptop.md` §13.
+- **What:** the laptop has 180 templates per service; the company has about 3k keys. Fit time and memory of the
+  per-key models were not measured at that size, so the cost gate for LightGBM rests on the laptop numbers.
+- **Fix idea:** time one service with 3k keys (a synthetic world) before the company run.
+- **Likelihood:** medium.
+
+### B19. The lab judges some minutes differently from the live engine
+- **Where:** `scripts/lab/methods/sigma.py`, `scripts/lab/load.py`.
+- **What:** six known differences (late-closed minutes, retrain schedule, re-read counts, services with no committed
+  day, template levels and doc links at load time, idle templates); none occurs in the synthetic worlds. The list is in
+  spec `docs/specs/2026-10-27-bakeoff-laptop.md` §6.4.
+- **Fix idea:** none planned; check the list against company data before trusting a "σ stays" verdict there.
+- **Likelihood:** low on laptop worlds; unknown on company data.
+
 ## Fixed
+
+### F2. mprofile looked ahead inside the scored day (fixed in bk16, `14bc644`)
+- **What:** a minute of day D was scored against the whole day's matrix profile, so it could match later windows of D;
+  a key with an observed prior day but no array for it raised `KeyError`.
+- **Fix:** each minute is scored with the left matrix profile (distance to the nearest earlier window), the history
+  thresholds use the left profile too (day 1 of the history excluded), and a missing array is skipped.
 
 ### F1. NUL byte in an ES field stalled the flush
 - 2026-10-23, merge `05ec099`: `hit_to_line` strips `\x00` from every stored field.

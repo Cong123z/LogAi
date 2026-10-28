@@ -1063,3 +1063,49 @@ MinuteBatch or alert-row shapes; the order of the flush transaction or the
 cursor rule; band, floor or hysteresis rules; the commit or its timing;
 table names, partitions or retention; settings keys or command kinds; metric
 names or labels; failure behavior; process topology.
+
+## 18. Lab (bake-off)
+
+Offline comparison of 13 alerting methods and a vote against today's σ on the recorded per-minute counts. It never
+writes the live tables and the engine does not import it. Spec: `docs/specs/2026-10-27-bakeoff-laptop.md`; run commands:
+README "Lab image". Code: `scripts/lab/`; the evaluation API and page: `logai2/web/eval_view.py`, `docs/WEB_UI.md`.
+
+**Data flow.** The recorder (§7.3 step 5, `lab.record`) writes `lab_minute_counts`; `synth.py` writes the same tables for
+a made-up history into `lab_s_<scenario>` (`counts` mode directly, `engine` mode through a real Engine on an injected
+clock). `run.py` reads one service at a time (`load.py` → `ServiceData`: `minutes[key][day]` arrays of 1440, `-1` =
+unobserved, hourly sums, excluded hours, levels, first-seen, doc links, incidents), assigns each key a monitor kind
+M1–M7 (`kinds.py`), walks each method day by day, and writes `lab_*` in the results schema. `finish` hooks tune,
+bootstrap and decide across services; the web page only reads `lab_*`.
+
+**Method contract** (`methods/__init__.py`). `fit(sd, day, cfg)` sees data strictly before `day` (None = not enough
+history); `day(model, prev_model, sd, key, day, knobs, cfg)` returns `{knob: DayOut}` with `expected/low/high` arrays
+(band methods) or only a `score`, plus `high_flag` after the shared live alert shape `apply_d4` (floors, `*total`
+drop). Heavy methods (ETS, Prophet, LightGBM, Chronos, Matrix Profile) need the lab image; a missing package is
+`Unavailable`. Matrix Profile scores with the left profile only (nothing after the minute is used).
+
+**Sink contract** (`run.run`). `collect(...)` returns a sink; the runner calls `sink.add(key, day, outs)` for every walked
+key and fitted day in ascending day order, `sink.skip(day)` for a day the fit refused, then `sink.end()`. A sink writes
+only in `end()`, in one transaction; if `add` or `end` raises, the runner clears the method's rows for the service and
+writes `failed` rows. Sinks: `ScoreSink` (Test B metrics, episodes, drawn bands), `InjectSink` (Test A), `IncidentSink`
+(Test C).
+
+**Tables** (§11): `lab_runs`, `lab_results` (per method × kind × service, then `scope = 'all'` and `_decision` rows),
+`lab_episodes`, `lab_bands` (drawn keys only), `lab_sweeps`, `lab_choices`, `lab_incidents`. The last 5 runs per site are
+kept.
+
+**Tests.** *B* (fit): coverage, Winkler interval score relative to σ, sharpness, MASE, alert rate, flap share on shared
+normal minutes (planted and real incidents ± 15 min excluded), tune/test split by days (≥ 14 days) or by key. *A*
+(`inject.py`, `test_a.py`): spikes, drops, ramps, level shifts, bursts (M6), mix swaps (M7) at three sizes planted in an
+in-memory copy over 5 seeded passes; recall within 15 minutes and delay at the most sensitive knob inside the alert
+budget. *C* (`load_incidents.py`): the same scoring on `lab_incidents` loaded from an `incident_test.py` run; a gap to
+Test A of more than 0.10 sets `injector_flag`.
+
+**Decision** (`tune.py`, `bootstrap.py`, `decide.py`). Per kind: knob tuned to equal coverage 99.5 % (band methods) or
+equal alert budget (score methods, σ too), day-block bootstrap (1,000, seeded) for the ratio to σ with a 90 % interval,
+gates (band, cost, coverage, alert rate, flaps, Test A recall), verdict (adopt candidate, σ stays, mixed, pending,
+no method) and strength. M6 and M7 are decided from Test A recall. Reproducible for the same code, data, params, seed.
+
+**Known lab-vs-live differences** (none occurs in the synthetic worlds): late-closed minutes are judged, a daily rebuild
+is assumed, re-read counts replace the originals, a service with no committed day is skipped, levels and doc links are
+those at load time, idle templates are judged as 0. Details and the σ parity result: spec §6.4; tracked as B19 in
+`docs/BUGS.md`.

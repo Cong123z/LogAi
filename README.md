@@ -138,7 +138,28 @@ Five methods (ETS, Prophet, LightGBM, Chronos-Bolt, Matrix Profile) need package
 
 `docker build -t logai2:latest . && docker build -f Dockerfile.lab -t logai2-lab:latest .`
 
-`docker run --rm --network none logai2-lab:latest python -m scripts.lab.run --site laptop --test B --methods heavy --days 1 --check` lists every heavy method `available` (outside the image: `unavailable`).
+`docker compose --profile lab run --rm logai2-lab` runs the default `--check` and lists every method `available` (compose service `logai2-lab`, profile `lab`, 5 GB memory limit, never started by `up`).
+
+Container modes (stop and start containers per mode; details in spec §2):
+
+| Mode | Running | Stopped |
+|---|---|---|
+| Building code | postgres (+ web) | bge-m3, linker, elasticsearch, replayer, engine |
+| Recording real data | postgres, elasticsearch, replayer, engine | bge-m3, linker |
+| Test C | postgres, elasticsearch, replayer, engine, web | bge-m3, linker |
+| Heavy lab runs | postgres, lab container | bge-m3, linker (bge-m3 alone uses 5.3 GB of the VM's 7.75 GB) |
+
+Before a heavy run: `docker compose stop logai2-linker` and stop the stack's bge-m3.
+
+Run the lab. The core methods run in the venv (`--dsn` from the host); all methods run in the lab container (the DSN is set; `./lab` is mounted):
+
+`python -m scripts.lab.run --site laptop --test B --methods core --days 28 --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
+
+`docker compose --profile lab run --rm logai2-lab --site laptop --test B --methods all --days 28`
+
+Test A (injected into the counts) and Test C (real incidents, next section) take the same arguments with `--test A` / `--test C`.
+
+Then open `http://localhost:5565/#evaluation` (the web container; it reads only the `lab_*` tables).
 
 ### Test C (real incidents through the engine)
 
@@ -146,9 +167,11 @@ Five methods (ETS, Prophet, LightGBM, Chronos-Bolt, Matrix Profile) need package
 
 `python -m scripts.lab.load_incidents reports/incident-YYYYMMDD-HHMM --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
 
-Score them (laptop only; a Test B run's data, recall and delay as Test A; no incidents in the window ends the run ok with a note):
+Score them with the core methods (laptop only; a Test B run's data, recall and delay as Test A; no incidents in the window ends the run ok with a note):
 
 `python -m scripts.lab.run --site laptop --test C --methods core --days 28 --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
+
+`docker compose --profile lab run --rm logai2-lab --site laptop --test C --methods all --days 28` does the same with all methods.
 
 A method whose Test C medium recall differs from the latest ok Test A run of the same code version by more than 0.10 gets `injector_flag` in its result.
 
