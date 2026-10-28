@@ -70,6 +70,13 @@ def test_tune_band_tie_is_higher_coverage():
     assert tune(True, by)[0] == 2.0
 
 
+def test_tune_follows_the_dict_order_most_sensitive_first():
+    """bk17: a tail-probability grid is listed 0.01 .. 1e-5 (sensitive first): numeric order picked the least sensitive."""
+    by = {0.01: {"alert_rate": 5.0}, 0.001: {"alert_rate": 0.5}, 1e-05: {"alert_rate": 0.0}}
+    assert tune(False, by) == (0.001, True)
+    assert tune(False, {0.01: {"alert_rate": 5.0}, 1e-05: {"alert_rate": 3.0}}) == (1e-05, False)
+
+
 def test_tune_score_most_sensitive_within_budget():
     by = {1.0: {"alert_rate": 5.0}, 2.0: {"alert_rate": 1.0}, 3.0: {"alert_rate": 0.2}}
     assert tune(False, by) == (2.0, True)
@@ -349,6 +356,19 @@ def test_m7_adopts_at_half_recall_else_no_method(conn, cfg, two):
         dec = all_rows(conn, rid)["_decision", "M7"]
         assert dec["verdict"] == want, r
     assert dec["metrics"]["leader"] == "alt"
+
+
+def test_zero_recall_names_no_leader(conn, cfg, two):
+    """bk17 R3: a tie at recall 0 is not a leader."""
+    dec = m6(conn, cfg, {"sigma": 0.0, "alt": 0.0})
+    assert dec["verdict"] == "sigma stays" and dec["metrics"]["leader"] is None and dec["metrics"]["tied"] == []
+    assert dec["metrics"]["note"] == "no method detects"
+    put_test_a(conn, "M7", {"alt": 0.0})
+    rid = new_run(conn)
+    board_kind(conn, rid, "M7")
+    finish_all(conn, rid, seed=7, cfg=cfg)
+    dec = all_rows(conn, rid)["_decision", "M7"]
+    assert dec["verdict"] == "no method" and dec["metrics"]["leader"] is None and dec["metrics"]["note"] == "no method detects"
 
 
 def test_m7_failed_gate_means_no_method(conn, cfg, two):

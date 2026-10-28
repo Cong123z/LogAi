@@ -375,6 +375,8 @@ def run_a(monkeypatch, conn, cfg):
     Rec.fits, Rec.days = [], []
     monkeypatch.setattr(methods, "METHODS", {"rec": Rec})
     seed(conn)
+    tmpl(conn, "busy", "ERROR")            # bk17: upward injections go only on keys that can alert (a floor)
+    conn.commit()
     assert labrun.run(args_a(), cfg, conn, conn, finish=test_a.finish) == 0
 
 
@@ -408,3 +410,31 @@ def test_a_records_incidents_and_writes_recall_rows(monkeypatch, conn, cfg):
 def test_company_test_a_still_exits_2(monkeypatch):
     monkeypatch.setattr(labrun, "connect", lambda *a, **k: pytest.fail("connected"))
     assert labrun.main(["--site", "company", "--test", "A", "--methods", "core", "--days", "3"]) == 2
+
+
+def test_a_main_commits_finish_and_run_status(monkeypatch, conn, schema):
+    """bk17: Test A through main() (own connections, closed at the end): the 'all' recall rows and status ok survive."""
+    monkeypatch.setattr(methods, "METHODS", {"rec": Rec})
+    monkeypatch.setattr(methods, "GROUPS", {"core": ["rec"], "heavy": []})
+    seed(conn)
+    argv = ["--site", "laptop", "--test", "A", "--methods", "rec", "--from", "2026-10-01", "--to", "2026-10-14",
+            "--dsn", TEST_DSN, "--schema", schema, "--results-schema", schema]
+    assert labrun.main(argv) == 0
+    conn.commit()
+    assert conn.execute("SELECT status FROM lab_runs").fetchone()["status"] == "ok"
+    assert conn.execute("SELECT count(*) AS n FROM lab_results WHERE scope = 'all'").fetchone()["n"] == 3
+
+
+def test_a_finish_picks_the_sensitive_end_of_a_tail_grid(conn):
+    """bk17: nb's grid is 0.01 .. 1e-5 (sensitive first); with no alerts anywhere the tuned knob is 0.01, not 1e-5."""
+    from scripts.lab import test_a, store
+    rid = start_run(conn, site="laptop", test="A", code_version="c", image_tag=None, data_schema="public",
+                    window_from=date(2026, 10, 1), window_to=date(2026, 10, 14), tune_to=date(2026, 10, 7), seed=1,
+                    params={})
+    knobs = {str(k): {"tune": {"episodes": 0, "key_days": 100.0}, "inj": {}} for k in (0.01, 0.003, 0.001, 0.0003, 0.0001, 1e-05)}
+    store.put_result(conn, rid, "nb", "M3", "s", None, "ok", {"n_keys": 1, "knobs": knobs})
+    conn.commit()
+    test_a.finish(conn, rid)
+    conn.commit()
+    row = conn.execute("SELECT knob FROM lab_results WHERE run_id = %s AND scope = 'all'", (rid,)).fetchone()
+    assert row["knob"] == 0.01

@@ -1,0 +1,11 @@
+seed: 1
+days: 14
+services: {count: 1, scale: [1.0], subset: 0.03, phase_minutes: [0]}
+day_factors: {weekday: 1.0, jitter: 0.0, sat: 0.75, sun: 0.65}
+holiday: {start_day: 0, length: 0, factor: 0.4}
+trend: {per_week: 0.0}
+dispersion: poisson
+new_templates: {per_service_day: 0, error_share: 0.3, rate: 0.5}
+gaps: []
+incidents:
+  - {type: spike, size: 3, minutes: 10, every_days: 2}

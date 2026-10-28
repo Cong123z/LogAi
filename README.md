@@ -130,6 +130,8 @@ A multi-week history made from the laptop's own templates and hourly shapes, wri
 
 `python -m scripts.lab.synth --mode engine --scenario lab/scenarios/tiny.yaml --dsn postgresql://logai:logai@127.0.0.1:5433/logai` sends the same world as log lines through the real Engine on a simulated clock (schema `lab_s_<scenario>_engine`; `--scale` multiplies every rate; the last days run through the engine, up to 7 earlier ones are seeded from the counts; gaps are silent, not unobserved).
 
+A run of N days needs a world of N + 14 days (`lab/scenarios/w7|w14|w28.yaml`): the forecasters need 14 days of hourly history and mad / mprofile / pca 7 days of minutes before the window, else their scoreboard rows are `skipped`. The same holds for recorded data. Proof run and numbers: `docs/validation/2026-10-28-bakeoff-laptop-proof.md`.
+
 `lab/world.json` holds template texts and is git-ignored. It uses only hours with counts (at least 30 observed minutes and `*total` above 0) and warns when fewer than 8 exist: rebuild it after a full overnight replay. `lab/scenarios/tiny.yaml` is the quick one.
 
 ### Lab image (heavy bake-off methods)

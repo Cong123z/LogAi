@@ -155,6 +155,9 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Where:** `scripts/lab/methods/prophet_m.py`.
 - **What:** Prophet's band comes from simulated samples; with the default sample count the 0.999 and 0.9999 quantiles
   rest on a handful of draws, so the noise-widening term dominates the tails and the two knobs differ little.
+- **Measured (bk17, 28-day world, M2, test part):** prophet coverage at knobs 0.98 / 0.99 / 0.995 / 0.999 / 0.9999 is
+  0.847 / 0.882 / 0.908 / 0.942 / 0.965 (ETS, same grid: 0.891 / 0.920 / 0.939 / 0.961 / 0.978). The band stays far
+  under its nominal level at the tails and the last two knobs differ by 2 points.
 - **Fix idea:** raise `uncertainty_samples` (cost grows with it) or use the analytic interval for the extreme knobs.
 - **Likelihood:** certain for the extreme knobs; only matters if Prophet reaches the decision.
 
@@ -162,8 +165,48 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Where:** `scripts/lab/methods/lgbm.py`; spec `docs/specs/2026-10-27-bakeoff-laptop.md` §13.
 - **What:** the laptop has 180 templates per service; the company has about 3k keys. Fit time and memory of the
   per-key models were not measured at that size, so the cost gate for LightGBM rests on the laptop numbers.
+- **Measured (bk17):** 274 keys per service, 28-day Test B in the lab container: LightGBM fit 214 s over 87 walk-forward
+  fits (2.5 s per fit), scoring 126 s for 10,752 key-days (11.7 ms per key-day), process peak 1.4 GB for all methods.
+  Linear extrapolation (NOT measured) to 3,000 keys per service: about 27 s per fit and 3,000 x 28 x 11.7 ms = 16 min of
+  scoring, so about 28 min per service for a 28-day Test B (fit 12 min + scoring 16 min); memory unknown (training rows grow
+  to about 2 million). Still worth one real 3k-key timing before the company run.
 - **Fix idea:** time one service with 3k keys (a synthetic world) before the company run.
 - **Likelihood:** medium.
+
+### B20. Test A injections on sparse floored keys cannot reach the count floor
+- **Where:** `scripts/lab/inject.py` (`TYPES` sizes, `plan`).
+- **What:** spike / ramp / level_shift add `(size - 1) x expected` to a key whose alert needs `count >= floor` (ERROR 5, WARN
+  10 per minute, D4). On the 28-day world all 49 M4 injections (sparse ERROR/WARN templates, under 2/min) peak below the floor
+  (`lab/proof/reach.py`: 0 of 49), so M4 recall is 0 for every method by construction; M3 has no eligible key (INFO
+  templates have no floor, and no ERROR template has a busy mean of 2/min), so its recall is `-`. M2 is fine (100 % of spikes,
+  86-92 % of ramps/level shifts reach the floor). The ramp hit window (15 min after the start of a 60 min ramp) sees at most
+  a quarter of the added count, so ramp recall is 0 for every method on every world.
+- **Fix idea:** size the addition so the peak minute reaches the floor (or skip the injection and say so), and measure ramp
+  hits over the whole incident.
+- **Likelihood:** certain; M3/M4/ramp recall and the "detect" gate for M3/M4 are not usable until fixed.
+
+### B21. pca (M7) cannot see a mix swap on the synthetic worlds
+- **Where:** `scripts/lab/methods/pca.py`, `scripts/lab/inject.py` (`mix_swap`).
+- **What:** recall is 0 on all three worlds. Not an injection bug: a swap moves Q by about 2-5 while the noise Q of a normal
+  minute is 30-38 and the 0.99 / 0.9999 thresholds are 51-67 (even swapping the busiest template with one 8 times smaller:
+  Q mean 28.8 against a threshold of 52.9). Poisson noise on 100 low-count templates drowns a swap of two of them.
+- **Fix idea:** a mix_swap that moves many templates, or PCA on hourly shares; first check on real data.
+- **Likelihood:** certain on these worlds.
+
+### B22. M5 (doc keys) is never exercised by the synthetic worlds
+- **Where:** `scripts/lab/synth.py`.
+- **What:** `template_doc_links` is empty in every counts world, so there are no `doc:` keys and every M5 row is `skipped`.
+- **Fix idea:** link a few templates to documents in the scenario.
+- **Likelihood:** certain.
+
+### B23. A window needs recorded history before it
+- **Where:** `scripts/lab/load.py`, `scripts/lab/run.py` (tune/test split).
+- **What:** weekly, ETS, Prophet and LightGBM need 14 days of hourly history; mad, mprofile and pca need 7 days of minutes
+  (now loaded, `MINUTE_HISTORY`). A world that starts at the window start leaves the tune half without a fitted day and the
+  scoreboard row `skipped` with empty metrics. The synthetic worlds are therefore built with N + 14 days; real data needs
+  a recording of at least window + 14 days before a Test B can rank these methods.
+- **Fix idea:** none needed beyond the rule; the runner could warn when a method has no fitted tune day.
+- **Likelihood:** certain for short recordings.
 
 ### B19. The lab judges some minutes differently from the live engine
 - **Where:** `scripts/lab/methods/sigma.py`, `scripts/lab/load.py`.
@@ -174,6 +217,28 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Likelihood:** low on laptop worlds; unknown on company data.
 
 ## Fixed
+
+### F7. Test A never committed its recall rows or the run status (fixed in bk17, `b5118d6`)
+- **What:** `test_a.finish` committed, then read, then wrote inside the read's transaction (a savepoint), so closing the
+  connection rolled the `scope = 'all'` rows and `finish_run` back: the run stayed `running` with per-service rows only.
+- **Fix:** commit after the read; test `test_a_main_commits_finish_and_run_status`.
+
+### F8. Test A injected where nothing can alert, and bursts as INFO (fixed in bk17, `9cde33a`)
+- **What:** upward injections went on any template (INFO templates have no floor, D4 never flags them high) and the burst
+  template was INFO, so recall was 0 by construction.
+- **Fix:** spike / ramp / level_shift only on keys with a floor (`floor_for`), bursts as ERROR templates.
+
+### F9. Test A chose the least sensitive tail probability (fixed in bk17, `58ea334`)
+- **What:** with no alerts at any knob, `tune` took the numerically lowest knob; for nb / nb_clip / ratio / lgbm / chronos
+  (grid 0.01 .. 1e-5) that is the least sensitive, so their Test A recall was near 0 and the detect gate failed them.
+- **Fix:** `tune` follows the grid order (most sensitive first); `finish` passes the knobs in that order.
+
+### F10. mad, mprofile and pca never fitted on the first 7 days of a window (fixed in bk17, `4cf66fb`)
+- **What:** minute arrays were loaded only for the window, so the 7-prior-day fits failed and the tune half had no result.
+- **Fix:** `load_service` keeps the minute arrays of the 7 recorded days before the window (`sd.days` is still the window).
+
+### F11. A tie at recall 0 named a leader for M6 / M7 (fixed in bk17, `84fa91f`)
+- **Fix:** zero best recall gives no leader, note "no method detects".
 
 ### F2. mprofile looked ahead inside the scored day (fixed in bk16, `14bc644`)
 - **What:** a minute of day D was scored against the whole day's matrix profile, so it could match later windows of D;

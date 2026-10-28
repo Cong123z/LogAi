@@ -13,9 +13,11 @@ from dataclasses import dataclass, replace
 
 from psycopg.types.json import Jsonb
 
+from logai2.config import load_config
 from logai2.links import level_class
 from logai2.timeutil import daytype
 from scripts.lab.data import UNOBSERVED, Incident, ServiceData, minute_at, slot_of
+from scripts.lab.methods import floor_for
 from scripts.lab.methods.sigma import rebuild_stats
 from scripts.lab.score import LEVEL_KEY
 
@@ -88,8 +90,9 @@ def _near(a, b, gap) -> bool:
     return a[0] < b[1] + gap and b[0] < a[1] + gap
 
 
-def plan(sd: ServiceData, kinds: dict, seed: int, exp: Expect) -> list[Injection]:
+def plan(sd: ServiceData, kinds: dict, seed: int, exp: Expect, cfg=None) -> list[Injection]:
     """One pass: about PER_TYPE (= one per size) injections of every type. A candidate that breaks a rule is redrawn."""
+    cfg = cfg or load_config(None)
     rng = random.Random(seed)
     mid, hi = minute_at(sd.days[len(sd.days) // 2], 0), minute_at(sd.days[-1], 0) + 1440
     tmpl = sorted(k for k in sd.minutes if not k.startswith(("*", "doc:")))
@@ -97,7 +100,11 @@ def plan(sd: ServiceData, kinds: dict, seed: int, exp: Expect) -> list[Injection
     busy: dict[str, list] = {}
     out: list[Injection] = []
     errors = [t for t in tmpl if LEVEL_KEY[level_class(sd.levels.get(t))] == "*error"]
-    by_kind = {typ: sorted(k for k, kd in kinds.items() if kd in tk and not k.startswith("inj:"))
+    # bk17: an upward incident (spike, ramp, level_shift) goes only on a key that can alert (D4: it has a floor);
+    # drop stays on *total, which alerts through its lower side.
+    up = ("spike", "ramp", "level_shift")
+    by_kind = {typ: sorted(k for k, kd in kinds.items() if kd in tk and not k.startswith("inj:")
+                           and (typ not in up or floor_for(k, sd.level(k), cfg) is not None))
                for typ, (tk, _, _, _) in TYPES.items()}
 
     def carrier_of(key, start, dur):
@@ -212,10 +219,10 @@ def apply(sd: ServiceData, injs: list[Injection]) -> ServiceData:
     for inj in injs:
         span = range(inj.start, inj.end)
         if inj.type == "burst":
-            minutes[inj.key] = {d: array("i", [0 if o else UNOBSERVED for o in sd.observed[d]]) for d in sd.days}
+            minutes[inj.key] = {d: array("i", [0 if o else UNOBSERVED for o in sd.observed[d]]) for d in sd.observed}
             owned_keys.add(inj.key)
-            owned |= {(inj.key, d) for d in sd.days}
-            levels[inj.key], first[inj.key] = "INFO", inj.start
+            owned |= {(inj.key, d) for d in sd.observed}
+            levels[inj.key], first[inj.key] = "ERROR", inj.start     # bk17: an INFO template has no floor and can never alert
         if inj.type == "drop":
             for t in sorted(k for k in minutes if not k.startswith(("*", "doc:"))):
                 for m in span:
@@ -239,11 +246,11 @@ def apply(sd: ServiceData, injs: list[Injection]) -> ServiceData:
     return replace(sd, minutes=minutes, levels=levels, first_seen=first, incidents=incidents)
 
 
-def passes(sd: ServiceData, kinds: dict, seed: int, n: int = PASSES):
+def passes(sd: ServiceData, kinds: dict, seed: int, n: int = PASSES, cfg=None):
     """[(injected ServiceData, kinds with the burst keys as M6, injections)] for seeds seed .. seed+n-1."""
     exp, out = Expect(sd), []
     for p in range(n):
-        injs = plan(sd, kinds, seed + p, exp)
+        injs = plan(sd, kinds, seed + p, exp, cfg)
         out.append((apply(sd, injs), {**kinds, **{i.key: "M6" for i in injs if i.type == "burst"}}, injs))
     return out
 

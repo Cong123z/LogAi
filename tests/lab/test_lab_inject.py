@@ -45,8 +45,9 @@ def check_consistent(sd):
             col = {k: sd.minutes[k][d][i] for k in sd.minutes}
             assert min(col.values()) >= 0
             assert col["*total"] == sum(col[t] for t in tmpl)
-            assert col["*error"] == col["A"]
-            assert col["*info"] == sum(col[t] for t in tmpl if t != "A")
+            err = [t for t in tmpl if sd.levels.get(t) == "ERROR"]          # A, and the burst keys (ERROR since bk17)
+            assert col["*error"] == sum(col[t] for t in err)
+            assert col["*info"] == sum(col[t] for t in tmpl if t not in err)
             assert col["doc:d1"] == col["A"] + col["B"]
 
 
@@ -171,3 +172,18 @@ def test_short_window_still_places_mix_swap_even_if_mix_hashes_to_tune():
     injs = plan(sd, kinds, 3, Expect(sd))
     assert "mix_swap" in {i.type for i in injs}
     assert all(slot_of(i.start)[0] >= days[3] for i in injs)       # last half of the window, whatever part(key, day) says
+
+
+# bk17 R2: injections must be able to alert --------------------------------------------------------------------
+@pytest.mark.parametrize("seed", range(1, 9))
+def test_upward_injections_only_on_keys_with_a_floor(seed, cfg):
+    from scripts.lab.methods import floor_for
+    sd, kinds, injs = build(seed)
+    assert {i.type for i in injs} >= {"spike", "ramp", "level_shift", "drop", "burst"}
+    for i in injs:
+        if i.type in ("spike", "ramp", "level_shift"):
+            assert floor_for(i.key, sd.level(i.key), cfg) is not None, (i.type, i.key)
+    out = apply(sd, injs)
+    for i in injs:
+        if i.type == "burst":
+            assert floor_for(i.key, out.level(i.key), cfg) is not None      # a new INFO template can never alert

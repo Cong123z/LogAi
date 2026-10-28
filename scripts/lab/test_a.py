@@ -77,18 +77,26 @@ def _median(xs):
     return None if not n else xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
 
 
+def _grid_order(method, key) -> list[float]:
+    """The knobs in the method's grid order (most sensitive first), as `tune` expects; unknown ones last, ascending."""
+    spec = _spec(method)
+    grid = [float(k) for k in spec.knobs] if spec else []
+    return sorted(key, key=lambda k: (grid.index(k) if k in grid else len(grid), k))
+
+
 def finish(conn, run_id) -> None:
     conn.commit()           # the store's transactions must be the outermost ones
     groups: dict[tuple, list] = {}
     for r in conn.execute("SELECT method, kind, metrics FROM lab_results WHERE run_id = %s AND scope <> 'all' "
                           "AND status = 'ok' ORDER BY scope", (run_id,)):
         groups.setdefault((r["method"], r["kind"]), []).append(r["metrics"])
+    conn.commit()           # end the read's implicit transaction: the writes below (and finish_run) must be outermost, not savepoints
     with conn.transaction():
         for (m, kd), rows in sorted(groups.items()):
             key = {float(k): k for r in rows for k in r["knobs"]}
             rates = {k: alert_rate(sum(r["knobs"][key[k]]["tune"]["episodes"] for r in rows if key[k] in r["knobs"]),
                                    sum(r["knobs"][key[k]]["tune"]["key_days"] for r in rows if key[k] in r["knobs"]), kd)
-                     for k in sorted(key)}
+                     for k in _grid_order(m, key)}
             knob, in_budget = tune(False, {k: {"alert_rate": v} for k, v in rates.items()})
             if knob is None:        # no normal minutes of this kind in the tune part (M6 before any injection): the method's default
                 spec = _spec(m)
