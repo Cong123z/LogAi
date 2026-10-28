@@ -1,5 +1,5 @@
 from logai2.db import connect
-from scripts.stress_pipeline import main, run
+from scripts.stress_pipeline import leftover_schemas, main, run
 from tests.conftest import TEST_DSN
 
 
@@ -11,8 +11,8 @@ def test_stress_pipeline_tiny_runs():
     assert i1["template ALERTING"] == 3 and i1["false alerts"] == []
     assert i5["tick_failures"] > 0 and i5["counted"] == i5["truth"] and i5["template keys sum = *total"]
     assert i6["stalled"] and "UnicodeEncodeError" in i6["errors"][0]   # docs/BUGS.md B2; flip when fixed
-    with connect(TEST_DSN) as c:   # the throwaway schemas are gone
-        assert not c.execute("SELECT 1 FROM pg_namespace WHERE nspname LIKE 'stress_pipe%%'").fetchall()
+    with connect(TEST_DSN) as c:   # this run's throwaway schemas are gone
+        assert not leftover_schemas(c)
 
 
 def test_stress_pipeline_refuses_over_the_disk_limit(capsys):
@@ -30,4 +30,17 @@ def test_stress_pipeline_reread_tiny():
     assert r4["state"] == "succeeded" and r4["warning"] and r4["skipped hours"] > 0
     assert r4["zeros after range"] == 0 and r4["mismatches"] == 0 and r4["other services written"]
     with connect(TEST_DSN) as c:
-        assert not c.execute("SELECT 1 FROM pg_namespace WHERE nspname LIKE 'stress_pipe%%'").fetchall()
+        assert not leftover_schemas(c)
+
+
+def test_leftover_check_ignores_schemas_of_other_runs():
+    with connect(TEST_DSN) as c:
+        c.execute("CREATE SCHEMA stress_pipe_otherrun_deadbeef")      # a parallel run's schema, still alive
+        c.commit()
+        try:
+            code, _ = run(["--dsn", TEST_DSN, "--scale", "tiny", "--scenarios", "N1"])
+            assert code == 0 and not leftover_schemas(c)
+            assert c.execute("SELECT 1 FROM pg_namespace WHERE nspname = 'stress_pipe_otherrun_deadbeef'").fetchone()
+        finally:
+            c.execute("DROP SCHEMA stress_pipe_otherrun_deadbeef")
+            c.commit()

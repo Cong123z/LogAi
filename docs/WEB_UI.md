@@ -397,8 +397,8 @@ timezone (`timezone` of `GET /api/retrain`).
 `#evaluation` (nav "Evaluate", no polling): shows a lab run from `/api/eval/*`. Read-only except "Choose".
 
 - **Run bar**: run picker (newest first: id, site, test, window, status), strength badge, kind counts. No runs: the empty
-  state gives the `python -m scripts.lab.run ...` command; a run whose status is not `ok` shows its status (the API does not
-  return the run's error text).
+  state gives the `python -m scripts.lab.run ...` command; a run whose status is not `ok` shows its status and, for a failed
+  run, its error text (`/api/eval/runs` returns `error`).
 - **Evaluation board**: one card per kind (M1 to M7: verdict, leader, strength, stability; Test A runs show "Test A"),
   click one to pick the kind. The scoreboard has one row per method (sigma first): knob, ratio vs sigma with its 90 % CI as a
   small bar, coverage, interval score, sharpness, MASE, alert rate, flap share and a pass/fail/n.a. badge per gate (text and
@@ -408,8 +408,11 @@ timezone (`timezone` of `GET /api/retrain`).
   method, shared zoom) or Overlay. Count line, expected (dashed), band area, flagged minutes (red diamonds) and episodes
   (shaded); step-5 and step-1 days both draw.
 - **Calibrate board**: for the picked kind and a method, coverage and alert rate against the knob (test solid, tune dashed,
-  chosen knob marked). Knob pills redraw that method's band in the fit chart at that knob; "Choose" posts
-  `/api/eval/choices` with the note and shows the saved choice, or the API's error message.
+  chosen knob marked). Knob pills redraw that method's band in the fit chart at that knob; "Choose" (disabled until a knob
+  is picked) posts `/api/eval/choices` with the note and shows the saved choice, or the API's error message. The saved
+  choices (`GET /api/eval/choices`) are read on load: the kind's saved choice is shown under the pills, and the star marks
+  its knob when it is this run's and method's (else the run's own chosen knob); Choose moves the star. A failed keys/sweep
+  fetch after switching kind keeps the old kind.
 
 ## Baseline
 
@@ -907,7 +910,8 @@ Read the `lab_*` tables only (never live tables or count tables); no token. Time
 is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `null`.
 
 - `GET /api/eval/runs`: the newest 20 runs `{id, site, test, status, started_at, finished_at, window_from, window_to,
-  tune_to, data_schema, code_version, strength, kinds}`; `strength` comes from any `_decision` row.
+  tune_to, data_schema, code_version, strength, kinds, error}`; `strength` comes from any `_decision` row; `error` is the
+  failed run's text, else null.
 - `GET /api/eval/scoreboard?run=`: `{M1: {decision: {verdict, strength, leader, tied, note, text, stability, sigma_knob,
   test_days}, methods: [...]}}`, methods sigma first then the run's order. Test B rows: `{method, knob, status, verdict,
   ratio_vs_sigma, ci90, gates, coverage, interval_score, sharpness, mase, alert_rate, flap_share}`; Test A and Test C rows:
@@ -921,6 +925,7 @@ is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `nu
   inclusive local days, at most 7 (400 beyond). `kind` (M1 to M7, required; the page knows it from `/keys`) picks the chosen knob. Default knob: the method's `scope='all'` knob for that kind, else the first grid knob
   that has bands. Step-5 days give 288 points, step-1 days 1440.
 - `GET /api/eval/sweep?run=&kind=`: `{method: [{knob, chosen, tune, test}]}`, knobs ascending.
+- `GET /api/eval/choices`: the saved choices `[{kind, method, knob, run_id, note, chosen_at}]`, by kind.
 - `POST /api/eval/choices` `{kind, method, knob, run_id, note}`: upserts `lab_choices` and returns it. 400 unless `kind` is
   M1 to M7, `method` is in that run with a `scope='all'` result for that kind, `knob` is in its grid (`lab_runs.params.knobs`) and `note` is at most 500 characters; an unknown `kind` is also 400 on keys, sweep and series; 404 for an unknown `run_id`.
 

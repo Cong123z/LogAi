@@ -7,6 +7,7 @@ on a day with a high flag, 288 otherwise). Nothing else of the runner's per-day 
 from __future__ import annotations
 
 import math
+from array import array
 from datetime import timedelta
 
 from logai2.links import level_class
@@ -93,9 +94,14 @@ def day_from(acc: Acc, naive) -> dict:
             "episodes": acc.episodes, "flaps": acc.flaps, "key_days": acc.normal / 1440}
 
 
+def nan_none(a):
+    """A float array as a list with NaN -> None (the write-time form of a drawn band row)."""
+    return None if a is None else [None if v != v else float(v) for v in a]
+
+
 def _mean5(vals):
     ok = [v for v in vals if v == v]
-    return sum(ok) / len(ok) if ok else None
+    return sum(ok) / len(ok) if ok else math.nan
 
 
 class ScoreSink:
@@ -135,7 +141,8 @@ class ScoreSink:
         if key not in self._win:
             sd, w = self.sd, []
             for inc in sd.incidents:
-                lvl = LEVEL_KEY[level_class(sd.levels.get(inc.key))] if inc.key else None
+                tmpl = bool(inc.key) and not inc.key.startswith(("*", "doc:"))        # only a template has a level class
+                lvl = LEVEL_KEY[level_class(sd.levels.get(inc.key))] if tmpl else None
                 if (inc.key in (None, "*total", key) or key == "*total" or key == lvl
                         or (key.startswith("doc:") and inc.key in sd.docs.get(key, []))
                         or (key == MIX and not inc.key.startswith(("*", "doc:")))):
@@ -262,17 +269,15 @@ class ScoreSink:
             rows = self.band_rows.setdefault((key, knob), [])
             if any(o.high_flag):
                 f = [bool(x) for x in o.high_flag]
-                nan = lambda v: None if v != v else float(v)       # noqa: E731
-                rows.append((day, 1, list(arr), None if o.expected is None else [nan(v) for v in o.expected],
-                             None if o.low is None else [nan(v) for v in o.low],
-                             None if o.high is None else [nan(v) for v in o.high], f))
+                f32 = lambda a: None if a is None else array("f", a)       # noqa: E731
+                rows.append((day, 1, list(arr), f32(o.expected), f32(o.low), f32(o.high), f))
                 continue
             if counts5 is None:
                 counts5 = []
                 for i in range(0, 1440, 5):
                     seen = [x for x in arr[i:i + 5] if x != UNOBSERVED]
                     counts5.append(round(sum(seen) / 5) if seen else UNOBSERVED)
-            mean5 = lambda a: None if a is None else [_mean5(a[i:i + 5]) for i in range(0, 1440, 5)]   # noqa: E731
+            mean5 = lambda a: None if a is None else array("f", (_mean5(a[i:i + 5]) for i in range(0, 1440, 5)))   # noqa: E731
             rows.append((day, 5, counts5, mean5(o.expected), mean5(o.low), mean5(o.high),
                          [any(o.high_flag[i:i + 5]) for i in range(0, 1440, 5)]))
 
@@ -328,7 +333,8 @@ class ScoreSink:
                     store.put_episodes(conn, self.run_id, self.method, knob, self.service, key,
                                        [(e.start, e.end, e.peak_score, e.alerted) for e in eps])
             for (key, knob), rows in sorted(self.band_rows.items()):
-                store.put_bands(conn, self.run_id, self.method, knob, self.service, key, rows)
+                store.put_bands(conn, self.run_id, self.method, knob, self.service, key,
+                                [(*r[:3], *map(nan_none, r[3:6]), r[6]) for r in rows])
 
 
 def score_collect(results_conn, run_id, service, method, spec, kinds, ctx) -> ScoreSink:

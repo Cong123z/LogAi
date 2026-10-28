@@ -503,7 +503,7 @@ def run_scenario(a, cfg, world, sc: Scenario, admin, bg_wal: float) -> dict:
     cuts, extra = sc.streams(a2, world) if sc.streams else ({}, [])
     streams = [s for svc in world for s in base_streams(world, a2, svc, *span, cuts.get(svc, ()))] + extra
     hours = sorted({day_hour(int(m))[1] for m in range(int(read_from // 60), int(t_end // 60) + 61, 30)})
-    schema = f"stress_pipe_{uuid.uuid4().hex[:8]}"
+    schema = f"{SCHEMA_PREFIX}{uuid.uuid4().hex[:8]}"
     admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     engine = None
     try:
@@ -795,11 +795,20 @@ def r_guard(name: str, rows: int, admin, a) -> None:
         raise Refused(f"~{est / 2**20:,.0f} MB over the {limit / 2**20:,.0f} MB limit")
 
 
+SCHEMA_PREFIX = f"stress_pipe_{uuid.uuid4().hex[:6]}_"      # per process: parallel runs never see each other's schemas
+
+
+def leftover_schemas(conn) -> list[str]:
+    """Throwaway schemas of THIS process that are still there (a schema of another run is not ours to judge)."""
+    rows = conn.execute("SELECT nspname FROM pg_namespace WHERE nspname LIKE %s", (SCHEMA_PREFIX + "%",)).fetchall()
+    return [r["nspname"] if isinstance(r, dict) else r[0] for r in rows]
+
+
 @contextmanager
 def r_session(a, world, admin, streams, now: float, since: float):
     """A throwaway schema and a real Engine reading the generator from `since`, its clock at `now`."""
     cfg = load_config(None)
-    schema = f"stress_pipe_{uuid.uuid4().hex[:8]}"
+    schema = f"{SCHEMA_PREFIX}{uuid.uuid4().hex[:8]}"
     admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     sess = None
     try:

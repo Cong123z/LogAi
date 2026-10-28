@@ -343,6 +343,28 @@ def test_band_rows_step_1_on_flagged_days_else_5():
     assert r2[1] == 5 and len(r2[2]) == 288 and r2[3][0] == 3.0 and r2[2][0] == 1 and r2[6][0] is False
 
 
+def test_band_rows_keep_float32_arrays_and_nan_becomes_none_at_write_time():
+    d1, d2 = D0, D0 + timedelta(1)
+    o1 = out(flags=[100])
+    o1.expected[5] = NAN
+    sd = make_sd({d1: [1] * 1440, d2: [1] * 1440})
+    s = sink_for(sd, {"k": "M3"}, {d1: {1.0: o1}, d2: {1.0: out(expected=3.0)}})
+    r1, r2 = s.band_rows[("k", 1.0)]
+    assert isinstance(r1[3], array) and r1[3].typecode == "f" and r1[3][5] != r1[3][5]       # NaN kept in the row
+    assert isinstance(r1[4], array) and isinstance(r1[5], array)
+    assert score.nan_none(r1[3])[5] is None and score.nan_none(r1[3])[6] == 5.0
+    assert score.nan_none(None) is None
+
+
+def test_incident_on_a_pseudo_key_does_not_mask_a_level_key():
+    sd = make_sd({D0: [1] * 1440}, extra={"*info": {D0: array("i", [1] * 1440)}, "T": {D0: array("i", [1] * 1440)}},
+                 levels={"T": "ERROR"},
+                 incidents=[Incident("*error", 100, 110, "s"), Incident("doc:x", 200, 210, "s"), Incident("T", 300, 310, "s")])
+    s = score.ScoreSink(None, 1, "s", "t", spec({"M3"}), {"k": "M3"}, ctx_for(sd))
+    assert s.windows("*info") == []                  # *error / doc: incidents have no level class
+    assert (300 - score.MARGIN, 310 + score.MARGIN) in s.windows("*error")      # a template's incident masks its level key
+
+
 def test_band_rows_downsample_means_and_flags():
     sd = make_sd({D0: [UNOBSERVED] * 5 + [2, 3, 4, 5, 6] + [1] * 1430})
     o = out(expected=2.0, low=1.0, high=4.0)

@@ -208,6 +208,36 @@ def test_no_look_ahead(name):
     if a.expected is not None:
         assert list(a.expected) == pytest.approx(list(b.expected), nan_ok=True)
         assert list(a.high) == pytest.approx(list(b.high), nan_ok=True)
+    if name == "mprofile":                              # its history distances (the thresholds) never see day D
+        def dist(sd):
+            m = methods.METHODS["mprofile"]()
+            model = m.fit(sd, D, CFG)
+            m.day(model, None, sd, "*total", D, (0.999,), CFG)
+            return model.dist["*total"]
+        assert dist(make_sd()) == dist(make_sd(d_scale=5.0))
+
+
+def test_mprofile_scores_the_left_profile_only():
+    pytest.importorskip("stumpy")
+    def scores(late):
+        sd = make_sd()
+        c = sd.minutes["*total"][D]
+        for i in range(900, 1440):
+            c[i] = c[i] * late                           # day D changes from minute 900 on
+        m = methods.METHODS["mprofile"]()
+        return m.day(m.fit(sd, D, CFG), None, sd, "*total", D, (0.999,), CFG)[0.999].score
+    a, b = scores(1), scores(5)
+    assert list(a[:900]) == pytest.approx(list(b[:900]))        # earlier minutes never match later windows of D
+    assert list(a[900:]) != list(b[900:])
+
+
+def test_mprofile_key_without_an_array_on_a_prior_day():
+    pytest.importorskip("stumpy")
+    sd = make_sd()
+    del sd.minutes["*total"][D - timedelta(3)]           # observed day, but no array for this key
+    m = methods.METHODS["mprofile"]()
+    out = m.day(m.fit(sd, D, CFG), None, sd, "*total", D, (0.999,), CFG)[0.999]
+    assert len(out.score) == 1440
 
 
 def mp_day(**kw):

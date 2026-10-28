@@ -1,7 +1,7 @@
 // ── Evaluate: a lab run, read-only except "Choose" (POST /api/eval/choices) ──
 // Everything shown comes from /api/eval/*; nothing is computed here beyond picking labels and drawing.
 const ev = {runs: [], run: null, board: 'eval', kind: 'M1', board_data: null, keys: [], key: null, from: '', to: '',
-            mode: 'multi', off: new Set(), calMethod: null, calKnob: null, sweep: null, seq: 0, fitSeq: 0};
+            mode: 'multi', off: new Set(), choices: {}, calMethod: null, calKnob: null, sweep: null, seq: 0, fitSeq: 0};
 const $ev = id => document.getElementById(id);
 const evColors = () => { const c = getComputedStyle(document.documentElement); return ['accent', 'orange', 'green', 'blue', 'yellow', 'gray'].map(n => c.getPropertyValue(`--${n}`).trim()); };
 const EV_KINDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7'];
@@ -33,9 +33,11 @@ async function loadEvaluation() {
   const seq = ++ev.seq;
   evStatus('');
   let runs;
-  try { runs = await evGet('/api/eval/runs'); } catch (err) { evStatus(err.message, true); return; }
+  let saved;
+  try { [runs, saved] = await Promise.all([evGet('/api/eval/runs'), evGet('/api/eval/choices')]); } catch (err) { evStatus(err.message, true); return; }
   if (seq !== ev.seq) return;
   ev.runs = runs;
+  ev.choices = Object.fromEntries(saved.map(c => [c.kind, c]));
   $ev('ev-empty').hidden = true;
   if (!runs.length) {
     $ev('ev-body').hidden = true;
@@ -49,7 +51,7 @@ async function loadEvaluation() {
   }
   if (!runs.some(r => r.id === ev.run)) ev.run = runs[0].id;
   $ev('ev-run').innerHTML = runs.map(r =>
-    `<option value="${r.id}">#${r.id} · ${escapeHtml(r.site)} · Test ${escapeHtml(r.test)} · ${r.window_from} to ${r.window_to} · ${escapeHtml(r.status)}</option>`).join('');
+    `<option value="${r.id}">#${r.id} · ${escapeHtml(r.site)} · Test ${escapeHtml(r.test)} · ${escapeHtml(r.window_from)} to ${escapeHtml(r.window_to)} · ${escapeHtml(r.status)}</option>`).join('');
   $ev('ev-run').value = String(ev.run);
   await evLoadRun(seq);
 }
@@ -64,7 +66,7 @@ async function evLoadRun(seq = ++ev.seq) {
     $ev('ev-body').hidden = true;
     empty.hidden = false;
     empty.innerHTML = `<p><strong>Run #${run.id} is ${escapeHtml(run.status)}.</strong> ${run.status === 'running' ? 'Reload when it finishes.'
-      : 'It has no usable results; the failure text is in the run output and in <code>lab_runs.error</code>.'}</p>`;
+      : 'It has no usable results.'}</p>${run.error ? `<p class="ins-toast ins-toast-error">${escapeHtml(run.error)}</p>` : ''}`;
     return;
   }
   empty.hidden = true;
@@ -92,7 +94,7 @@ async function evLoadKind(seq = ++ev.seq) {
   try {
     [keys, sweep] = await Promise.all([evGet(`/api/eval/keys?run=${ev.run}&kind=${ev.kind}`),
                                        evGet(`/api/eval/sweep?run=${ev.run}&kind=${ev.kind}`)]);
-  } catch (err) { evStatus(err.message, true); return; }
+  } catch (err) { evStatus(err.message, true); return false; }
   if (seq !== ev.seq) return;
   ev.keys = keys; ev.sweep = sweep;
   const methods = Object.keys(sweep);
@@ -173,18 +175,22 @@ function evRenderScore() {
 }
 
 // ── Calibrate ──
+const evSaved = c => `Saved: ${c.kind} uses ${c.method} at knob ${evKnob(c.knob)} (run #${c.run_id})${c.note ? ` — ${c.note}` : ''}.`;
 function evRenderCal() {
   const sweep = ev.sweep || {}, methods = Object.keys(sweep);
   $ev('ev-cal-title').textContent = `Calibrate · ${ev.kind}`;
   $ev('ev-cal-method').innerHTML = methods.map(m => `<option>${escapeHtml(m)}</option>`).join('');
   if (ev.calMethod) $ev('ev-cal-method').value = ev.calMethod;
   const rows = sweep[ev.calMethod] || [];
-  const chosen = rows.find(r => r.chosen);
+  // The star is the saved choice when it is this run's and method's, else the run's own chosen knob.
+  const saved = ev.choices[ev.kind], mine = saved && saved.run_id === ev.run && saved.method === ev.calMethod;
+  const star = r => mine ? r.knob === saved.knob : r.chosen;
+  const chosen = rows.find(star);
   if (ev.calKnob == null && chosen) ev.calKnob = chosen.knob;
   $ev('ev-pills').innerHTML = rows.map(r =>
-    `<button type="button" class="toggle-btn${r.knob === ev.calKnob ? ' active' : ''}" aria-pressed="${r.knob === ev.calKnob}" data-knob="${r.knob}">${evKnob(r.knob)}${r.chosen ? ' ★' : ''}</button>`).join('');
-  $ev('ev-choose').disabled = !rows.length;
-  $ev('ev-choice').textContent = '';
+    `<button type="button" class="toggle-btn${r.knob === ev.calKnob ? ' active' : ''}" aria-pressed="${r.knob === ev.calKnob}" data-knob="${r.knob}">${evKnob(r.knob)}${star(r) ? ' ★' : ''}</button>`).join('');
+  $ev('ev-choose').disabled = !rows.length || ev.calKnob == null;
+  $ev('ev-choice').textContent = saved ? evSaved(saved) : '';
   $ev('ev-choice').classList.remove('ins-toast-error');
   const el = $ev('ev-sweep');
   if (!rows.length) { echarts.getInstanceByDom(el)?.clear(); return; }
@@ -263,7 +269,7 @@ async function evLoadFit() {
 
 function evDrawFit(data) {
   const el = $ev('ev-fit'), t = chartTokens(), pal = evColors(), chart = chartFor(el);
-  if (!data.length) { chart.clear(); $ev('ev-fit-status').textContent = 'No method selected.'; return; }
+  if (!data.length) { chart.clear(); $ev('ev-fit-status').classList.remove('ins-toast-error'); $ev('ev-fit-status').textContent = 'No method selected.'; return; }
   const multi = ev.mode === 'multi', n = data.length, ph = 150;
   el.style.height = multi ? `${n * ph + 90}px` : '420px';
   chart.resize();
@@ -309,11 +315,14 @@ $ev('ev-boards').addEventListener('click', e => {
   const b = e.target.closest('[data-board]');
   if (b) { ev.board = b.dataset.board; evRenderBoard(); if (ev.board === 'cal') evRenderCal(); }
 });
-$ev('ev-cards').addEventListener('click', e => {
+$ev('ev-cards').addEventListener('click', async e => {
   const b = e.target.closest('[data-kind]');
   if (!b || b.dataset.kind === ev.kind) return;
+  const prev = {kind: ev.kind, key: ev.key, off: ev.off};
   ev.kind = b.dataset.kind; ev.key = null; ev.off = new Set();
-  evRenderCards(); evRenderScore(); evLoadKind();
+  evRenderCards(); evRenderScore();
+  // A failed keys/sweep fetch keeps the old kind (its keys, sweep and fit chart are still on screen).
+  if (await evLoadKind() === false) { Object.assign(ev, prev); evRenderCards(); evRenderScore(); }
 });
 $ev('ev-key').addEventListener('change', e => { ev.key = e.target.value; evLoadFit(); });
 $ev('ev-from').addEventListener('change', e => { ev.from = e.target.value; evLoadFit(); });
@@ -336,10 +345,10 @@ $ev('ev-choose').addEventListener('click', async () => {
   btn.disabled = true;
   try {
     const r = await apiMutation('/api/eval/choices', 'POST', {kind: ev.kind, method: ev.calMethod, knob: ev.calKnob, run_id: ev.run, note: $ev('ev-note').value});
-    out.classList.remove('ins-toast-error');
-    out.textContent = `Saved: ${r.kind || ev.kind} uses ${r.method || ev.calMethod} at knob ${evKnob(r.knob != null ? r.knob : ev.calKnob)} (run #${r.run_id || ev.run})${r.note ? ` — ${r.note}` : ''}.`;
+    ev.choices[r.kind] = r;
+    evRenderCal();                                  // moves the star to the saved knob and shows the saved line
   } catch (err) {
     out.classList.add('ins-toast-error');
     out.textContent = err.message;
-  } finally { btn.disabled = false; }
+  } finally { btn.disabled = ev.calKnob == null || !(ev.sweep[ev.calMethod] || []).length; }
 });
