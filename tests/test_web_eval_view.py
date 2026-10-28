@@ -82,6 +82,9 @@ def test_scoreboard_test_a(conn, client):
     m = client.get(f"/api/eval/scoreboard?run={rid}").get_json()["M1"]["methods"][0]
     assert m["recall"] == {"medium": 0.5} and m["delay"] == {"medium": 4}
     assert "interval_score" not in m and "ratio_vs_sigma" not in m
+    rid = run(conn, test="C")
+    result(conn, rid, "sigma", "M1", "all", 3.0, {"recall": {"medium": 0.5}, "delay": {"median": 1}})
+    assert client.get(f"/api/eval/scoreboard?run={rid}").get_json()["M1"]["methods"][0]["recall"] == {"medium": 0.5}
 
 
 def seed_series(conn):
@@ -103,6 +106,22 @@ def test_keys(conn, client):
     rid = seed_series(conn)
     r = client.get(f"/api/eval/keys?run={rid}&kind=M1").get_json()
     assert r == [{"service": "pay", "key": "*total", "kind": "M1", "methods": ["sigma", "ewma"]}]
+
+
+def test_keys_read_the_stored_kinds_and_old_runs_use_the_heuristic(conn, client):
+    rid = run(conn)
+    for key in ("*total", "tpl", "newt"):
+        band(conn, rid, "sigma", 3.0, D1, 5, key=key, counts=[9] * 288)       # tpl: mean 9 would read M3 by heuristic
+    band(conn, rid, "ewma", 0.1, D1, 5, key="tpl", counts=[9] * 288)
+    result(conn, rid, "sigma", "M4", "pay", None, {"drawn": {"tpl": "M4"}})
+    result(conn, rid, "ewma", "M4", "pay", None, {"drawn": {"tpl": "M4"}})
+    result(conn, rid, "sigma", "M6", "pay", None, {"drawn": {"newt": "M6"}})
+    result(conn, rid, "sigma", "M1", "pay", None, {"drawn": {"*total": "M1"}})
+    # bands were written with service "pay"
+    q = lambda kind: client.get(f"/api/eval/keys?run={rid}&kind={kind}").get_json()      # noqa: E731
+    assert q("M4") == [{"service": "pay", "key": "tpl", "kind": "M4", "methods": ["sigma", "ewma"]}]
+    assert q("M6") == [{"service": "pay", "key": "newt", "kind": "M6", "methods": ["sigma"]}]
+    assert q("M3") == [] and [k["key"] for k in q("M1")] == ["*total"]
 
 
 def test_series_steps_default_knob_episodes_nulls(conn, client):

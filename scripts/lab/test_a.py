@@ -10,15 +10,33 @@ from __future__ import annotations
 
 import math
 
+from psycopg.types.json import Jsonb
+
 from scripts.lab import store
 from scripts.lab.decide import _spec
-from scripts.lab.inject import SIZES
-from scripts.lab.score import InjectSink
+from scripts.lab.inject import SIZES, Injection
+from scripts.lab.score import SIZE_BREAKS, IncidentSink, InjectSink
 from scripts.lab.tune import alert_rate, tune
 
 
 def collect(results_conn, run_id, service, method, spec, kinds, ctx) -> InjectSink:
     return InjectSink(results_conn, run_id, service, method, spec, kinds, ctx)
+
+
+def collect_c(results_conn, run_id, service, method, spec, kinds, ctx) -> IncidentSink:
+    return IncidentSink(results_conn, run_id, service, method, spec, kinds, ctx)
+
+
+def incidents_c(conn, service, kinds, lo, hi, schema=None) -> list[Injection]:
+    """The `test-c` incidents of the service touching minutes [lo, hi) as Injections (an incident without a key is not scorable)."""
+    out = []
+    for r in conn.execute("SELECT key, type, size, start_minute, end_minute FROM lab_incidents WHERE source = 'test-c' "
+                          "AND service = %s AND data_schema = %s AND key IS NOT NULL AND start_minute < %s "
+                          "AND end_minute > %s ORDER BY start_minute, id", (service, schema or "public", hi, lo)):
+        name = SIZES[sum(r["size"] >= b for b in SIZE_BREAKS)]
+        out.append(Injection(r["type"], name, r["size"], r["key"], kinds.get(r["key"], ""), r["start_minute"],
+                             r["end_minute"]))
+    return out
 
 
 def _merge(into: dict, cells: dict) -> None:
@@ -90,3 +108,38 @@ def finish(conn, run_id) -> None:
                        "alert_rate": rates[knob], "in_budget": in_budget,
                        "n_injections": sum(c["n"] for cs in by_size.values() for c in cs)}
             store.put_result(conn, run_id, m, kd, "all", knob, "ok", metrics)
+
+
+def finish_c(conn, run_id) -> None:
+    finish(conn, run_id)
+    flag_gap(conn, run_id)
+
+
+GAP = 0.10
+
+
+def flag_gap(conn, run_id) -> None:
+    """Per method and kind: Test C medium recall against the latest ok Test A run of the same code_version (its `spike`
+    medium recall, `burst` for M6, which has no spike). A gap above GAP sets injector_flag with both numbers."""
+    conn.commit()           # the store's transactions must be the outermost ones (else they are savepoints, lost on close)
+    a = conn.execute("SELECT a.id FROM lab_runs a, lab_runs c WHERE c.id = %s AND a.test = 'A' AND a.status = 'ok' "
+                     "AND a.code_version = c.code_version AND a.site = c.site ORDER BY a.id DESC LIMIT 1", (run_id,)).fetchone()
+    if a is None:
+        conn.commit()
+        return
+    conn.commit()
+    rows = conn.execute("SELECT method, kind, metrics FROM lab_results WHERE run_id = %s AND scope = 'all' "
+                        "AND status = 'ok'", (run_id,)).fetchall()
+    conn.commit()
+    with conn.transaction():
+        for r in rows:
+            ra = conn.execute("SELECT metrics FROM lab_results WHERE run_id = %s AND method = %s AND kind = %s "
+                              "AND scope = 'all' AND status = 'ok'", (a["id"], r["method"], r["kind"])).fetchone()
+            by_type = ra["metrics"].get("by_type", {}) if ra else {}
+            a_rec = (by_type.get("spike") or by_type.get("burst") or {}).get("medium")
+            c_rec = r["metrics"].get("recall", {}).get("medium")
+            if a_rec is None or c_rec is None:
+                continue
+            conn.execute("UPDATE lab_results SET metrics = metrics || %s WHERE run_id = %s AND method = %s AND kind = %s "
+                         "AND scope = 'all'", (Jsonb({"injector_flag": abs(a_rec - c_rec) > GAP, "a_recall": a_rec,
+                                                      "c_recall": c_rec}), run_id, r["method"], r["kind"]))

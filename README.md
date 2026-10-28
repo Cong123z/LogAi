@@ -140,6 +140,18 @@ Five methods (ETS, Prophet, LightGBM, Chronos-Bolt, Matrix Profile) need package
 
 `docker run --rm --network none logai2-lab:latest python -m scripts.lab.run --site laptop --test B --methods heavy --days 1 --check` lists every heavy method `available` (outside the image: `unavailable`).
 
+### Test C (real incidents through the engine)
+
+`python scripts/incident_test.py` injects bursts through the replayer and writes `reports/incident-YYYYMMDD-HHMM/`. Load its incidents (the key is re-resolved against the current templates; warnings name the ones it could not resolve; re-loading replaces):
+
+`python -m scripts.lab.load_incidents reports/incident-YYYYMMDD-HHMM --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
+
+Score them (laptop only; a Test B run's data, recall and delay as Test A; no incidents in the window ends the run ok with a note):
+
+`python -m scripts.lab.run --site laptop --test C --methods core --days 28 --dsn postgresql://logai:logai@127.0.0.1:5433/logai`
+
+A method whose Test C medium recall differs from the latest ok Test A run of the same code version by more than 0.10 gets `injector_flag` in its result.
+
 ### Upgrading to migrations 008 and 009 (Retrain)
 
 1. Deploy the **engine** first: it runs 008 (`retrain_runs`) and 009
