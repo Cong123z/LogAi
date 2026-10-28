@@ -575,6 +575,10 @@ def create_app(cfg: AppConfig) -> Flask:
         run = lab_run()
         return jsonify(eval_view.sweep(conn(), run, request.args.get("kind") or eval_bad_param("kind")))
 
+    @app.get("/api/eval/choices")
+    def eval_choices_list():
+        return jsonify(eval_view.choices(conn(), iso))
+
     @app.post("/api/eval/choices")
     def eval_choices():
         return jsonify(eval_view.choose(conn(), body()))

@@ -53,7 +53,7 @@ def runs(conn, iso) -> list[dict]:
                     "finished_at": iso(r["finished_at"].timestamp()) if r["finished_at"] else None,
                     "window_from": r["window_from"].isoformat(), "window_to": r["window_to"].isoformat(),
                     "tune_to": r["tune_to"].isoformat(), "data_schema": r["data_schema"],
-                    "code_version": r["code_version"], "strength": r["strength"], "kinds": r["kinds"]})
+                    "code_version": r["code_version"], "strength": r["strength"], "kinds": r["kinds"], "error": r["error"]})
     return out
 
 
@@ -175,6 +175,12 @@ def sweep(conn, run: dict, kind: str) -> dict:
         by.setdefault(r["method"], {}).setdefault(r["knob"], {})[r["part"]] = r["metrics"]
     return {m: [{"knob": k, "chosen": chosen.get(m) == k, "tune": p.get("tune"), "test": p.get("test")}
                 for k, p in sorted(ks.items())] for m, ks in ((m, by[m]) for m in order(run, by))}
+
+
+def choices(conn, iso) -> list[dict]:
+    return [{"kind": r["kind"], "method": r["method"], "knob": r["knob"], "run_id": r["run_id"], "note": r["note"],
+             "chosen_at": iso(r["chosen_at"].timestamp())}
+            for r in conn.execute("SELECT * FROM lab_choices ORDER BY kind")]
 
 
 def choose(conn, payload: dict[str, Any]) -> dict:

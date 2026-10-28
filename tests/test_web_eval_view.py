@@ -59,6 +59,14 @@ def test_runs_newest_first_with_strength(conn, client):
     assert r[1]["started_at"].endswith("Z")
 
 
+def test_runs_carry_the_error_of_a_failed_run(conn, client):
+    ok, bad = run(conn), run(conn, status="failed")
+    conn.execute("UPDATE lab_runs SET error = 'boom: no data' WHERE id = %s", (bad,))
+    conn.commit()
+    r = {x["id"]: x for x in client.get("/api/eval/runs").get_json()}
+    assert r[bad]["error"] == "boom: no data" and r[ok]["error"] is None
+
+
 def test_scoreboard_test_b(conn, client):
     rid = run(conn)
     result(conn, rid, "_decision", "M1", "all", None,
@@ -181,6 +189,20 @@ def test_choices(conn, client):
     assert client.post("/api/eval/choices", json={**ok, "note": "x" * 501}).status_code == 400
     assert client.post("/api/eval/choices", json={**ok, "run_id": 999}).status_code == 404
     assert counts() == before
+
+
+def test_get_choices_lists_the_saved_ones(conn, client):
+    assert client.get("/api/eval/choices").get_json() == []
+    rid = run(conn)
+    result(conn, rid, "ewma", "M1", "all", 0.3, {})
+    result(conn, rid, "sigma", "M2", "all", 3.0, {})
+    for body in ({"kind": "M2", "method": "sigma", "knob": 3.0, "run_id": rid, "note": None},
+                 {"kind": "M1", "method": "ewma", "knob": 0.3, "run_id": rid, "note": "x"}):
+        assert client.post("/api/eval/choices", json=body).status_code == 200
+    r = client.get("/api/eval/choices").get_json()
+    assert [(c["kind"], c["method"], c["knob"], c["run_id"], c["note"]) for c in r] == [
+        ("M1", "ewma", 0.3, rid, "x"), ("M2", "sigma", 3.0, rid, None)]
+    assert r[0]["chosen_at"].endswith("Z")
 
 
 def test_unknown_run_404(client):
