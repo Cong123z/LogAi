@@ -95,6 +95,27 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Bake-off lab (heavy methods): never started by `up`. One-off runs, args after the service name:
+  #   docker compose --profile lab run --rm logai2-lab --site laptop --test B --methods all --days 28
+  logai2-lab:
+    profiles: [lab]
+    build:
+      context: .
+      dockerfile: Dockerfile.lab
+    image: logai2-lab:latest
+    container_name: logai2-lab
+    entrypoint: ["python", "-m", "scripts.lab.run"]
+    command: ["--site", "laptop", "--test", "B", "--methods", "all", "--days", "1", "--check"]
+    environment:
+      LOGAI2_DATABASE_DSN: postgresql://logai:logai@postgres:5432/logai
+    volumes:
+      - ./lab:/app/lab          # world.json and scenarios
+    mem_limit: 5g
+    networks: [default, aiops-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   logai2-tei:
     profiles: [tei]   # with it: LOGAI2_EMBEDDING_URL=http://logai2-tei:80
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4
