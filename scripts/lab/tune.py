@@ -34,13 +34,14 @@ def aggregate(ms, kind) -> dict:
 
 def tune(band: bool, tune_by_knob: dict[float, dict]) -> tuple[float | None, bool]:
     """(chosen knob, within budget). Band methods: coverage closest to 99.5 %, tie -> higher coverage (wider band).
-    Score methods: the lowest (most sensitive) knob whose tune alert rate is within budget; none -> the highest
-    knob and False. Knobs with nothing measured are ignored; None when no knob is left."""
+    Score methods: the first (most sensitive) knob, in the dict's order, whose tune alert rate is within budget; none
+    -> the last knob and False. The caller orders the dict most sensitive first (a method's knob grid; ascending when
+    a low knob is the sensitive one, descending for a tail probability). Knobs with nothing measured are ignored; None when no knob is left."""
     if band:
         have = {k: m["coverage"] for k, m in tune_by_knob.items() if m["coverage"] is not None}
         return (min(have, key=lambda k: (round(abs(have[k] - COVERAGE_TARGET), 9), -have[k])) if have else None), True
     have = {k: m["alert_rate"] for k, m in tune_by_knob.items() if m["alert_rate"] is not None}
     if not have:
         return None, True
-    ok = [k for k in sorted(have) if have[k] <= BUDGET]
-    return (ok[0], True) if ok else (max(have), False)
+    ok = [k for k in have if have[k] <= BUDGET]
+    return (ok[0], True) if ok else (list(have)[-1], False)

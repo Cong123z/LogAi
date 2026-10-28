@@ -70,6 +70,13 @@ def test_tune_band_tie_is_higher_coverage():
     assert tune(True, by)[0] == 2.0
 
 
+def test_tune_follows_the_dict_order_most_sensitive_first():
+    """bk17: a tail-probability grid is listed 0.01 .. 1e-5 (sensitive first): numeric order picked the least sensitive."""
+    by = {0.01: {"alert_rate": 5.0}, 0.001: {"alert_rate": 0.5}, 1e-05: {"alert_rate": 0.0}}
+    assert tune(False, by) == (0.001, True)
+    assert tune(False, {0.01: {"alert_rate": 5.0}, 1e-05: {"alert_rate": 3.0}}) == (1e-05, False)
+
+
 def test_tune_score_most_sensitive_within_budget():
     by = {1.0: {"alert_rate": 5.0}, 2.0: {"alert_rate": 1.0}, 3.0: {"alert_rate": 0.2}}
     assert tune(False, by) == (2.0, True)
