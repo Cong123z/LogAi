@@ -408,3 +408,16 @@ def test_a_records_incidents_and_writes_recall_rows(monkeypatch, conn, cfg):
 def test_company_test_a_still_exits_2(monkeypatch):
     monkeypatch.setattr(labrun, "connect", lambda *a, **k: pytest.fail("connected"))
     assert labrun.main(["--site", "company", "--test", "A", "--methods", "core", "--days", "3"]) == 2
+
+
+def test_a_main_commits_finish_and_run_status(monkeypatch, conn, schema):
+    """bk17: Test A through main() (own connections, closed at the end): the 'all' recall rows and status ok survive."""
+    monkeypatch.setattr(methods, "METHODS", {"rec": Rec})
+    monkeypatch.setattr(methods, "GROUPS", {"core": ["rec"], "heavy": []})
+    seed(conn)
+    argv = ["--site", "laptop", "--test", "A", "--methods", "rec", "--from", "2026-10-01", "--to", "2026-10-14",
+            "--dsn", TEST_DSN, "--schema", schema, "--results-schema", schema]
+    assert labrun.main(argv) == 0
+    conn.commit()
+    assert conn.execute("SELECT status FROM lab_runs").fetchone()["status"] == "ok"
+    assert conn.execute("SELECT count(*) AS n FROM lab_results WHERE scope = 'all'").fetchone()["n"] == 3

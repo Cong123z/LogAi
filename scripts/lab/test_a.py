@@ -83,6 +83,7 @@ def finish(conn, run_id) -> None:
     for r in conn.execute("SELECT method, kind, metrics FROM lab_results WHERE run_id = %s AND scope <> 'all' "
                           "AND status = 'ok' ORDER BY scope", (run_id,)):
         groups.setdefault((r["method"], r["kind"]), []).append(r["metrics"])
+    conn.commit()           # end the read's implicit transaction: the writes below (and finish_run) must be outermost, not savepoints
     with conn.transaction():
         for (m, kd), rows in sorted(groups.items()):
             key = {float(k): k for r in rows for k in r["knobs"]}

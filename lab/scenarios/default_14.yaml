@@ -1,0 +1,15 @@
+seed: 7
+days: 14
+services: {count: 3, scale: [1.0, 0.5, 2.0], subset: 0.8, phase_minutes: [0, 20, -15]}
+day_factors: {weekday: 1.0, jitter: 0.05, sat: 0.75, sun: 0.65}
+holiday: {start_day: 18, length: 3, factor: 0.4}
+trend: {per_week: 0.03}
+dispersion: world
+new_templates: {per_service_day: 3, error_share: 0.3, rate: 0.5}
+gaps: [{day: 9, hour_from: 2, hour_to: 4}]
+incidents:
+  - {type: spike, size: 3, minutes: 10, every_days: 2}
+  - {type: drop, size: 0.3, minutes: 30, every_days: 5}
+  - {type: ramp, size: 2, minutes: 60, every_days: 4}
+  - {type: level_shift, size: 1.5, minutes: 240, every_days: 7}
+  - {type: mix_swap, minutes: 60, every_days: 6}
