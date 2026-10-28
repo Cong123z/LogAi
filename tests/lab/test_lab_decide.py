@@ -351,6 +351,19 @@ def test_m7_adopts_at_half_recall_else_no_method(conn, cfg, two):
     assert dec["metrics"]["leader"] == "alt"
 
 
+def test_zero_recall_names_no_leader(conn, cfg, two):
+    """bk17 R3: a tie at recall 0 is not a leader."""
+    dec = m6(conn, cfg, {"sigma": 0.0, "alt": 0.0})
+    assert dec["verdict"] == "sigma stays" and dec["metrics"]["leader"] is None and dec["metrics"]["tied"] == []
+    assert dec["metrics"]["note"] == "no method detects"
+    put_test_a(conn, "M7", {"alt": 0.0})
+    rid = new_run(conn)
+    board_kind(conn, rid, "M7")
+    finish_all(conn, rid, seed=7, cfg=cfg)
+    dec = all_rows(conn, rid)["_decision", "M7"]
+    assert dec["verdict"] == "no method" and dec["metrics"]["leader"] is None and dec["metrics"]["note"] == "no method detects"
+
+
 def test_m7_failed_gate_means_no_method(conn, cfg, two):
     put_test_a(conn, "M7", {"alt": 0.9})
     rid = new_run(conn)

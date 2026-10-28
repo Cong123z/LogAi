@@ -194,6 +194,8 @@ def _detect_decision(kd, cands: list[Cand], recalls) -> dict:
     if not live:
         return {"verdict": no, "leader": None, "tied": [], "note": "no method passed the gates with a Test A recall"}
     r, lead = live[0]
+    if r == 0:      # bk17: a tie at zero is not a leader
+        return {"verdict": no, "leader": None, "tied": [], "note": "no method detects"}
     out = {"leader": lead.name, "tied": [c.name for q, c in live if q == r]}
     if kd == "M7":
         win = r >= MIX_RECALL
