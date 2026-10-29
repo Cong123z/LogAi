@@ -131,6 +131,7 @@ class Resolver:
                 SELECT t.service, t.template_id, t.level, t.text FROM templates t
                 LEFT JOIN alert_state a ON a.service = t.service AND a.key = t.template_id
                 WHERE t.embedding IS NOT NULL
+                  AND t.service NOT IN (SELECT service FROM services WHERE NOT monitored)
                   AND NOT EXISTS (SELECT 1 FROM template_doc_links l
                                   WHERE l.service = t.service AND l.template_id = t.template_id)
                   AND NOT t.service = ANY(%s)
