@@ -73,6 +73,8 @@ class Engine:
         self.reader: Reader | None = None
         self.owner: Owner | None = None
         self.bootstrap: dict = {}
+        self.enabled: set[str] = set()
+        self.disabled: set[str] = set()
         self.last_commit: dict | None = None
         self.resolution: dict[str, list[str]] = {}
         self.available: list[dict] = []
@@ -223,17 +225,23 @@ class Engine:
         self.resolution = self.source.resolve([e["pattern"] for e in entries])
         floors: dict[str, int] = {}
         targets: dict[str, str] = {}
+        # an Off pattern is never read and is excluded from every On pattern, whatever its position
+        self.disabled = {e["pattern"] for e in entries if e.get("enabled") is False}
+        self.enabled = {e["pattern"] for e in entries} - self.disabled
+        # pm3: self.owner.set_selection(self.enabled, self.disabled) goes here
         for e in entries:
-            if e["pattern"] in floors:
+            if e["pattern"] in floors or e["pattern"] in self.disabled:
                 continue   # duplicate pattern: the first entry wins
             # a pattern selected before the first start is read from days_back; a later one from when it was added
             floor = self.bootstrap["since"] if e["added_at"] <= self.bootstrap["until"] else e["added_at"]
+            floor = max(floor, e.get("enabled_at") or 0)   # switched back On: only what comes after
             floors[e["pattern"]] = int(floor * 1000)
             # an index matched by two patterns is read once, by the earlier one
-            targets[e["pattern"]] = ",".join([e["pattern"]] + [f"-{p}" for p in floors if p != e["pattern"]])
+            targets[e["pattern"]] = ",".join([e["pattern"]] + [f"-{p}" for p in floors if p != e["pattern"]]
+                                       + [f"-{p}" for p in sorted(self.disabled)])
         # upgrade: rows keyed by concrete index all hold the minute boundary; a pattern without a row starts there
         oldest = min(saved.values(), default=None)
-        starts = {p: saved.get(p, f if oldest is None else max(f, oldest)) for p, f in floors.items()}
+        starts = {p: max(saved.get(p, f if oldest is None else max(f, oldest)), f) for p, f in floors.items()}
         self.reader.set_sources(floors, starts, targets)
         self._targets = targets
         return floors, starts

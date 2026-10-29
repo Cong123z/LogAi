@@ -28,14 +28,14 @@ def test_selection_round_trip_and_command(client, conn):
     first = entries[0]["added_at"]
     client.put("/api/sources/selection", json={"patterns": ["app-*"], "revision": body["selection"]["revision"]})
     again = client.get("/api/sources").get_json()["selection"]["entries"]
-    assert again == [{"pattern": "app-*", "added_at": first}]
+    assert again == [{"pattern": "app-*", "added_at": first, "enabled": True, "enabled_at": None}]
 
 
 def test_selection_configured_index_keeps_engine_start(client, cfg):
     # before the first save the engine reads cfg's index from added_at 0; saving it must not skip logs
     client.put("/api/sources/selection", json={"patterns": [cfg.elasticsearch.index], "revision": None})
     entries = client.get("/api/sources").get_json()["selection"]["entries"]
-    assert entries == [{"pattern": cfg.elasticsearch.index, "added_at": 0}]
+    assert entries == [{"pattern": cfg.elasticsearch.index, "added_at": 0, "enabled": True, "enabled_at": None}]
 
 
 def test_selection_invalid_pattern_400(client):
@@ -107,3 +107,50 @@ def test_index_page_served(client):
     r = client.get("/")
     assert r.status_code == 200 and b"LogAI2 Console" in r.data
     assert client.get("/static/js/views/sources.js").status_code == 200
+
+
+def put(client, patterns, disabled=None):
+    rev = client.get("/api/sources").get_json()["selection"]["revision"]
+    body = {"patterns": patterns, "revision": rev}
+    if disabled is not None:
+        body["disabled"] = disabled
+    return client.put("/api/sources/selection", json=body)
+
+
+def entries(client):
+    return {e["pattern"]: e for e in client.get("/api/sources").get_json()["selection"]["entries"]}
+
+
+def test_selection_disable_and_reenable(client):
+    put(client, ["a", "b"])
+    before = entries(client)
+    assert before["b"]["enabled"] is True and before["b"]["enabled_at"] is None
+    put(client, ["a", "b"], disabled=["b"])
+    off = entries(client)
+    assert off["b"]["enabled"] is False and off["a"]["enabled"] is True
+    assert off["b"]["added_at"] == before["b"]["added_at"] and off["a"]["enabled_at"] is None
+    t_switch = time.time()
+    put(client, ["a", "b"], disabled=[])
+    on = entries(client)
+    assert on["b"]["enabled"] is True and t_switch <= on["b"]["enabled_at"] <= time.time()
+    # a save that leaves it On keeps enabled_at
+    put(client, ["a", "b"])
+    assert entries(client)["b"]["enabled_at"] == on["b"]["enabled_at"]
+
+
+def test_selection_disabled_must_be_selected(client):
+    r = put(client, ["a"], disabled=["zzz"])
+    assert r.status_code == 400 and r.get_json()["error"] == "disabled must name selected patterns"
+    assert put(client, ["a"], disabled="a").status_code == 400
+
+
+def test_selection_without_enabled_is_on(client, conn):
+    from logai2.db import put_setting
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "a", "added_at": 0}]})
+    conn.commit()
+    assert entries(client)["a"] == {"pattern": "a", "added_at": 0, "enabled": True, "enabled_at": None}
+
+
+def test_selection_disabled_non_string_items_400(client):
+    r = client.put("/api/sources/selection", json={"patterns": ["a"], "disabled": [["a"]], "revision": None})
+    assert r.status_code == 400 and r.get_json()["error"] == "disabled must name selected patterns"

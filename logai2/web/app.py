@@ -181,7 +181,9 @@ def create_app(cfg: AppConfig) -> Flask:
     def selection_entries() -> list[dict]:
         value, _ = setting("index_selection")
         # never saved (or saved empty): the engine reads the configured index from added_at 0
-        return (value or {}).get("entries") or [{"pattern": cfg.elasticsearch.index, "added_at": 0}]
+        entries = (value or {}).get("entries") or [{"pattern": cfg.elasticsearch.index, "added_at": 0}]
+        # an entry saved before the switch existed is On
+        return [{"enabled": True, "enabled_at": None, **e} for e in entries]
 
     def engine_status() -> dict:
         row = conn().execute("SELECT status FROM worker_status WHERE worker = 'engine'").fetchone()
@@ -235,9 +237,19 @@ def create_app(cfg: AppConfig) -> Flask:
     def put_selection():
         payload = body()
         patterns = validate_patterns(payload.get("patterns"))
-        added = {e["pattern"]: e["added_at"] for e in selection_entries()}
+        disabled = payload.get("disabled", [])
+        if not isinstance(disabled, list) or not all(isinstance(d, str) and d in patterns for d in disabled):
+            raise BadRequest("disabled must name selected patterns")
+        old = {e["pattern"]: e for e in selection_entries()}
         now = time.time()
-        value = {"entries": [{"pattern": p, "added_at": added.get(p, now)} for p in patterns]}
+        value = {"entries": []}
+        for p in patterns:
+            prev = old.get(p)
+            on = p not in disabled
+            # switched back On: the engine reads it from now; otherwise keep what was saved
+            at = now if on and prev and not prev["enabled"] else prev["enabled_at"] if prev else None
+            value["entries"].append({"pattern": p, "added_at": prev["added_at"] if prev else now,
+                                     "enabled": on, "enabled_at": at})
         return jsonify({"revision": save("index_selection", value, payload.get("revision"))})
 
     @app.put("/api/sources/connection")
