@@ -6,6 +6,8 @@ schema probe_<8 hex>, then a CHILD process (clean RSS) builds Owner, times Miner
 M minutes of one count per template per minute with the watermark held, moves it past all M in one batch and flushes
 (the B25 shape). The last stdout line is one JSON object:
 templates, baseline_rows, blob_bytes, load_peak_mib, load_steady_mib, save_state_ms, flush_peak_mib.
+load_peak_mib is the peak while loading (before trim); load_steady_mib is the RSS after trim(); flush_peak_mib is the
+peak of the WHOLE run (load, holding M open minutes, closing in bites, flushing), so it is never below load_peak_mib.
 Detection is off (no detection_enabled setting), so the flush numbers are a floor.
 --off: instead builds the Owner with the pattern Off, switches it On, then Off; adds start_mib, on_mib, off_mib.
 """
@@ -100,7 +102,7 @@ def child(dsn: str, n: int, minutes: int) -> dict:
     while owner.minutes.next_to_close < START + minutes:
         owner.handle(done)
         owner.flush({"a": (owner.boundary_ms, held)}, {})
-    out["flush_peak_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    out["flush_peak_mib"] = max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, out["load_peak_mib"])
     return out
 
 

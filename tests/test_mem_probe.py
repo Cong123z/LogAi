@@ -11,3 +11,4 @@ def test_mem_probe_small(schema):
     r = json.loads(out.stdout.strip().splitlines()[-1])
     assert r["templates"] == 500 and r["baseline_rows"] == 500 * 48 and r["blob_bytes"] > 0
     assert r["load_peak_mib"] >= r["load_steady_mib"] > 0
+    assert r["flush_peak_mib"] >= r["load_peak_mib"]

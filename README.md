@@ -189,6 +189,18 @@ A method whose Test C medium recall differs from the latest ok Test A run of the
    services, all days. Live detection keeps running; the re-read pauses while
    live lags more than `retrain.max_live_lag_seconds`.
 
+### Upgrading from v15 (pattern On/Off, memory)
+
+1. Deploy the **engine** first: it applies migrations 010, 011 and 012 at start (lab tables, a lab knob, `services.monitored`;
+   seconds). Confirm `schema_migrations` has version 12 (or read it in the engine log). Then deploy the **web** and reload
+   open UI tabs.
+2. Every saved pattern stays On: nothing changes until you switch one.
+3. To stop monitoring a pattern without losing its data, open Settings, Data sources and turn its switch Off. The engine
+   stops reading, loading, zero-filling and judging its services, resets their alerts to NORMAL, and frees their memory;
+   the services disappear from every page. All history stays in Postgres. Turning it On again resumes from now.
+4. Watch `process_resident_memory_bytes` (Prometheus, from the engine) before and after: a big service that is Off costs
+   almost nothing, and the engine should no longer be OOMKilled at start for a removed or Off pattern.
+
 ### First start
 
 1. The engine migrates the schema and records `bootstrap = {since: now − 2
