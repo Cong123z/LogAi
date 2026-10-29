@@ -1,5 +1,5 @@
 // ── Data sources (Elasticsearch indices) ──
-const src = {data: null, draft: null, signature: null};
+const src = {data: null, draft: null, draftOff: null, signature: null};
 const $srcStatus = document.getElementById('src-status');
 const $srcAction = document.getElementById('src-action-status');
 
@@ -7,7 +7,10 @@ function fetchSources() { return getJson('/api/sources', 'Unable to load data so
 
 const srcSaved = () => ((src.data && src.data.selection.entries) || []).map(e => e.pattern);
 const srcPatterns = () => src.draft || srcSaved();
-const srcDirty = () => src.draft !== null && JSON.stringify(src.draft) !== JSON.stringify(srcSaved());
+const srcSavedOff = () => ((src.data && src.data.selection.entries) || []).filter(e => e.enabled === false).map(e => e.pattern);
+const srcOff = () => (src.draftOff || srcSavedOff()).filter(p => srcPatterns().includes(p));
+const srcDirty = () => (src.draft !== null && JSON.stringify(src.draft) !== JSON.stringify(srcSaved()))
+  || JSON.stringify(srcOff().sort()) !== JSON.stringify(srcSavedOff().sort());
 
 function srcMatches(pattern, index) {
   const re = new RegExp('^' + pattern.split('*').map(p => p.replace(/[.+?^${}()|[\]\\#-]/g, '\\$&')).join('.*') + '$');
@@ -22,7 +25,7 @@ function srcStatusText(data) {
 }
 
 function renderSources(data, force = false) {
-  const signature = JSON.stringify([data, src.draft, document.getElementById('src-filter').value]);
+  const signature = JSON.stringify([data, src.draft, src.draftOff, document.getElementById('src-filter').value]);
   if (!force && signature === src.signature) return;
   src.signature = signature;
   src.data = data;
@@ -35,7 +38,8 @@ function renderSources(data, force = false) {
   const addedAt = Object.fromEntries((data.selection.entries || []).map(e => [e.pattern, e.added_at]));
   const resolved = data.resolution || {};
   const progress = data.indices || {};
-    const patterns = srcPatterns();
+  const patterns = srcPatterns();
+  const off = srcOff();
   document.getElementById('src-selected-tbody').innerHTML = patterns.length ? patterns.map(pattern => {
     const saved = pattern in addedAt;
     const indices = resolved[pattern];
@@ -50,11 +54,14 @@ function renderSources(data, force = false) {
       reading = `<div><span class="ins-meta">${escapeHtml(at)}${p.caught_up ? ' · caught up' : ''}</span> ${badge}</div>`
         + `<div class="ins-meta">${indices.map(escapeHtml).join(', ')}</div>`;
     }
+    const isOff = off.includes(pattern);
+    if (isOff) reading = '<span class="badge badge-gray">Off: not read, hidden everywhere, history kept</span>';
     return `<tr>
       <td><span class="tmpl-id">${escapeHtml(pattern)}</span></td>
       <td>${reading}</td>
       <td><span class="ins-meta">${!saved ? 'on save' : addedAt[pattern] ? escapeHtml(formatFullTs(addedAt[pattern])) : 'engine start'}</span></td>
-      <td><button type="button" class="btn btn-danger" data-src-remove="${escapeHtml(pattern)}" aria-label="Stop reading ${escapeHtml(pattern)}">Remove</button></td>
+      <td><label class="switch"><input type="checkbox" role="switch" data-src-onoff="${escapeHtml(pattern)}" ${isOff ? '' : 'checked'} aria-label="Monitoring ${escapeHtml(pattern)}"></label> <span class="ins-meta">Monitoring</span>
+        <button type="button" class="btn btn-danger" data-src-remove="${escapeHtml(pattern)}" aria-label="Stop reading ${escapeHtml(pattern)}">Remove</button></td>
     </tr>`;
   }).join('') : '<tr><td colspan="4" class="empty-state">Nothing selected. Tick an index below or add a pattern.</td></tr>';
 
@@ -99,6 +106,14 @@ document.getElementById('src-selected-tbody').addEventListener('click', event =>
   const remove = event.target.closest('[data-src-remove]');
   if (remove) srcEdit(list => list.filter(p => p !== remove.dataset.srcRemove));
 });
+document.getElementById('src-selected-tbody').addEventListener('change', event => {
+  const box = event.target.closest('[data-src-onoff]');
+  if (!box) return;
+  const pattern = box.dataset.srcOnoff;
+  src.draftOff = srcOff().filter(p => p !== pattern).concat(box.checked ? [] : [pattern]);
+  $srcAction.textContent = '';
+  renderSources(src.data, true);
+});
 document.getElementById('src-available-tbody').addEventListener('change', event => {
   const box = event.target.closest('[data-src-toggle]');
   if (!box) return;
@@ -107,6 +122,7 @@ document.getElementById('src-available-tbody').addEventListener('change', event 
 });
 document.getElementById('src-discard-btn').addEventListener('click', () => {
   src.draft = null;
+  src.draftOff = null;
   $srcAction.textContent = '';
   renderSources(src.data, true);
 });
@@ -115,8 +131,9 @@ document.getElementById('src-save-btn').addEventListener('click', async event =>
   button.disabled = true;
   $srcAction.textContent = '';
   try {
-    await apiMutation('/api/sources/selection', 'PUT', {patterns: srcPatterns(), revision: src.data.selection.revision});
+    await apiMutation('/api/sources/selection', 'PUT', {patterns: srcPatterns(), disabled: srcOff(), revision: src.data.selection.revision});
     src.draft = null;
+    src.draftOff = null;
     renderSources(await fetchSources(), true);
   } catch (err) {
     $srcAction.textContent = err.status === 409

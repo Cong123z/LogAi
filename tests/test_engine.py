@@ -632,3 +632,48 @@ def test_status_es_oldest(conn, cfg, make):
     clock.t += 601
     engine.tick()
     assert engine._status()["es_oldest"] == {"a": 1_000}
+
+
+def _switch_engine(conn, make, entries, vas_hits=()):
+    put_setting(conn, "bootstrap", {"since": NOON - 86400, "until": NOON})
+    put_setting(conn, "index_selection", {"entries": entries})
+    src = FakeSource({"logs-app": [hit("app1", (NOON - 600) * 1000, service="app", level="ERROR", message="x")],
+                      "logs-vas": list(vas_hits)})
+    engine = make(src, Clock(NOON + 3600))
+    engine.start()
+    return src, engine
+
+
+def test_disabled_pattern_not_read_and_excluded(conn, cfg, make):
+    vas = [hit("v1", (NOON - 600) * 1000, service="vas", level="ERROR", message="y")]
+    src, engine = _switch_engine(conn, make, [
+        {"pattern": "logs-*", "added_at": 0}, {"pattern": "logs-vas", "added_at": 0, "enabled": False}], vas)
+    engine.tick()
+    assert set(engine.reader.floors) == {"logs-*"}
+    assert engine.reader._targets["logs-*"] == "logs-*,-logs-vas"
+    assert engine.enabled == {"logs-*"} and engine.disabled == {"logs-vas"}
+    assert all(not c.startswith("logs-vas") for c in src.calls)
+    assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 1
+
+
+def test_off_pattern_excluded_whatever_its_order(conn, cfg, make):
+    src, engine = _switch_engine(conn, make, [
+        {"pattern": "logs-*", "added_at": 0}, {"pattern": "logs-vas", "added_at": 0, "enabled": False}])
+    assert engine.reader._targets == {"logs-*": "logs-*,-logs-vas"}
+    # earlier Off pattern: still excluded from the On one after it
+    _, engine = _switch_engine(conn, make, [
+        {"pattern": "logs-vas", "added_at": 0, "enabled": False}, {"pattern": "logs-*", "added_at": 0}])
+    assert engine.reader._targets == {"logs-*": "logs-*,-logs-vas"}
+
+
+def test_reenabled_pattern_reads_from_enabled_at(conn, cfg, make):
+    T = NOON - 300
+    vas = [hit("old", (T - 120) * 1000, service="vas", level="ERROR", message="y"),
+           hit("new", (T + 60) * 1000, service="vas", level="ERROR", message="y")]
+    src, engine = _switch_engine(conn, make, [
+        {"pattern": "logs-vas", "added_at": 0, "enabled": True, "enabled_at": T}], vas)
+    assert engine.reader.floors["logs-vas"] == T * 1000
+    assert engine.reader._pos["logs-vas"] >= T * 1000
+    engine.tick()
+    engine.tick()
+    assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 1
