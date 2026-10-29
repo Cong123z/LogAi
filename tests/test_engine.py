@@ -677,3 +677,20 @@ def test_reenabled_pattern_reads_from_enabled_at(conn, cfg, make):
     engine.tick()
     engine.tick()
     assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 1
+
+
+def test_reenabled_pattern_ignores_stale_cursor_below_enabled_at(conn, cfg, make):
+    T = NOON - 300
+    put_setting(conn, "bootstrap", {"since": NOON - 86400, "until": NOON})
+    put_setting(conn, "index_selection", {"entries": [
+        {"pattern": "logs-vas", "added_at": 0, "enabled": True, "enabled_at": T}]})
+    conn.execute("INSERT INTO es_cursors (index, since_ms, floor_ms) VALUES ('logs-vas', %s, 1)", ((T - 3600) * 1000,))
+    conn.commit()
+    vas = [hit("gap", (T - 600) * 1000, service="vas", level="ERROR", message="y"),
+           hit("new", (T + 60) * 1000, service="vas", level="ERROR", message="y")]
+    engine = make(FakeSource({"logs-vas": vas}), Clock(NOON + 3600))
+    engine.start()
+    assert engine.reader._pos["logs-vas"] >= T * 1000
+    engine.tick()
+    engine.tick()
+    assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 1

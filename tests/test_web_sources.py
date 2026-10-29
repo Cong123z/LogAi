@@ -149,3 +149,8 @@ def test_selection_without_enabled_is_on(client, conn):
     put_setting(conn, "index_selection", {"entries": [{"pattern": "a", "added_at": 0}]})
     conn.commit()
     assert entries(client)["a"] == {"pattern": "a", "added_at": 0, "enabled": True, "enabled_at": None}
+
+
+def test_selection_disabled_non_string_items_400(client):
+    r = client.put("/api/sources/selection", json={"patterns": ["a"], "disabled": [["a"]], "revision": None})
+    assert r.status_code == 400 and r.get_json()["error"] == "disabled must name selected patterns"

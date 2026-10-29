@@ -241,7 +241,7 @@ class Engine:
                                        + [f"-{p}" for p in sorted(self.disabled)])
         # upgrade: rows keyed by concrete index all hold the minute boundary; a pattern without a row starts there
         oldest = min(saved.values(), default=None)
-        starts = {p: saved.get(p, f if oldest is None else max(f, oldest)) for p, f in floors.items()}
+        starts = {p: max(saved.get(p, f if oldest is None else max(f, oldest)), f) for p, f in floors.items()}
         self.reader.set_sources(floors, starts, targets)
         self._targets = targets
         return floors, starts

@@ -238,7 +238,7 @@ def create_app(cfg: AppConfig) -> Flask:
         payload = body()
         patterns = validate_patterns(payload.get("patterns"))
         disabled = payload.get("disabled", [])
-        if not isinstance(disabled, list) or not set(disabled) <= set(patterns):
+        if not isinstance(disabled, list) or not all(isinstance(d, str) and d in patterns for d in disabled):
             raise BadRequest("disabled must name selected patterns")
         old = {e["pattern"]: e for e in selection_entries()}
         now = time.time()
