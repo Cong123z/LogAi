@@ -38,6 +38,7 @@ def history(start_s, end_s, per_min, msg="ERROR payment failed for user 42", lev
 def make(conn, cfg):
     cfg.database.dsn = TEST_DSN
     cfg.elasticsearch.index = "a"
+    cfg.flush.max_closed_minutes = 10**6   # tests jump the clock and tick once; bites have their own tests
     made = []
 
     def build(src, clock, metrics=None):
@@ -694,3 +695,30 @@ def test_reenabled_pattern_ignores_stale_cursor_below_enabled_at(conn, cfg, make
     engine.tick()
     engine.tick()
     assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 1
+
+
+def test_lag_warning_names_the_slow_pattern(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make)
+    now = clock.t
+    engine._watermark_ms = int((now - 1200) * 1000)   # 20 min behind
+    engine._positions = {
+        "slow": {"pos_ms": int((now - 1200) * 1000), "caught_up": False, "failing": False},
+        "fast": {"pos_ms": int((now - 5) * 1000), "caught_up": True, "failing": False}}
+    warnings = engine._status()["warnings"]
+    assert "slow is 20 min behind: alerts of every pattern wait for it" in warnings
+    assert not any(w.startswith("fast ") for w in warnings)
+    engine._watermark_ms = int((now - 100) * 1000)    # under lag_warn_seconds: no warning
+    assert not any("min behind" in w for w in engine._status()["warnings"])
+
+
+def test_first_catch_up_waits_for_the_owner_bites(conn, cfg, make):
+    cfg.flush.max_closed_minutes = 60
+    clock = Clock(NOON)
+    engine = make(FakeSource({"a": history(NOON - 2 * 86400, NOON - 60, 1)}), clock)
+    cfg.start.days_back = 2
+    engine.start()
+    engine.tick()
+    assert engine.owner.close_full is False and not engine.owner.detection_enabled   # one bite is not caught up
+    catch_up(engine, clock, ticks=100)
+    assert engine.owner.minutes.next_to_close >= engine._watermark_ms // 60_000
+    assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 2 * 1440 - 1

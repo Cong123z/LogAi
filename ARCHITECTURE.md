@@ -166,6 +166,8 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `reader.upper_bound_seconds` | 30 | only docs with `@timestamp <= now - 30 s` are read |
 | `flush.seconds` | 2.0 | flush at least this often |
 | `flush.max_events` | 50000 | flush when this many events are pending |
+| `flush.max_closed_minutes` | 60 | minutes one flush may close; a longer lag is closed in bites, one flush each |
+| `reader.lag_warn_seconds` | 600 | status warning naming the slow pattern(s) once the watermark lags this much (detection on) |
 | `retrain.tick_seconds` | 1.0 | re-read lane: reading time per engine tick |
 | `retrain.es_timeout_seconds` | 30 | re-read lane: request timeout of one page |
 | `retrain.max_live_lag_seconds` | 60 | the lane waits while live lags more than this |
@@ -464,9 +466,11 @@ Each profile's state (`down_until`, `error`) and the last LLM error are in
    at the min over all patterns (so an ES outage never closes minutes);
    with no pattern at all it is `upper_ms`.
 
-After a successful flush the engine calls `forget_before(boundary)`: ids
-older than min(boundary, position) are dropped from the seen-set, so it holds
-only the open minutes (never the position's millisecond, which is re-read).
+After a successful flush the engine calls `forget_read()`: ids with a
+timestamp below the pattern's position are dropped (pages start at the
+position, so they cannot be read again; ids at the position's millisecond are
+kept, it is re-read). The seen-set holds only the last unflushed stretch, not
+the whole lag.
 `learn()` puts the owner's resolved misses into the cache.
 
 ## 7. Owner and exactly-once flush
@@ -503,7 +507,12 @@ anything else; case-insensitive), and to the (template, module) count. A count f
 is dropped and counted in `logai_late_counts_total` (expected to stay 0).
 
 `close_before(watermark_ms // 60000)` closes every minute before the
-watermark's minute, in order, including minutes with no event:
+watermark's minute, in order, including minutes with no event. `handle` closes at
+most `flush.max_closed_minutes` (60) per flush (`close_full`; the engine flushes
+when it is reached), so a watermark that jumps hours is written in bites. The
+cursor stays at the oldest open minute, so a crash between bites re-reads the
+minutes not yet closed, once. Open-minute error samples keep at most 20 lines
+per template and minute:
 
 - **Silent zeros.** Every known service gets `*total`, `*error`, `*warn` and `*info` = 0
   in every closed minute from its first minute on; every template seen

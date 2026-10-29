@@ -135,8 +135,8 @@ def live_two_patterns(conn, cfg, src, until_ms):
         batch = reader.poll()
         reader.learn(owner.handle(batch))
         owner.flush(reader.cursors(owner.boundary_ms), {})
-        reader.forget_before(owner.boundary_ms)
-        if batch["watermark_ms"] >= until_ms:
+        reader.forget_read()
+        if owner.boundary_ms >= until_ms:
             return
     raise AssertionError("watermark never passed until_ms")
 

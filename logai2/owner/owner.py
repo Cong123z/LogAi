@@ -156,7 +156,7 @@ class Owner:
         self._unparsed_logged: dict[str, int] = {}  # service -> minute last logged
         # samples of open minutes, queued only when their minute closes: open minutes are
         # re-read after a crash, so queuing earlier would insert their samples twice
-        self._open_samples: dict[int, list[tuple[str, str, str]]] = defaultdict(list)
+        self._open_samples: dict[int, dict[tuple[str, str], list[str]]] = defaultdict(dict)
         self._clear()
 
     def _clear(self) -> None:
@@ -175,6 +175,7 @@ class Owner:
         self._samples: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=SAMPLES_KEPT))
         self._lane_hours: list = []                    # re-read LaneHours replacing whole hours in the next flush
         self._lane_run: tuple[int, dict] | None = None  # (run id, {"pos_ms", "steps"}) written in that flush
+        self._closed = 0   # minutes closed since the last flush
 
     def _load_links(self) -> dict[tuple[str, str], str]:
         return {(r["service"], r["template_id"]): r["doc_id"]
@@ -188,6 +189,10 @@ class Owner:
     def reload_links(self) -> None:
         with self.conn.transaction():
             self.detector.links = self._load_links()
+
+    @property
+    def close_full(self) -> bool:
+        return self._closed >= self.cfg.flush.max_closed_minutes
 
     @property
     def boundary_ms(self) -> int:
@@ -211,17 +216,25 @@ class Owner:
                         self._unparsed_logged[service] = minute
                         logger.exception("could not template a %s line; counted as %s", service, template_id)
             self._see(service, template_id, text, level, c["module"], minute)
-            if minute >= self.minutes.next_to_close:  # a late count is dropped, its sample too
-                self._open_samples[minute].append((service, template_id, c["sample"]))
+            # a late count is dropped, its sample too; only error templates keep samples (memory while lagging)
+            if minute >= self.minutes.next_to_close and self.levels[(service, template_id)].upper() in ERROR_LEVELS:
+                kept = self._open_samples[minute].setdefault((service, template_id), [])
+                if len(kept) < SAMPLES_KEPT:
+                    kept.append(c["sample"])
             self.minutes.add(service, template_id, level, c["module"], minute, c["n"])
 
         today = day_hour(int(self.now() // 60))[0]
         mod_cutoff = today - timedelta(days=self.cfg.retention.module_hours_days)
         lab_cutoff = today - timedelta(days=self.cfg.lab.days)
-        for cm in self.minutes.close_before(batch["watermark_ms"] // 60_000, self.services):
-            for service, template_id, sample in self._open_samples.pop(cm.minute, ()):
+        # a long lag is closed in bites of max_closed_minutes per flush (the cursor stays at the oldest open minute)
+        room = max(0, self.cfg.flush.max_closed_minutes - self._closed)
+        upto = min(batch["watermark_ms"] // 60_000, self.minutes.next_to_close + room)
+        closed = self.minutes.close_before(upto, self.services)
+        self._closed += len(closed)
+        for cm in closed:
+            for (service, template_id), lines in self._open_samples.pop(cm.minute, {}).items():
                 if self.levels[(service, template_id)].upper() in ERROR_LEVELS:
-                    self._samples[(service, template_id)].append((cm.minute, sample))
+                    self._samples[(service, template_id)].extend((cm.minute, line) for line in lines)
             for (service, key), n in cm.keys.items():
                 if key == "*total":  # close_before gives every service a *total key
                     self.service_minutes[service].append((cm.minute, n))
