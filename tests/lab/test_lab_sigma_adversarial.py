@@ -37,6 +37,7 @@ def drive_live(conn, cfg, days, gen, templates, links=(), exclusions=()):
         conn.execute("INSERT INTO review_exclusions (service, day, hour_from, hour_to, decision) "
                      "VALUES (%s, %s, %s, %s, 'exclude')", (SVC, d, hf, ht))
     conn.commit()
+    cfg.flush.max_closed_minutes = 10**6   # one handle per block must close the whole block (no bites)
     clock = [minute_at(days[0], 0) * 60.0]
     owner = Owner(conn, cfg, minute_at(days[0], 0), now=lambda: clock[0])
     loaded = {}
