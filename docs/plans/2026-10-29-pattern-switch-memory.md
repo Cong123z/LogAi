@@ -17,7 +17,7 @@ Minutes close in bounded bites. `services.monitored` is the one flag the web and
 ## Global Constraints
 
 - Tests: `.venv/bin/pytest -q <files>` against the test Postgres on 127.0.0.1:5433 (`docker compose up -d postgres`).
-- **Test budget (user, 2026-10-29: "run test less"):** implementers, reviewers and adversaries run only the task's
+- **Test budget (user, 2026-10-29: "run test less"):** implementers and reviewers run only the task's
   **focused set** (listed per task below), never the full suite. The tech lead runs the full suite **twice in the
   build**: on `build/pattern-switch` after wave 2 (pm1 + pm5 merged) and once before the final merge into master.
   A failure there goes back to the task that owns the file.
@@ -58,8 +58,7 @@ Nothing is dispatched until the user says start.
 | Tech lead | Claude Opus 5.5 (this session) | Writes each brief `docs/tasks/pm<N>-<slug>.md` just before dispatch (with the interfaces merged code really has); creates the branch + worktree; answers `QUESTION:`; assigns reviewers; final review (seams, focused set, docs); runs the two full-suite checkpoints; adds the probe rows to `docs/perf/2026-10-29-memory.md`; merges each approved task into `build/pattern-switch`; master gets **one merge at the end, after the user confirms** (user, 2026-10-29); keeps `.team/ledger.md` | Feature code (only tiny review fixes, and says so) |
 | Implementer | Claude Sonnet 5.5 subagent (`model: sonnet`), one fresh agent per task | Tests first (seen failing), code, the focused set, probe run when the task says so, PR file `.team/prs/task-pm<N>-<slug>.md`; stops with `QUESTION:` when unsure | Merges; reviews its own branch; touches files outside its brief |
 | Reviewer O | Claude Opus 5.5 subagent (`model: opus`), fresh | Reviews the tasks where a mistake silently loses or doubles counts, or wrongly silences alerts (pm1, pm3, pm5): another model than the implementer, so a shared blind spot is less likely | Rewrites the feature |
-| Adversary O | a second, independent Opus subagent, fresh | Only on pm3 and pm5. Not a style review: writes and runs extra tests that try to break the claim (crash between bites, flush failure after an Off, Off/On/Off within one flush, a service in both an On and an Off pattern) and reports what fails | Fixes what it finds |
-| Reviewer S | Claude Sonnet 5.5 subagent (`model: sonnet`), fresh, never the implementer | Reviews the bounded tasks (pm0, pm2, pm4, pm6) | Rewrites the feature |
+| Reviewer S | Claude Sonnet 5.5 subagent, fresh | Reviewed pm0 and pm2 (before the 2026-10-29 ruling); not used after | Rewrites the feature |
 | User | - | Confirms each branch before merge; checks the Data sources switch and the hidden service in Chrome (pm2, pm4); does the company rollout | - |
 
 A review returns `Spec ✅/❌`, Critical / Important / Minor, `Approved / Needs fixes`. Up to 3 fix rounds by the same
@@ -67,15 +66,19 @@ implementer, then the tech lead rules. Re-review only after a Critical or Import
 
 ### Per task
 
-| Task | Implementer | Reviewer | Why this reviewer | Tech lead checks before merge |
+**Review ruling (user, 2026-10-29: "less review"):** one fresh Opus reviewer only on the important tasks (pm1, pm3,
+pm5); no adversaries; no separate review on the bounded tasks (pm4, pm6): the tech lead's final review (Opus) is the
+only gate there. pm0 and pm2 were already Sonnet-reviewed before this ruling.
+
+| Task | Implementer | Reviewer | Why | Tech lead checks before merge |
 |---|---|---|---|---|
-| pm0 probe + metric | Sonnet | Sonnet | Script and one metric line; nothing in the data path | Run the probe at 135k myself; the "before" numbers are believable against the 3.9 GiB measured |
+| pm0 probe + metric | Sonnet | Sonnet (done) | Script and one metric line | Done |
 | pm1 compact baseline | Sonnet | **Opus** | A wrong slot or NaN rule gives wrong bands everywhere, silently | Old dict vs new layout give the same `lookup` for every row of the laptop's live baseline |
-| pm5 bites, forget, samples | Sonnet | **Opus** + **Opus adversary** | Exactly-once path: the cap, the cursor boundary and forgetting ids can double or lose counts | Kill the engine between two bites and restart: counts exact (run myself) |
-| pm2 On/Off switch | Sonnet | Sonnet | Selection API, the targets string, a UI toggle: bounded, with a clear contract | Read the `targets` string for On/Off/Remove orders; the user switches Off/On in Chrome |
-| pm3 active services | Sonnet | **Opus** + **Opus adversary** | The core of the fix: Off wins, alert reset, open minutes dropped, rebuild delete rule, lazy load | Replay the incident (Off the slowest pattern 3 h behind) on the laptop: no zeros, alerts reset, RSS drops |
-| pm4 hide everywhere | Sonnet | Sonnet | Many small, similar query edits | Grep every `FROM services` / `FROM templates` / `FROM alert_state` in web and linker: each filtered or justified; the user clicks through in Chrome |
-| pm6 proof + docs | Sonnet | Tech lead | Measurements and docs; I validate the report | Re-run one number of each probe row |
+| pm5 bites, forget, samples | Sonnet | **Opus** | Exactly-once path: the cap, the cursor boundary and forgetting ids can double or lose counts | Kill the engine between two bites and restart: counts exact (run myself) |
+| pm2 On/Off switch | Sonnet | Sonnet (done) | Bounded contract | Done |
+| pm3 active services | Sonnet | **Opus** | The core: Off wins, alert reset, open minutes dropped, rebuild delete rule, lazy load | Replay the incident (Off the slowest pattern 3 h behind) on the laptop: no zeros, alerts reset, RSS drops |
+| pm4 hide everywhere | Sonnet | Tech lead only | Many small, similar query edits | Grep every `FROM services` / `FROM templates` / `FROM alert_state` in web and linker: each filtered or justified; the user clicks through in Chrome |
+| pm6 proof + docs | Sonnet | Tech lead only | Measurements and docs | Re-run one number of each probe row |
 
 ### Waves (parallel only when the file lists are disjoint; at most 3 agents at once)
 
@@ -92,8 +95,8 @@ implementer, on the tech lead's request) and reruns its focused set before its f
 
 ### Cost
 
-7 Sonnet implementers, 4 Sonnet/lead reviews, 3 Opus reviews, 2 Opus adversaries, plus fix rounds. To cut cost,
-drop the adversaries first (pm5, then pm3); never drop the Opus review of pm3.
+7 Sonnet implementers, 2 Sonnet reviews (done), 3 Opus reviews (pm1, pm3, pm5), the tech lead's final review on
+every task, fix rounds only after a Critical or Important finding.
 
 ---
 

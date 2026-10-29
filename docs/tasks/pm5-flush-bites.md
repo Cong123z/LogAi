@@ -1,7 +1,7 @@
 # Task pm5: Close minutes in bites, stop hoarding while lagging, lag warning
 
 Implementer: Sonnet 5.5 — the exactly-once path (owner, reader, engine flush).
-Reviewer: Opus 5.5 (fresh) + an independent Opus adversary — the cap, the cursor boundary and forgetting ids can
+Reviewer: Opus 5.5 (fresh) — the cap, the cursor boundary and forgetting ids can
 double or lose counts.
 Branch: task/pm5-flush-bites (worktree ../logai2-task-pm5, created by the tech lead from build/pattern-switch)
 PR file: .team/prs/task-pm5-flush-bites.md (from docs/templates/pr.md)
