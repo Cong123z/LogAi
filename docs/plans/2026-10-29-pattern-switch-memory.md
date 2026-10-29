@@ -1,5 +1,7 @@
 # Pattern On/Off switch and engine memory: implementation plan
 
+Status: done, 2026-10-29, on build/pattern-switch 23ed042 (merges pm0-pm5); pm4 (web) and pm6 (proof) follow.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
