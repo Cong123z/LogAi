@@ -950,6 +950,15 @@ is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `nu
 enqueues a command is listed in the table above; the command kinds are in
 ARCHITECTURE §12.2.
 
+## Off services
+
+A service whose pattern is Off (`services.monitored = false`) is hidden completely: it is missing from every list
+and picker (Services, Alerts, Templates, Template levels, Documents' link counts, Pipeline, Retrain, module alerts),
+and its per-service routes (`/api/baseline*`, `/api/modules`, `/api/templates/<service>/...`) answer 404
+"Unknown service". A document cannot be scoped to it. The linker does not embed its templates and the LLM resolver
+skips them. Nothing is deleted: its data is back when the pattern is turned On. The Evaluation (lab) pages are not
+affected.
+
 ## Security
 
 The API has no authentication or authorization (except the optional shared bearer token on

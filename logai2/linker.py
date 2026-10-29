@@ -55,7 +55,8 @@ class Linker:
             self.resolver.run(status, progress=lambda: self._write_status(status))
         with self.conn.transaction():
             status["pending"] = self.conn.execute(
-                "SELECT (SELECT count(*) FROM templates WHERE embedding IS NULL) AS templates, "
+                "SELECT (SELECT count(*) FROM templates WHERE embedding IS NULL "
+                "AND service NOT IN (SELECT service FROM services WHERE NOT monitored)) AS templates, "
                 "(SELECT count(*) FROM documents WHERE status <> 'rejected' "
                 "AND embedded_revision IS DISTINCT FROM revision) AS documents").fetchone()
         self._write_status(status)
@@ -74,6 +75,7 @@ class Linker:
             rows = self.conn.execute(
                 "SELECT t.service, t.template_id, t.text FROM templates t LEFT JOIN alert_state a "
                 "ON a.service = t.service AND a.key = t.template_id WHERE t.embedding IS NULL "
+                "AND t.service NOT IN (SELECT service FROM services WHERE NOT monitored) "
                 "ORDER BY (a.state = 'ALERTING') IS TRUE DESC, t.last_seen DESC LIMIT %s",
                 (batch * TEMPLATES_PER_CYCLE,)).fetchall()
         for i in range(0, len(rows), batch):
