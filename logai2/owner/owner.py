@@ -216,7 +216,8 @@ class Owner:
                         self._unparsed_logged[service] = minute
                         logger.exception("could not template a %s line; counted as %s", service, template_id)
             self._see(service, template_id, text, level, c["module"], minute)
-            if minute >= self.minutes.next_to_close:  # a late count is dropped, its sample too
+            # a late count is dropped, its sample too; only error templates keep samples (memory while lagging)
+            if minute >= self.minutes.next_to_close and self.levels[(service, template_id)].upper() in ERROR_LEVELS:
                 kept = self._open_samples[minute].setdefault((service, template_id), [])
                 if len(kept) < SAMPLES_KEPT:
                     kept.append(c["sample"])
