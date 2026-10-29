@@ -722,3 +722,112 @@ def test_first_catch_up_waits_for_the_owner_bites(conn, cfg, make):
     catch_up(engine, clock, ticks=100)
     assert engine.owner.minutes.next_to_close >= engine._watermark_ms // 60_000
     assert q(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 2 * 1440 - 1
+
+
+def test_switch_order_unloads_before_jump(conn, cfg, make):
+    """Off the pattern holding the watermark 3 h back: the jump closes no minute for its services."""
+    clock = Clock(NOON)
+    app = [hit(f"a{m}", m * 60_000 + 500, service="app", level="INFO", message="app ok")
+           for m in range(int(NOON) // 60 - 30, int(NOON) // 60 + 200)]
+    vas = [hit("v1", (NOON - 600) * 1000, service="vas", level="ERROR", message="y")]
+    put_setting(conn, "bootstrap", {"since": NOON - 86400, "until": NOON})
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "logs-app", "added_at": 0},
+                                                      {"pattern": "logs-vas", "added_at": 0}]})
+    engine = make(FakeSource({"logs-app": app, "logs-vas": vas}), clock)
+    engine.start()
+    engine.tick()
+    assert engine.owner.active == {"app", "vas"}
+    clock.t = NOON + 3 * 3600
+    engine.reader.source.fail(engine._targets["logs-vas"])   # vas is stuck: it holds the watermark
+    engine.tick()
+    assert engine.owner.minutes.next_to_close * 60 < NOON + 60
+    n_before = q(conn, "SELECT count(*) AS n FROM hourly_counts WHERE service = 'vas'")[0]["n"]
+    h_before = q(conn, "SELECT sum(n_minutes) AS n FROM service_hours WHERE service = 'vas'")[0]["n"]
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "logs-app", "added_at": 0},
+                                                      {"pattern": "logs-vas", "added_at": 0, "enabled": False}]})
+    clock.t += cfg.elasticsearch.index_refresh_seconds + 1
+    for _ in range(5):
+        engine.tick()
+    assert engine.owner.active == {"app"}
+    assert engine.owner.minutes.next_to_close * 60 > NOON + 2 * 3600   # the jump was closed
+    assert q(conn, "SELECT count(*) AS n FROM hourly_counts WHERE service = 'vas'")[0]["n"] == n_before
+    assert q(conn, "SELECT sum(n_minutes) AS n FROM service_hours WHERE service = 'vas'")[0]["n"] == h_before
+    assert q(conn, "SELECT monitored FROM services WHERE service = 'vas'")[0]["monitored"] is False
+
+
+def test_export_only_active_services(conn, cfg, make):
+    exported = []
+    metrics = Metrics(None)
+    metrics.export_rows = lambda rows: exported.append(rows)
+    put_setting(conn, "bootstrap", {"since": NOON - 86400, "until": NOON})
+    put_setting(conn, "index_selection", {"entries": [{"pattern": "logs-app", "added_at": 0},
+                                                      {"pattern": "logs-vas", "added_at": 0}]})
+    src = FakeSource({"logs-app": [hit("a1", (NOON - 600) * 1000, service="app", level="ERROR", message="x")],
+                      "logs-vas": [hit("v1", (NOON - 600) * 1000, service="vas", level="ERROR", message="y")]})
+    engine = make(src, Clock(NOON + 3600), metrics)
+    engine.start()
+    engine.tick()
+    from logai2.owner.detect import AlertRow
+    for s in ("app", "vas"):
+        engine.owner.detector.states[(s, f"doc:{s}")] = AlertRow(s, f"doc:{s}", "ALERTING", 0, 0.0, 1.0, 5)
+    engine.owner.detector.links[("app", "app:T1")] = "d1"
+    engine.owner.detector.links[("vas", "vas:T1")] = "d2"
+    engine.owner.detector.states[("vas", "vas:T1")] = AlertRow("vas", "vas:T1", "ALERTING", 0, 0.0, 1.0, 5)
+    engine.owner.detector.states[("app", "app:T1")] = AlertRow("app", "app:T1", "ALERTING", 0, 0.0, 1.0, 5)
+    engine.owner.active.discard("vas")
+    engine._flush()
+    assert exported[-1] and {r["service"] for r in exported[-1]} == {"app"}
+
+
+def _lane_engine(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make)
+
+    class Lane:
+        done = False
+        steps = 0
+
+        def step(self, seconds, now):
+            self.steps += 1
+            return []
+
+        def take_ready(self):
+            return []
+
+    engine.reread = {"lane": Lane(), "paused": 0, "errors": 0, "lag": 0.0}
+    engine._reread_publish = lambda hours: None
+    engine._positions = {"a": {"pos_ms": 0, "caught_up": True, "failing": False}}
+    engine._watermark_ms = int(clock.t * 1000)
+    return engine, clock
+
+
+def test_lane_waits_for_owner_bites(conn, cfg, make):
+    engine, clock = _lane_engine(conn, cfg, make)
+    lane = engine.reread["lane"]
+    engine.owner.minutes.next_to_close = engine._watermark_ms // 60_000 - 5   # the owner still closes bites
+    engine._lane_tick(clock.t)
+    assert lane.steps == 0 and engine.reread["paused"] == 1
+    engine.owner.minutes.next_to_close = engine._watermark_ms // 60_000
+    engine._lane_tick(clock.t)
+    assert lane.steps == 1
+
+
+def test_tick_no_sleep_while_owner_behind(conn, cfg, make):
+    cfg.flush.max_closed_minutes = 60
+    cfg.start.days_back = 1
+    clock = Clock(NOON)
+    engine = make(FakeSource({"a": history(NOON - 86400, NOON - 60, 1)}), clock)
+    engine.start()
+    assert engine.tick() is True                       # events read
+    assert engine.owner.minutes.next_to_close < engine._watermark_ms // 60_000
+    assert engine.tick() is True                       # no events left, owner still closing bites
+    for _ in range(40):
+        if not engine.tick():
+            break
+    assert engine.owner.minutes.next_to_close >= engine._watermark_ms // 60_000
+
+
+def test_status_owner_lag_seconds(conn, cfg, make):
+    engine, clock = caught_up_engine(conn, cfg, make)
+    st = engine._status()
+    assert st["owner_lag_seconds"] == pytest.approx(max(0.0, clock.t - engine.owner.boundary_ms / 1000))
+    assert "lag_seconds" in st and "skipped_off" in st

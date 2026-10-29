@@ -166,7 +166,7 @@ Compose-only variables: `LOGAI2_NETWORK` (external network name, default
 | `reader.upper_bound_seconds` | 30 | only docs with `@timestamp <= now - 30 s` are read |
 | `flush.seconds` | 2.0 | flush at least this often |
 | `flush.max_events` | 50000 | flush when this many events are pending |
-| `flush.max_closed_minutes` | 60 | minutes one flush may close; a longer lag is closed in bites, one flush each |
+| `flush.max_closed_minutes` | 60 | minutes one flush may close (must be ≥ 1: config load raises `ValueError`); a longer lag is closed in bites, one flush each |
 | `reader.lag_warn_seconds` | 600 | status warning naming the slow pattern(s) once the watermark lags this much (detection on) |
 | `retrain.tick_seconds` | 1.0 | re-read lane: reading time per engine tick |
 | `retrain.es_timeout_seconds` | 30 | re-read lane: request timeout of one page |
@@ -478,6 +478,35 @@ the whole lag.
 `logai2/owner/owner.py`. The owner holds one Drain3 miner per service, the
 open minutes, the detector and everything pending for the next flush.
 
+**Active services.** The owner keeps state (Drain3 blob, template levels,
+baseline, alert states, links, first-minute map) only for the *active*
+services: those with a pair in `index_services` under an On pattern, minus
+those with a pair under an Off pattern (**Off wins**), plus services first seen
+in a batch. `Owner(..., enabled, disabled)` computes the set at start
+(`enabled=None`: every pattern is On); a removed pattern's services are in
+neither set, so they are not loaded (B24). Only active services are
+zero-filled, judged and exported to Prometheus. A count of an Off service
+(reached through another pattern's index) is dropped and counted in
+`skipped_off` (status). A count of a service that is not active and not Off
+loads its state first (`_load`), from the pending blob if a flush has not
+written it yet.
+
+`Engine._select_indices` calls `Owner.set_selection(enabled, disabled)`
+before the next `poll`, so a switch never lets the jump's minutes reach the
+leaving services. `_unload` drops a leaving service from memory (miner after
+saving its dirty blob as pending, baseline, levels except those of pending
+templates, modules, links, open minutes and hour keys, open samples, the
+first-minute entry: no zero-fill), then `trim()`s the heap and logs
+`state loaded: N services, rss M MiB`. Rows of minutes already closed stay
+pending. **Alert reset:** each state of a leaving service that is not
+NORMAL or has a streak becomes NORMAL, streak 0, with an `alert_changes`
+row (`ALERTING` → `NORMAL`, at the switch time); the next flush writes
+`alert_state` and the change. A service switched On loads its state and is
+zero-filled from the next minute to close, not from its old first minute (D3:
+the gap stays a gap). When the active set changed, the flush also runs
+`UPDATE services SET monitored = (service = ANY(active))` (migration 012;
+every web query filters on it). All data of an Off service stays in Postgres.
+
 ### 7.1 Templates
 
 - `Miners.match(service, text)` (`owner/miners.py`): each service has its
@@ -523,7 +552,9 @@ per template and minute:
   `sum += n, sumsq += n²` for every key with n > 0. The baseline's
   denominator is `n_minutes`, so silent minutes count as zeros.
 - Samples of ERROR+ templates are queued only when their minute closes (an
-  open minute is re-read after a crash), at most 20 per template.
+  open minute is re-read after a crash), at most 20 per template; open
+  samples are kept only for templates whose level is ERROR+ at count time
+  (memory while lagging).
 - Detection runs on the closed minute (§8) when detection is enabled.
 
 All local-time bucketing goes through `logai2/timeutil.py`
@@ -664,8 +695,13 @@ the Retrain page's **Rebuild** (and its re-read's last step) all call it.
 1. **Mark days:** every (service, day) in `service_hours` with `day < today`
    is inserted into `day_status` as committed, with its day type (ISO
    weekday 6–7 = weekend). An already-committed day is not re-marked.
-2. **Rebuild** `baseline` from scratch (`DELETE` then one `INSERT … SELECT`):
-   - per service, the last 5 committed weekdays and the last 4 committed
+2. **Rebuild** `baseline` per service: the `INSERT … SELECT` goes into the temp
+   table `tmp_rebuild`; then the baseline rows of the services it produced rows
+   for are deleted and replaced. A service with no produced row keeps its
+   baseline: an Off service (`services.monitored` false, spec D4: the Off hours
+   have no rows, nothing is learned from them) and one whose `service_hours`
+   were dropped by retention. `baseline_rows` in the result is the rows inserted.
+   - per monitored service, the last 5 committed weekdays and the last 4 committed
      weekend days;
    - their hours with `n_minutes > 0`, minus hours covered by an
      `exclude` decision in `review_exclusions` (`hour_from` ≤ h <
@@ -709,7 +745,7 @@ one whole hour at a time, then rebuilds the baseline.
   the oldest open minute) is *live*; neither is written. A service fed by two patterns
   reads both.
 - The `Lane` runs inside the engine tick, after the live poll and flush, only when live is
-  caught up and `lag_seconds <= retrain.max_live_lag_seconds`, for `retrain.tick_seconds`
+  caught up, the owner has closed up to the watermark, and `lag_seconds <= retrain.max_live_lag_seconds`, for `retrain.tick_seconds`
   a tick. It pages each window like the live reader (position = max sort ms, re-read docs
   dropped by `(_index, _id)`, only the ids at the position ms kept), matches with the
   owner's Drain3 miners and the reader's known-line cache, and counts into its **own**
@@ -763,30 +799,35 @@ status and `commit()`, each unit of work in its own transaction.
    every retry (the web's fix is picked up before the loop runs commands).
 4. `start_ms` = min over the selected patterns' starting positions (saved `since_ms`, else the upgrade rule or floor, §4.3).
    Create partitions from that local day (or today) to today + 2.
-5. Build the owner with `start_minute = start_ms // 60000`; load Drain3
-   blobs, template levels, services, modules, alert states, links,
-   `detection_enabled` and the baseline. Log a warning when non-NORMAL states
-   were loaded (they are exported as they were until catch-up re-judges
-   them).
+5. Build the owner with `start_minute = start_ms // 60000` and the selection
+   (`enabled`, `disabled`); load, for the active services only (§7), Drain3
+   blobs, template levels, services, modules, alert states, links and the
+   baseline, and `detection_enabled`. Log `state loaded: N services, rss M MiB`
+   and a warning when non-NORMAL states were loaded (they are exported as they
+   were until catch-up re-judges them).
 6. If a commit is due (§10.3), run it now ("missed daily commit").
 
 ### 10.2 Tick
 
-`run_forever()` calls `tick()`; when a tick read no event it sleeps
-`poll_interval_seconds`, otherwise it polls again at once.
+`run_forever()` calls `tick()`; when a tick read no event and the owner has
+closed up to the watermark it sleeps `poll_interval_seconds`, otherwise it
+polls again at once (a long jump is closed bite after bite without sleeping).
 
 1. Run pending commands (§12.2).
 2. Refresh: re-resolve index patterns every 60 s; list available indices
    every 30 s; at local midnight create partitions for today .. today + 2.
 3. `reader.poll()` → `owner.handle(batch)` → `reader.learn(resolved)`.
 4. Update counters and the 5-min miss window.
-5. Flush when due.
+5. Flush when due: `max_events` read, `flush.seconds` elapsed, or the owner
+   closed `flush.max_closed_minutes` minutes (`close_full`, a bite).
 6. **First catch-up:** while detection is off, as soon as every healthy
-   index is caught up (failing ones ignored): run the commit, save
+   index is caught up (failing ones ignored) **and the owner has closed up to
+   the watermark** (it closes in bites): run the commit, save
    `detection_enabled = true`, enable detection and flush. Before that,
    nothing alerts, not even the floors.
 7. Otherwise run the daily commit when due.
-8. **Re-read lane:** if a re-read is active and live is caught up and not lagging
+8. **Re-read lane:** if a re-read is active and live is caught up, the owner
+   has closed up to the watermark, and live is not lagging
    (§9), read for `retrain.tick_seconds` and queue the finished hours for the next flush.
 
 A tick that raises is logged; the engine sleeps 30 s, reconnects `db` if it
@@ -823,6 +864,8 @@ The engine writes `worker_status['engine'].status` at every flush:
 |---|---|
 | `heartbeat` | epoch s of the flush |
 | `lag_seconds` | now − watermark (≥ 30 s by the upper bound) |
+| `owner_lag_seconds` | now − the owner's boundary (oldest unclosed minute): how far closing trails while bites are written |
+| `skipped_off` | counts dropped since start because their service is Off (§7) |
 | `flush_seconds` | duration of the last completed flush (0 before the first) |
 | `flush_seconds_max` | slowest flush of the last 15 min |
 | `late_counts` | events for an already-closed minute since start (should stay 0) |
@@ -872,7 +915,7 @@ hits are counted in the reader but not exported.
 ## 11. Postgres schema
 
 `logai2/migrations/` (001 core, 002 document links, 003 LLM failover, 004
-document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs, 009 index services, 010 lab, 011 lab knob), applied by `db.migrate()` (numbered
+document service, 005 document level, 006 modules per service, 007 template modules, 008 retrain runs, 009 index services, 010 lab, 011 lab knob, 012 services monitored), applied by `db.migrate()` (numbered
 `NNN_*.sql` files, tracked in `schema_migrations`). Plain SQL, no ORM,
 `psycopg` 3 with dict rows. `service` is the first column of every
 service-scoped primary key.
@@ -880,7 +923,7 @@ service-scoped primary key.
 | Table | Primary key | Columns | Written by |
 |---|---|---|---|
 | `schema_migrations` | `version` | `applied_at` | engine |
-| `services` | `service` | `partition` (crc32 % 60) | flush |
+| `services` | `service` | `partition` (crc32 % 60), `monitored` (migration 012: the service is active, §7; default true) | flush |
 | `modules` | `service, module_code` (index on `module_code`) | — (a module may belong to several services) | flush |
 | `index_services` | `pattern, service` | | flush (insert once per new pair; never deleted) |
 | `es_cursors` | `index` | `since_ms`, `floor_ms`, `updated_at` | flush |

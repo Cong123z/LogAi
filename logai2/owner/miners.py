@@ -65,6 +65,16 @@ class Miners:
             entry = self._miners[service] = (miner, persistence)
         return entry[0]
 
+    def load(self, service: str, blob: Optional[bytes]) -> None:
+        """(Re)build one service's miner from its blob."""
+        self._miners.pop(service, None)
+        self._miner(service, blob)
+
+    def drop(self, service: str) -> None:
+        """Forget a service; serialize its dirty state first (Owner does)."""
+        self._miners.pop(service, None)
+        self._dirty.discard(service)
+
     def match(self, service: str, text: str) -> Tuple[str, str, bool]:
         """``text`` is already normalized; returns (template_id, display_text, is_new)."""
         result = self._miner(service).add_log_message(
