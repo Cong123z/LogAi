@@ -231,4 +231,6 @@ def load_config(path: str | None = None) -> AppConfig:
             setattr(cfg.embedding, attr, cast(env("LOGAI2_EMBEDDING_" + name)))
     if env("LOGAI2_EMBEDDING_API_KEY"):
         cfg.embedding.api_key = env("LOGAI2_EMBEDDING_API_KEY")
+    if cfg.flush.max_closed_minutes < 1:
+        raise ValueError("flush.max_closed_minutes must be >= 1 (0 would stall minute closing)")
     return cfg

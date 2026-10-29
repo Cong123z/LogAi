@@ -29,7 +29,7 @@ from logai2.jobs import runs
 from logai2.jobs.commit import commit
 from logai2.jobs.reread import Lane, Scope, plan as plan_reread
 from logai2.jobs.runs import RunLog
-from logai2.metrics import Metrics
+from logai2.metrics import Metrics, rss_mib
 from logai2.owner.owner import SQL, Owner
 from logai2.reader.cache import KnownLines
 from logai2.reader.reader import Reader
@@ -128,7 +128,9 @@ class Engine:
         with self.db.transaction():
             ensure_partitions(self.db, min(_day(start_ms / 1000), today), today + timedelta(days=2))
         self._partitions_day = today
-        self.owner = Owner(self.conn, self.cfg, start_ms // 60_000, now=self.now)
+        self.owner = Owner(self.conn, self.cfg, start_ms // 60_000, now=self.now,
+                           enabled=self.enabled, disabled=self.disabled)
+        logger.info("state loaded: %d services, rss %.0f MiB", len(self.owner.active), rss_mib())
         raised = sum(r.state != "NORMAL" for r in self.owner.detector.states.values())
         if raised:
             logger.warning("loaded %d non-NORMAL alert states; they are exported as they were "
@@ -228,7 +230,8 @@ class Engine:
         # an Off pattern is never read and is excluded from every On pattern, whatever its position
         self.disabled = {e["pattern"] for e in entries if e.get("enabled") is False}
         self.enabled = {e["pattern"] for e in entries} - self.disabled
-        # pm3: self.owner.set_selection(self.enabled, self.disabled) goes here
+        if self.owner:   # before the next poll/handle: leaving services must not get the jump's minutes
+            self.owner.set_selection(self.enabled, self.disabled)
         for e in entries:
             if e["pattern"] in floors or e["pattern"] in self.disabled:
                 continue   # duplicate pattern: the first entry wins
@@ -273,8 +276,7 @@ class Engine:
         if self._pending_events >= self.cfg.flush.max_events or self.owner.close_full or now - self._last_flush >= self.cfg.flush.seconds:
             self._flush()
         # first catch-up is done when the owner has closed up to the watermark too (it closes in bites)
-        owner_done = self.owner.minutes.next_to_close >= self._watermark_ms // 60_000
-        if not self.owner.detection_enabled and self._caught_up() and owner_done:
+        if not self.owner.detection_enabled and self._caught_up() and self._owner_done():
             self._commit("first_start")
             with self.db.transaction():
                 put_setting(self.db, "detection_enabled", True)
@@ -286,7 +288,10 @@ class Engine:
         if self._resume and now - self._resume_at >= self.cfg.elasticsearch.index_refresh_seconds:
             self._reread_resume()
         self._lane_tick(now)
-        return batch["events"] > 0
+        return batch["events"] > 0 or not self._owner_done()   # a long jump is closed bite after bite, no sleep
+
+    def _owner_done(self) -> bool:
+        return self.owner.minutes.next_to_close >= self._watermark_ms // 60_000
 
     def _refresh(self, now: float) -> None:
         if now - self._refreshed >= self.cfg.elasticsearch.index_refresh_seconds:
@@ -375,7 +380,8 @@ class Engine:
         for service in self._miss_services - set(status["miss_ratio"]):   # left the window
             m.miss_ratio.remove(service)
         self._miss_services = set(status["miss_ratio"])
-        m.export_rows(alert_rows([asdict(r) for r in self.owner.detector.states.values()],
+        active = self.owner.active
+        m.export_rows(alert_rows([asdict(r) for r in self.owner.detector.states.values() if r.service in active],
                                  self.owner.detector.links, {}, {}))
 
     def _status(self) -> dict:
@@ -414,6 +420,8 @@ class Engine:
         return {
             "heartbeat": now,
             "lag_seconds": lag,
+            "owner_lag_seconds": max(0.0, now - self.owner.boundary_ms / 1000),
+            "skipped_off": self.owner.skipped_off,
             "flush_seconds": self._flush_times[-1][1] if self._flush_times else 0.0,
             "flush_seconds_max": max((d for _, d in self._flush_times), default=0.0),
             "late_counts": self.owner.minutes.late,
@@ -649,7 +657,7 @@ class Engine:
         lane = rr["lane"]
         rr["lag"] = lag = max(0.0, now - self._watermark_ms / 1000)
         hours: list = []
-        if not (self._caught_up() and lag <= self.cfg.retrain.max_live_lag_seconds):
+        if not (self._caught_up() and self._owner_done() and lag <= self.cfg.retrain.max_live_lag_seconds):
             rr["paused"] += 1   # live first: the lane never runs while it lags or catches up
         else:
             try:

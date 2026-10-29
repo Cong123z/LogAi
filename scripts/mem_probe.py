@@ -1,5 +1,5 @@
 """Memory probe: rebuild a vas_066-sized service in a throwaway schema and measure what the engine costs.
-python scripts/mem_probe.py --dsn DSN --templates N [--minutes M] [--keep]
+python scripts/mem_probe.py --dsn DSN --templates N [--minutes M] [--keep] [--off]
 
 Seeds one service `vas` (N templates, N x 48 baseline rows, a Drain3 blob of N clusters, 5 committed weekdays) in
 schema probe_<8 hex>, then a CHILD process (clean RSS) builds Owner, times Miners.dirty() after one new cluster, feeds
@@ -7,6 +7,7 @@ M minutes of one count per template per minute with the watermark held, moves it
 (the B25 shape). The last stdout line is one JSON object:
 templates, baseline_rows, blob_bytes, load_peak_mib, load_steady_mib, save_state_ms, flush_peak_mib.
 Detection is off (no detection_enabled setting), so the flush numbers are a floor.
+--off: instead builds the Owner with the pattern Off, switches it On, then Off; adds start_mib, on_mib, off_mib.
 """
 from __future__ import annotations
 
@@ -59,6 +60,7 @@ def seed(conn, n: int, cfg) -> int:
     seen = datetime.fromtimestamp((START - 1440) * 60, timezone.utc)
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("INSERT INTO services (service, partition) VALUES ('vas', 0)")
+        cur.execute("INSERT INTO index_services (pattern, service) VALUES ('p', 'vas')")
         cur.execute("INSERT INTO drain3_state (service, blob) VALUES ('vas', %s)", (blob,))
         with cur.copy("COPY templates (service, template_id, level, text, first_seen, last_seen) FROM STDIN") as cp:
             for tid, text in zip(ids, texts):
@@ -79,7 +81,9 @@ def child(dsn: str, n: int, minutes: int) -> dict:
     cfg = load_config(None)
     owner = Owner(conn, cfg, START)
     trim()
-    out = {"load_peak_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, "load_steady_mib": rss_mib()}
+    steady = rss_mib()
+    # ru_maxrss can lag the current RSS by a few hundred KiB when the load is tiny: a peak is never below it
+    out = {"load_peak_mib": max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, steady), "load_steady_mib": steady}
     owner.miners.match("vas", line(n))   # one new cluster dirties the service
     t = time.perf_counter()
     blobs = owner.miners.dirty()
@@ -100,16 +104,31 @@ def child(dsn: str, n: int, minutes: int) -> dict:
     return out
 
 
+def child_off(dsn: str) -> dict:
+    """The switch: the big service's pattern Off at start, then On, then Off again. RSS after each step."""
+    conn = connect(dsn)
+    owner = Owner(conn, load_config(None), START, enabled=set(), disabled={"p"})
+    trim()
+    out = {"start_mib": rss_mib(), "active_at_start": len(owner.active)}
+    owner.set_selection({"p"}, set())
+    trim()
+    out["on_mib"], out["on_services"] = rss_mib(), len(owner.active)
+    owner.set_selection(set(), {"p"})   # _unload trims
+    out["off_mib"], out["off_services"] = rss_mib(), len(owner.active)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dsn", required=True)
     ap.add_argument("--templates", type=int, required=True)
     ap.add_argument("--minutes", type=int, default=60)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument("--off", action="store_true", help="measure the Off/On/Off switch instead (start_mib, on_mib, off_mib)")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.child:
-        print(json.dumps(child(a.dsn, a.templates, a.minutes)))
+        print(json.dumps(child_off(a.dsn) if a.off else child(a.dsn, a.templates, a.minutes)))
         return
     schema = f"probe_{uuid.uuid4().hex[:8]}"
     conn = connect(a.dsn)
@@ -123,7 +142,7 @@ def main() -> None:
         blob_bytes = seed(conn, a.templates, load_config(None))
         print(f"seeded in {time.perf_counter() - t:.0f} s into {schema}", file=sys.stderr)
         r = subprocess.run([sys.executable, __file__, "--child", "--dsn", with_schema(a.dsn, schema),
-                            "--templates", str(a.templates), "--minutes", str(a.minutes)],
+                            "--templates", str(a.templates), "--minutes", str(a.minutes), *(["--off"] if a.off else [])],
                            capture_output=True, text=True)
         sys.stderr.write(r.stderr[-2000:])
         if r.returncode:   # e.g. -9 when the OOM killer took the child: report it, still drop the schema

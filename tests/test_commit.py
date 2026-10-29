@@ -155,3 +155,25 @@ def test_commit_drops_old_lab_partitions(conn, cfg):
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
     assert "lab_minute_counts_20261012" not in tables           # today-8
     assert "lab_minute_counts_20261013" in tables               # today-7 (boundary)
+
+
+def test_rebuild_keeps_unmonitored_and_dataless_services(conn, cfg):
+    # sa monitored with hours; sb Off (monitored false); sd monitored but its service_hours were dropped by retention
+    for s in ("sa", "sb", "sd"):
+        conn.execute("INSERT INTO services (service, partition) VALUES (%s, 0)", (s,))
+    conn.execute("UPDATE services SET monitored = false WHERE service = 'sb'")
+    conn.commit()
+    for s in ("sa", "sb"):
+        for d in (12, 13):
+            seed(conn, s, date(2026, 10, d), 10, 60, {f"{s}:T1": (60, 60)})
+    old = ("INSERT INTO baseline (service, key, daytype, hour, mean, std, days) "
+           "VALUES (%s, %s, 'weekday', 10, 99, 9, 5)")
+    for s in ("sa", "sb", "sd"):
+        conn.execute(old, (s, f"{s}:T1"))
+    conn.execute("INSERT INTO day_status VALUES ('sd', '2026-10-12', true, 'weekday')")
+    conn.commit()
+    out = commit(conn, cfg, today=date(2026, 10, 14))
+    rows = {r["service"]: r for r in baseline_rows(conn)}
+    assert (rows["sb"]["mean"], rows["sd"]["mean"]) == (99, 99)            # kept as they were
+    assert (rows["sa"]["mean"], rows["sa"]["days"]) == (1.0, 2)            # rebuilt from its hours
+    assert out["baseline_rows"] == 1 and out["rows_before"] == 3
