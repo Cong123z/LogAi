@@ -252,7 +252,7 @@ def test_random_feed_random_crashes(conn, rec, monkeypatch, seed):
         if r < 0.55:                                    # keep pending across ticks
             continue
         owner.flush(reader.cursors(owner.boundary_ms), {})
-        reader.forget_before(owner.boundary_ms)
+        reader.forget_read()
         if clock[0] >= end_s and owner.boundary_ms >= start + n_min * MIN:
             break
     got = check_invariants(conn)

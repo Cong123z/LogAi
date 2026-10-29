@@ -270,9 +270,11 @@ class Engine:
         batch = self.reader.poll()
         self.reader.learn(self.owner.handle(batch))
         self._observe(batch, now)
-        if self._pending_events >= self.cfg.flush.max_events or now - self._last_flush >= self.cfg.flush.seconds:
+        if self._pending_events >= self.cfg.flush.max_events or self.owner.close_full or now - self._last_flush >= self.cfg.flush.seconds:
             self._flush()
-        if not self.owner.detection_enabled and self._caught_up():
+        # first catch-up is done when the owner has closed up to the watermark too (it closes in bites)
+        owner_done = self.owner.minutes.next_to_close >= self._watermark_ms // 60_000
+        if not self.owner.detection_enabled and self._caught_up() and owner_done:
             self._commit("first_start")
             with self.db.transaction():
                 put_setting(self.db, "detection_enabled", True)
@@ -359,7 +361,7 @@ class Engine:
                         logger.warning("database still unreachable")
                 self.sleep(delay)
                 delay = min(delay * 2, MAX_BACKOFF_SECONDS)
-        self.reader.forget_before(self.owner.boundary_ms)
+        self.reader.forget_read()
         self._pending_events = 0
         self._last_flush = self.now()
         m = self.metrics
@@ -403,6 +405,12 @@ class Engine:
         if not self._history or self._history[-1]["t"] != minute_of(now) * 60:
             last_minute = sum(n for t, n in self._event_window if t >= now - 60)
             self._history.append({"t": minute_of(now) * 60, "lag": lag, "eps": last_minute / 60})
+        behind = []
+        if self.owner.detection_enabled and lag > self.cfg.reader.lag_warn_seconds:
+            # the slowest healthy patterns hold the watermark back: name them
+            behind = [f"{i} is {int((now - p['pos_ms'] / 1000) // 60)} min behind: alerts of every pattern wait for it"
+                      for i, p in self._positions.items()
+                      if not p["failing"] and not p["caught_up"] and p["pos_ms"] // 60_000 <= self._watermark_ms // 60_000]
         return {
             "heartbeat": now,
             "lag_seconds": lag,
@@ -425,7 +433,8 @@ class Engine:
             "resolution": self.resolution,
             "es_oldest": self.es_oldest,
             "warnings": [f"no index matches {p}" for p in self.reader.floors if not self.resolution.get(p)]
-                        + [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn],
+                        + [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn]
+                        + behind,
         }
 
     def _owner_day(self) -> date:

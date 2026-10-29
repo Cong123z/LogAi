@@ -9,7 +9,7 @@ import psycopg
 import pytest
 
 from logai2.db import connect, ensure_partitions, put_setting
-from logai2.owner.owner import Owner
+from logai2.owner.owner import SAMPLES_KEPT, Owner
 from logai2.reader.cache import KnownLines
 from logai2.reader.reader import Reader
 from tests.conftest import TEST_DSN
@@ -39,7 +39,7 @@ def tick(reader, owner, flush=True):
     reader.learn(owner.handle(batch))
     if flush:
         owner.flush(reader.cursors(owner.boundary_ms), {"events": batch["events"]})
-        reader.forget_before(owner.boundary_ms)
+        reader.forget_read()
     return batch
 
 
@@ -48,7 +48,8 @@ def run_minutes(conn, cfg, hits, until_ms, floor_ms=T0, src=None):
     src = src or FakeSource({"a": hits})
     reader, owner = make(conn, cfg, src, until_ms / 1000 + 60, floor_ms)
     for _ in range(20):
-        if tick(reader, owner)["watermark_ms"] >= until_ms:
+        tick(reader, owner)
+        if owner.boundary_ms >= until_ms:   # closed up to it, bites included
             return reader, owner
     raise AssertionError("watermark never passed until_ms")
 
@@ -447,3 +448,66 @@ def test_templates_seen_moves_first_seen_earlier(conn, cfg):
         conn.commit()
         row = conn.execute("SELECT first_seen, last_seen FROM templates").fetchone()
         assert (row["first_seen"], row["last_seen"]) == (ts(want), ts(M + 5))
+
+
+def test_close_at_most_cap_per_flush(conn, cfg):
+    hits = [h for m in range(300) for h in lines(m, 1)]
+    reader, owner = make(conn, cfg, FakeSource({"a": hits}), (T0 + 301 * 60_000) / 1000 + 60)
+    batch = reader.poll()
+    owner.handle(batch)
+    assert owner.minutes.next_to_close == M + 60 and owner.close_full
+    for _ in range(4):
+        owner.flush(reader.cursors(owner.boundary_ms), {})
+        owner.handle({**batch, "counts": []})
+    owner.flush(reader.cursors(owner.boundary_ms), {})
+    assert owner.minutes.next_to_close == M + 300
+    assert rows(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 300
+
+
+def test_open_samples_capped(conn, cfg):
+    _, owner = make(conn, cfg, FakeSource({"a": []}), T0 / 1000 + 600)
+    c = {"service": "s", "template_id": None, "text": "boom <*>", "level": "ERROR", "module": "", "minute": M, "n": 1,
+         "sample": "boom 1"}
+    for _ in range(100):
+        owner.handle({"counts": [c], "watermark_ms": T0, "events": 1, "positions": {}, "sources": []})
+    assert sum(len(v) for v in owner._open_samples[M].values()) <= SAMPLES_KEPT
+
+
+def test_crash_between_bites_counts_exact(conn, cfg):
+    src = FakeSource({"a": [h for m in range(300) for h in lines(m, 1)]})
+    now_s = (T0 + 301 * 60_000) / 1000 + 60
+    reader, owner = make(conn, cfg, src, now_s)
+    tick(reader, owner)                                   # 60 of 300 minutes closed and flushed
+    assert owner.minutes.next_to_close == M + 60
+    reader, owner = make(conn, cfg, src, now_s)           # crash: rebuilt from the database
+    for _ in range(10):
+        tick(reader, owner)
+        if owner.minutes.next_to_close >= M + 300:
+            break
+    assert owner.minutes.next_to_close == M + 300
+    assert rows(conn, "SELECT sum(sum) AS n FROM hourly_counts WHERE key = '*total'")[0]["n"] == 300
+    assert rows(conn, "SELECT sum(n_minutes) AS n FROM service_hours")[0]["n"] == 300
+
+
+def test_failed_flush_keeps_cap(conn, cfg, monkeypatch):
+    real = psycopg.Cursor.executemany
+
+    def boom(self, query, params, **kw):
+        if "es_cursors" in str(query):
+            raise RuntimeError("disk full")
+        return real(self, query, params, **kw)
+
+    reader, owner = make(conn, cfg, FakeSource({"a": [h for m in range(300) for h in lines(m, 1)]}),
+                         (T0 + 301 * 60_000) / 1000 + 60)
+    batch = reader.poll()
+    owner.handle(batch)
+    with monkeypatch.context() as mp:
+        mp.setattr(psycopg.Cursor, "executemany", boom)
+        with pytest.raises(RuntimeError, match="disk full"):
+            owner.flush(reader.cursors(owner.boundary_ms), {})
+    conn.rollback()
+    owner.handle({**batch, "counts": []})
+    assert owner.minutes.next_to_close == M + 60 and owner.close_full   # pending rows kept, no more minutes
+    owner.flush(reader.cursors(owner.boundary_ms), {})
+    owner.handle({**batch, "counts": []})
+    assert owner.minutes.next_to_close == M + 120

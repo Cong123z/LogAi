@@ -91,8 +91,11 @@ def child(dsn: str, n: int, minutes: int) -> dict:
         owner.handle({"counts": [{"service": "vas", "template_id": tid, "text": None, "level": "INFO", "module": "",
                                   "minute": START + m, "n": 1, "sample": "x"} for tid in ids],
                       "watermark_ms": held, "events": n, "positions": {}, "sources": []})
-    owner.handle({"counts": [], "watermark_ms": (START + minutes) * 60_000, "events": 0, "positions": {}, "sources": []})
-    owner.flush({"a": ((START + minutes) * 60_000, held)}, {})
+    # close in bites like the engine: flush whenever close_full, until every minute is closed
+    done = {"counts": [], "watermark_ms": (START + minutes) * 60_000, "events": 0, "positions": {}, "sources": []}
+    while owner.minutes.next_to_close < START + minutes:
+        owner.handle(done)
+        owner.flush({"a": (owner.boundary_ms, held)}, {})
     out["flush_peak_mib"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     return out
 

@@ -155,12 +155,12 @@ def test_caught_up_flips_back_when_new_doc_arrives(cfg):
     assert not b["positions"]["a"]["caught_up"] and b["watermark_ms"] == T0 + 10
 
 
-def test_forget_before_keeps_ids_at_or_after_position(cfg):
+def test_forget_read_drops_ids_before_position(cfg):
     # Idle index: its last doc sits before the boundary and is re-read every poll.
     _, r = make(cfg, {"a": [hit("1", T0, service="s", message="m"),
                             hit("2", T0 + 5, service="s", message="m")]}, {"a": T0})
     assert r.poll()["events"] == 2
-    r.forget_before(T0 + 120_000)
+    r.forget_read()
     b = r.poll()
     assert b["events"] == 0 and b["positions"]["a"]["caught_up"] and b["watermark_ms"] == UPPER
     assert set(r._seen["a"]) == {("a", "2")}   # "1" is before the position: forgotten
