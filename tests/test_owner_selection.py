@@ -168,17 +168,68 @@ def test_reenable_loads_state_and_keeps_template_ids(conn, cfg):
     assert o.miners.match("sb", "payment failed for user 7")[0] == "sb:T00001"
     assert o.levels[("sb", "sb:T00001")] == "INFO"
     assert o.detector.states[("sb", "sb:T00001")].state == "ALERTING"
-    # zero-fill resumes from the switch, not from the old first_seen
-    assert o.services["sb"] == M
 
 
-def test_reenable_zero_fill_starts_at_switch(conn, cfg):
+def test_reenable_zero_fill_starts_at_first_count(conn, cfg):
     o = make(conn, cfg)
     o.handle(batch([count("sa", M, 1)], (M + 30) * 60_000))
     o.set_selection({"a", "b"}, set())
-    assert o.services["sb"] == o.minutes.next_to_close
-    drive(o, (M + 40) * 60_000)
-    assert rows(conn, "SELECT sum(n_minutes) AS n FROM service_hours WHERE service = 'sb'")[0]["n"] == 10
+    assert "sb" not in o.services      # the gap stays a gap: the first real count sets the first minute
+    o.handle(batch([count("sb", M + 35, 1)], (M + 40) * 60_000, sources=[("b", "sb")]))
+    o.flush({"a": (o.boundary_ms, T0)}, {})
+    assert rows(conn, "SELECT sum(n_minutes) AS n FROM service_hours WHERE service = 'sb'")[0]["n"] == 5
+
+
+def test_reenable_while_other_pattern_lags_writes_no_zeros(conn, cfg):
+    cfg.flush.max_closed_minutes = 60
+    o = make(conn, cfg)
+    o.set_selection({"a", "b"}, set())          # a lags: the owner is 2 h behind real time
+    o.handle(batch([count("sb", M + 120, 1)], (M + 121) * 60_000, sources=[("b", "sb")]))
+    drive(o, (M + 121) * 60_000)
+    assert rows(conn, "SELECT count(*) AS n FROM hourly_counts WHERE service = 'sb' AND key = '*total' AND sum = 0")[0]["n"] == 0
+    assert rows(conn, "SELECT sum(n_minutes) AS n FROM service_hours WHERE service = 'sb'")[0]["n"] == 1
+
+
+def test_unpaired_service_not_active_with_selection(conn, cfg):
+    seed(conn)
+    with conn.transaction():
+        conn.execute("INSERT INTO services VALUES ('sz', 0)")
+    o = Owner(conn, cfg, M, now=lambda: NOW, enabled=set(), disabled={"a", "b"})
+    assert o.active == set() and "sz" not in o.services
+    drive(o, (M + 180) * 60_000)
+    assert rows(conn, "SELECT count(*) AS n FROM service_hours WHERE service = 'sz'")[0]["n"] == 0
+    o.handle(batch([count("sz", M + 181, 1)], (M + 182) * 60_000))   # first count: lazy load
+    assert "sz" in o.active
+    assert Owner(conn, cfg, M, now=lambda: NOW).active >= {"sz"}      # no selection: today's behaviour
+
+
+def test_inactive_at_start_alerts_reset_on_first_flush(conn, cfg):
+    o = make(conn, cfg)
+    o.flush({}, {})
+    assert rows(conn, "SELECT state FROM alert_state WHERE service = 'sb'")[0]["state"] == "NORMAL"
+    (ch,) = rows(conn, "SELECT from_state, to_state FROM alert_changes WHERE service = 'sb'")
+    assert (ch["from_state"], ch["to_state"]) == ("ALERTING", "NORMAL")
+    assert rows(conn, "SELECT state FROM alert_state WHERE service = 'sa'")[0]["state"] == "ALERTING"
+    o.set_selection({"a", "b"}, set())
+    assert o.detector.states[("sb", "sb:T00001")].state == "NORMAL"
+    o.set_selection({"a"}, {"b"})
+    o.flush({}, {})
+    assert rows(conn, "SELECT count(*) AS n FROM alert_changes WHERE service = 'sb'")[0]["n"] == 1   # no second reset
+
+
+def test_normal_state_with_streak_resets_without_a_change(conn, cfg):
+    o = make(conn, cfg, enabled={"a", "b"}, disabled=frozenset())
+    from logai2.owner.detect import AlertRow
+    o.detector.states[("sb", "sb:T00001")] = AlertRow("sb", "sb:T00001", "NORMAL", 2, 0.0)
+    o.set_selection({"a"}, {"b"})
+    assert o._changes == [] and o.detector.states[("sb", "sb:T00001")].streak == 0
+
+
+def test_lane_only_service_inserted_unmonitored(conn, cfg):
+    o = make(conn, cfg)
+    o._services["sx"] = 3           # as add_lane does for a service the live owner does not hold
+    o.flush({}, {})
+    assert rows(conn, "SELECT monitored FROM services WHERE service = 'sx'")[0]["monitored"] is False
 
 
 def test_new_service_in_on_pattern_activates(conn, cfg):

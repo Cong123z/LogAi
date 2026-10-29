@@ -38,7 +38,7 @@ SAMPLES_KEPT = 20
 # ponytail: executemany per table but the two module tables (COPY, copy_upsert: ~2x faster at 20k-60k rows, see
 # docs/perf/2026-10-23-template-modules.md); move the others when flush time shows in the Pipeline stats.
 SQL = {
-    "services": "INSERT INTO services (service, partition) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+    "services": "INSERT INTO services (service, partition, monitored) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
     "modules": "INSERT INTO modules (module_code, service) VALUES (%s, %s) ON CONFLICT DO NOTHING",
     "templates": (
         "INSERT INTO templates (service, template_id, level, text, first_seen, last_seen) "
@@ -143,10 +143,14 @@ class Owner:
             self._source_pairs = {(r["pattern"], r["service"])
                                   for r in conn.execute("SELECT pattern, service FROM index_services")}
             self.active, self._off = self._split(enabled, disabled)
-            # a service no pattern is recorded for (data from before index_services) can't be shown removed: keep it
-            self.active |= {r["service"] for r in conn.execute(
-                "SELECT service FROM services UNION SELECT service FROM alert_state UNION SELECT service FROM drain3_state "
-                "UNION SELECT DISTINCT service FROM templates")} - {s for _, s in self._source_pairs} - self._off
+            # no selection (tests): a service no pattern is recorded for stays active. With a selection it comes
+            # in through the lazy load on its first count: migration 009 has no backfill, so a removed pattern's
+            # service may have no pair and must not be loaded.
+            if enabled is None:
+                self.active |= {r["service"] for r in conn.execute(
+                    "SELECT service FROM services UNION SELECT service FROM alert_state UNION "
+                    "SELECT service FROM drain3_state UNION SELECT DISTINCT service FROM templates"
+                )} - {s for _, s in self._source_pairs} - self._off
             st = self._read_state(sorted(self.active), start_minute)
             self.detection_enabled = get_setting(conn, "detection_enabled") is True
         self.levels = st["levels"]
@@ -216,7 +220,7 @@ class Owner:
             self.levels.setdefault(k, v)
         for k, r in st["states"].items():
             self.detector.states.setdefault(k, r)   # a reset not yet flushed wins over the stored state
-        self.services.update(st["services"])
+        # no first-minute entry: the first real count sets it (_see), so the gap before it stays a gap (D3)
         self.modules |= st["modules"]
         self.detector.baseline.update(st["baseline"])
         self.detector.links.update(st["links"])
@@ -235,7 +239,9 @@ class Owner:
         for k in [k for k in d.states if k[0] in leaving]:
             r = d.states[k]
             if r.state != "NORMAL" or r.streak:
-                self._changes.append(Change(r.service, r.key, at, r.state, "NORMAL", r.count, r.band_low, r.band_high))
+                if r.state != "NORMAL":
+                    self._changes.append(Change(r.service, r.key, at, r.state, "NORMAL", r.count,
+                                                r.band_low, r.band_high))
                 d.states[k] = replace(r, state="NORMAL", streak=0, since=at)
                 d.touched.add(k)   # the next flush writes alert_state and alert_changes
             elif k not in d.touched:
@@ -249,8 +255,8 @@ class Owner:
             self.service_minutes.pop(s, None)
             self._unparsed_logged.pop(s, None)
             self.miners.drop(s)
-            d.baseline.drop(s)
-            self.minutes.drop_service(s)
+        d.baseline.drop(leaving)       # one pass over the rows for all of them
+        self.minutes.drop_service(leaving)
         for per in self._open_samples.values():
             for k in [k for k in per if k[0] in leaving]:
                 del per[k]
@@ -468,9 +474,10 @@ class Owner:
         states = self.detector.states
         touched = list(self.detector.touched)
         with self.conn.transaction(), self.conn.cursor() as cur:
-            cur.executemany(SQL["services"], list(self._services.items()))
+            cur.executemany(SQL["services"], [(s, p, s in self.active) for s, p in self._services.items()])
             if self._monitored_dirty:
-                cur.execute("UPDATE services SET monitored = (service = ANY(%s))", (sorted(self.active),))
+                active = sorted(self.active)
+                cur.execute("UPDATE services SET monitored = (service = ANY(%s))", (active,))
             cur.executemany(SQL["modules"], self._modules)
             cur.executemany(SQL["index_services"], sorted(self._new_sources))
             cur.executemany(SQL["templates"], new_t)
@@ -487,6 +494,12 @@ class Owner:
                 for r in (states[k] for k in touched)])
             cur.executemany(SQL["alert_changes"], [(c.service, c.key, _ts(c.at), c.from_state, c.to_state,
                                                     c.count, c.band_low, c.band_high) for c in self._changes])
+            if self._monitored_dirty:   # states of services that are not active (Off or removed at start) go NORMAL
+                cur.execute("INSERT INTO alert_changes (service, key, at, from_state, to_state, count, band_low, band_high) "
+                            "SELECT service, key, now(), state, 'NORMAL', count, band_low, band_high FROM alert_state "
+                            "WHERE service <> ALL(%s) AND state <> 'NORMAL' ON CONFLICT DO NOTHING", (active,))
+                cur.execute("UPDATE alert_state SET state = 'NORMAL', streak = 0, since = now() "
+                            "WHERE service <> ALL(%s) AND (state <> 'NORMAL' OR streak <> 0)", (active,))
             cur.executemany(SQL["error_samples"], [(s, t, _ts(m * 60), line)
                                                    for (s, t), q in self._samples.items() for m, line in q])
             cur.executemany(SQL["error_samples_trim"], list(self._samples))

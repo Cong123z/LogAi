@@ -503,6 +503,7 @@ def test_start_logs_loaded_alerting_states(conn, cfg, make, caplog):
     cfg.start.days_back = 0
     conn.execute("INSERT INTO alert_state (service, key, state, since, streak, score, count) "
                  "VALUES ('s', 's:T1', 'ALERTING', now(), 3, 2.0, 9), ('s', 's:T2', 'NORMAL', now(), 0, 0, 0)")
+    conn.execute("INSERT INTO index_services VALUES ('a', 's')")   # an unpaired service is not loaded
     conn.commit()
     with caplog.at_level("WARNING", logger="logai2.engine"):
         make(FakeSource({"a": []}), Clock(NOON)).start()

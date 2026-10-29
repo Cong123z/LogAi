@@ -54,14 +54,15 @@ class OpenMinutes:
         if old is None or SEVERITY.get(level.upper(), 0) > SEVERITY.get(old.upper(), 0):
             cm.levels[tkey] = level
 
-    def drop_service(self, service: str) -> None:
-        """Forget a service's open counts and its hour keys (it left the active set)."""
+    def drop_service(self, services) -> None:
+        """Forget these services' open counts and hour keys (one name or a set; they left the active set)."""
+        services = {services} if isinstance(services, str) else set(services)
         for cm in self._open.values():
-            cm.keys = {k: n for k, n in cm.keys.items() if k[0] != service}
-            cm.modules = {k: n for k, n in cm.modules.items() if k[0] != service}
-            cm.levels = {k: v for k, v in cm.levels.items() if k[0] != service}
+            cm.keys = {k: n for k, n in cm.keys.items() if k[0] not in services}
+            cm.modules = {k: n for k, n in cm.modules.items() if k[0] not in services}
+            cm.levels = {k: v for k, v in cm.levels.items() if k[0] not in services}
         for seen in self.hour_keys.values():
-            seen.difference_update([k for k in seen if k[0] == service])
+            seen.difference_update([k for k in seen if k[0] in services])
 
     def close_before(self, minute_excl: int, services: Iterable[str] | Mapping[str, int]) -> list[ClosedMinute]:
         """``services`` may map service -> first minute seen: a service is zero-filled only from then on."""

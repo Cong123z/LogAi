@@ -501,11 +501,15 @@ first-minute entry: no zero-fill), then `trim()`s the heap and logs
 pending. **Alert reset:** each state of a leaving service that is not
 NORMAL or has a streak becomes NORMAL, streak 0, with an `alert_changes`
 row (`ALERTING` → `NORMAL`, at the switch time); the next flush writes
-`alert_state` and the change. A service switched On loads its state and is
-zero-filled from the next minute to close, not from its old first minute (D3:
-the gap stays a gap). When the active set changed, the flush also runs
+`alert_state` and the change. A service switched On loads its state but gets no
+first-minute entry: its first real count sets it, so it is zero-filled from
+that minute on, never before (D3: the gap stays a gap). A service with no
+`index_services` pair is not active when a selection is given (migration 009
+has no backfill); it loads on its first count. When the active set changed, the flush also runs
 `UPDATE services SET monitored = (service = ANY(active))` (migration 012;
-every web query filters on it). All data of an Off service stays in Postgres.
+every web query filters on it; new services are inserted with the flag) and,
+in SQL, resets to NORMAL (with `alert_changes` rows) the alert states of every
+service not active, which also covers services inactive at start. All data of an Off service stays in Postgres.
 
 ### 7.1 Templates
 

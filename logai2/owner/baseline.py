@@ -80,10 +80,12 @@ class Baseline:
         self._rows.update(other._rows)
         self.days.update(other.days)
 
-    def drop(self, service: str) -> None:
-        for k in [k for k in self._rows if k[0] == service]:
+    def drop(self, services) -> None:
+        """Forget these services (one name or a set): one pass over the rows."""
+        services = {services} if isinstance(services, str) else set(services)
+        for k in [k for k in self._rows if k[0] in services]:
             del self._rows[k]
-        for k in [k for k in self.days if k[0] == service]:
+        for k in [k for k in self.days if k[0] in services]:
             del self.days[k]
 
     @classmethod
