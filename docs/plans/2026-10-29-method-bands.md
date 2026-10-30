@@ -1,14 +1,16 @@
-# Method bands: one chart, 7 methods, k tuned per method (plan, tasks mb1-mb5)
+# Method bands: 4 methods computed on read, k tuned per method (plan, tasks mb1, mb2, mb4, mb5)
 
-Status: **approved** (2026-10-29, plan + mockup). Nothing dispatched until the user says start.
+Status: **superseded 2026-10-30** by docs/specs/2026-10-30-evaluation-bands.md and docs/plans/2026-10-30-evaluation-bands.md. Was: **approved** (2026-10-29, plan + mockup). 2026-10-30: cut to 5 methods (ets, prophet and their nightly
+job dropped, so no new table, no migration, no lab image). Same day: cut to 4 (`within_between` dropped: it equals σ, see below;
+`median` gets a robust spread). Nothing dispatched until the user says start.
 Mockup: https://claude.ai/artifact/MH5YqMboT6BAGKwbAr9u22 (sample data).
 
 ## Goal
 
-Replace the Evaluate page with one chart, drawn like Baseline: a key's real hourly rate plus the band (low, high)
+Replace the current Evaluation page (the name stays "Evaluation") with one chart, drawn like Baseline: a key's real hourly rate plus the band (low, high)
 of **every method, drawn as soon as the page opens**, one chart per method in the Baseline style, each at
-**its own best k** from the fit test below. Nothing is computed while the user waits: hourly methods take
-milliseconds per key on request, and forecaster bands are read from a table filled by a nightly job. Above the
+**its own best k** from the fit test below. All 4 methods are computed on request from the hourly tables, in
+milliseconds per key; nothing is stored and no job runs except the k tune. Above the
 chart, one small table per kind shows each method's k, coverage and width. Everything else on the page goes:
 verdicts, gates, sweeps, episodes, Test A/B/C, runs.
 
@@ -19,11 +21,11 @@ The company runs `congdock123/logai-engine:v15` (master ~`960fe1e`, migrations 0
 
 - Every input comes from tables v15 already fills: `hourly_counts` (sum, sumsq, kept 90 days), `service_hours`
   (n_minutes), `day_status`, `review_exclusions`, `baseline`. The tune result goes into `settings`
-  (key `bands_tune`). Only one new table, migration 012 `method_bands`, holds the forecaster bands. No recorder.
+  (key `bands_tune`). No new table, no migration. No recorder.
 - Deploying to the company upgrades v15 to the new image. The engine then applies 010/011 (empty `lab_*` tables)
-  and 012, in seconds. The recorder stays off: `LOGAI2_LAB_RECORD` defaults to false outside compose.
+  and 012 (`services.monitored`, from pattern switch), in seconds. The recorder stays off: `LOGAI2_LAB_RECORD` defaults to false outside compose.
 
-## The 7 methods, chosen from the bk17 results
+## The 4 methods, chosen from the bk17 results
 
 Source: `docs/validation/2026-10-28-bakeoff-laptop-proof.md` (28-day world, sections 6 and 8). Rule: keep what
 won there; add a method only where it fixes a loss bk17 measured; drop duplicates and losers.
@@ -32,11 +34,8 @@ won there; add a method only where it fixes a loss bk17 measured; drop duplicate
 |---|---|---|
 | `sigma` | live σ: m ± kσ, daytype split, last 5 weekdays / 4 weekend days | the reference; the live band |
 | `nb` | negative binomial NB(m, v) quantiles (Poisson when v ≤ m) | tightest band at good coverage: M3 ratio 0.625 (coverage 0.998), M2 0.755, M4 0.943 (passes gates); spike recall 1.00 vs σ 0.58 |
-| `within_between` | σ² = within-hour v + day-to-day var(m_d) | fixes nb/σ's measured loss: no day-to-day variance, so the band collapses on a shifted day (nb holiday ratio 2.91, coverage 0.83) |
-| `median` | median of daily means ± k√v | fixes a measured loss: mad was tightest on M4 (0.498) but flapped. This keeps the robust centre and σ's spread, so one incident day in the week does not drag the band |
+| `median` | median(m_d) ± k·√(median(v_d) + (1.4826·MAD(m_d))²) | fixes a measured loss: mad was tightest on M4 (0.498) but flapped. Robust centre and robust spread: one incident day in the week moves neither (example below: high 9.8 vs σ 12.6) |
 | `ewma` | recent days weigh more (half-life 2 days) | the worlds' 3 %/week trend; the cheap way to follow a level change |
-| `ets` | Holt-Winters / ETS, season 24 (statsmodels) | best forecaster: weekend 0.75, holiday 0.78 (M1) / 0.52 (M2); best drop recall 0.47 vs σ 0.40 |
-| `prophet` | Prophet on the hourly-mean series | the only other method that learns the calendar: weekend 0.79, holiday 0.84 / 0.56. Its tails under-cover (B17); tuning k by coverage corrects that |
 
 Dropped, with the bk17 reason:
 
@@ -49,17 +48,14 @@ Dropped, with the bk17 reason:
 | `lgbm` | worse than σ almost everywhere (M1 1.44, M2 2.77, M4 8.27) |
 | `mstl`, `greykite` | not in bk17. Both overlap ets/prophet; Greykite also needs its own image (pins pandas < 2) |
 | `sigma_all`, `sigma_smooth`, `trimmed`, `sqrt` | not in bk17 and no measured loss for them to fix |
+| `within_between` | dropped 2026-10-30: σ is pooled over every minute of the picked days, so its variance already is mean(v_d) + var(m_d) (law of total variance); adding var(m_d) again only adds the n−1 correction (example: 13.2 vs σ 12.6) |
+| `ets`, `prophet` | dropped 2026-10-30 (user): about 1 s per fit, so they need a nightly job, a table and the lab image; the 5 hourly methods are computed on read |
 | `cusum`, `pca`, `mprofile`, `mad` (minute) | need per-minute counts, which v15 does not keep |
 
 Notation: per (service, key, daytype, hour) and per training day d there are n_d minutes, s_d sum and q_d sumsq.
 The day's minute mean is m_d = s_d/n_d and its variance v_d = q_d/n_d − m_d². Pooled m and v are taken over the
 training days, as REBUILD does. Bands are per-minute counts (alerting is per minute). For `nb`, k maps to α
-through the normal tail (k = 3 gives α = 0.00135). ets and prophet forecast the hourly mean, and the band is
-forecast ± k·√(v + forecast variance).
-
-ets and prophet run in the lab image (`logai2-lab`, offline) as a nightly job, on `*total`, `*error`, `*warn`,
-`*info` and busy templates (mean ≥ 2/min) only. Prophet takes about 1 s per fit, so all 3k keys would take hours
-per service. Other keys show the 5 hourly methods.
+through the normal tail (k = 3 gives α = 0.00135).
 
 ## Data each method needs
 
@@ -72,14 +68,11 @@ gives committed days and their daytype.
 |---|---|---|---|---|
 | `sigma` | `baseline` table (mean, std per service, key, daytype, hour) | the rebuild's picked days: last 5 committed weekdays / 4 weekend days | 1 committed day of the daytype (young, k 4); full after `full_after_days` | read as is, not recomputed |
 | `nb` | n, s, q of the picked days | same as sigma | 1 day (v comes from the minutes inside each hour) | Poisson when v ≤ m |
-| `within_between` | n, s, q of the picked days | same as sigma | 2 days of the daytype (3+ to be steady) | adds var(m_d) across days |
-| `median` | m_d per picked day, pooled v | same as sigma | 3 days (the median of 2 is the mean) | |
+| `median` | m_d and v_d per picked day | same as sigma | 3 days (the median of 2 is the mean) | robust centre and spread |
 | `ewma` | n, s, q of every day of the daytype | all kept days, weight 0.5^(age/2 days) | 2 days | old days fade, no cap |
-| `ets` | the hourly-mean series s/n, hour by hour, all days (no daytype split), plus v | all kept days (90-day retention) | 2 full days (48 hours, season 24) | gaps filled with the same hour's mean of other days; nightly, lab image |
-| `prophet` | the same hourly series, plus v and `lab.holidays` | all kept days | 2 days (daily cycle); weekly cycle from 14 days | handles gaps; nightly, lab image |
 
 The tune test needs its 3 test days plus each method's minimum before the first test day. With one week, the
-weekend has 2 days (Sat, Sun): `median` has no weekend band yet and `within_between` is weak there. The tune table
+weekend has 2 days (Sat, Sun): `median` has no weekend band yet. The tune table
 flags both.
 
 ## The test that picks k (`bands tune`)
@@ -115,33 +108,48 @@ minutes. Gate: coverage gap ≤ 0.2 pp and the same best k (one grid step apart 
 
 Output: `settings.bands_tune` = {run_at, test days, per kind: {method: {k, coverage, width, ratio, flag}}}.
 Run:
-- `python -m logai2.bands tune`: the 5 hourly methods, in the web or engine pod (pure Python).
-- `python -m logai2.bands tune --forecast`: ets and prophet, in the lab image. It writes their tune rows and
-  `method_bands` (bands at the best k for the last 7 days plus today; it replaces the previous rows).
-- Nightly after the 02:00 commit: a k8s CronJob from the lab image (manifest in mb5); `--profile lab` on the laptop.
+- `python -m logai2.bands tune` (pure Python, any logai2 pod), and a "Re-tune" button on the page that runs the
+  same function in a web thread and shows the last run time. Until the first run every method is drawn at k = 3,
+  labelled "k 3 (not tuned)". The result is written in one transaction at the end, with a `version`; a result of
+  another version counts as not tuned.
 
 ## Tasks
 
 | # | Task | Role | Review |
 |---|---|---|---|
-| mb1 | `logai2/bands.py`: `sigma`, `nb`, `within_between`, `median`, `ewma` (fit from day-hour (n, s, q)), band at k, NB/Poisson/normal tail. Tests: `sigma` equals the `baseline` table and the Baseline series band exactly; each method against hand values on a seeded fixture; NB → Poisson when v ≤ m. | Sonnet | Opus |
-| mb2 | `python -m logai2.bands tune`: walk-forward, estimated coverage, floors, best k per method × kind, `settings.bands_tune`. Estimate check on `lab_s_w28` and `lab_minute_counts`, plus timing; report `docs/validation/2026-10-xx-bands-tune.md`. | Sonnet | Opus |
-| mb3 | `ets`, `prophet` behind the same method contract (lab image); `tune --forecast`; migration 012 `method_bands` (service, key, method, day, k, expected/low/high real[24]); key scope; timing on `lab_s_w28`; added to the report. | Sonnet | Opus |
-| mb4 | API + page. `GET /api/bands/series?service&key&days` returns the rate and all 7 bands in one response (hourly methods computed at best k, forecasters from `method_bands`, hours outside each); a missing band says why (not tuned yet, sparse key outside the forecaster scope, not enough days); target under 300 ms per key. `GET /api/bands/tune`. Page `#bands/<service>/<key>/<days>` (nav "Bands") replaces `#evaluation`: opens on `*total`, 7 days, with **one chart per method** stacked (sigma first), each drawn like the Baseline chart: shaded band at the method's best k, the same white rate line, orange dot per hour outside, red box per run of such hours, a header line (k, coverage, width vs σ, hours outside); a method with no band shows a one-line reason instead of a chart; tune table per kind below; `keypicker.js`, `charts.js`. The key picker lists in-scope keys only (no new templates, documents or verdict groups); any other key gets 404. Delete `eval_view.py`, `/api/eval/*`, `evaluation.js`, `tests/test_web_eval_view.py`. Docs: WEB_UI, README, ARCHITECTURE. | Sonnet | Sonnet |
-| mb5 | Laptop run on the live DB (`recharge`, 26-29 Oct: 4 days); Chrome look; deploy note v15 → new (engine first: 010-012, then web; `bands tune` in the pod, then the forecaster job; CronJob manifest). | lead | user |
+| mb1 | `logai2/bands.py`: `sigma`, `nb`, `median` (robust), `ewma` (fit from day-hour (n, s, q)), band at k, NB/Poisson/normal tail. Tests: `sigma` equals the `baseline` table and the Baseline series band exactly; each method against hand values on a seeded fixture; NB → Poisson when v ≤ m. | Sonnet | Opus |
+| mb2 | `python -m logai2.bands tune`: walk-forward, estimated coverage, floors, best k per method × kind, `settings.bands_tune` (with `version`, one transaction). Estimate check on `lab_s_w28` and `lab_minute_counts`, plus timing; report `docs/validation/2026-10-xx-bands-tune.md`. | Sonnet | Opus |
+| mb4 | API + page. `GET /api/bands/series?service&key&days` returns the rate and all 4 bands in one response (each at its best k, or k 3 not tuned; hours outside each); a missing band says why (not enough days); target under 300 ms per key. `GET /api/bands/tune`, `POST /api/bands/tune` (Re-tune). Page `#evaluation/<service>/<key>/<days>` (nav name stays "Evaluation") replaces the current Evaluation page: opens on `*total`, 7 days, with **one chart per method** stacked (sigma first), each drawn like the Baseline chart: shaded band at the method's best k, the same white rate line, orange dot per hour outside, red box per run of such hours, a header line (k, coverage, width vs σ, hours outside); a method with no band shows a one-line reason instead of a chart; tune table per kind below; `keypicker.js`, `charts.js`. The key picker lists in-scope keys only (no new templates, documents or verdict groups); any other key gets 404. Delete `eval_view.py`, `/api/eval/*`, `evaluation.js`, `tests/test_web_eval_view.py`. Docs: WEB_UI, README, ARCHITECTURE. | Sonnet | Sonnet |
+| mb5 | Laptop run on the live DB (`recharge`, 26-29 Oct: 4 days); Chrome look; deploy note v15 → new (engine first: 010-012, then web; then `bands tune` once). | lead | user |
 
-Order: mb1 → (mb2, mb3) → mb4 → mb5. One branch + worktree per task; merge into master only after the user confirms.
+Order: mb1 → mb2 → mb4 → mb5 (mb3 dropped with ets/prophet). One branch + worktree per task; merge into master only after the user confirms.
 
 ## Limits
 
-- bk17 was synthetic. The 7 were chosen on synthetic evidence; the tune table on real data may rank them
+- bk17 was synthetic. The 4 were chosen on synthetic evidence; the tune table on real data may rank them
   differently, and that ranking is the point of the page.
 - In-sample on the chart: as on Baseline today, the displayed days are drawn against the current fit. The tune test
   itself is out-of-sample (walk forward).
 - Coverage is estimated from hourly moments (see the estimate check), not counted minute by minute.
-- With 7 days, ets and prophet see one weekly cycle. Their bk17 gain was on weekends and holidays, so expect
-  σ-like results until about 14 days of history (hourly counts are kept 90 days, so this improves by itself).
+- No method learns the calendar: holidays look like weekdays (bk17: nb holiday ratio 2.91). `median` resists
+  one odd day in the week; that is all.
 - The laptop has 4 days. The real week is on the company after the deploy.
+
+## Image update and pod restarts (k8s)
+
+- Stored state is only `settings.bands_tune` in Postgres. Bands are computed per request, with no cache, so a new
+  web pod draws them on its first request, with no warm-up.
+- No migration for bands. Upgrading v15: engine first (it applies 010-012), then web (it never migrates).
+- Web pod killed during a Re-tune (rollout, OOM, node drain): that run is lost; the previous result stays (one
+  transaction at the end). The page shows the last run time; press Re-tune again. The run status is held in the web
+  process only, which is safe because web is 1 replica with `Recreate`.
+- Engine restart: the charts keep working (they read Postgres). Hours the engine missed have smaller n; every
+  method weights by n, so a gap is not read as silence. `sigma` follows the `baseline` table, rebuilt at the 02:00
+  commit as today.
+- A new image whose tune changes the result format bumps `version`: charts fall back to "k 3 (not tuned)" until
+  Re-tune.
+- A browser tab opened before the deploy runs the old JS (B10): the old Evaluate page gets 404 from the deleted
+  `/api/eval/*`. Reload the tab.
 
 ## Not changed
 
