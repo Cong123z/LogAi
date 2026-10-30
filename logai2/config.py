@@ -35,6 +35,7 @@ class ReaderConfig:
     cache_size: int = 200000
     max_line_bytes: int = 8192
     upper_bound_seconds: int = 30
+    lag_warn_seconds: int = 600    # status warning when the watermark is this far behind
 
 
 @dataclass
@@ -49,6 +50,7 @@ class RetrainConfig:
 class FlushConfig:
     seconds: float = 2.0
     max_events: int = 50000
+    max_closed_minutes: int = 60   # minutes one flush may close: a long lag is written in bites
 
 
 @dataclass
@@ -229,4 +231,6 @@ def load_config(path: str | None = None) -> AppConfig:
             setattr(cfg.embedding, attr, cast(env("LOGAI2_EMBEDDING_" + name)))
     if env("LOGAI2_EMBEDDING_API_KEY"):
         cfg.embedding.api_key = env("LOGAI2_EMBEDDING_API_KEY")
+    if cfg.flush.max_closed_minutes < 1:
+        raise ValueError("flush.max_closed_minutes must be >= 1 (0 would stall minute closing)")
     return cfg

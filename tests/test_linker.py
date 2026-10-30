@@ -64,3 +64,36 @@ def test_service_down_is_reported_and_links_still_run(conn, cfg):
     assert status["last_error"].startswith("embedding: ") and status["pending"]["templates"] == 1
     cfg.embedding.url = ""
     assert Linker(cfg, conn).cycle()["warnings"] == ["embedding.url is empty: nothing is embedded"]
+
+
+def test_linker_skips_off_templates(conn, cfg, server):
+    cfg.embedding.url = server.url
+    conn.execute("INSERT INTO services VALUES ('sa', 0), ('sb', 1)")
+    conn.execute("UPDATE services SET monitored = false WHERE service = 'sb'")
+    conn.execute("INSERT INTO templates VALUES ('sa', 'sa:T1', 'ERROR', 'timeout <*>', now(), now()), "
+                 "('sb', 'sb:T1', 'ERROR', 'timeout <*>', now(), now())")
+    conn.commit()
+    status = Linker(cfg, conn).cycle()
+    assert status["embedded_templates"] == 1 and status["pending"]["templates"] == 0
+    assert q(conn, "SELECT service FROM templates WHERE embedding IS NOT NULL") == [{"service": "sa"}]
+
+
+def test_resolver_skips_off_templates(conn, cfg):
+    from logai2.resolver import Resolver
+    from tests.test_links import tmpl, vec
+    conn.execute("INSERT INTO llm_profiles (name, base_url, model, api_key, active, revision) "
+                 "VALUES ('p', 'http://x', 'm', 'k', true, 'r')")
+    conn.execute("INSERT INTO services VALUES ('sa', 0), ('sb', 1)")
+    conn.execute("UPDATE services SET monitored = false WHERE service = 'sb'")
+    tmpl(conn, "A", v=vec((0, 1.0)), service="sa")
+    tmpl(conn, "B", v=vec((1, 1.0)), service="sb")
+    conn.commit()
+    seen = []
+
+    def chat(profile, system, user):
+        seen.append(user)
+        return {"title": "t", "handling": "h"}
+
+    Resolver(cfg, conn, chat=chat).run({"warnings": [], "last_error": None})
+    conn.commit()
+    assert seen and all('"service": "sb"' not in s for s in seen)

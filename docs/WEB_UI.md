@@ -331,6 +331,19 @@ it, an index already covered by a selected pattern is shown as "via
 local draft until **Save**; **Discard** drops it. A 409 keeps the draft and
 reloads the saved selection.
 
+**Monitoring switch.** Each selected row has a Monitoring switch (On by
+default). Off keeps the pattern and its history but the engine stops
+reading it and excludes it from every other pattern ("Off: not read,
+hidden everywhere, history kept"). The switch is part of the draft
+(Save / Discard). Switching back On reads from the moment of the save,
+not backfilled. Selection entries are
+`{pattern, added_at, enabled, enabled_at}` (`enabled_at` is the last time
+the pattern went Off to On, else null; entries saved without the fields
+read as On). `PUT /api/sources/selection` takes `{patterns, disabled,
+revision}`; `disabled` is optional and must be a subset of `patterns`
+(else 400 "disabled must name selected patterns"). It takes effect at the
+`reload_sources` command the save enqueues.
+
 Before any save the engine reads `elasticsearch.index` from its
 configuration; saving an empty list falls back to it too. An index added
 later is read from the moment it was added, not backfilled
@@ -936,6 +949,15 @@ is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `nu
 `{"days_committed", "baseline_rows"}` or `{"error": "..."}`. Every write that
 enqueues a command is listed in the table above; the command kinds are in
 ARCHITECTURE §12.2.
+
+## Off services
+
+A service whose pattern is Off (`services.monitored = false`) is hidden completely: it is missing from every list
+and picker (Services, Alerts, Templates, Template levels, Documents' link counts, Pipeline, Retrain, module alerts),
+and its per-service routes (`/api/baseline*`, `/api/modules`, `/api/templates/<service>/...`) answer 404
+"Unknown service". A document cannot be scoped to it. The linker does not embed its templates and the LLM resolver
+skips them. Nothing is deleted: its data is back when the pattern is turned On. The Evaluation (lab) pages are not
+affected.
 
 ## Security
 

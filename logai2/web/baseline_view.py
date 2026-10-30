@@ -316,9 +316,9 @@ def series(conn, cfg: AppConfig, service: str, key: str, ndays: int, today: date
             k = cfg.baseline.sigma_multiplier if bl.days.get((service, dt), 0) >= full_after(cfg, dt) \
                 else cfg.baseline.young_sigma_multiplier
             prof[dt] = [{"hour": h, "mean": s.mean, "band_low": s.mean - k * s.std, "band_high": s.mean + k * s.std}
-                        for h in range(24) if (s := bl.stats.get((service, ids[0], dt, h)))]
+                        for h in range(24) if (s := bl.stat(service, ids[0], dt, h))]
     lk = bl.lookup_doc(service, ids, today, last_hour) if kind == "doc" else bl.lookup(service, ids[0], today, last_hour)
-    state = ("none" if not any(k[:2] == (service, t) for k in bl.stats for t in ids) else
+    state = ("none" if not any(bl.has(service, t) for t in ids) else
              "borrowed" if lk.upper_only else "full" if lk.days >= full_after(cfg, lk.daytype) else "young")
     if state == "full" and _young_level_key(conn, cfg, service, key, lk.daytype, picked_days(conn, service)[lk.daytype]):
         state = "young"

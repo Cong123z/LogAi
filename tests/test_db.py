@@ -88,7 +88,7 @@ def test_migration_010_creates_lab_tables_on_009(conn):
     names = {r["tablename"] for r in conn.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
     assert LAB_TABLES <= names
-    assert conn.execute("SELECT max(version) AS v FROM schema_migrations").fetchone()["v"] == 11
+    assert conn.execute("SELECT max(version) AS v FROM schema_migrations").fetchone()["v"] == 12
 
 
 def test_migration_011_lab_knob_and_daily_bands(conn):
@@ -134,7 +134,7 @@ def test_migration_010_on_an_empty_database(schema):
         c.execute(f"CREATE SCHEMA {schema}")
         c.execute(f"SET search_path TO {schema}, public")
         c.commit()
-        assert migrate(c)[-1] == 11
+        assert migrate(c)[-1] == 12
         names = {r["tablename"] for r in c.execute("SELECT tablename FROM pg_tables WHERE schemaname = current_schema()")}
         assert LAB_TABLES <= names
         c.rollback()

@@ -31,6 +31,9 @@ from logai2.web.pipeline_view import services as service_rows
 
 STATIC_DIR = Path(__file__).parent / "static"
 STALE_HEARTBEAT_SECONDS = 30
+# A service whose pattern is Off has services.monitored = false: hidden everywhere, its data stays.
+# NOT IN (... NOT monitored), not IN (... monitored): a service without a services row is not Off (fixtures only).
+MONITORED = "{} NOT IN (SELECT service FROM services WHERE NOT monitored)"
 LINKER_STALE_SECONDS = 90   # the linker writes its status once per cycle (30 s), longer with LLM calls
 
 # Copied from logai-engine logai/storage/index_selection.py.
@@ -181,7 +184,9 @@ def create_app(cfg: AppConfig) -> Flask:
     def selection_entries() -> list[dict]:
         value, _ = setting("index_selection")
         # never saved (or saved empty): the engine reads the configured index from added_at 0
-        return (value or {}).get("entries") or [{"pattern": cfg.elasticsearch.index, "added_at": 0}]
+        entries = (value or {}).get("entries") or [{"pattern": cfg.elasticsearch.index, "added_at": 0}]
+        # an entry saved before the switch existed is On
+        return [{"enabled": True, "enabled_at": None, **e} for e in entries]
 
     def engine_status() -> dict:
         row = conn().execute("SELECT status FROM worker_status WHERE worker = 'engine'").fetchone()
@@ -235,9 +240,19 @@ def create_app(cfg: AppConfig) -> Flask:
     def put_selection():
         payload = body()
         patterns = validate_patterns(payload.get("patterns"))
-        added = {e["pattern"]: e["added_at"] for e in selection_entries()}
+        disabled = payload.get("disabled", [])
+        if not isinstance(disabled, list) or not all(isinstance(d, str) and d in patterns for d in disabled):
+            raise BadRequest("disabled must name selected patterns")
+        old = {e["pattern"]: e for e in selection_entries()}
         now = time.time()
-        value = {"entries": [{"pattern": p, "added_at": added.get(p, now)} for p in patterns]}
+        value = {"entries": []}
+        for p in patterns:
+            prev = old.get(p)
+            on = p not in disabled
+            # switched back On: the engine reads it from now; otherwise keep what was saved
+            at = now if on and prev and not prev["enabled"] else prev["enabled_at"] if prev else None
+            value["entries"].append({"pattern": p, "added_at": prev["added_at"] if prev else now,
+                                     "enabled": on, "enabled_at": at})
         return jsonify({"revision": save("index_selection", value, payload.get("revision"))})
 
     @app.put("/api/sources/connection")
@@ -290,7 +305,8 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.get("/api/alerts")
     def alerts():
         c = conn()
-        states = c.execute("SELECT * FROM alert_state WHERE state <> 'NORMAL'").fetchall()
+        states = c.execute("SELECT * FROM alert_state WHERE state <> 'NORMAL' AND "
+                            + MONITORED.format("service")).fetchall()
         pairs = [(s["service"], s["key"]) for s in states]
         docs = [(svc, k[4:]) for svc, k in pairs if k.startswith("doc:")]
         # Links of the alerting templates (for grouping) and of the alerting doc keys (for their mean ± σ).
@@ -306,7 +322,8 @@ def create_app(cfg: AppConfig) -> Flask:
             "SELECT doc_id, title FROM documents WHERE doc_id = ANY(%s)", (doc_ids,))}
         texts = {(r["service"], r["template_id"]): r["text"] for r in c.execute(
             "SELECT t.service, t.template_id, t.text FROM templates t JOIN alert_state a "
-            "ON a.service = t.service AND a.key = t.template_id WHERE a.state <> 'NORMAL'")}
+            "ON a.service = t.service AND a.key = t.template_id WHERE a.state <> 'NORMAL' AND "
+            + MONITORED.format("t.service"))}
 
         # Normal mean and σ of this local hour, from the same lookups detection uses.
         day, hour = day_hour(minute_of(time.time()))
@@ -358,14 +375,14 @@ def create_app(cfg: AppConfig) -> Flask:
 
     @app.get("/api/services")
     def services():
-        return jsonify([r["service"] for r in conn().execute("SELECT service FROM services ORDER BY service")])
+        return jsonify([r["service"] for r in conn().execute("SELECT service FROM services WHERE monitored ORDER BY service")])
 
     @app.get("/api/template-levels")
     def template_levels():
         # every level present in the data (levels are stored as read from the logs), with its template count
         service = request.args.get("service")
-        rows = conn().execute("SELECT level, count(*) AS n FROM templates WHERE %s::text IS NULL OR service = %s "
-                              "GROUP BY level", (service, service)).fetchall()
+        rows = conn().execute("SELECT level, count(*) AS n FROM templates WHERE (%s::text IS NULL OR service = %s) AND "
+                              + MONITORED.format("service") + " GROUP BY level", (service, service)).fetchall()
         rows.sort(key=lambda r: (LEVEL_ORDER.index(r["level"]) if r["level"] in LEVEL_ORDER else len(LEVEL_ORDER), r["level"]))
         return jsonify(rows)
 
@@ -378,8 +395,10 @@ def create_app(cfg: AppConfig) -> Flask:
         rows = conn().execute(
             "SELECT d.doc_id, d.service, d.level, d.based_on, d.title, d.error_code, d.error, d.handling, d.status, d.source, d.verdict, "
             "d.confidence, d.revision, d.embedded_revision IS NOT DISTINCT FROM d.revision AS embedded, "
-            "count(l.template_id) FILTER (WHERE l.source = ANY(%s)) AS linked_templates, "
-            "max(t.level) FILTER (WHERE l.source = 'draft') AS template_level "   # level of the template a draft was written for
+            "count(l.template_id) FILTER (WHERE l.source = ANY(%s) AND " + MONITORED.format("l.service")
+            + ") AS linked_templates, "
+            "max(t.level) FILTER (WHERE l.source = 'draft' AND " + MONITORED.format("l.service")
+            + ") AS template_level "   # level of the template a draft was written for
             "FROM documents d LEFT JOIN template_doc_links l USING (doc_id) "
             "LEFT JOIN templates t ON t.service = l.service AND t.template_id = l.template_id WHERE d.status = %s "
             "GROUP BY d.doc_id ORDER BY d.doc_id", (list(ALERTING_SOURCES), status)).fetchall()
@@ -407,7 +426,7 @@ def create_app(cfg: AppConfig) -> Flask:
         if "service" in payload:
             service = payload["service"] or None
             if service is not None and not (isinstance(service, str) and conn().execute(
-                    "SELECT 1 FROM services WHERE service = %s", (service,)).fetchone()):
+                    "SELECT 1 FROM services WHERE service = %s AND monitored", (service,)).fetchone()):
                 raise BadRequest("service must be a known service, or empty for shared")
         # level of the ERROR line: ERROR / WARN / INFO, "" or null = any; absent keeps it (update) / any (create)
         level = KEEP
@@ -482,16 +501,17 @@ def create_app(cfg: AppConfig) -> Flask:
         return day, hour_from, hour_to
 
     def known_service(service: str | None) -> str:
-        if not service or not conn().execute("SELECT 1 FROM services WHERE service = %s", (service,)).fetchone():
+        if not service or not conn().execute(
+                "SELECT 1 FROM services WHERE service = %s AND monitored", (service,)).fetchone():
             abort(404, "Unknown service")
         return service
 
     @app.get("/api/baseline/groups")
     def baseline_groups():
         """Exact key picker counts: templates per level class, and active documents per verdict with a linked template here."""
-        service = request.args.get("service")
-        if not service:
+        if not request.args.get("service"):
             raise BadRequest("service is required")
+        service = known_service(request.args.get("service"))
         c = conn()
         cls = class_sql("level")
         row = c.execute(
@@ -677,7 +697,7 @@ def create_app(cfg: AppConfig) -> Flask:
         return {"schedule": schedule, "revision": revision, "saved": saved is not None,
                 "next_run_at": status.get("next_commit_at"), "timezone": str(TZ), "current": current, "runs": runs,
                 "es_oldest": status.get("es_oldest") or {},
-                "services": [r["service"] for r in c.execute("SELECT service FROM services ORDER BY service")],
+                "services": [r["service"] for r in c.execute("SELECT service FROM services WHERE monitored ORDER BY service")],
                 "llm_active": c.execute("SELECT EXISTS (SELECT 1 FROM llm_profiles WHERE active) AS a").fetchone()["a"],
                 "engine_stale": time.time() - (status.get("heartbeat") or 0) > STALE_HEARTBEAT_SECONDS,
                 "default_rate": cfg.retrain.default_rate}
@@ -732,7 +752,7 @@ def create_app(cfg: AppConfig) -> Flask:
         if not all(type(h) is int for h in (hour_from, hour_to)) or not 0 <= hour_from < hour_to <= 24:
             raise BadRequest("hours must satisfy 0 <= hour_from < hour_to <= 24")
         if services is not None:
-            known = {r["service"] for r in conn().execute("SELECT service FROM services")}
+            known = {r["service"] for r in conn().execute("SELECT service FROM services WHERE monitored")}
             if not isinstance(services, list) or not services or not all(isinstance(s, str) and s in known for s in services):
                 raise BadRequest("services must be a non-empty list of known services")
         return Scope(services, parsed, hour_from, hour_to).to_json()
@@ -791,7 +811,7 @@ def create_app(cfg: AppConfig) -> Flask:
         sort = request.args.get("sort") or "last_seen"
         if sort not in ("first_seen", "last_seen"):
             raise BadRequest("sort must be first_seen or last_seen")
-        where, args = ["true"], []   # every filter but link_source: review_total counts within these
+        where, args = [MONITORED.format("t.service")], []   # every filter but link_source: review_total counts within these
         for column, value in (("t.service", request.args.get("service")), ("t.level", request.args.get("level")),
                               ("l.doc_id", request.args.get("doc_id")),
                               ("t.template_id", request.args.get("template_id"))):
@@ -878,9 +898,9 @@ def create_app(cfg: AppConfig) -> Flask:
     @app.get("/api/modules")
     def modules():
         """A service's modules: templates ever seen in each and its lines over the last 24 h."""
-        service = request.args.get("service")
-        if not service:
+        if not request.args.get("service"):
             raise BadRequest("service is required")
+        service = known_service(request.args.get("service"))
         days, bdays, bhours = modules_view.window_args(modules_view.clock())
         rows = conn().execute(
             "SELECT m.module_code AS module, count(*) AS templates, COALESCE(sum(w.n), 0)::bigint AS lines_24h "
@@ -891,7 +911,12 @@ def create_app(cfg: AppConfig) -> Flask:
             (service, days, bdays, bhours, service)).fetchall()
         return jsonify(rows)
 
+    def not_off(c, service: str) -> None:
+        if not c.execute("SELECT 1 WHERE " + MONITORED.format("%s::text"), (service,)).fetchone():
+            abort(404, "Unknown service")
+
     def known_template(c, service: str, template_id: str) -> None:
+        not_off(c, service)
         if not c.execute("SELECT 1 FROM templates WHERE service = %s AND template_id = %s",
                          (service, template_id)).fetchone():
             abort(404, "Unknown template")
@@ -983,6 +1008,7 @@ def create_app(cfg: AppConfig) -> Flask:
     def similar_templates(service: str, template_id: str):
         """Apply-to-similar list: same service and level class, pre-ticked at the inherit threshold."""
         c = conn()
+        not_off(c, service)
         row = c.execute("SELECT level, embedding IS NOT NULL AS embedded FROM templates "
                         "WHERE service = %s AND template_id = %s", (service, template_id)).fetchone()
         if not row:

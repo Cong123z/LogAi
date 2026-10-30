@@ -111,6 +111,8 @@ def load(c, a, now: float, buckets: list, pairs: list[tuple]) -> int:
     now_ts = datetime.fromtimestamp(now, timezone.utc)
     old = min(d for d, _ in buckets) - timedelta(days=1)
     ensure_partitions(c, old, max(d for d, _ in buckets))
+    c.cursor().executemany("INSERT INTO services (service, partition) VALUES (%s, 0) ON CONFLICT DO NOTHING",
+                           [(f"s{s:02d}",) for s in range(a.services)])
     with c.cursor().copy("COPY templates (service, template_id, level, text, first_seen, last_seen) FROM STDIN") as cp:
         for s in range(a.services):
             for i in range(a.templates):

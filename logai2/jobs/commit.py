@@ -29,6 +29,7 @@ hours AS (
   SELECT sh.service, p.daytype, sh.day, sh.hour, sh.n_minutes
   FROM service_hours sh JOIN picked p USING (service, day)
   WHERE sh.n_minutes > 0 AND NOT EXISTS (
+    SELECT 1 FROM services v WHERE v.service = sh.service AND NOT v.monitored) AND NOT EXISTS (
     SELECT 1 FROM review_exclusions x
     WHERE x.decision = 'exclude' AND x.service = sh.service AND x.day = sh.day
       AND sh.hour >= x.hour_from AND sh.hour < x.hour_to)),
@@ -38,7 +39,7 @@ keys AS (
 born AS (       -- view-only level keys are new: earlier days are unknown, not zero
   SELECT service, key, min(day) AS day FROM hourly_counts
   WHERE key IN ('*warn', '*info') GROUP BY service, key)
-INSERT INTO baseline (service, key, daytype, hour, mean, std, days)
+INSERT INTO tmp_rebuild (service, key, daytype, hour, mean, std, days)
 SELECT k.service, k.key, h.daytype, h.hour,
        sum(coalesce(hc.sum, 0))::float / sum(h.n_minutes),
        sqrt(greatest(sum(coalesce(hc.sumsq, 0))::float / sum(h.n_minutes)
@@ -71,8 +72,12 @@ def commit(conn, cfg: AppConfig, today: date, rebuild: bool = True, on_step=None
             before = conn.execute("SELECT count(*) AS n FROM baseline").fetchone()["n"]
             rows = before
             if rebuild:
-                conn.execute("DELETE FROM baseline")
+                # per service: one with no rows produced (Off, or its hours dropped by retention) keeps its baseline
+                conn.execute("DROP TABLE IF EXISTS tmp_rebuild")
+                conn.execute("CREATE TEMP TABLE tmp_rebuild (LIKE baseline) ON COMMIT DROP")
                 rows = conn.execute(REBUILD).rowcount
+                conn.execute("DELETE FROM baseline WHERE service IN (SELECT DISTINCT service FROM tmp_rebuild)")
+                conn.execute("INSERT INTO baseline SELECT * FROM tmp_rebuild")
                 done.append(("rebuild", "Rebuild baseline", {"rows_before": before, "rows": rows}, t0, time.time()))
             key = "housekeeping"
             t0 = time.time()

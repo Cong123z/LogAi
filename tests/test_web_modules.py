@@ -77,6 +77,7 @@ def test_module_filter_orders_window_first_and_narrows(client, conn):
 
 
 def test_api_modules_counts(client, conn):
+    conn.execute("INSERT INTO services VALUES ('pay', 0)")
     seen(conn, "T1", "A"); seen(conn, "T2", "A"); seen(conn, "T2", "B"); seen(conn, "T9", "A", service="other")
     hours(conn, "T1", "A", 5); hours(conn, "T2", "A", 6); hours(conn, "T2", "B", 1, day=TODAY - timedelta(days=2))
     conn.commit()

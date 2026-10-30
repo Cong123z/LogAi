@@ -1,6 +1,6 @@
 # Pattern On/Off switch and engine memory
 
-Status: draft, 2026-10-29. Plan: `docs/plans/2026-10-29-pattern-switch-memory.md`.
+Status: done, 2026-10-29, on build/pattern-switch 23ed042 (merges pm0-pm5); pm4 (web) and pm6 (proof) follow. Plan: `docs/plans/2026-10-29-pattern-switch-memory.md`.
 Fixes B24, B25, B26 (new) and the memory findings below. Comes from the company incident of 2026-10-28
 (vas_066: 22 h lag, flush stall on removal, OOMKilled at every start; pod at ~4,400 MiB since).
 

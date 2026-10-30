@@ -12,6 +12,7 @@ import logging
 import time
 import zlib
 from collections import Counter, defaultdict, deque
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -24,7 +25,8 @@ from logai2.db import get_setting
 from logai2.links import ALERTING_SOURCES
 from logai2.owner.baseline import Baseline
 from logai2.owner.counts import ERROR_LEVELS, SEVERITY, OpenMinutes
-from logai2.owner.detect import AlertRow, Detector
+from logai2.metrics import rss_mib, trim
+from logai2.owner.detect import AlertRow, Change, Detector
 from logai2.owner.miners import Miners
 from logai2.reader.reader import MinuteBatch
 from logai2.timeutil import day_hour, local
@@ -36,7 +38,7 @@ SAMPLES_KEPT = 20
 # ponytail: executemany per table but the two module tables (COPY, copy_upsert: ~2x faster at 20k-60k rows, see
 # docs/perf/2026-10-23-template-modules.md); move the others when flush time shows in the Pipeline stats.
 SQL = {
-    "services": "INSERT INTO services (service, partition) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+    "services": "INSERT INTO services (service, partition, monitored) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
     "modules": "INSERT INTO modules (module_code, service) VALUES (%s, %s) ON CONFLICT DO NOTHING",
     "templates": (
         "INSERT INTO templates (service, template_id, level, text, first_seen, last_seen) "
@@ -126,38 +128,141 @@ def _more_severe(level: str, than: str | None) -> bool:
 
 
 class Owner:
-    def __init__(self, conn, cfg: AppConfig, start_minute: int, now: Callable[[], float] = time.time):
+    """Holds state only for the ACTIVE services: pairs under an On pattern, minus pairs under an Off pattern
+    (Off wins), plus services first seen in a batch. enabled=None: every pattern in index_services is On."""
+
+    def __init__(self, conn, cfg: AppConfig, start_minute: int, now: Callable[[], float] = time.time,
+                 enabled: set[str] | None = None, disabled: set[str] = frozenset()):
         self.conn = conn
         self.cfg = cfg
         self.now = now
+        self.skipped_off = 0     # counts dropped because their service is Off
+        self._monitored_dirty = True   # services.monitored is written by the first flush
+        self._new_sources: set[tuple[str, str]] = set()
         with conn.transaction():
-            blobs = {r["service"]: r["blob"] for r in conn.execute("SELECT service, blob FROM drain3_state")}
-            self.levels = {(r["service"], r["template_id"]): r["level"]
-                           for r in conn.execute("SELECT service, template_id, level FROM templates")}
-            # service -> first minute it is zero-filled from; a known service counts from its first
-            # template (or from start), so a restart does not zero-fill minutes before it existed
-            self.services = {r["service"]: max(start_minute, int(r["first"].timestamp()) // 60)
-                             if r["first"] else start_minute for r in conn.execute(
-                                 "SELECT s.service, min(t.first_seen) AS first FROM services s "
-                                 "LEFT JOIN templates t USING (service) GROUP BY s.service")}
-            self.modules = {(r["service"], r["module_code"]) for r in conn.execute("SELECT service, module_code FROM modules")}
             self._source_pairs = {(r["pattern"], r["service"])
                                   for r in conn.execute("SELECT pattern, service FROM index_services")}
-            states = {(r["service"], r["key"]): AlertRow(
-                r["service"], r["key"], r["state"], r["streak"], r["since"].timestamp(), r["score"],
-                r["count"], r["band_low"], r["band_high"]) for r in conn.execute("SELECT * FROM alert_state")}
+            self.active, self._off = self._split(enabled, disabled)
+            # no selection (tests): a service no pattern is recorded for stays active. With a selection it comes
+            # in through the lazy load on its first count: migration 009 has no backfill, so a removed pattern's
+            # service may have no pair and must not be loaded.
+            if enabled is None:
+                self.active |= {r["service"] for r in conn.execute(
+                    "SELECT service FROM services UNION SELECT service FROM alert_state UNION "
+                    "SELECT service FROM drain3_state UNION SELECT DISTINCT service FROM templates"
+                )} - {s for _, s in self._source_pairs} - self._off
+            st = self._read_state(sorted(self.active), start_minute)
             self.detection_enabled = get_setting(conn, "detection_enabled") is True
-            baseline = Baseline.load(conn)
-            links = self._load_links()
-        self.miners = Miners(cfg.drain3, blobs)
+        self.levels = st["levels"]
+        # service -> first minute it is zero-filled from; a known service counts from its first
+        # template (or from start), so a restart does not zero-fill minutes before it existed
+        self.services = st["services"]
+        self.modules = st["modules"]
+        self.miners = Miners(cfg.drain3, st["blobs"])
         self.minutes = OpenMinutes(start_minute)
-        self.detector = Detector(cfg, baseline, links, self.levels, states)
+        self.detector = Detector(cfg, st["baseline"], st["links"], self.levels, st["states"])
         self.service_minutes: dict[str, deque[tuple[int, int]]] = defaultdict(lambda: deque(maxlen=60))
         self._unparsed_logged: dict[str, int] = {}  # service -> minute last logged
         # samples of open minutes, queued only when their minute closes: open minutes are
         # re-read after a crash, so queuing earlier would insert their samples twice
-        self._open_samples: dict[int, list[tuple[str, str, str]]] = defaultdict(list)
+        self._open_samples: dict[int, dict[tuple[str, str], list[str]]] = defaultdict(dict)
         self._clear()
+
+    def _split(self, enabled, disabled) -> tuple[set[str], set[str]]:
+        """(active, off) services from the index_services pairs; Off wins over any On pair."""
+        pairs = self._source_pairs | self._new_sources
+        off = {s for p, s in pairs if p in disabled}
+        return {s for p, s in pairs if enabled is None or p in enabled} - off, off
+
+    def _read_state(self, services: list[str], start_minute: int) -> dict:
+        """The stored state of these services; call inside a transaction (the baseline streams a cursor)."""
+        ex = lambda q: self.conn.execute(q, (services,))   # noqa: E731
+        first = {r["service"]: max(start_minute, int(r["first"].timestamp()) // 60) if r["first"] else start_minute
+                 for r in ex("SELECT s.service, min(t.first_seen) AS first FROM services s "
+                             "LEFT JOIN templates t USING (service) WHERE s.service = ANY(%s) GROUP BY s.service")}
+        return {
+            "blobs": {r["service"]: r["blob"] for r in ex("SELECT service, blob FROM drain3_state WHERE service = ANY(%s)")},
+            "levels": {(r["service"], r["template_id"]): r["level"]
+                       for r in ex("SELECT service, template_id, level FROM templates WHERE service = ANY(%s)")},
+            "services": first,
+            "modules": {(r["service"], r["module_code"])
+                        for r in ex("SELECT service, module_code FROM modules WHERE service = ANY(%s)")},
+            "states": {(r["service"], r["key"]): AlertRow(
+                r["service"], r["key"], r["state"], r["streak"], r["since"].timestamp(), r["score"],
+                r["count"], r["band_low"], r["band_high"])
+                for r in ex("SELECT * FROM alert_state WHERE service = ANY(%s)")},
+            "baseline": Baseline.load(self.conn, services=services),
+            "links": self._load_links(services),
+        }
+
+    def set_selection(self, enabled: set[str], disabled: set[str]) -> None:
+        """A switch: services leaving the active set are unloaded (alerts reset), joining ones loaded.
+        Call between a flush and the next handle, so leaving services never get the next minutes."""
+        pairs = self._source_pairs | self._new_sources
+        active, off = self._split(enabled, disabled)
+        active |= {s for s in self.active - {s for _, s in pairs}} - off   # first seen in a batch: no pair yet
+        leaving, coming = self.active - active, active - self.active
+        if coming:
+            self._load(coming)     # first: a failed query leaves the owner as it was
+        self._off = off
+        self._unload(leaving)
+
+    def _load(self, services) -> None:
+        """Bring these services' stored state in (a switch On, or a service first counted again)."""
+        services = sorted(services)
+        with self.conn.transaction():
+            st = self._read_state(services, self.minutes.next_to_close)
+        for s in services:
+            blob = self._blobs.get(s) or st["blobs"].get(s)   # a pending blob is newer than the stored one
+            if blob:
+                self.miners.load(s, blob)
+        for k, v in st["levels"].items():
+            self.levels.setdefault(k, v)
+        for k, r in st["states"].items():
+            self.detector.states.setdefault(k, r)   # a reset not yet flushed wins over the stored state
+        # no first-minute entry: the first real count sets it (_see), so the gap before it stays a gap (D3)
+        self.modules |= st["modules"]
+        self.detector.baseline.update(st["baseline"])
+        self.detector.links.update(st["links"])
+        self.active |= set(services)
+        self._monitored_dirty = True
+
+    def _unload(self, leaving) -> None:
+        """Forget these services: state, open minutes, pending zero-fill; reset their alerts. Rows of minutes
+        already closed stay pending (they are real)."""
+        if not leaving:
+            return
+        leaving = set(leaving)
+        self.active -= leaving
+        self._blobs.update(self.miners.dirty())   # an unflushed cluster id must come back identical
+        at, d = self.now(), self.detector
+        for k in [k for k in d.states if k[0] in leaving]:
+            r = d.states[k]
+            if r.state != "NORMAL" or r.streak:
+                if r.state != "NORMAL":
+                    self._changes.append(Change(r.service, r.key, at, r.state, "NORMAL", r.count,
+                                                r.band_low, r.band_high))
+                d.states[k] = replace(r, state="NORMAL", streak=0, since=at)
+                d.touched.add(k)   # the next flush writes alert_state and alert_changes
+            elif k not in d.touched:
+                del d.states[k]
+        d.links = {k: v for k, v in d.links.items() if k[0] not in leaving}
+        for k in [k for k in self.levels if k[0] in leaving and k not in self._templates]:
+            del self.levels[k]   # a pending template row still needs its level at the flush
+        self.modules = {m for m in self.modules if m[0] not in leaving}
+        for s in leaving:
+            self.services.pop(s, None)
+            self.service_minutes.pop(s, None)
+            self._unparsed_logged.pop(s, None)
+            self.miners.drop(s)
+        d.baseline.drop(leaving)       # one pass over the rows for all of them
+        self.minutes.drop_service(leaving)
+        for per in self._open_samples.values():
+            for k in [k for k in per if k[0] in leaving]:
+                del per[k]
+        self._monitored_dirty = True
+        trim()
+        logger.info("state loaded: %d services, rss %.0f MiB", len(self.active), rss_mib())
 
     def _clear(self) -> None:
         self._services: dict[str, int] = {}
@@ -175,19 +280,26 @@ class Owner:
         self._samples: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=SAMPLES_KEPT))
         self._lane_hours: list = []                    # re-read LaneHours replacing whole hours in the next flush
         self._lane_run: tuple[int, dict] | None = None  # (run id, {"pos_ms", "steps"}) written in that flush
+        self._closed = 0   # minutes closed since the last flush
 
-    def _load_links(self) -> dict[tuple[str, str], str]:
+    def _load_links(self, services: list[str] | None = None) -> dict[tuple[str, str], str]:
+        services = sorted(self.active) if services is None else services
         return {(r["service"], r["template_id"]): r["doc_id"]
                 for r in self.conn.execute("SELECT service, template_id, doc_id FROM template_doc_links "
-                                           "WHERE doc_id IS NOT NULL AND source = ANY(%s)", (list(ALERTING_SOURCES),))}
+                                           "WHERE doc_id IS NOT NULL AND source = ANY(%s) AND service = ANY(%s)",
+                                           (list(ALERTING_SOURCES), services))}
 
     def reload_baseline(self) -> None:
         with self.conn.transaction():
-            self.detector.baseline = Baseline.load(self.conn)
+            self.detector.baseline = Baseline.load(self.conn, services=sorted(self.active))
 
     def reload_links(self) -> None:
         with self.conn.transaction():
             self.detector.links = self._load_links()
+
+    @property
+    def close_full(self) -> bool:
+        return self._closed >= self.cfg.flush.max_closed_minutes
 
     @property
     def boundary_ms(self) -> int:
@@ -198,6 +310,11 @@ class Owner:
         self._new_sources |= set(map(tuple, batch.get("sources", ()))) - self._source_pairs
         for c in batch["counts"]:
             service, level, minute = c["service"], c["level"], c["minute"]
+            if service not in self.active:
+                if service in self._off:   # reached through another pattern's index: Off wins
+                    self.skipped_off += c["n"]
+                    continue
+                self._load([service])     # first seen, or back after its pattern was removed
             template_id, text = c["template_id"], None
             if template_id is None:
                 try:
@@ -211,17 +328,25 @@ class Owner:
                         self._unparsed_logged[service] = minute
                         logger.exception("could not template a %s line; counted as %s", service, template_id)
             self._see(service, template_id, text, level, c["module"], minute)
-            if minute >= self.minutes.next_to_close:  # a late count is dropped, its sample too
-                self._open_samples[minute].append((service, template_id, c["sample"]))
+            # a late count is dropped, its sample too; only error templates keep samples (memory while lagging)
+            if minute >= self.minutes.next_to_close and self.levels[(service, template_id)].upper() in ERROR_LEVELS:
+                kept = self._open_samples[minute].setdefault((service, template_id), [])
+                if len(kept) < SAMPLES_KEPT:
+                    kept.append(c["sample"])
             self.minutes.add(service, template_id, level, c["module"], minute, c["n"])
 
         today = day_hour(int(self.now() // 60))[0]
         mod_cutoff = today - timedelta(days=self.cfg.retention.module_hours_days)
         lab_cutoff = today - timedelta(days=self.cfg.lab.days)
-        for cm in self.minutes.close_before(batch["watermark_ms"] // 60_000, self.services):
-            for service, template_id, sample in self._open_samples.pop(cm.minute, ()):
+        # a long lag is closed in bites of max_closed_minutes per flush (the cursor stays at the oldest open minute)
+        room = max(0, self.cfg.flush.max_closed_minutes - self._closed)
+        upto = min(batch["watermark_ms"] // 60_000, self.minutes.next_to_close + room)
+        closed = self.minutes.close_before(upto, self.services)
+        self._closed += len(closed)
+        for cm in closed:
+            for (service, template_id), lines in self._open_samples.pop(cm.minute, {}).items():
                 if self.levels[(service, template_id)].upper() in ERROR_LEVELS:
-                    self._samples[(service, template_id)].append((cm.minute, sample))
+                    self._samples[(service, template_id)].extend((cm.minute, line) for line in lines)
             for (service, key), n in cm.keys.items():
                 if key == "*total":  # close_before gives every service a *total key
                     self.service_minutes[service].append((cm.minute, n))
@@ -284,6 +409,7 @@ class Owner:
         """Queue closed re-read hours and the run's pos_ms / steps; the next flush replaces those hours and
         writes the update in its transaction, after every live write. The lane's templates, modules and pairs
         go through the same pending paths as live ones; Owner.services (the zero-fill map) is not touched."""
+        hours = [h for h in hours if h.service not in self._off]
         self._lane_hours += hours
         self._lane_run = (run_id, run_update)
         for h in hours:
@@ -348,7 +474,10 @@ class Owner:
         states = self.detector.states
         touched = list(self.detector.touched)
         with self.conn.transaction(), self.conn.cursor() as cur:
-            cur.executemany(SQL["services"], list(self._services.items()))
+            cur.executemany(SQL["services"], [(s, p, s in self.active) for s, p in self._services.items()])
+            if self._monitored_dirty:
+                active = sorted(self.active)
+                cur.execute("UPDATE services SET monitored = (service = ANY(%s))", (active,))
             cur.executemany(SQL["modules"], self._modules)
             cur.executemany(SQL["index_services"], sorted(self._new_sources))
             cur.executemany(SQL["templates"], new_t)
@@ -365,6 +494,12 @@ class Owner:
                 for r in (states[k] for k in touched)])
             cur.executemany(SQL["alert_changes"], [(c.service, c.key, _ts(c.at), c.from_state, c.to_state,
                                                     c.count, c.band_low, c.band_high) for c in self._changes])
+            if self._monitored_dirty:   # states of services that are not active (Off or removed at start) go NORMAL
+                cur.execute("INSERT INTO alert_changes (service, key, at, from_state, to_state, count, band_low, band_high) "
+                            "SELECT service, key, now(), state, 'NORMAL', count, band_low, band_high FROM alert_state "
+                            "WHERE service <> ALL(%s) AND state <> 'NORMAL' ON CONFLICT DO NOTHING", (active,))
+                cur.execute("UPDATE alert_state SET state = 'NORMAL', streak = 0, since = now() "
+                            "WHERE service <> ALL(%s) AND (state <> 'NORMAL' OR streak <> 0)", (active,))
             cur.executemany(SQL["error_samples"], [(s, t, _ts(m * 60), line)
                                                    for (s, t), q in self._samples.items() for m, line in q])
             cur.executemany(SQL["error_samples_trim"], list(self._samples))
@@ -373,5 +508,10 @@ class Owner:
             cur.execute("DELETE FROM es_cursors WHERE index <> ALL(%s)", (list(cursors),))
             cur.executemany(SQL["worker_status"], [("engine", Jsonb(status))])
         self._source_pairs |= self._new_sources
+        self._monitored_dirty = False
         self._clear()
+        for k in touched:   # a reset state of a service that left is persisted: forget it
+            r = states.get(k)
+            if r is not None and k[0] not in self.active and r.state == "NORMAL" and not r.streak:
+                del states[k]
         self.detector.touched.clear()

@@ -715,7 +715,9 @@ def module_measure(a, world, c, run, res):
 
 
 def caught_up(run) -> bool:
-    return bool(run.lags) and run.engine._caught_up() and run.lags[-1][1] < 60
+    e = run.engine   # the owner closes a long jump in bites after the reader caught up
+    return bool(run.lags) and e._caught_up() and e.owner.minutes.next_to_close >= e._watermark_ms // 60_000 \
+        and run.lags[-1][1] < 60
 
 
 def scenarios(a) -> dict[str, Scenario]:

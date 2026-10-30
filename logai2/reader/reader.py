@@ -178,10 +178,10 @@ class Reader:
         # restart.
         return {i: (max(boundary_ms, floor), floor) for i, floor in self._floors.items()}
 
-    def forget_before(self, boundary_ms: int) -> None:
-        # Never forget ids at or after the position: the next poll re-reads
-        # the position's millisecond and would count them again.
+    def forget_read(self) -> None:
+        # Ids below the position are never read again (pages start at the position); ids at or
+        # after it stay: the next poll re-reads that millisecond and would count them again.
         for index, seen in self._seen.items():
-            cut = min(boundary_ms, self._pos[index])
+            cut = self._pos[index]
             for key in [k for k, ts in seen.items() if ts < cut]:
                 del seen[key]

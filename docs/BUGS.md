@@ -216,7 +216,66 @@ Open items to fix, newest findings included. When one is fixed, move it to
 - **Fix idea:** none planned; check the list against company data before trusting a "σ stays" verdict there.
 - **Likelihood:** low on laptop worlds; unknown on company data.
 
+### B27. Drain3 `save_state` serialises the whole tree on every flush that learns a template
+- **Where:** `Miners.dirty` (`logai2/owner/miners.py`), `Owner.flush`.
+- **What:** probe: 2.3 s at 80k templates (extrapolated 4-5 s at 135k), inside every flush that has a new cluster, on the
+  engine loop. Not a memory cost; it delays the heartbeat and the next poll.
+- **Fix idea:** save less often, but a saved tree must never lag the cursors: after a crash the cluster ids that the saved
+  tree does not know would be handed out again for other templates.
+- **Likelihood:** only services with tens of thousands of templates that still learn new ones.
+
+### B28. A restart within the lag after a switch On can zero-fill from the boundary up to `enabled_at`
+- **Where:** `Owner.__init__` (first minute of a service), `Owner.set_selection`.
+- **What:** after a pattern is switched On, its services have no counts before `enabled_at`. If the engine restarts while
+  the owner is still behind (bites), the service is loaded with its first minute at the boundary and the minutes up to
+  `enabled_at` get `*total = 0` rows.
+- **Fix idea:** none good. Leaving the first minute unset at start (as `_load` does) was rejected: it would stop
+  zero-filling silent services after every restart.
+- **Likelihood:** low (restart inside the lag window right after a switch).
+
+### B29. While the owner is behind, open minutes hold every count of the minutes not yet closed
+- **Where:** `Owner.handle`, `OpenMinutes`, Pipeline `lag_seconds`.
+- **What:** the bites bound the closing and the flush, not the open part: holding M open minutes costs about 240 B per
+  template-minute, bounded only by the lag. The Pipeline `lag_seconds` is the reader's lag; the owner's is
+  `owner_lag_seconds` in the status.
+- **Fix idea:** make the reader wait when the owner is more than N minutes behind (bounded read-ahead on the owner side).
+- **Likelihood:** whenever the owner is behind for hours (a backfill, a long switch).
+
+### B30. Small leftovers of the pattern switch (deferred minors)
+- **Where:** `Owner._unload` / `_load` (`logai2/owner/owner.py`), reader template cache, open samples.
+- **What:** (1) levels kept for pending templates of a left service are never removed after the flush (a small leak per
+  switch); (2) lines of an Off service are never learned by the reader's template cache, so each is a cache miss; (3) an
+  open sample is decided by the level at arrival, so a template that becomes ERROR later may have kept no sample.
+- **Fix idea:** drop the pending levels after the flush; learn Off lines in the cache or skip them early; decide the
+  sample when the minute closes.
+- **Likelihood:** low.
+
 ## Fixed
+
+### B24. The engine loads every service's state at start, also services no pattern reads (OOMKilled loop) (fixed in pm1 `73a9e47` + pm3 `a41425f`)
+- **Where:** `Owner.__init__` (`logai2/owner/owner.py`): `Baseline.load(conn)` with no filter, `Miners` decoding every
+  `drain3_state` blob, `levels` from every template row.
+- **What:** company 2026-10-28: a backfilled service (vtn_cntt_vas_066, ~2 billion docs) grew to 135k templates and
+  ~6M `baseline` rows. Its pattern was removed from Data sources, but the engine still loads all of it at every start
+  and was OOMKilled 10-20 s after each restart. Measured (test DB, real `Baseline.load`): 166k rows -> 144 MiB peak,
+  6M rows -> 3.9 GiB peak. Worked around by raising the pod's memory limit.
+- **Fix:** the baseline is packed (about 80 B per row instead of 650-690 B) and the owner loads baseline rows, Drain3 trees and levels only for the active services (those of patterns that are On); a switch loads or unloads. Probe, 80k templates: load peak 2372 -> 382 MiB; at 20k templates the process is 52.7 MiB with the pattern Off, 130.4 On, 68.9 after Off again.
+
+### B25. A slow pattern holds every other pattern's data in memory; removing it closes it all in one tick (fixed in pm5 `6453203`)
+- **Where:** `Reader.poll` / `_watermark` (`logai2/reader/reader.py`), `Owner.handle`.
+- **What:** minutes close at the slowest non-failing pattern. The same incident: the backfill pattern lagged ~22 h,
+  so the live pattern's open minutes and dedup ids (`Reader._seen`) for 22 h stayed in memory. Removing the slow
+  pattern moved the watermark ~22 h at once; ~1,300 minutes closed in one tick and the flush never completed
+  (heartbeat stale -> "Engine unavailable", then OOMKilled). B5's fix covers indices inside one pattern, not
+  patterns against each other.
+- **Fix:** minutes close in bites (`flush.max_closed_minutes`), the reader forgets read ids after each flush (`forget_read`), open samples are capped and kept only for error templates, and the status warns when a pattern lags. Probe, 20k templates x 120 minutes: flush peak 1180 -> 1000 MiB; the gain grows with the minutes closed at once.
+
+### B26. A removed pattern's services are still zero-filled and judged (fixed in pm3 `a41425f`)
+- **Where:** `Owner.__init__` (`self.services` from every `services` row), `OpenMinutes.close_before`, `Detector.run`.
+- **What:** found reading the code 2026-10-29 (not seen in the company yet). After a pattern is removed, its services
+  still get `*total = 0` in every closed minute: zero `service_hours` / `hourly_counts` rows (fake silence in the
+  history) and, once the baseline is full, a false `*total` drop alert.
+- **Fix:** only active services are zero-filled and judged; switching a pattern Off resets the alerts of its services to NORMAL in the flush.
 
 ### F7. Test A never committed its recall rows or the run status (fixed in bk17, `b5118d6`)
 - **What:** `test_a.finish` committed, then read, then wrote inside the read's transaction (a savepoint), so closing the

@@ -29,7 +29,7 @@ from logai2.jobs import runs
 from logai2.jobs.commit import commit
 from logai2.jobs.reread import Lane, Scope, plan as plan_reread
 from logai2.jobs.runs import RunLog
-from logai2.metrics import Metrics
+from logai2.metrics import Metrics, rss_mib
 from logai2.owner.owner import SQL, Owner
 from logai2.reader.cache import KnownLines
 from logai2.reader.reader import Reader
@@ -73,6 +73,8 @@ class Engine:
         self.reader: Reader | None = None
         self.owner: Owner | None = None
         self.bootstrap: dict = {}
+        self.enabled: set[str] = set()
+        self.disabled: set[str] = set()
         self.last_commit: dict | None = None
         self.resolution: dict[str, list[str]] = {}
         self.available: list[dict] = []
@@ -126,7 +128,9 @@ class Engine:
         with self.db.transaction():
             ensure_partitions(self.db, min(_day(start_ms / 1000), today), today + timedelta(days=2))
         self._partitions_day = today
-        self.owner = Owner(self.conn, self.cfg, start_ms // 60_000, now=self.now)
+        self.owner = Owner(self.conn, self.cfg, start_ms // 60_000, now=self.now,
+                           enabled=self.enabled, disabled=self.disabled)
+        logger.info("state loaded: %d services, rss %.0f MiB", len(self.owner.active), rss_mib())
         raised = sum(r.state != "NORMAL" for r in self.owner.detector.states.values())
         if raised:
             logger.warning("loaded %d non-NORMAL alert states; they are exported as they were "
@@ -223,17 +227,24 @@ class Engine:
         self.resolution = self.source.resolve([e["pattern"] for e in entries])
         floors: dict[str, int] = {}
         targets: dict[str, str] = {}
+        # an Off pattern is never read and is excluded from every On pattern, whatever its position
+        self.disabled = {e["pattern"] for e in entries if e.get("enabled") is False}
+        self.enabled = {e["pattern"] for e in entries} - self.disabled
+        if self.owner:   # before the next poll/handle: leaving services must not get the jump's minutes
+            self.owner.set_selection(self.enabled, self.disabled)
         for e in entries:
-            if e["pattern"] in floors:
+            if e["pattern"] in floors or e["pattern"] in self.disabled:
                 continue   # duplicate pattern: the first entry wins
             # a pattern selected before the first start is read from days_back; a later one from when it was added
             floor = self.bootstrap["since"] if e["added_at"] <= self.bootstrap["until"] else e["added_at"]
+            floor = max(floor, e.get("enabled_at") or 0)   # switched back On: only what comes after
             floors[e["pattern"]] = int(floor * 1000)
             # an index matched by two patterns is read once, by the earlier one
-            targets[e["pattern"]] = ",".join([e["pattern"]] + [f"-{p}" for p in floors if p != e["pattern"]])
+            targets[e["pattern"]] = ",".join([e["pattern"]] + [f"-{p}" for p in floors if p != e["pattern"]]
+                                       + [f"-{p}" for p in sorted(self.disabled)])
         # upgrade: rows keyed by concrete index all hold the minute boundary; a pattern without a row starts there
         oldest = min(saved.values(), default=None)
-        starts = {p: saved.get(p, f if oldest is None else max(f, oldest)) for p, f in floors.items()}
+        starts = {p: max(saved.get(p, f if oldest is None else max(f, oldest)), f) for p, f in floors.items()}
         self.reader.set_sources(floors, starts, targets)
         self._targets = targets
         return floors, starts
@@ -262,9 +273,10 @@ class Engine:
         batch = self.reader.poll()
         self.reader.learn(self.owner.handle(batch))
         self._observe(batch, now)
-        if self._pending_events >= self.cfg.flush.max_events or now - self._last_flush >= self.cfg.flush.seconds:
+        if self._pending_events >= self.cfg.flush.max_events or self.owner.close_full or now - self._last_flush >= self.cfg.flush.seconds:
             self._flush()
-        if not self.owner.detection_enabled and self._caught_up():
+        # first catch-up is done when the owner has closed up to the watermark too (it closes in bites)
+        if not self.owner.detection_enabled and self._caught_up() and self._owner_done():
             self._commit("first_start")
             with self.db.transaction():
                 put_setting(self.db, "detection_enabled", True)
@@ -276,7 +288,10 @@ class Engine:
         if self._resume and now - self._resume_at >= self.cfg.elasticsearch.index_refresh_seconds:
             self._reread_resume()
         self._lane_tick(now)
-        return batch["events"] > 0
+        return batch["events"] > 0 or not self._owner_done()   # a long jump is closed bite after bite, no sleep
+
+    def _owner_done(self) -> bool:
+        return self.owner.minutes.next_to_close >= self._watermark_ms // 60_000
 
     def _refresh(self, now: float) -> None:
         if now - self._refreshed >= self.cfg.elasticsearch.index_refresh_seconds:
@@ -351,7 +366,7 @@ class Engine:
                         logger.warning("database still unreachable")
                 self.sleep(delay)
                 delay = min(delay * 2, MAX_BACKOFF_SECONDS)
-        self.reader.forget_before(self.owner.boundary_ms)
+        self.reader.forget_read()
         self._pending_events = 0
         self._last_flush = self.now()
         m = self.metrics
@@ -365,7 +380,8 @@ class Engine:
         for service in self._miss_services - set(status["miss_ratio"]):   # left the window
             m.miss_ratio.remove(service)
         self._miss_services = set(status["miss_ratio"])
-        m.export_rows(alert_rows([asdict(r) for r in self.owner.detector.states.values()],
+        active = self.owner.active
+        m.export_rows(alert_rows([asdict(r) for r in self.owner.detector.states.values() if r.service in active],
                                  self.owner.detector.links, {}, {}))
 
     def _status(self) -> dict:
@@ -395,9 +411,17 @@ class Engine:
         if not self._history or self._history[-1]["t"] != minute_of(now) * 60:
             last_minute = sum(n for t, n in self._event_window if t >= now - 60)
             self._history.append({"t": minute_of(now) * 60, "lag": lag, "eps": last_minute / 60})
+        behind = []
+        if self.owner.detection_enabled and lag > self.cfg.reader.lag_warn_seconds:
+            # the slowest healthy patterns hold the watermark back: name them
+            behind = [f"{i} is {int((now - p['pos_ms'] / 1000) // 60)} min behind: alerts of every pattern wait for it"
+                      for i, p in self._positions.items()
+                      if not p["failing"] and not p["caught_up"] and p["pos_ms"] // 60_000 <= self._watermark_ms // 60_000]
         return {
             "heartbeat": now,
             "lag_seconds": lag,
+            "owner_lag_seconds": max(0.0, now - self.owner.boundary_ms / 1000),
+            "skipped_off": self.owner.skipped_off,
             "flush_seconds": self._flush_times[-1][1] if self._flush_times else 0.0,
             "flush_seconds_max": max((d for _, d in self._flush_times), default=0.0),
             "late_counts": self.owner.minutes.late,
@@ -417,7 +441,8 @@ class Engine:
             "resolution": self.resolution,
             "es_oldest": self.es_oldest,
             "warnings": [f"no index matches {p}" for p in self.reader.floors if not self.resolution.get(p)]
-                        + [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn],
+                        + [f"high miss ratio: {s} {ratios[s]:.0%}" for s in warn]
+                        + behind,
         }
 
     def _owner_day(self) -> date:
@@ -632,7 +657,7 @@ class Engine:
         lane = rr["lane"]
         rr["lag"] = lag = max(0.0, now - self._watermark_ms / 1000)
         hours: list = []
-        if not (self._caught_up() and lag <= self.cfg.retrain.max_live_lag_seconds):
+        if not (self._caught_up() and self._owner_done() and lag <= self.cfg.retrain.max_live_lag_seconds):
             rr["paused"] += 1   # live first: the lane never runs while it lags or catches up
         else:
             try:

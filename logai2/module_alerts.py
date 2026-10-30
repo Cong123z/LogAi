@@ -60,7 +60,8 @@ def _day(ts: float):
 
 
 def module_alerts(conn, module_code: str, start: float, end: float, warm_consecutive: int = 2) -> list[dict]:
-    services = [r["service"] for r in conn.execute("SELECT service FROM modules WHERE module_code = %s", (module_code,))]
+    services = [r["service"] for r in conn.execute("SELECT service FROM modules WHERE module_code = %s "
+        "AND service IN (SELECT service FROM services WHERE monitored)", (module_code,))]
     if not services:
         return []
     ts = lambda x: datetime.fromtimestamp(x, timezone.utc)

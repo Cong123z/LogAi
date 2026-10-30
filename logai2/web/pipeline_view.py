@@ -34,14 +34,17 @@ def throughput(engine: dict) -> dict[str, dict]:
 def services(conn, cfg: AppConfig, engine: dict, day: date, hour: int) -> list[dict]:
     """One row per service, by name."""
     tp = throughput(engine)
-    templates = _by_service(conn, "SELECT service, count(*) AS n FROM templates GROUP BY 1")
+    templates = _by_service(conn, "SELECT service, count(*) AS n FROM templates "
+                                   "WHERE service IN (SELECT service FROM services WHERE monitored) GROUP BY 1")
     new = _by_service(conn, "SELECT service, count(*) AS n FROM templates "
-                            "WHERE first_seen > now() - interval '24 hours' GROUP BY 1")
-    not_normal = _by_service(conn, "SELECT service, count(*) AS n FROM alert_state WHERE state <> 'NORMAL' GROUP BY 1")
+                            "WHERE first_seen > now() - interval '24 hours' "
+                            "AND service IN (SELECT service FROM services WHERE monitored) GROUP BY 1")
+    not_normal = _by_service(conn, "SELECT service, count(*) AS n FROM alert_state WHERE state <> 'NORMAL' "
+                                       "AND service IN (SELECT service FROM services WHERE monitored) GROUP BY 1")
     unparsed = {r["key"]: r["sum"] for r in conn.execute(
         "SELECT key, sum FROM hourly_counts WHERE day = %s AND hour = %s AND key LIKE '%%:unparsed'", (day, hour))}
     rows = []
-    for r in conn.execute("SELECT service FROM services ORDER BY service").fetchall():
+    for r in conn.execute("SELECT service FROM services WHERE monitored ORDER BY service").fetchall():
         service, t = r["service"], tp.get(r["service"], {})
         rows.append({"service": service, "last": t.get("last"), "avg15": t.get("avg15"), "delta_1h": t.get("delta_1h"),
                      "miss_ratio": (engine.get("miss_ratio") or {}).get(service),

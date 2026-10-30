@@ -1,11 +1,33 @@
 """Prometheus metrics. Never a per-template series: alert rows only, by service and document."""
 from __future__ import annotations
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, start_http_server
+import ctypes
+
+from prometheus_client import CollectorRegistry, Counter, Gauge, ProcessCollector, start_http_server
 
 from logai2.alerts import RANK
 
 LABEL = {"service": "service", "template": "undocumented"}
+
+
+def rss_mib() -> float:
+    """VmRSS of this process in MiB; 0.0 where /proc is unreadable."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0.0
+
+
+def trim() -> None:
+    """Hand freed heap back to the OS (glibc); a no-op elsewhere."""
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
 
 
 class Metrics:
@@ -22,6 +44,7 @@ class Metrics:
         self.heartbeat = Gauge("logai_engine_heartbeat_timestamp_seconds", "Last flush time", registry=r)
         self.alert_state = Gauge("log_alert_state", "1 for the alert row's current state",
                                  ["service", "doc_id", "state"], registry=r)
+        ProcessCollector(registry=r)   # process_resident_memory_bytes etc.
         self._alert_keys: set[tuple[str, str]] = set()
         if port is not None:
             start_http_server(port, registry=r)

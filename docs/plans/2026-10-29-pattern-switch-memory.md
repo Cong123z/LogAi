@@ -1,5 +1,7 @@
 # Pattern On/Off switch and engine memory: implementation plan
 
+Status: done, 2026-10-29, on build/pattern-switch 23ed042 (merges pm0-pm5); pm4 (web) and pm6 (proof) follow.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -16,7 +18,11 @@ Minutes close in bounded bites. `services.monitored` is the one flag the web and
 
 ## Global Constraints
 
-- Tests: `.venv/bin/pytest -q` against the test Postgres on 127.0.0.1:5433 (`docker compose up -d postgres`).
+- Tests: `.venv/bin/pytest -q <files>` against the test Postgres on 127.0.0.1:5433 (`docker compose up -d postgres`).
+- **Test budget (user, 2026-10-29: "run test less"):** implementers and reviewers run only the task's
+  **focused set** (listed per task below), never the full suite. The tech lead runs the full suite **twice in the
+  build**: on `build/pattern-switch` after wave 2 (pm1 + pm5 merged) and once before the final merge into master.
+  A failure there goes back to the task that owns the file.
 - One branch + worktree per task (`task/pm<N>-<slug>`); merge into `master` with `--no-ff` only after the user
   confirms that branch. Never push. Stage by explicit path; no AI attribution in commits.
 - New config values, exactly: `flush.max_closed_minutes: 60`, `reader.lag_warn_seconds: 600`.
@@ -51,11 +57,10 @@ Nothing is dispatched until the user says start.
 
 | Role | Who | Does | Never does |
 |---|---|---|---|
-| Tech lead | Claude Opus 5.5 (this session) | Writes each brief `docs/tasks/pm<N>-<slug>.md` just before dispatch (with the interfaces merged code really has); creates the branch + worktree; answers `QUESTION:`; assigns reviewers; final review (seams, full suite, docs); adds the probe rows to `docs/perf/2026-10-29-memory.md`; merges **after the user confirms each branch**; keeps `.team/ledger.md` | Feature code (only tiny review fixes, and says so) |
-| Implementer | Claude Sonnet 5.5 subagent (`model: sonnet`), one fresh agent per task | Tests first (seen failing), code, full suite, probe run when the task says so, PR file `.team/prs/task-pm<N>-<slug>.md`; stops with `QUESTION:` when unsure | Merges; reviews its own branch; touches files outside its brief |
+| Tech lead | Claude Opus 5.5 (this session) | Writes each brief `docs/tasks/pm<N>-<slug>.md` just before dispatch (with the interfaces merged code really has); creates the branch + worktree; answers `QUESTION:`; assigns reviewers; final review (seams, focused set, docs); runs the two full-suite checkpoints; adds the probe rows to `docs/perf/2026-10-29-memory.md`; merges each approved task into `build/pattern-switch`; master gets **one merge at the end, after the user confirms** (user, 2026-10-29); keeps `.team/ledger.md` | Feature code (only tiny review fixes, and says so) |
+| Implementer | Claude Sonnet 5.5 subagent (`model: sonnet`), one fresh agent per task | Tests first (seen failing), code, the focused set, probe run when the task says so, PR file `.team/prs/task-pm<N>-<slug>.md`; stops with `QUESTION:` when unsure | Merges; reviews its own branch; touches files outside its brief |
 | Reviewer O | Claude Opus 5.5 subagent (`model: opus`), fresh | Reviews the tasks where a mistake silently loses or doubles counts, or wrongly silences alerts (pm1, pm3, pm5): another model than the implementer, so a shared blind spot is less likely | Rewrites the feature |
-| Adversary O | a second, independent Opus subagent, fresh | Only on pm3 and pm5. Not a style review: writes and runs extra tests that try to break the claim (crash between bites, flush failure after an Off, Off/On/Off within one flush, a service in both an On and an Off pattern) and reports what fails | Fixes what it finds |
-| Reviewer S | Claude Sonnet 5.5 subagent (`model: sonnet`), fresh, never the implementer | Reviews the bounded tasks (pm0, pm2, pm4, pm6) | Rewrites the feature |
+| Reviewer S | Claude Sonnet 5.5 subagent, fresh | Reviewed pm0 and pm2 (before the 2026-10-29 ruling); not used after | Rewrites the feature |
 | User | - | Confirms each branch before merge; checks the Data sources switch and the hidden service in Chrome (pm2, pm4); does the company rollout | - |
 
 A review returns `Spec ✅/❌`, Critical / Important / Minor, `Approved / Needs fixes`. Up to 3 fix rounds by the same
@@ -63,15 +68,19 @@ implementer, then the tech lead rules. Re-review only after a Critical or Import
 
 ### Per task
 
-| Task | Implementer | Reviewer | Why this reviewer | Tech lead checks before merge |
+**Review ruling (user, 2026-10-29: "less review"):** one fresh Opus reviewer only on the important tasks (pm1, pm3,
+pm5); no adversaries; no separate review on the bounded tasks (pm4, pm6): the tech lead's final review (Opus) is the
+only gate there. pm0 and pm2 were already Sonnet-reviewed before this ruling.
+
+| Task | Implementer | Reviewer | Why | Tech lead checks before merge |
 |---|---|---|---|---|
-| pm0 probe + metric | Sonnet | Sonnet | Script and one metric line; nothing in the data path | Run the probe at 135k myself; the "before" numbers are believable against the 3.9 GiB measured |
+| pm0 probe + metric | Sonnet | Sonnet (done) | Script and one metric line | Done |
 | pm1 compact baseline | Sonnet | **Opus** | A wrong slot or NaN rule gives wrong bands everywhere, silently | Old dict vs new layout give the same `lookup` for every row of the laptop's live baseline |
-| pm5 bites, forget, samples | Sonnet | **Opus** + **Opus adversary** | Exactly-once path: the cap, the cursor boundary and forgetting ids can double or lose counts | Kill the engine between two bites and restart: counts exact (run myself) |
-| pm2 On/Off switch | Sonnet | Sonnet | Selection API, the targets string, a UI toggle: bounded, with a clear contract | Read the `targets` string for On/Off/Remove orders; the user switches Off/On in Chrome |
-| pm3 active services | Sonnet | **Opus** + **Opus adversary** | The core of the fix: Off wins, alert reset, open minutes dropped, rebuild delete rule, lazy load | Replay the incident (Off the slowest pattern 3 h behind) on the laptop: no zeros, alerts reset, RSS drops |
-| pm4 hide everywhere | Sonnet | Sonnet | Many small, similar query edits | Grep every `FROM services` / `FROM templates` / `FROM alert_state` in web and linker: each filtered or justified; the user clicks through in Chrome |
-| pm6 proof + docs | Sonnet | Tech lead | Measurements and docs; I validate the report | Re-run one number of each probe row |
+| pm5 bites, forget, samples | Sonnet | **Opus** | Exactly-once path: the cap, the cursor boundary and forgetting ids can double or lose counts | Kill the engine between two bites and restart: counts exact (run myself) |
+| pm2 On/Off switch | Sonnet | Sonnet (done) | Bounded contract | Done |
+| pm3 active services | Sonnet | **Opus** | The core: Off wins, alert reset, open minutes dropped, rebuild delete rule, lazy load | Replay the incident (Off the slowest pattern 3 h behind) on the laptop: no zeros, alerts reset, RSS drops |
+| pm4 hide everywhere | Sonnet | Tech lead only | Many small, similar query edits | Grep every `FROM services` / `FROM templates` / `FROM alert_state` in web and linker: each filtered or justified; the user clicks through in Chrome |
+| pm6 proof + docs | Sonnet | Tech lead only | Measurements and docs | Re-run one number of each probe row |
 
 ### Waves (parallel only when the file lists are disjoint; at most 3 agents at once)
 
@@ -84,12 +93,12 @@ implementer, then the tech lead rules. Re-review only after a Critical or Import
 | 5 | pm6 | Everything merged |
 
 Merge order inside a wave: the first to pass review; the second rebases onto master in its worktree (by its
-implementer, on the tech lead's request) and reruns the full suite before its final review.
+implementer, on the tech lead's request) and reruns its focused set before its final review.
 
 ### Cost
 
-7 Sonnet implementers, 4 Sonnet/lead reviews, 3 Opus reviews, 2 Opus adversaries, plus fix rounds. To cut cost,
-drop the adversaries first (pm5, then pm3); never drop the Opus review of pm3.
+7 Sonnet implementers, 2 Sonnet reviews (done), 3 Opus reviews (pm1, pm3, pm5), the tech lead's final review on
+every task, fix rounds only after a Critical or Important finding.
 
 ---
 
@@ -243,7 +252,8 @@ query. `baseline_view.py:319` uses `bl.stat(service, ids[0], dt, h)`; `:321` use
 
 - [ ] **Step 4: Run the baseline, detect, web baseline tests**
 
-Run: `.venv/bin/pytest -q tests/test_baseline.py tests/test_detect.py tests/test_web_baseline_view.py tests/test_web_docs_baseline.py tests/test_owner.py`
+Run: `.venv/bin/pytest -q tests/test_baseline.py tests/test_detect.py tests/test_web_baseline_view.py tests/test_web_docs_baseline.py tests/test_web_alerts_templates.py tests/test_owner.py`
+(this is pm1's focused set)
 Expected: PASS.
 
 - [ ] **Step 5: Probe and record**
@@ -326,10 +336,10 @@ Expected: FAIL.
   each healthy pattern whose `pos_ms // 60_000 <= self._watermark_ms // 60_000` and is not caught up;
   minutes = `int((now - pos_ms / 1000) // 60)`.
 
-- [ ] **Step 4: Run the full suite**
+- [ ] **Step 4: Run the focused set**
 
-Run: `.venv/bin/pytest -q`
-Expected: all pass (B9's two time-of-day tests may fail at their known hours; note it if so).
+Run: `.venv/bin/pytest -q tests/test_owner.py tests/test_reader.py tests/test_engine.py tests/test_reread.py tests/test_recorder.py tests/test_recorder_adversarial.py tests/test_counts.py`
+Expected: all pass.
 
 - [ ] **Step 5: Probe and record**
 
@@ -526,9 +536,9 @@ Expected: FAIL.
   insert the result into `tmp_rebuild (LIKE baseline)`, then `DELETE FROM baseline WHERE service IN (SELECT DISTINCT
   service FROM tmp_rebuild)`, then `INSERT INTO baseline SELECT * FROM tmp_rebuild`; `rows` = rows inserted.
 
-- [ ] **Step 4: Run the full suite**
+- [ ] **Step 4: Run the focused set**
 
-Run: `.venv/bin/pytest -q`
+Run: `.venv/bin/pytest -q tests/test_owner_selection.py tests/test_owner.py tests/test_engine.py tests/test_commit.py tests/test_detect.py tests/test_miners.py tests/test_counts.py tests/test_reread.py tests/test_recorder.py`
 Expected: all pass.
 
 - [ ] **Step 5: Probe and record**
@@ -594,9 +604,9 @@ Expected: FAIL.
 `AND MONITORED.format(<service column>)`; the documents' `linked_templates` count adds it to its FILTER. The linker's
 template SELECT, its pending count, and the resolver's candidate SELECT join `services s ON s.service = t.service AND s.monitored`.
 
-- [ ] **Step 4: Run the full suite and click through**
+- [ ] **Step 4: Run the focused set and click through**
 
-Run: `.venv/bin/pytest -q`
+Run: `.venv/bin/pytest -q tests/test_web_*.py tests/test_linker.py tests/test_resolver.py tests/test_module_alerts.py tests/test_module_alerts_adversarial.py`
 Expected: all pass. Then with the local stack: switch a pattern Off and check Templates, Baseline, Review, Pipeline,
 Alerts, Modules: the service is gone; a bookmarked `?service=` URL shows the "unknown service" state.
 
