@@ -31,3 +31,4 @@ Touching any other file needs a QUESTION first.
    (e.g. no counts in the training days, eb2 ruling 3) is a gap in that chart, not a reason.
 3. Coverage is shown as "coverage (estimated)" on the cards, chart headers and tune table header (user ruling on the eb2 gate).
 4. Re-tune can take tens of minutes at company scale (eb2: ~0.11 s per key): the status bar shows progress (`done / total` keys from `tune(on_key=...)`) while running.
+5. Re-tune: `tune()` gets its own connection (autocommit off, not inside another transaction): it commits itself.
