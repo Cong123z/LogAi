@@ -161,7 +161,7 @@ Run the lab. The core methods run in the venv (`--dsn` from the host); all metho
 
 Test A (injected into the counts) and Test C (real incidents, next section) take the same arguments with `--test A` / `--test C`.
 
-Then open `http://localhost:5565/#evaluation` (the web container; it reads only the `lab_*` tables).
+The lab results have no page any more. `http://localhost:5565/#evaluation` is the Evaluation page: it computes the four band methods from the live count tables and has a **Re-tune** button (or `python -m logai2.bands tune`) that picks each method's k.
 
 ### Test C (real incidents through the engine)
 
