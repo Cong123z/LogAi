@@ -271,7 +271,7 @@ function evRenderCharts() {
       if (i >= 0 && i !== ev.cursor) evCursor(i);      // moves the pointer of all four; the i !== ev.cursor guard stops the loop
     });
   });
-  echarts.connect('ev');
+  // No echarts.connect: evCursor drives every chart's pointer; connect hid it on charts with no data at the hour.
   const slider = $ev('ev-hour');
   slider.max = String(pts.length - 1);
   const lastRate = pts.map(p => p.rate).findLastIndex(r => r != null);
