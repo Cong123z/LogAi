@@ -98,7 +98,7 @@ def band(method: str, rows: list[DayHour], k: float) -> Band | None:
     m = sum(a * r.s for a, r in zip(w, rows)) / wn
     v = max(0.0, sum(a * r.q for a, r in zip(w, rows)) / wn - m * m)
     if method == "nb":
-        return Band(*map(float, nb_quantiles(m, v, 1 - _Z.cdf(k))))
+        return Band(*map(float, nb_quantiles(m, v, _Z.cdf(-k))))
     spread = k * math.sqrt(v)
     return Band(m - spread, m + spread)
 
@@ -112,7 +112,7 @@ def nb_quantiles(mu: float, var: float, p: float) -> tuple[int, int]:
     return _quantiles(round(mu, 6), round(var, 6), p)
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1 << 16)
 def _quantiles(mu: float, var: float, p: float) -> tuple[int, int]:
     """(low, high): high = smallest c with P(X > c) <= p; low = largest c with P(X < c) <= p (0 when none).
     Port of scripts/lab/methods/nb.py::_quantiles, plus a normal branch above NORMAL_ABOVE."""
@@ -149,7 +149,13 @@ def _pmf(k: int, mu: float, r: float) -> float:
 
 def _sum_pmf(m: float, v: float, a: int, b: int) -> float:
     r = _r(m, v)
-    return sum(_pmf(k, m, r) for k in range(a, b + 1))
+    tot = 0.0
+    for k in range(a, b + 1):
+        x = _pmf(k, m, r)
+        tot += x
+        if k > m and x < 1e-15 * tot:       # past the mode, the rest cannot move the sum
+            break
+    return tot
 
 
 def _limit(m: float, v: float) -> int:
@@ -184,7 +190,9 @@ def tail_below(m: float, v: float, t: int) -> float:
 
 def floor_of(cfg, key: str, level: str | None) -> int | None:
     """Alerting floor (events/min) of a key: ERROR/WARN levels only; `*warn` is view-only and has none."""
-    lv = FLOOR_LEVEL.get((level or KEY_LEVEL.get(key, "")).upper())
+    if key in ("*warn", "*info"):
+        return None
+    lv = FLOOR_LEVEL.get((KEY_LEVEL.get(key) or level or "").upper())
     return cfg.floors.get(lv) if lv else None
 
 

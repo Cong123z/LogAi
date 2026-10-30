@@ -216,3 +216,16 @@ def test_kind_and_scope(conn):
     assert not in_scope(conn, "s", "doc:x", now) and not in_scope(conn, "s", "verdict:action", now)
     assert not in_scope(conn, "s", "t23", now) and in_scope(conn, "s", "t25", now)
     assert not in_scope(conn, "s", "nope", now)
+
+
+def test_floor_view_only_and_key_level_first(cfg):
+    assert floor_of(cfg, "*warn", "WARN") is None
+    assert floor_of(cfg, "*error", "INFO") == 5
+
+
+def test_tail_above_bounded_sum_matches_full():
+    from logai2.bands import _limit, _pmf, _r
+    r = _r(900, 9000)
+    for t in (950, 1200, 2000):
+        full = sum(_pmf(k, 900, r) for k in range(t, _limit(900, 9000) + 1))
+        assert tail_above(900, 9000, t) == pytest.approx(full, abs=1e-9, rel=1e-9)
