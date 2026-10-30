@@ -268,18 +268,18 @@ function evRenderCharts() {
     chart.on('updateAxisPointer', e => {
       const v = e.axesInfo && e.axesInfo[0] && e.axesInfo[0].value;
       const i = typeof v === 'number' ? v : labels.indexOf(v);
-      if (i >= 0 && i !== ev.cursor) evCursor(i, true);      // showTip on all four: each draws its own pointer
+      if (i >= 0 && i !== ev.cursor) evCursor(i);      // moves the pointer of all four; the i !== ev.cursor guard stops the loop
     });
   });
   echarts.connect('ev');
   const slider = $ev('ev-hour');
   slider.max = String(pts.length - 1);
   const lastRate = pts.map(p => p.rate).findLastIndex(r => r != null);
-  evCursor(Math.min(ev.cursor, pts.length - 1) || (lastRate < 0 ? pts.length - 1 : lastRate), false);
+  evCursor(Math.min(ev.cursor, pts.length - 1) || (lastRate < 0 ? pts.length - 1 : lastRate));
 }
 
-// Reads the rate and every method's range at hour i; `drive` also moves the charts' axis pointer (slider).
-function evCursor(i, drive = true) {
+// Reads the rate and every method's range at hour i and moves the axis pointer of all four charts.
+function evCursor(i) {
   const d = ev.data, p = d.points[i];
   if (!p) return;
   ev.cursor = i;
@@ -292,7 +292,8 @@ function evCursor(i, drive = true) {
     const el = $ev(`m-${m.id}`).querySelector('[data-cur]');
     el.textContent = b ? `range ${evFmt(Math.max(0, b.low))}–${evFmt(b.high)}${out ? ' · outside' : ''}` : 'no range';
     el.style.color = out ? 'var(--orange)' : '';
-    if (drive) chartFor($ev(`ev-c-${m.id}`)).dispatchAction({type: 'showTip', seriesIndex: 2, dataIndex: i});
+    // the pointer is driven by option (showTip hides it again with showContent false); the last cursor stays on mouse leave
+    chartFor($ev(`ev-c-${m.id}`)).setOption({xAxis: {axisPointer: {value: i, status: 'show'}}}, {lazyUpdate: true});
   });
 }
 $ev('ev-hour').addEventListener('input', e => evCursor(Number(e.target.value)));
