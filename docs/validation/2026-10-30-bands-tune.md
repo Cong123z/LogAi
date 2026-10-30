@@ -17,8 +17,8 @@ The script's whole run (tune + the minute-by-minute pass) finished inside the 10
   <= 0.1 pp except `*error` sigma/median/ewma at k 3.5-5 (<= 0.13 pp) -- read from the per-k tables below.
 - Per spec, a failed gate means the page labels coverage "estimated" and we discuss before eb3 merges. Not tuned away.
 - Likely cause (not investigated further): the hour's NB/Poisson model fed with (m, v) of the hour is a poorer fit than the
-  true minute distribution when counts are bursty inside the hour (`*error`, `busy`), and the estimator is biased low
-  at k 2 (it predicts slightly more outside minutes than are counted for `*total`/`busy`, fewer for `*error`).
+  true minute distribution when counts are bursty inside the hour (`*error`, `busy`), and the estimator is biased
+  at k 2 (it predicts fewer outside minutes than are counted for `*total`/`busy`, more for `*error`).
 
 ## Output of the check
 
