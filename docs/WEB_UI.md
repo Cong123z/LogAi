@@ -405,27 +405,25 @@ timezone (`timezone` of `GET /api/retrain`).
   estimate (`POST /api/retrain/estimate`, polled as a command) refreshes 0.4 s after each change. Start posts the
   run, polls the command, shows its `error` in the dialog, and on success opens the new run.
 
-## Evaluate
+## Evaluation
 
-`#evaluation` (nav "Evaluate", no polling): shows a lab run from `/api/eval/*`. Read-only except "Choose".
+Route `#evaluation/<service>/<key>/<days>` (days 1 or 7; opens on `*total`, 7 days). Nothing is stored but the tune
+result; bands are computed from Postgres when the key opens (spec `docs/specs/2026-10-30-evaluation-bands.md`).
 
-- **Run bar**: run picker (newest first: id, site, test, window, status), strength badge, kind counts. No runs: the empty
-  state gives the `python -m scripts.lab.run ...` command; a run whose status is not `ok` shows its status and, for a failed
-  run, its error text (`/api/eval/runs` returns `error`).
-- **Evaluation board**: one card per kind (M1 to M7: verdict, leader, strength, stability; Test A runs show "Test A"),
-  click one to pick the kind. The scoreboard has one row per method (sigma first): knob, ratio vs sigma with its 90 % CI as a
-  small bar, coverage, interval score, sharpness, MASE, alert rate, flap share and a pass/fail/n.a. badge per gate (text and
-  colour). Test A runs show recall small/medium/large and delay median/p90 instead.
-- **Fit chart** (both boards): key select (`/api/eval/keys` for the kind; a plain select, not `keypicker.js`, whose groups
-  and template search are Baseline's), method toggles, from/to days (at most 7, the API's 400 is shown), Panels (one per
-  method, shared zoom) or Overlay. Count line, expected (dashed), band area, flagged minutes (red diamonds) and episodes
-  (shaded); step-5 and step-1 days both draw.
-- **Calibrate board**: for the picked kind and a method, coverage and alert rate against the knob (test solid, tune dashed,
-  chosen knob marked). Knob pills redraw that method's band in the fit chart at that knob; "Choose" (disabled until a knob
-  is picked) posts `/api/eval/choices` with the note and shows the saved choice, or the API's error message. The saved
-  choices (`GET /api/eval/choices`) are read on load: the kind's saved choice is shown under the pills, and the star marks
-  its knob when it is this run's and method's (else the run's own chosen knob); Choose moves the star. A failed keys/sweep
-  fetch after switching kind keeps the old kind.
+- **Header**: service, key (a plain select fed by `/api/eval/keys`: service keys, then templates past their first 24 h;
+  not `keypicker.js`) and 1 day / 7 days.
+- **Tune bar**: "Tuned <time>" with the test days, key count and methods, "Not tuned yet" (every method at k 3) or
+  "Re-tuning..." with `done / total keys`; the last result stays while it runs. Re-tune posts `/api/eval/tune` and
+  polls it every 2 s while running, then reloads the page data. A failed run shows its error.
+- **Method cards** (sigma, nb, median, ewma): k, "coverage (estimated)", hours outside, width vs sigma with a bar
+  (tick at 1.0); "Narrowest at 99.5 %" on the smallest ratio among tuned methods without a flag; `sigma` is tagged
+  live. A card links to its chart.
+- **Charts**: one panel, 4 stacked ECharts charts on one shared y-scale (shaded range, rate line, a dot per hour
+  outside, a box per run of such hours, nights shaded) with a synced hover (`echarts.connect`). A method with no band
+  for any shown hour shows "not enough days"; hours without a band are gaps. The hour slider (arrow keys) moves the
+  axis pointer and reads every method's range at that hour.
+- **Tune table**: per kind (tabs `*total`, `*error`, `*warn/*info`, `busy`, `sparse`), sorted by width vs sigma, with
+  best k, "Coverage (estimated)" and the flag text.
 
 ## Baseline
 
@@ -919,28 +917,19 @@ fewer than 3 usable days.
 
 ### Evaluation (`/api/eval/*`)
 
-Read the `lab_*` tables only (never live tables or count tables); no token. Times are ISO UTC (`Z`); a bad or unknown `run`
-is 404 `{"error"}`, a missing parameter 400. NaN and missing band values are `null`.
+No token. Every route uses `known_service` (404 for an unknown or Off service). No `lab_*` table is read.
 
-- `GET /api/eval/runs`: the newest 20 runs `{id, site, test, status, started_at, finished_at, window_from, window_to,
-  tune_to, data_schema, code_version, strength, kinds, error}`; `strength` comes from any `_decision` row; `error` is the
-  failed run's text, else null.
-- `GET /api/eval/scoreboard?run=`: `{M1: {decision: {verdict, strength, leader, tied, note, text, stability, sigma_knob,
-  test_days}, methods: [...]}}`, methods sigma first then the run's order. Test B rows: `{method, knob, status, verdict,
-  ratio_vs_sigma, ci90, gates, coverage, interval_score, sharpness, mase, alert_rate, flap_share}`; Test A and Test C rows:
-  `{method, knob, status, verdict, recall, delay}`.
-- `GET /api/eval/keys?run=&kind=`: `[{service, key, kind, methods}]` of the drawn keys. The sink stores `{key: kind}` of its
-  drawn keys in the per-service `lab_results.metrics` (`"drawn"`) and this reads it, so M6 keys are listed under M6. Runs
-  from before that (no `drawn` anywhere in the run) fall back to a guess from the key name (`*total` M1, `*error` M2, `*mix`
-  M7, `doc:` M5) and, for template keys, the mean drawn count (>= 2 M3, else M4; M6 keys read as M4).
-- `GET /api/eval/series?run=&kind=&service=&key=&from=&to=[&methods=a,b][&knob=]`: `{method: {knob, points: [{t, count, expected,
-  low, high, flag}], episodes: [{start_minute, end_minute, start, end, peak_score, alerted_minutes}]}}`. `from`/`to` are
-  inclusive local days, at most 7 (400 beyond). `kind` (M1 to M7, required; the page knows it from `/keys`) picks the chosen knob. Default knob: the method's `scope='all'` knob for that kind, else the first grid knob
-  that has bands. Step-5 days give 288 points, step-1 days 1440.
-- `GET /api/eval/sweep?run=&kind=`: `{method: [{knob, chosen, tune, test}]}`, knobs ascending.
-- `GET /api/eval/choices`: the saved choices `[{kind, method, knob, run_id, note, chosen_at}]`, by kind.
-- `POST /api/eval/choices` `{kind, method, knob, run_id, note}`: upserts `lab_choices` and returns it. 400 unless `kind` is
-  M1 to M7, `method` is in that run with a `scope='all'` result for that kind, `knob` is in its grid (`lab_runs.params.knobs`) and `note` is at most 500 characters; an unknown `kind` is also 400 on keys, sweep and series; 404 for an unknown `run_id`.
+- `GET /api/eval/bands?service=&key=&days=1|7`: `{key, kind, tuned, run_at, test_days, points: [{day, hour, rate}],
+  methods: [{id, k, tuned, coverage, ratio, bands: [{day, hour, low, high} | null], outside, missing}]}`. Methods in the
+  order sigma, nb, median, ewma. Each shown day is fitted on the days before it; k is the tuned k of the key's kind, else
+  3. `rate` is null without a `service_hours` row; today's hours up to now only. `outside` counts hours above `high`
+  (and below `low` for `*total`). `missing` is "not enough days" when no hour has a band. 400 on a bad `days`; 404 on an
+  unknown, out-of-scope (documents, verdicts, templates younger than 24 h) or Off key or service.
+- `GET /api/eval/keys?service=`: `[{key, label, kind}]`, service keys first, then templates by level class then text.
+- `GET /api/eval/tune`: `{status: "idle"|"running", started_at, error, progress: {done, total}|null, result}`; `result`
+  is the stored `bands_tune` value (null when not tuned).
+- `POST /api/eval/tune`: 202 `{status: "running"}`; 409 while a run is going. The run is a thread of the web process
+  with its own connection; a web restart loses it and keeps the previous result.
 
 ### Commands
 
@@ -956,7 +945,7 @@ A service whose pattern is Off (`services.monitored = false`) is hidden complete
 and picker (Services, Alerts, Templates, Template levels, Documents' link counts, Pipeline, Retrain, module alerts),
 and its per-service routes (`/api/baseline*`, `/api/modules`, `/api/templates/<service>/...`) answer 404
 "Unknown service". A document cannot be scoped to it. The linker does not embed its templates and the LLM resolver
-skips them. Nothing is deleted: its data is back when the pattern is turned On. The Evaluation (lab) pages are not
+skips them. Nothing is deleted: its data is back when the pattern is turned On. The Evaluation page is not
 affected.
 
 ## Security
@@ -976,8 +965,8 @@ returned.
 | Views | `static/js/views/{alerting,pipeline,templates,documentation,sources,baseline,review,llm}.js` |
 | Charts | `static/js/charts.js` (ECharts helpers, colour tokens); `static/vendor/echarts.min.js` (ECharts 5.5.1, Apache-2.0, `ECHARTS-LICENSE`, self-hosted) |
 | Baseline and Pipeline data | `logai2/web/baseline_view.py` (matrix, inspect, series, incident), `logai2/web/pipeline_view.py` (services, throughput, stage states) |
-| Evaluation API | `logai2/web/eval_view.py` (runs, scoreboard, keys, series, sweep, choices); tests `tests/test_web_eval_view.py` |
-| Evaluate page | `logai2/web/static/js/views/evaluation.js` (+ its section in `index.html`, `.ev-*` styles in `app.css`); manual check in the PR |
+| Evaluation API | `logai2/web/bands_view.py` (`bands_series`, `eval_keys`, `Retune`) and the 4 routes in `app.py`; tests `tests/test_web_bands.py` |
+| Evaluation page | `logai2/web/static/js/views/evaluation.js` (+ its section in `index.html`, `.ev-*` styles in `app.css`); manual check in the PR |
 | Styles | `static/css/tokens.css`, `app.css` (copied from logai-engine) |
 | Shared with the engine | `logai2/alerts.py` (alert rows), `logai2/owner/baseline.py` (bands), `logai2/review.py` (suggestions; minutes and keys per hour), `logai2/commands.py` |
 | Tests | `tests/test_web_sources.py`, `test_web_alerts_templates.py`, `test_web_docs_baseline.py` |

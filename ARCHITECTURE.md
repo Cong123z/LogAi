@@ -1124,14 +1124,14 @@ names or labels; failure behavior; process topology.
 
 Offline comparison of 13 alerting methods and a vote against today's σ on the recorded per-minute counts. It never
 writes the live tables and the engine does not import it. Spec: `docs/specs/2026-10-27-bakeoff-laptop.md`; run commands:
-README "Lab image". Code: `scripts/lab/`; the evaluation API and page: `logai2/web/eval_view.py`, `docs/WEB_UI.md`.
+README "Lab image". Code: `scripts/lab/`; the web has no lab page and reads no `lab_*` table; the Evaluation page (`logai2/web/bands_view.py`, `logai2/bands.py`) computes bands on read from the live count tables, see `docs/WEB_UI.md`.
 
 **Data flow.** The recorder (§7.3 step 5, `lab.record`) writes `lab_minute_counts`; `synth.py` writes the same tables for
 a made-up history into `lab_s_<scenario>` (`counts` mode directly, `engine` mode through a real Engine on an injected
 clock). `run.py` reads one service at a time (`load.py` → `ServiceData`: `minutes[key][day]` arrays of 1440, `-1` =
 unobserved, hourly sums, excluded hours, levels, first-seen, doc links, incidents), assigns each key a monitor kind
 M1–M7 (`kinds.py`), walks each method day by day, and writes `lab_*` in the results schema. `finish` hooks tune,
-bootstrap and decide across services; the web page only reads `lab_*`.
+bootstrap and decide across services; nothing in the web reads `lab_*`.
 
 **Method contract** (`methods/__init__.py`). `fit(sd, day, cfg)` sees data strictly before `day` (None = not enough
 history); `day(model, prev_model, sd, key, day, knobs, cfg)` returns `{knob: DayOut}` with `expected/low/high` arrays
