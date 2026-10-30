@@ -185,7 +185,7 @@ function evRenderCards() {
       <dl><div><dt>k</dt><dd>${k}</dd></div>
         <div><dt>coverage (estimated)</dt><dd>${evPct(m.coverage)}</dd></div>
         <div><dt>hours out</dt><dd class="${m.outside ? 'ev-warn-fg' : ''}">${m.missing ? '—' : m.outside}</dd></div></dl>
-      <div><div class="ev-ratio"><span>width vs σ</span><span class="ev-mono ${evRatioTone(m.ratio)}">${m.ratio == null ? '—' : m.ratio.toFixed(2)}</span></div>
+      <div><div class="ev-ratio"><span>width vs σ</span><span class="ev-mono ${info(m.id)?.flag ? '' : evRatioTone(m.ratio)}">${m.ratio == null ? '—' : m.ratio.toFixed(2)}</span></div>
         <div class="ev-bar" aria-hidden="true"><i style="width:${m.ratio == null ? 0 : Math.min(100, m.ratio / 1.5 * 100).toFixed(1)}%"></i><b></b></div></div>
     </a>`;
   }).join('');
@@ -234,7 +234,7 @@ function evRenderCharts() {
     });
     const gaps = m.bands.filter(b => !b).length;
     blk.querySelector('[data-k]').textContent = `k ${m.k}${m.tuned ? '' : ' (not tuned)'}`
-      + (m.missing ? '' : gaps ? ` · no range for ${gaps} h (not enough days)` : '');
+      + (m.missing ? '' : gaps ? ` · no range for ${gaps} h` : '');
     el.setAttribute('aria-label', m.missing ? `${m.id}: ${m.missing}`
       : `${m.id}: ${m.outside} hours outside its range in the shown days`);
     const chart = chartFor(el);
@@ -268,7 +268,7 @@ function evRenderCharts() {
     chart.on('updateAxisPointer', e => {
       const v = e.axesInfo && e.axesInfo[0] && e.axesInfo[0].value;
       const i = typeof v === 'number' ? v : labels.indexOf(v);
-      if (i >= 0 && i !== ev.cursor) evCursor(i, false);
+      if (i >= 0 && i !== ev.cursor) evCursor(i, true);      // showTip on all four: each draws its own pointer
     });
   });
   echarts.connect('ev');
@@ -290,7 +290,7 @@ function evCursor(i, drive = true) {
   d.methods.forEach(m => {
     const b = m.bands[i], out = b && p.rate != null && (p.rate > b.high || (ev.key === '*total' && p.rate < b.low));
     const el = $ev(`m-${m.id}`).querySelector('[data-cur]');
-    el.textContent = b ? `range ${evFmt(b.low)}–${evFmt(b.high)}${out ? ' · outside' : ''}` : 'no range';
+    el.textContent = b ? `range ${evFmt(Math.max(0, b.low))}–${evFmt(b.high)}${out ? ' · outside' : ''}` : 'no range';
     el.style.color = out ? 'var(--orange)' : '';
     if (drive) chartFor($ev(`ev-c-${m.id}`)).dispatchAction({type: 'showTip', seriesIndex: 2, dataIndex: i});
   });
@@ -303,11 +303,11 @@ function evRenderTable() {
   $ev('ev-tabs').innerHTML = EV_KINDS.map(k => `<button type="button" aria-pressed="${k === tab}" data-kind="${escapeHtml(k)}">${escapeHtml(k)}</button>`).join('');
   $ev('ev-caption').textContent = kd ? `${tab} · ${kd.keys} ${kd.keys === 1 ? 'key' : 'keys'}` : `${tab} · no keys tuned`;
   const rows = EV_IDS.map(id => ({id, ...(kd?.methods[id] || {})}));
-  rows.sort((a, b) => (a.ratio ?? Infinity) - (b.ratio ?? Infinity));
+  rows.sort((a, b) => (!!a.flag - !!b.flag) || (a.ratio ?? Infinity) - (b.ratio ?? Infinity));
   $ev('ev-rows').innerHTML = rows.map((m, i) => `<tr>
     <td class="sync-status">${i + 1}</td><td class="ev-mono">${m.id}</td>
     <td class="r ev-mono">${m.k == null ? '—' : m.k}</td><td class="r ev-mono">${m.hours ?? '—'}</td><td class="r ev-mono">${evPct(m.coverage)}</td>
-    <td class="r ev-mono ${evRatioTone(m.ratio)}">${m.ratio == null ? '—' : m.ratio.toFixed(2)}</td>
+    <td class="r ev-mono ${m.flag ? '' : evRatioTone(m.ratio)}">${m.ratio == null ? '—' : m.ratio.toFixed(2)}</td>
     <td class="${m.flag && (m.flag.startsWith('never') || m.flag.startsWith('few')) ? 'ev-warn-fg' : 'sync-status'}">${escapeHtml(kd ? m.flag || '' : 'not tuned yet')}</td></tr>`).join('');
 }
 $ev('ev-tabs').addEventListener('click', e => {
