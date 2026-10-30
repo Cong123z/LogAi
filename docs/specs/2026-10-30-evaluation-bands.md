@@ -73,7 +73,7 @@ Runs: `python -m logai2.bands tune [config.yaml] [--test-days N]`, or the page's
 
 **Estimate check.** Coverage is estimated from hourly moments. On `lab_s_w28` (synthetic, per-minute counts in
 `lab_minute_counts`) the estimated coverage and the coverage counted minute by minute must differ by ≤ 0.2 pp per
-method × kind at each k, and give the same best k (one grid step apart allowed, with a note). If it fails, the page
+method × kind at the best k and every larger k (user ruling 2026-10-30: lower k are never picked), and give the same best k (one grid step apart allowed, with a note). If it fails, the page
 labels coverage "estimated" and we discuss before eb3 merges.
 
 ## 6. HTTP API (replaces every `/api/eval/*` route)
