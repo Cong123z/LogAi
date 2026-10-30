@@ -246,7 +246,7 @@ function evRenderCharts() {
               axisLabel: {show: last, color: t.dim, fontSize: 12,
                           interval: (_, v) => multi ? v.endsWith(' 00') : Number(v.slice(-2)) % 6 === 0,
                           formatter: v => multi ? rvDayLabel(v.slice(0, 10)).slice(0, -4) : `${v.slice(-2)}:00`},
-              axisPointer: {show: true, snap: true, lineStyle: {color: t.accent, type: 'dashed'}}},
+              axisPointer: {show: true, snap: false, lineStyle: {color: t.accent, type: 'dashed'}}},
       yAxis: {type: 'value', min: 0, max: ymax, splitNumber: 2, splitLine: {lineStyle: {color: t.grid}},
               axisLabel: {color: t.dim, fontSize: 11, formatter: evFmt}},
       tooltip: {...baseOption().tooltip, trigger: 'axis', showContent: false},
