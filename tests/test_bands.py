@@ -229,3 +229,9 @@ def test_tail_above_bounded_sum_matches_full():
     for t in (950, 1200, 2000):
         full = sum(_pmf(k, 900, r) for k in range(t, _limit(900, 9000) + 1))
         assert tail_above(900, 9000, t) == pytest.approx(full, abs=1e-9, rel=1e-9)
+
+
+def test_all_zero_rows_no_band():
+    rows = rows_of([0, 0, 0, 0], [0, 0, 0, 0])
+    for m in METHODS:
+        assert band(m, rows, 3) is None
