@@ -152,12 +152,15 @@ def _pmf(k: int, mu: float, r: float) -> float:
 
 def _sum_pmf(m: float, v: float, a: int, b: int) -> float:
     r = _r(m, v)
+    x = _pmf(a, m, r)
+    step = None if x < 1e-290 else (lambda k, x: x * m / (k + 1)) if r == math.inf else \
+        (lambda k, x, c=m / (r + m): x * (k + r) / (k + 1) * c)
     tot = 0.0
     for k in range(a, b + 1):
-        x = _pmf(k, m, r)
         tot += x
         if k > m and x < 1e-15 * tot:       # past the mode, the rest cannot move the sum
             break
+        x = _pmf(k + 1, m, r) if step is None else step(k, x)     # recursion; lgamma when pmf(a) underflowed
     return tot
 
 
@@ -264,6 +267,14 @@ def _lookback(conn, service: str, tdays: list[date]) -> date:
     return first
 
 
+def _test_days(conn, today: date, n: int) -> list[date]:
+    """The last n days before today that are committed in any monitored service, oldest first."""
+    sv = _services(conn)
+    return sorted(r["day"] for r in conn.execute(
+        "SELECT DISTINCT day FROM day_status WHERE committed AND day < %s AND service = ANY(%s) "
+        "ORDER BY day DESC LIMIT %s", (today, sv, n)))
+
+
 def _plan(conn, today: date, tdays: list[date]):
     cutoff = datetime.combine(today, datetime.min.time(), TZ) - timedelta(hours=24)
     for svc in _services(conn):
@@ -278,8 +289,8 @@ def _plan(conn, today: date, tdays: list[date]):
 
 def tune_hours(conn, cfg, today: date, test_days: int = 3, on_key=None):
     """Every (key, test day, hour) of every in-scope key of every monitored service, with the rows each method fits on."""
-    tdays = [today - timedelta(days=i) for i in range(test_days, 0, -1)]
-    plan = list(_plan(conn, today, tdays))
+    tdays = _test_days(conn, today, test_days)
+    plan = list(_plan(conn, today, tdays)) if tdays else []
     total, done = sum(len(keys) for _, _, keys in plan), 0
     for svc, a, keys in plan:
         for key, level in keys:
@@ -309,6 +320,7 @@ def tune(conn, cfg, today: date, test_days: int = 3, on_key=None) -> dict:
     # kind -> keys seen, method -> k -> [expected outside, minutes, width sum, hours]
     acc: dict[str, dict] = {}
     seen = set()
+    tdays = _test_days(conn, today, test_days)
     for th in tune_hours(conn, cfg, today, test_days, on_key):
         a = acc.setdefault(th.kind, {"keys": 0, "m": {m: {k: [0.0, 0, 0.0, 0] for k in KGRID} for m in METHODS}})
         if (th.service, th.key) not in seen:
@@ -340,7 +352,7 @@ def tune(conn, cfg, today: date, test_days: int = 3, on_key=None) -> dict:
             out["sigma"]["ratio"] = 1.0
         kinds[kind] = {"keys": a["keys"], "methods": out}
     result = {"version": TUNE_VERSION, "run_at": datetime.now(timezone.utc).isoformat(),
-              "test_days": [(today - timedelta(days=i)).isoformat() for i in range(test_days, 0, -1)],
+              "test_days": [d.isoformat() for d in tdays],
               "seconds": time.monotonic() - t0, "kinds": kinds}
     put_setting(conn, "bands_tune", result)
     conn.commit()

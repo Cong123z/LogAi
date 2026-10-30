@@ -60,8 +60,8 @@ def main() -> int:
 
     fails = []
     print(f"schema {a.schema}, today {today}, test days {first}..{today - timedelta(days=1)}, tune {t_tune:.1f} s\n")
-    print("| kind | method | max abs gap (pp) | at k | best k est | best k exact | stored k | verdict |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("| kind | method | max gap, all k (pp) | at k | max gap, k >= best (pp) | best k est | best k exact | stored k | verdict |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for kind, ms in acc.items():
         for m, cells in ms.items():
             est = {k: 1 - c[0] / c[2] for k, c in cells.items()}
@@ -70,11 +70,12 @@ def main() -> int:
             gap = abs(est[gk] - ex[gk]) * 100
             ke, kx = pick_k(est)[0], pick_k(ex)[0]
             step = abs(KGRID.index(ke) - KGRID.index(kx))
-            ok = gap <= GAP_PP and step <= 1
+            gb = max(abs(est[k] - ex[k]) for k in cells if k >= (kx or 0)) * 100     # gate: best k and above
+            ok = gb <= GAP_PP and step <= 1
             note = "ok" if ok and step == 0 else "ok, best k one step apart" if ok else "FAIL"
             if not ok:
                 fails.append((kind, m))
-            print(f"| {kind} | {m} | {gap:.3f} | {gk} | {ke} | {kx} | {stored['kinds'][kind]['methods'][m]['k']} | {note} |")
+            print(f"| {kind} | {m} | {gap:.3f} | {gk} | {gb:.3f} | {ke} | {kx} | {stored['kinds'][kind]['methods'][m]['k']} | {note} |")
     print("\nPer k (estimated / exact coverage %, gap pp):")
     for kind, ms in acc.items():
         print(f"\n{kind}\n\n| method | " + " | ".join(f"k {k}" for k in KGRID) + " |\n|---|" + "---|" * len(KGRID))

@@ -3,49 +3,49 @@
 Spec section 5 gate: coverage estimated from hourly moments vs coverage counted minute by minute must differ by
 <= 0.2 pp per method x kind at each k, and give the same best k (one grid step apart allowed, with a note).
 
-## Result: gate FAILED (gap), best k agrees
+## Result: gate PASS (judged at the best k and above)
 
-Command: `.venv/bin/python scripts/bands_estimate_check.py --schema lab_s_w28` (schema `lab_s_w28`, synthetic, 3 services,
-test days 2026-10-24..26, `tune` writes `settings.bands_tune` into that schema). `tune` itself took 94.1 s there.
-The script's whole run (tune + the minute-by-minute pass) finished inside the 10 minute limit.
+Rule (spec section 5, user ruling): gap <= 0.2 pp per method x kind at the best k and every larger k, and the same
+best k (one grid step apart allowed, with a note). Command: `.venv/bin/python scripts/bands_estimate_check.py --schema lab_s_w28`
+(synthetic, 3 services, test days 2026-10-24..26; `tune` writes `settings.bands_tune` into that schema).
 
-- Best k: estimated and exact are the same in 19 of 20 method x kind cells; `*warn/*info` / `nb` is one step apart
-  (3 estimated, 2.5 exact; the estimate is the safer side). The k stored by `tune` equals the script's estimated k in all 20.
-- Gap: 9 of 20 cells exceed 0.2 pp at some k (`*total`/nb 0.52, `*error` all four 0.45-0.59, `busy` sigma/median/ewma
-  0.33-0.37 and nb 0.200 rounded up). All of them are at the small k (k 2, or 2.5 for a few): the coverage there is 88-97 %,
-  far below the 99.5 % target, so no best k depends on it. At the k that matters (>= the best k) the gaps are
-  <= 0.1 pp except `*error` sigma/median/ewma at k 3.5-5 (<= 0.13 pp) -- read from the per-k tables below.
-- Per spec, a failed gate means the page labels coverage "estimated" and we discuss before eb3 merges. Not tuned away.
-- Likely cause (not investigated further): the hour's NB/Poisson model fed with (m, v) of the hour is a poorer fit than the
-  true minute distribution when counts are bursty inside the hour (`*error`, `busy`), and the estimator is biased
-  at k 2 (it predicts fewer outside minutes than are counted for `*total`/`busy`, more for `*error`).
+- Gap at k >= best k: at most 0.078 pp in all 20 cells (table below, column "max gap, k >= best").
+- Best k: estimated and exact agree in 19 of 20 cells; `*warn/*info` nb is one step apart (3 estimated, 2.5 exact; the
+  estimate is the safer side). The k stored by `tune` equals the estimated k in all 20.
+- Full gap table kept: judged over all k, 9 of 20 cells exceed 0.2 pp, all at k 2 or 2.5 where coverage is only 88-97 %
+  (`*total` nb 0.52, `*error` 0.45-0.59, `busy` 0.2-0.37). No best k depends on them.
+- `*error` slight optimism at k >= 3.5: the estimate is above the count, e.g. sigma k 3.5: 99.02 estimated vs 98.90 exact;
+  median 3.5: 98.76 vs 98.68; k 4: 99.61 vs 99.58. The gap is 0.05-0.07 pp at the best k, but at the margin the
+  estimate can pick a k one step too small for `*error`.
+- Likely cause of the small-k gaps (not investigated): the hour's NB/Poisson model fed with (m, v) is a poorer fit than
+  the true minute distribution when counts are bursty inside the hour.
 
 ## Output of the check
 
-schema lab_s_w28, today 2026-10-27, test days 2026-10-24..2026-10-26, tune 94.1 s
+schema lab_s_w28, today 2026-10-27, test days 2026-10-24..2026-10-26, tune 41.3 s
 
-| kind | method | max abs gap (pp) | at k | best k est | best k exact | stored k | verdict |
-|---|---|---|---|---|---|---|---|
-| *total | sigma | 0.178 | 2.5 | 4 | 4 | 4 | ok |
-| *total | nb | 0.518 | 2 | 3 | 3 | 3 | FAIL |
-| *total | median | 0.135 | 2.5 | 4 | 4 | 4 | ok |
-| *total | ewma | 0.191 | 2.5 | 4 | 4 | 4 | ok |
-| *error | sigma | 0.545 | 2 | 4 | 4 | 4 | FAIL |
-| *error | nb | 0.450 | 2 | 3 | 3 | 3 | FAIL |
-| *error | median | 0.585 | 2 | 5 | 5 | 5 | FAIL |
-| *error | ewma | 0.480 | 2 | 4 | 4 | 4 | FAIL |
-| *warn/*info | sigma | 0.083 | 3.5 | 5 | 5 | 5 | ok |
-| *warn/*info | nb | 0.051 | 2.5 | 3 | 2.5 | 3 | ok, best k one step apart |
-| *warn/*info | median | 0.111 | 3 | 6 | 6 | 6 | ok |
-| *warn/*info | ewma | 0.093 | 3 | 5 | 5 | 5 | ok |
-| busy | sigma | 0.371 | 2 | 8 | 8 | 8 | FAIL |
-| busy | nb | 0.200 | 2 | 3 | 3 | 3 | FAIL |
-| busy | median | 0.333 | 2 | 8 | 8 | 8 | FAIL |
-| busy | ewma | 0.371 | 2 | 8 | 8 | 8 | FAIL |
-| sparse | sigma | 0.123 | 3 | 8 | 8 | 8 | ok |
-| sparse | nb | 0.111 | 2 | 2.5 | 2.5 | 2.5 | ok |
-| sparse | median | 0.095 | 2 | 8 | 8 | 8 | ok |
-| sparse | ewma | 0.144 | 2 | 8 | 8 | 8 | ok |
+| kind | method | max gap, all k (pp) | at k | max gap, k >= best (pp) | best k est | best k exact | stored k | verdict |
+|---|---|---|---|---|---|---|---|---|
+| *total | sigma | 0.178 | 2.5 | 0.032 | 4 | 4 | 4 | ok |
+| *total | nb | 0.518 | 2 | 0.046 | 3 | 3 | 3 | ok |
+| *total | median | 0.135 | 2.5 | 0.020 | 4 | 4 | 4 | ok |
+| *total | ewma | 0.191 | 2.5 | 0.032 | 4 | 4 | 4 | ok |
+| *error | sigma | 0.545 | 2 | 0.048 | 4 | 4 | 4 | ok |
+| *error | nb | 0.450 | 2 | 0.051 | 3 | 3 | 3 | ok |
+| *error | median | 0.585 | 2 | 0.052 | 5 | 5 | 5 | ok |
+| *error | ewma | 0.480 | 2 | 0.068 | 4 | 4 | 4 | ok |
+| *warn/*info | sigma | 0.083 | 3.5 | 0.039 | 5 | 5 | 5 | ok |
+| *warn/*info | nb | 0.051 | 2.5 | 0.051 | 3 | 2.5 | 3 | ok, best k one step apart |
+| *warn/*info | median | 0.111 | 3 | 0.019 | 6 | 6 | 6 | ok |
+| *warn/*info | ewma | 0.093 | 3 | 0.059 | 5 | 5 | 5 | ok |
+| busy | sigma | 0.371 | 2 | 0.012 | 8 | 8 | 8 | ok |
+| busy | nb | 0.200 | 2 | 0.029 | 3 | 3 | 3 | ok |
+| busy | median | 0.333 | 2 | 0.007 | 8 | 8 | 8 | ok |
+| busy | ewma | 0.371 | 2 | 0.015 | 8 | 8 | 8 | ok |
+| sparse | sigma | 0.123 | 3 | 0.015 | 8 | 8 | 8 | ok |
+| sparse | nb | 0.111 | 2 | 0.078 | 2.5 | 2.5 | 2.5 | ok |
+| sparse | median | 0.095 | 2 | 0.017 | 8 | 8 | 8 | ok |
+| sparse | ewma | 0.144 | 2 | 0.007 | 8 | 8 | 8 | ok |
 
 Per k (estimated / exact coverage %, gap pp):
 
@@ -94,14 +94,15 @@ sparse
 | median | 94.74 / 94.84 | 95.47 / 95.56 | 96.44 / 96.51 | 97.12 / 97.18 | 97.56 / 97.61 | 98.05 / 98.07 | 98.32 / 98.32 | 98.74 / 98.72 |
 | ewma | 96.03 / 96.17 | 97.04 / 97.18 | 97.72 / 97.84 | 98.23 / 98.34 | 98.72 / 98.80 | 99.17 / 99.22 | 99.43 / 99.46 | 99.67 / 99.68 |
 
-GATE: FAIL [('*total', 'nb'), ('*error', 'sigma'), ('*error', 'nb'), ('*error', 'median'), ('*error', 'ewma'), ('busy', 'sigma'), ('busy', 'nb'), ('busy', 'median'), ('busy', 'ewma')]
+GATE (best k and above): PASS
 
 
 ## Timing
 
-- `lab_s_w28`: `tune` 94.1 s for 3 services (about 820 keys: 4 service keys x 3 + 810 templates), 3 test days.
-  About 0.11 s per key. Extrapolation (labelled, not measured): at 27,000 templates that is roughly 50 minutes
-  single-threaded. A Re-tune button on a company-size database will be slow; eb3 must run it in a thread and show progress.
+- `lab_s_w28`, about 820 keys (4 service keys x 3 + 810 templates), 3 test days:
+  before the recursive pmf: `tune` 94.1 s (0.115 s/key); after (fix round 1): `tune` 41.3 s (0.050 s/key). The
+  result tables are identical. Extrapolation (labelled, not measured): 27,000 templates is about 23 minutes
+  single-threaded (was about 52). A Re-tune button on a company-size database will be slow; eb3 must run it in a thread and show progress.
 - Live laptop DB (`recharge`, only 4 committed days 26-29 Oct): `python -m logai2.bands tune config.yaml`, 1.4 s wall,
   184 keys (4 service, 29 busy, 151 sparse). Few training days make most hours skip, so this is not representative.
   Result stored in the live `settings.bands_tune`.

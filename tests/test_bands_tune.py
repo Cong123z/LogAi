@@ -112,3 +112,9 @@ def test_template_kinds_and_scope(conn, cfg):
         hours(conn, "s", "t_new", d, {h: cell(5, 5) for h in H})
     res = run(conn, cfg)
     assert res["kinds"]["busy"]["keys"] == 1
+
+
+def test_test_days_are_last_committed_days(conn, cfg):
+    build(conn)
+    res = tune(conn, cfg, date(2026, 10, 22), test_days=1)       # Oct 21 has no commit: not a test day
+    assert res["test_days"] == [TEST.isoformat()]

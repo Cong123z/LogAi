@@ -229,6 +229,10 @@ def test_tail_above_bounded_sum_matches_full():
     for t in (950, 1200, 2000):
         full = sum(_pmf(k, 900, r) for k in range(t, _limit(900, 9000) + 1))
         assert tail_above(900, 9000, t) == pytest.approx(full, abs=1e-9, rel=1e-9)
+    for m, v, t in ((900, 9000, 800), (50, 400, 30), (5, 3, 4), (5, 3, 9), (800, 800, 700)):    # tail_below; Poisson
+        r = _r(m, v)
+        assert tail_below(m, v, t) == pytest.approx(sum(_pmf(k, m, r) for k in range(t + 1)), abs=1e-9, rel=1e-9)
+        assert tail_above(m, v, t) == pytest.approx(sum(_pmf(k, m, r) for k in range(t, _limit(m, v) + 1)), abs=1e-9, rel=1e-9)
 
 
 def test_all_zero_rows_no_band():
