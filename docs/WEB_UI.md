@@ -412,6 +412,11 @@ result; bands are computed from Postgres when the key opens (spec `docs/specs/20
 
 - **Header**: service, key (a plain select fed by `/api/eval/keys`: service keys, then templates past their first 24 h;
   not `keypicker.js`) and 1 day / 7 days.
+- **Zoom**: wheel/pinch zooms the time axis around the cursor and drag pans (`dataZoom` inside on all four charts),
+  plus one slider under the last chart; all of them share one start/end (synced by `datazoom` events, no
+  `echarts.connect`). The shared y max follows the visible hours. `-`, `+` and Reset zoom buttons in the chart header
+  (minimum 6 hours); at 2 days or less the x labels show hours, otherwise day names. Key, service or days reset the
+  zoom; it is not in the URL.
 - **Tune bar**: "Tuned <time>" with the test days, key count and methods, "Not tuned yet" (every method at k 3) or
   "Re-tuning..." with `done / total keys`; the last result stays while it runs. Re-tune posts `/api/eval/tune` and
   polls it every 2 s while running, then reloads the page data. A failed run shows its error.
