@@ -1227,6 +1227,9 @@ a.ev-card.ev-best { border-color: var(--green); }
 .ev-legend > span { display: inline-flex; align-items: center; gap: 6px; }
 .ev-legend i { display: inline-block; }
 .ev-zoom { margin-left: auto; }
+.ev-scale { display: inline-flex; align-items: center; gap: 6px; }
+.ev-scale .btn { min-height: 44px; min-width: 44px; font-size: 13px; }
+.ev-scale .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--text); font-weight: 600; }
 .ev-zoom .btn { min-height: 44px; min-width: 44px; font-size: 13px; }
 .ev-block { border-top: 1px solid var(--border); padding-top: 8px; margin-top: 6px; }
 .ev-block-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; }
