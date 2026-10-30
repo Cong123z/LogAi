@@ -2,7 +2,7 @@
 // All numbers come from /api/eval/*; nothing is computed here beyond layout and picking the narrowest unflagged method.
 // Helpers rvPad/rvDayLabel come from review.js.
 const ev = {service: '', key: '*total', days: 7, data: null, tune: null, tab: null, keys: [], keysFor: null, seen: null,
-            seq: 0, lastSub: null, timer: null, built: false, cursor: 0, labels: []};
+            seq: 0, lastSub: null, timer: null, built: false, cursor: 0, labels: [], zoom: [0, 100], zsync: false};
 const $ev = id => document.getElementById(id);
 const EV_METHODS = {
   sigma: {live: true, desc: 'Live band: mean ± kσ from the baseline table.'},
@@ -154,11 +154,11 @@ $ev('ev-retune').addEventListener('click', async () => {
     evPoll();
   } catch (err) { evStatus(err.message, true); }
 });
-$ev('ev-service').addEventListener('change', e => { ev.service = e.target.value; ev.key = '*total'; evWriteRoute(); loadEvaluation(); });
-$ev('ev-key').addEventListener('change', e => { ev.key = e.target.value; evWriteRoute(); loadEvaluation(); });
+$ev('ev-service').addEventListener('change', e => { ev.service = e.target.value; ev.key = '*total'; ev.zoom = [0, 100]; evWriteRoute(); loadEvaluation(); });
+$ev('ev-key').addEventListener('change', e => { ev.key = e.target.value; ev.zoom = [0, 100]; evWriteRoute(); loadEvaluation(); });
 $ev('ev-days').addEventListener('click', e => {
   const b = e.target.closest('button[data-days]');
-  if (b) { ev.days = Number(b.dataset.days); evWriteRoute(); loadEvaluation(); }
+  if (b) { ev.days = Number(b.dataset.days); ev.zoom = [0, 100]; evWriteRoute(); loadEvaluation(); }
 });
 
 // ── Render ──
@@ -201,7 +201,7 @@ $ev('ev-cards').addEventListener('click', e => {
 function evBuild() {
   $ev('ev-charts').innerHTML = EV_IDS.map((id, i) => `<div class="ev-block" id="m-${id}">
     <div class="ev-block-head"><h4>${id}</h4><span class="sync-status" data-k></span><span class="ev-grow"></span><span class="sync-status" data-cur></span></div>
-    <div class="ev-chart" id="ev-c-${id}" role="img"${i === EV_IDS.length - 1 ? ' style="height:152px"' : ''}></div></div>`).join('');
+    <div class="ev-chart" id="ev-c-${id}" role="img"${i === EV_IDS.length - 1 ? ' style="height:190px"' : ''}></div></div>`).join('');
   ev.built = true;
 }
 
@@ -216,10 +216,7 @@ function evRenderCharts() {
   const t = chartTokens(), d = ev.data, pts = d.points, multi = ev.days > 1;
   const labels = ev.labels = pts.map(p => `${p.day} ${rvPad(p.hour)}`);
   $ev('ev-title').textContent = ev.keys.find(k => k.key === ev.key)?.label || ev.key;
-  let ymax = 1;
-  pts.forEach(p => { if (p.rate != null) ymax = Math.max(ymax, p.rate); });
-  d.methods.forEach(m => m.bands.forEach(b => { if (b) ymax = Math.max(ymax, b.high); }));
-  ymax *= 1.05;
+  const ymax = evYmax();
   const nights = [];
   for (let i = 0; i < pts.length; i++) {
     if (pts[i].hour !== 0) continue;
@@ -241,11 +238,12 @@ function evRenderCharts() {
     chart.group = 'ev';
     chart.setOption({
       ...baseOption(),
-      grid: {left: 52, right: 16, top: 8, bottom: last ? 24 : 4},
+      grid: {left: 52, right: 16, top: 8, bottom: last ? 56 : 4},
+      dataZoom: [{type: 'inside', xAxisIndex: 0, start: ev.zoom[0], end: ev.zoom[1], minValueSpan: 5, zoomOnMouseWheel: true, moveOnMouseMove: true},
+                 ...(last ? [{type: 'slider', xAxisIndex: 0, start: ev.zoom[0], end: ev.zoom[1], minValueSpan: 5, height: 22, bottom: 4,
+                              borderColor: t.border, textStyle: {color: t.dim}, labelFormatter: i => labels[Math.round(i)] || ''}] : [])],
       xAxis: {type: 'category', data: labels, boundaryGap: false, axisLine: {lineStyle: {color: t.grid}}, axisTick: {show: last},
-              axisLabel: {show: last, color: t.dim, fontSize: 12,
-                          interval: (_, v) => multi ? v.endsWith(' 00') : Number(v.slice(-2)) % 6 === 0,
-                          formatter: v => multi ? rvDayLabel(v.slice(0, 10)).slice(0, -4) : `${v.slice(-2)}:00`},
+              axisLabel: {show: last, color: t.dim, fontSize: 12, ...evLabels(multi)},
               axisPointer: {show: true, snap: false, lineStyle: {color: t.accent, type: 'dashed'}}},
       yAxis: {type: 'value', min: 0, max: ymax, splitNumber: 2, splitLine: {lineStyle: {color: t.grid}},
               axisLabel: {color: t.dim, fontSize: 11, formatter: evFmt}},
@@ -264,6 +262,8 @@ function evRenderCharts() {
       ],
       graphic: m.missing ? [{type: 'text', left: 'center', top: 'middle', style: {text: m.missing, fill: t.dim, fontSize: 13}}] : [],
     }, true);
+    chart.off('datazoom');
+    chart.on('datazoom', () => evOnZoom(chart));
     chart.off('updateAxisPointer');
     chart.on('updateAxisPointer', e => {
       const v = e.axesInfo && e.axesInfo[0] && e.axesInfo[0].value;
@@ -271,12 +271,68 @@ function evRenderCharts() {
       if (i >= 0 && i !== ev.cursor) evCursor(i);      // moves the pointer of all four; the i !== ev.cursor guard stops the loop
     });
   });
+  evZoomUi();
   // No echarts.connect: evCursor drives every chart's pointer; connect hid it on charts with no data at the hour.
   const slider = $ev('ev-hour');
   slider.max = String(pts.length - 1);
   const lastRate = pts.map(p => p.rate).findLastIndex(r => r != null);
   evCursor(Math.min(ev.cursor, pts.length - 1) || (lastRate < 0 ? pts.length - 1 : lastRate));
 }
+
+// ── Zoom: ev.zoom = [start, end] in percent of the loaded hours; all four charts and the slider share it ──
+const evVisible = () => {
+  const n = ev.data.points.length - 1;
+  return [Math.floor(ev.zoom[0] / 100 * n), Math.ceil(ev.zoom[1] / 100 * n)];
+};
+// Shared y max over the visible hours (everything at full range).
+function evYmax() {
+  const [a, b] = evVisible();
+  let ymax = 1;
+  ev.data.points.forEach((p, i) => { if (i >= a && i <= b && p.rate != null) ymax = Math.max(ymax, p.rate); });
+  ev.data.methods.forEach(m => m.bands.forEach((x, i) => { if (x && i >= a && i <= b) ymax = Math.max(ymax, x.high); }));
+  return ymax * 1.05;
+}
+// Hours ("Thu 29 14:00") at 2 days or less visible, day names otherwise; read live by the axis on every redraw.
+function evLabels(multi) {
+  const hours = () => ev.data && ev.data.points.length * (ev.zoom[1] - ev.zoom[0]) / 100 <= 48;
+  const step = () => { const v = ev.data.points.length * (ev.zoom[1] - ev.zoom[0]) / 100; return v <= 12 ? 1 : v <= 24 ? 3 : 6; };
+  return {
+    interval: (_, v) => hours() ? Number(v.slice(-2)) % step() === 0 : v.endsWith(' 00'),
+    formatter: v => hours() ? (multi ? rvDayLabel(v.slice(0, 10)).slice(0, -4) + ' ' : '') + `${v.slice(-2)}:00`
+                            : rvDayLabel(v.slice(0, 10)).slice(0, -4),
+  };
+}
+function evOnZoom(src) {
+  if (ev.zsync) return;
+  const z = src.getOption().dataZoom[0];
+  evZoomTo(z.start, z.end, src);
+}
+// Applies start/end to every chart except src (which already moved), then refits the y-scale and labels.
+function evZoomTo(start, end, src) {
+  ev.zsync = true;
+  try {
+    ev.zoom = [start, end];
+    EV_IDS.forEach(id => {
+      const c = chartFor($ev(`ev-c-${id}`));
+      if (c !== src) c.dispatchAction({type: 'dataZoom', start, end});
+      c.setOption({yAxis: {max: evYmax()}}, {lazyUpdate: true});
+    });
+    chartFor($ev(`ev-c-${EV_IDS[EV_IDS.length - 1]}`)).setOption({xAxis: {axisLabel: evLabels(ev.days > 1)}});
+  } finally { ev.zsync = false; }
+  evZoomUi();
+}
+function evZoomUi() {
+  $ev('ev-zoom-reset').disabled = ev.zoom[0] <= 0.01 && ev.zoom[1] >= 99.99;
+}
+function evZoomStep(factor) {          // factor 0.5 zooms in, 2 zooms out, around the centre; never under 6 hours
+  const n = ev.data.points.length - 1, [s, e] = ev.zoom, c = (s + e) / 2;
+  const span = Math.min(100, Math.max(6 / n * 100, (e - s) * factor));
+  const a = Math.min(100 - span, Math.max(0, c - span / 2));
+  evZoomTo(a, a + span, null);
+}
+$ev('ev-zoom-in').addEventListener('click', () => evZoomStep(0.5));
+$ev('ev-zoom-out').addEventListener('click', () => evZoomStep(2));
+$ev('ev-zoom-reset').addEventListener('click', () => evZoomTo(0, 100, null));
 
 // Reads the rate and every method's range at hour i and moves the axis pointer of all four charts.
 function evCursor(i) {
