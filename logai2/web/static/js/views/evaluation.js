@@ -201,7 +201,7 @@ $ev('ev-cards').addEventListener('click', e => {
 function evBuild() {
   $ev('ev-charts').innerHTML = EV_IDS.map((id, i) => `<div class="ev-block" id="m-${id}">
     <div class="ev-block-head"><h4>${id}</h4><span class="sync-status" data-k></span><span class="ev-grow"></span><span class="sync-status" data-cur></span></div>
-    <div class="ev-chart" id="ev-c-${id}" role="img"${i === EV_IDS.length - 1 ? ' style="height:190px"' : ''}></div></div>`).join('');
+    <div class="ev-chart" id="ev-c-${id}" role="img"${i === EV_IDS.length - 1 ? ' style="height:240px"' : ''}></div></div>`).join('');
   ev.built = true;
 }
 
@@ -238,9 +238,9 @@ function evRenderCharts() {
     chart.group = 'ev';
     chart.setOption({
       ...baseOption(),
-      grid: {left: 52, right: 16, top: 8, bottom: last ? 56 : 4},
-      dataZoom: [{type: 'inside', xAxisIndex: 0, start: ev.zoom[0], end: ev.zoom[1], minValueSpan: 5, zoomOnMouseWheel: true, moveOnMouseMove: true},
-                 ...(last ? [{type: 'slider', xAxisIndex: 0, start: ev.zoom[0], end: ev.zoom[1], minValueSpan: 5, height: 22, bottom: 4,
+      grid: {left: 52, right: 16, top: 8, bottom: last ? 84 : 4},
+      dataZoom: [{type: 'inside', xAxisIndex: 0, start: ev.zoom[0], end: ev.zoom[1], minValueSpan: 5, zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: 'shift', moveOnMouseMove: true},
+                 ...(last ? [{type: 'slider', xAxisIndex: 0, start: ev.zoom[0], end: ev.zoom[1], minValueSpan: 5, height: 28, bottom: 14,
                               borderColor: t.border, textStyle: {color: t.dim}, labelFormatter: i => labels[Math.round(i)] || ''}] : [])],
       xAxis: {type: 'category', data: labels, boundaryGap: false, axisLine: {lineStyle: {color: t.grid}}, axisTick: {show: last},
               axisLabel: {show: last, color: t.dim, fontSize: 12, ...evLabels(multi)},
