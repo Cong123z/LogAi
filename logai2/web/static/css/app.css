@@ -1235,6 +1235,6 @@ a.ev-card.ev-best { border-color: var(--green); }
 .ev-slider input { flex: 1 1 320px; min-height: 44px; accent-color: var(--accent); }
 .ev-slider output { min-width: 150px; color: var(--text); font-family: var(--font-mono); }
 .ev-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--bg-table); border-radius: var(--radius); }
-.ev-tabs button { border: 0; border-radius: var(--radius-sm); padding: 6px 12px; min-height: 40px; background: transparent; color: var(--text-dim); font: 13px var(--font-mono); cursor: pointer; }
-.ev-tabs button[aria-selected="true"] { background: var(--bg-card); color: var(--text); }
+.ev-tabs button { border: 0; border-radius: var(--radius-sm); padding: 6px 12px; min-height: 44px; background: transparent; color: var(--text-dim); font: 13px var(--font-mono); cursor: pointer; }
+.ev-tabs button[aria-pressed="true"] { background: var(--bg-card); color: var(--text); }
 .ev-tabs button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }

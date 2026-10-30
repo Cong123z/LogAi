@@ -422,8 +422,10 @@ result; bands are computed from Postgres when the key opens (spec `docs/specs/20
   outside, a box per run of such hours, nights shaded) with a synced hover (`echarts.connect`). A method with no band
   for any shown hour shows "not enough days"; hours without a band are gaps. The hour slider (arrow keys) moves the
   axis pointer and reads every method's range at that hour.
-- **Tune table**: per kind (tabs `*total`, `*error`, `*warn/*info`, `busy`, `sparse`), sorted by width vs sigma, with
-  best k, "Coverage (estimated)" and the flag text.
+- **Tune table**: per kind (buttons `*total`, `*error`, `*warn/*info`, `busy`, `sparse`), sorted by width vs sigma, with
+  best k, hours (test hours the method has a band for), "Coverage (estimated)" and the flag text. Width vs sigma is
+  computed only over the hours where both the method and sigma have a band; a method with fewer than 50 % of sigma's
+  hours in the kind is flagged "few hours (N %)" (also on its card) and is never "Narrowest".
 
 ## Baseline
 

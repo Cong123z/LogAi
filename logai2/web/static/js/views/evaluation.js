@@ -148,9 +148,11 @@ $ev('ev-retune').addEventListener('click', async () => {
     await apiMutation('/api/eval/tune', 'POST', {});
     evStatus('');
   } catch (err) { evStatus(err.message, true); }
-  ev.tune = await getJson('/api/eval/tune', 'Unable to load the tune status');
-  evRenderTune();
-  evPoll();
+  try {
+    ev.tune = await getJson('/api/eval/tune', 'Unable to load the tune status');
+    evRenderTune();
+    evPoll();
+  } catch (err) { evStatus(err.message, true); }
 });
 $ev('ev-service').addEventListener('change', e => { ev.service = e.target.value; ev.key = '*total'; evWriteRoute(); loadEvaluation(); });
 $ev('ev-key').addEventListener('change', e => { ev.key = e.target.value; evWriteRoute(); loadEvaluation(); });
@@ -179,6 +181,7 @@ function evRenderCards() {
         ${m.id === best ? '<span class="ev-tag ev-good">Narrowest at 99.5 %</span>' : ''}
         ${EV_METHODS[m.id].live ? '<span class="ev-tag">live</span>' : ''}</div>
       <div class="ev-desc">${EV_METHODS[m.id].desc}</div>
+      ${info(m.id)?.flag ? `<div class="ev-warn-fg">${escapeHtml(info(m.id).flag)}</div>` : ''}
       <dl><div><dt>k</dt><dd>${k}</dd></div>
         <div><dt>coverage (estimated)</dt><dd>${evPct(m.coverage)}</dd></div>
         <div><dt>hours out</dt><dd class="${m.outside ? 'ev-warn-fg' : ''}">${m.missing ? '—' : m.outside}</dd></div></dl>
@@ -297,15 +300,15 @@ $ev('ev-hour').addEventListener('input', e => evCursor(Number(e.target.value)));
 // ── Tune table per kind ──
 function evRenderTable() {
   const r = ev.tune.result, tab = ev.tab, kd = r?.kinds[tab];
-  $ev('ev-tabs').innerHTML = EV_KINDS.map(k => `<button type="button" role="tab" aria-selected="${k === tab}" data-kind="${escapeHtml(k)}">${escapeHtml(k)}</button>`).join('');
+  $ev('ev-tabs').innerHTML = EV_KINDS.map(k => `<button type="button" aria-pressed="${k === tab}" data-kind="${escapeHtml(k)}">${escapeHtml(k)}</button>`).join('');
   $ev('ev-caption').textContent = kd ? `${tab} · ${kd.keys} ${kd.keys === 1 ? 'key' : 'keys'}` : `${tab} · no keys tuned`;
   const rows = EV_IDS.map(id => ({id, ...(kd?.methods[id] || {})}));
   rows.sort((a, b) => (a.ratio ?? Infinity) - (b.ratio ?? Infinity));
   $ev('ev-rows').innerHTML = rows.map((m, i) => `<tr>
     <td class="sync-status">${i + 1}</td><td class="ev-mono">${m.id}</td>
-    <td class="r ev-mono">${m.k == null ? '—' : m.k}</td><td class="r ev-mono">${evPct(m.coverage)}</td>
+    <td class="r ev-mono">${m.k == null ? '—' : m.k}</td><td class="r ev-mono">${m.hours ?? '—'}</td><td class="r ev-mono">${evPct(m.coverage)}</td>
     <td class="r ev-mono ${evRatioTone(m.ratio)}">${m.ratio == null ? '—' : m.ratio.toFixed(2)}</td>
-    <td class="${m.flag && m.flag.startsWith('never') ? 'ev-warn-fg' : 'sync-status'}">${escapeHtml(kd ? m.flag || '' : 'not tuned yet')}</td></tr>`).join('');
+    <td class="${m.flag && (m.flag.startsWith('never') || m.flag.startsWith('few')) ? 'ev-warn-fg' : 'sync-status'}">${escapeHtml(kd ? m.flag || '' : 'not tuned yet')}</td></tr>`).join('');
 }
 $ev('ev-tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-kind]');

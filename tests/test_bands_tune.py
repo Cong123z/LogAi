@@ -118,3 +118,28 @@ def test_test_days_are_last_committed_days(conn, cfg):
     build(conn)
     res = tune(conn, cfg, date(2026, 10, 22), test_days=1)       # Oct 21 has no commit: not a test day
     assert res["test_days"] == [TEST.isoformat()]
+
+
+def sparse_build(conn, thin_hours):
+    """Hour 3 has every training day; `thin_hours` only the last two (median needs 3 days, sigma 1)."""
+    service(conn, "s")
+    for i, d in enumerate(TRAIN):
+        hrs = (3, *thin_hours) if i >= len(TRAIN) - 2 else (3,)
+        hours(conn, "s", "*total", d, {h: cell(10, 10) for h in hrs})
+    hours(conn, "s", "*total", TEST, {h: cell(10, 10) for h in (3, *thin_hours)})
+    committed(conn, "s", [*TRAIN, TEST])
+
+
+def test_ratio_on_common_hours(conn, cfg):
+    sparse_build(conn, (4, 5))
+    res = run(conn, cfg)
+    s, md = method(res, "*total", "sigma"), method(res, "*total", "median")
+    assert s["hours"] == 3 and md["hours"] == 1
+    assert s["ratio"] == 1.0 and md["ratio"] is not None and md["ratio"] > 0
+
+
+def test_few_hours_flag(conn, cfg):
+    sparse_build(conn, (4, 5, 6, 7, 8))
+    md = method(run(conn, cfg), "*total", "median")
+    assert md["hours"] == 1 and md["flag"] == "few hours (17 %)"
+    assert method(run(conn, cfg), "*total", "sigma")["flag"] == ""

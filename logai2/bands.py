@@ -319,6 +319,7 @@ def tune(conn, cfg, today: date, test_days: int = 3, on_key=None) -> dict:
     t0 = time.monotonic()
     # kind -> keys seen, method -> k -> [expected outside, minutes, width sum, hours]
     acc: dict[str, dict] = {}
+    wid: dict[str, dict] = {}          # kind -> method -> k -> {hour id: width}, for the ratio on common hours
     seen = set()
     tdays = _test_days(conn, today, test_days)
     for th in tune_hours(conn, cfg, today, test_days, on_key):
@@ -336,6 +337,8 @@ def tune(conn, cfg, today: date, test_days: int = 3, on_key=None) -> dict:
                 c[1] += th.act.n
                 c[2] += b.high - max(b.low, 0)
                 c[3] += 1
+                wid.setdefault(th.kind, {}).setdefault(m, {}).setdefault(k, {})[(th.service, th.key, th.day, th.hour)] = \
+                    b.high - max(b.low, 0)
     kinds = {}
     for kind, a in acc.items():
         out = {}
@@ -345,11 +348,16 @@ def tune(conn, cfg, today: date, test_days: int = 3, on_key=None) -> dict:
             out[m] = {"k": k, "flag": flag, "coverage": None, "width": None}
             if k is not None:
                 out[m].update(coverage=1 - cells[k][0] / cells[k][1], width=cells[k][2] / cells[k][3])
-        base = out["sigma"]["width"]
-        for r in out.values():
-            r["ratio"] = None if not base or r["width"] is None else r["width"] / base
-        if base is not None:
-            out["sigma"]["ratio"] = 1.0
+        sk = out["sigma"]["k"]
+        sw = wid.get(kind, {}).get("sigma", {}).get(sk, {})
+        for m, r in out.items():
+            r["hours"] = a["m"][m][r["k"]][3] if r["k"] is not None else 0
+            mw = wid.get(kind, {}).get(m, {}).get(r["k"], {})
+            common = mw.keys() & sw.keys()
+            base = sum(sw[h] for h in common)
+            r["ratio"] = sum(mw[h] for h in common) / base if base else None
+            if r["k"] is not None and out["sigma"]["hours"] and r["hours"] < 0.5 * out["sigma"]["hours"]:
+                r["flag"] = f"few hours ({round(100 * r['hours'] / out['sigma']['hours'])} %)"
         kinds[kind] = {"keys": a["keys"], "methods": out}
     result = {"version": TUNE_VERSION, "run_at": datetime.now(timezone.utc).isoformat(),
               "test_days": [d.isoformat() for d in tdays],
