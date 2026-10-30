@@ -24,7 +24,8 @@ from logai2.links import ALERTING_SOURCES, LEVEL_ORDER, class_sql, cluster_edges
 from logai2.owner.baseline import DAY_CAP, Baseline, full_after, judge
 from logai2.review import suggest
 from logai2.timeutil import TZ, day_hour, minute_of
-from logai2.web import eval_view, modules_view
+from logai2.bands import stored_tune
+from logai2.web import bands_view, modules_view
 from logai2.web.baseline_view import UnknownKey, incident, inspect, left_days, matrix, series
 from logai2.web.pipeline_view import stage_states, throughput
 from logai2.web.pipeline_view import services as service_rows
@@ -548,60 +549,32 @@ def create_app(cfg: AppConfig) -> Flask:
         except UnknownKey:
             abort(404, "Unknown key")
 
-    def eval_bad_param(name: str):
-        raise eval_view.BadRequest(f"{name} is required")
-
-    # ---- evaluation (lab_* tables only; eval_view.py)
-    def lab_run():
-        return eval_view.get_run(conn(), request.args.get("run"))
-
-    @app.errorhandler(eval_view.BadRequest)
-    def eval_bad(exc):
-        return jsonify({"error": str(exc)}), 400
-
-    @app.errorhandler(eval_view.NoRun)
-    def eval_no_run(exc):
-        return jsonify({"error": str(exc)}), 404
-
-    @app.get("/api/eval/runs")
-    def eval_runs():
-        return jsonify(eval_view.runs(conn(), iso))
-
-    @app.get("/api/eval/scoreboard")
-    def eval_scoreboard():
-        return jsonify(eval_view.scoreboard(conn(), lab_run()))
+    # ---- evaluation (bands computed on read; bands_view.py)
+    @app.get("/api/eval/bands")
+    def eval_bands():
+        service = known_service(request.args.get("service"))
+        if request.args.get("days", "7") not in ("1", "7"):
+            raise BadRequest("days must be 1 or 7")
+        try:
+            return jsonify(bands_view.bands_series(conn(), cfg, service, request.args.get("key", "*total"),
+                                                   int(request.args.get("days", "7")), datetime.now(TZ).date(), time.time()))
+        except UnknownKey:
+            abort(404, "Unknown key")
 
     @app.get("/api/eval/keys")
     def eval_keys():
-        run = lab_run()
-        return jsonify(eval_view.keys(conn(), run, request.args.get("kind") or eval_bad_param("kind")))
+        service = known_service(request.args.get("service"))
+        return jsonify(bands_view.eval_keys(conn(), service, datetime.now(TZ)))
 
-    @app.get("/api/eval/series")
-    def eval_series():
-        run, a = lab_run(), request.args
-        for name in ("kind", "service", "key", "from", "to"):
-            if not a.get(name):
-                eval_bad_param(name)
-        try:
-            d_from, d_to = date.fromisoformat(a["from"]), date.fromisoformat(a["to"])
-            knob = float(a["knob"]) if a.get("knob") else None
-        except ValueError:
-            raise eval_view.BadRequest("from/to must be ISO dates and knob a number") from None
-        methods = [m for m in a.get("methods", "").split(",") if m] or None
-        return jsonify(eval_view.series(conn(), run, iso, a["kind"], a["service"], a["key"], methods, knob, d_from, d_to))
+    @app.get("/api/eval/tune")
+    def eval_tune_status():
+        return jsonify({**bands_view.retune.status(), "result": stored_tune(conn())})
 
-    @app.get("/api/eval/sweep")
-    def eval_sweep():
-        run = lab_run()
-        return jsonify(eval_view.sweep(conn(), run, request.args.get("kind") or eval_bad_param("kind")))
-
-    @app.get("/api/eval/choices")
-    def eval_choices_list():
-        return jsonify(eval_view.choices(conn(), iso))
-
-    @app.post("/api/eval/choices")
-    def eval_choices():
-        return jsonify(eval_view.choose(conn(), body()))
+    @app.post("/api/eval/tune")
+    def eval_tune_start():
+        if not bands_view.retune.start(cfg.database.dsn, cfg):
+            return jsonify({"error": "A Re-tune is already running"}), 409
+        return jsonify({"status": "running"}), 202
 
     @app.get("/api/baseline/series")
     def baseline_series():
