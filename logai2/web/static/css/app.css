@@ -1234,6 +1234,7 @@ a.ev-card.ev-best { border-color: var(--green); }
 .ev-slider { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 8px; font-size: 12px; color: var(--text-dim); }
 .ev-slider input { flex: 1 1 320px; min-height: 44px; accent-color: var(--accent); }
 .ev-slider output { min-width: 150px; color: var(--text); font-family: var(--font-mono); }
+#view-evaluation .rv-head { flex-wrap: wrap; }
 .ev-tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 3px; background: var(--bg-table); border-radius: var(--radius); }
 .ev-tabs button { border: 0; border-radius: var(--radius-sm); padding: 6px 12px; min-height: 44px; background: transparent; color: var(--text-dim); font: 13px var(--font-mono); cursor: pointer; }
 .ev-tabs button[aria-pressed="true"] { background: var(--bg-card); color: var(--text); }
