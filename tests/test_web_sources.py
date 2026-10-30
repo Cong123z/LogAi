@@ -105,7 +105,7 @@ def test_pipeline_stale_flag(client, conn):
 
 def test_index_page_served(client):
     r = client.get("/")
-    assert r.status_code == 200 and b"LogAI2 Console" in r.data
+    assert r.status_code == 200 and b"LogAI Console" in r.data
     assert client.get("/static/js/views/sources.js").status_code == 200
 
 
