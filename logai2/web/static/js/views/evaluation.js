@@ -2,7 +2,7 @@
 // All numbers come from /api/eval/*; nothing is computed here beyond layout and picking the narrowest unflagged method.
 // Helpers rvPad/rvDayLabel come from review.js.
 const ev = {service: '', key: '*total', days: 7, data: null, tune: null, tab: null, keys: [], keysFor: null, seen: null,
-            seq: 0, lastSub: null, timer: null, built: false, cursor: 0, labels: [], zoom: [0, 100], zsync: false};
+            seq: 0, lastSub: null, timer: null, built: false, cursor: 0, labels: [], zoom: [0, 100], zsync: false, scale: 'counts'};
 const $ev = id => document.getElementById(id);
 const EV_METHODS = {
   sigma: {live: true, desc: 'Live band: mean ± kσ from the baseline table.'},
@@ -200,7 +200,7 @@ $ev('ev-cards').addEventListener('click', e => {
 
 function evBuild() {
   $ev('ev-charts').innerHTML = EV_IDS.map((id, i) => `<div class="ev-block" id="m-${id}">
-    <div class="ev-block-head"><h4>${id}</h4><span class="sync-status" data-k></span><span class="ev-grow"></span><span class="sync-status" data-cur></span></div>
+    <div class="ev-block-head"><h4>${id}</h4><span class="sync-status" data-k></span><span class="sync-status" data-clip></span><span class="ev-grow"></span><span class="sync-status" data-cur></span></div>
     <div class="ev-chart" id="ev-c-${id}" role="img"${i === EV_IDS.length - 1 ? ' style="height:240px"' : ''}></div></div>`).join('');
   ev.built = true;
 }
@@ -271,6 +271,7 @@ function evRenderCharts() {
       if (i >= 0 && i !== ev.cursor) evCursor(i);      // moves the pointer of all four; the i !== ev.cursor guard stops the loop
     });
   });
+  evClipNotes();
   evZoomUi();
   // No echarts.connect: evCursor drives every chart's pointer; connect hid it on charts with no data at the hour.
   const slider = $ev('ev-hour');
@@ -284,13 +285,22 @@ const evVisible = () => {
   const n = ev.data.points.length - 1;
   return [Math.floor(ev.zoom[0] / 100 * n), Math.ceil(ev.zoom[1] / 100 * n)];
 };
-// Shared y max over the visible hours (everything at full range).
+// Shared y max over the visible hours: counts = 1.3 x the highest rate (bands may clip); ranges = rate and bands.
 function evYmax() {
   const [a, b] = evVisible();
-  let ymax = 1;
-  ev.data.points.forEach((p, i) => { if (i >= a && i <= b && p.rate != null) ymax = Math.max(ymax, p.rate); });
-  ev.data.methods.forEach(m => m.bands.forEach((x, i) => { if (x && i >= a && i <= b) ymax = Math.max(ymax, x.high); }));
-  return ymax * 1.05;
+  let rate = 0, band = 0;
+  ev.data.points.forEach((p, i) => { if (i >= a && i <= b && p.rate != null) rate = Math.max(rate, p.rate); });
+  ev.data.methods.forEach(m => m.bands.forEach((x, i) => { if (x && i >= a && i <= b) band = Math.max(band, x.high); }));
+  if (ev.scale === 'ranges') return Math.max(1, rate, band) * 1.05;
+  return Math.max(1, (rate || band) * 1.3);
+}
+// Muted note in a chart head when its band goes above the plot in the visible hours.
+function evClipNotes() {
+  const [a, b] = evVisible(), ymax = evYmax();
+  ev.data.methods.forEach(m => {
+    const clipped = m.bands.some((x, i) => x && i >= a && i <= b && x.high > ymax);
+    $ev(`m-${m.id}`).querySelector('[data-clip]').textContent = clipped ? 'range above the chart' : '';
+  });
 }
 // Hours ("Thu 29 14:00") at 2 days or less visible, day names otherwise; read live by the axis on every redraw.
 function evLabels(multi) {
@@ -319,9 +329,12 @@ function evZoomTo(start, end, src) {
     });
     chartFor($ev(`ev-c-${EV_IDS[EV_IDS.length - 1]}`)).setOption({xAxis: {axisLabel: evLabels(ev.days > 1)}});
   } finally { ev.zsync = false; }
+  evClipNotes();
   evZoomUi();
 }
 function evZoomUi() {
+  $ev('ev-scale-counts').setAttribute('aria-pressed', String(ev.scale === 'counts'));
+  $ev('ev-scale-ranges').setAttribute('aria-pressed', String(ev.scale === 'ranges'));
   $ev('ev-zoom-reset').disabled = ev.zoom[0] <= 0.01 && ev.zoom[1] >= 99.99;
 }
 function evZoomStep(factor) {          // factor 0.5 zooms in, 2 zooms out, around the centre; never under 6 hours
@@ -370,4 +383,10 @@ function evRenderTable() {
 $ev('ev-tabs').addEventListener('click', e => {
   const b = e.target.closest('button[data-kind]');
   if (b) { ev.tab = b.dataset.kind; evRenderTable(); }
+});
+for (const sc of ['counts', 'ranges']) $ev(`ev-scale-${sc}`).addEventListener('click', () => {
+  if (ev.scale === sc) return;
+  ev.scale = sc;
+  if (ev.data) evZoomTo(ev.zoom[0], ev.zoom[1], null);   // refits every y max and the notes
+  else evZoomUi();
 });
