@@ -200,6 +200,8 @@ A method whose Test C medium recall differs from the latest ok Test A run of the
    the services disappear from every page. All history stays in Postgres. Turning it On again resumes from now.
 4. Watch `process_resident_memory_bytes` (Prometheus, from the engine) before and after: a big service that is Off costs
    almost nothing, and the engine should no longer be OOMKilled at start for a removed or Off pattern.
+5. Open **Evaluation** and press **Re-tune** once (or run `python -m logai2.bands tune` in the web pod). Until then
+   every method is drawn at k 3 (not tuned). A tune takes about 0.05 s per key (about 23 min at 27k templates).
 
 ### First start
 
