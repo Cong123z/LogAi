@@ -161,7 +161,7 @@ Run the lab. The core methods run in the venv (`--dsn` from the host); all metho
 
 Test A (injected into the counts) and Test C (real incidents, next section) take the same arguments with `--test A` / `--test C`.
 
-Then open `http://localhost:5565/#evaluation` (the web container; it reads only the `lab_*` tables).
+The lab results have no page any more. `http://localhost:5565/#evaluation` is the Evaluation page: it computes the four band methods from the live count tables and has a **Re-tune** button (or `python -m logai2.bands tune`) that picks each method's k.
 
 ### Test C (real incidents through the engine)
 
@@ -200,6 +200,8 @@ A method whose Test C medium recall differs from the latest ok Test A run of the
    the services disappear from every page. All history stays in Postgres. Turning it On again resumes from now.
 4. Watch `process_resident_memory_bytes` (Prometheus, from the engine) before and after: a big service that is Off costs
    almost nothing, and the engine should no longer be OOMKilled at start for a removed or Off pattern.
+5. Open **Evaluation** and press **Re-tune** once (or run `python -m logai2.bands tune` in the web pod). Until then
+   every method is drawn at k 3 (not tuned). A tune takes about 0.05 s per key (about 23 min at 27k templates).
 
 ### First start
 

@@ -5,6 +5,14 @@ Open items to fix, newest findings included. When one is fixed, move it to
 
 ## Open
 
+### B31. Evaluation: a key's kind in the key list can differ from the kind used for its k
+- **Where:** `eval_keys` and `bands_series` (`logai2/web/bands_view.py`).
+- **What:** the list takes busy/sparse from the key's mean over all committed days; `bands_series` and `tune` use the days
+  before the first shown / test day. A key near 2 events per minute can show one kind in the picker label and take the k
+  of the other on the page (the page's `kind` is the one that counts).
+- **Fix idea:** one shared mean function for all three.
+- **Likelihood:** low (only keys near the boundary; label only).
+
 ### B16. M6 decisions need a Test B M6 tune alert rate
 - **Where:** `scripts/lab/decide.py` (`_gates`, `_detect_decision`), `scripts/lab/tune.py`.
 - **What:** the M6 alert-rate gate reads the Test B M6 tune alert rate. When no template was born in the tune part there are no
