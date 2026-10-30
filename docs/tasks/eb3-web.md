@@ -23,3 +23,9 @@ Touching any other file needs a QUESTION first.
 - [ ] commits on the branch, explicit-path staging, no attribution lines
 - [ ] PR file filled in
 - [ ] reply: `DONE <last sha>` (or `QUESTION: ...`)
+
+## Rulings from the eb1 review (tech lead, 2026-10-30)
+1. Every route and `eval_keys` skip Off services (`known_service` for the routes; `services.monitored` in the
+   key list).
+2. A method with no band for every shown hour returns `missing: "not enough days"`; a band of None for some hours
+   (e.g. no counts in the training days, eb2 ruling 3) is a gap in that chart, not a reason.

@@ -23,3 +23,13 @@ Touching any other file needs a QUESTION first.
 - [ ] commits on the branch, explicit-path staging, no attribution lines
 - [ ] PR file filled in
 - [ ] reply: `DONE <last sha>` (or `QUESTION: ...`)
+
+## Rulings from the eb1 review (tech lead, 2026-10-30)
+1. Skip services with `services.monitored = false` (`history` and `in_scope` do not filter them).
+2. Lookback: per service, start `history` at the earliest day `training()` can need for the first test day: the
+   oldest of (the 5th weekday / 4th weekend committed day before it, first test day − 28). Do not use a fixed
+   35 days (a service with commit gaps would get fewer days than REBUILD).
+3. A key whose training rows all have s = 0 has no `baseline` row in REBUILD (no live band). Change `band()` in
+   `logai2/bands.py` to return None when Σs = 0 over the rows, and add `test_all_zero_rows_no_band`. Tune skips
+   such hours like any missing band.
+4. Report the timing of `tail_above` / `tail_below` on busy NB keys in the validation doc.
