@@ -17,4 +17,4 @@ patches:
 images:
   - name: logai2-engine
     newName: ghcr.io/cong123z/logai
-    newTag: sha-1622694cd425e7c07e6364397bc0d96f8a4a5a64
+    newTag: sha-60e9b4662e9f3af846efc6158ab2bd8441a71932
