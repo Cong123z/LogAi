@@ -40,21 +40,25 @@ spec:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_HOSTS
+                  optional: true
             - name: LOGAI2_ES_INDEX
               valueFrom:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_INDEX
+                  optional: true
             - name: LOGAI2_ES_USER
               valueFrom:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_USER
+                  optional: true
             - name: LOGAI2_ES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_PASSWORD
+                  optional: true
             - name: LOGAI2_ES_VERIFY_CERTS
               valueFrom:
                 secretKeyRef:
@@ -67,8 +71,8 @@ spec:
               protocol: TCP
           resources:
             requests:
-              cpu: "1"
-              memory: 2Gi
+              cpu: 150m
+              memory: 512Mi
             limits:
               cpu: "2"
               memory: 4Gi

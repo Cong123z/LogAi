@@ -31,11 +31,19 @@ spec:
                   key: POSTGRES_PASSWORD
             - name: LOGAI2_DATABASE_DSN
               value: "postgresql://logai:$(POSTGRES_PASSWORD)@logai-postgres:5432/logai"
+            # Support both LOGAI_EMBEDDING_ENDPOINT (v1.0) and LOGAI_EMBEDDING_URL (v2.0)
+            - name: LOGAI2_EMBEDDING_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_ENDPOINT
+                  optional: true
             - name: LOGAI2_EMBEDDING_URL
               valueFrom:
                 configMapKeyRef:
                   name: logai-embedding
                   key: LOGAI_EMBEDDING_URL
+                  optional: true
             - name: LOGAI2_EMBEDDING_MODEL
               valueFrom:
                 configMapKeyRef:
@@ -80,7 +88,7 @@ spec:
                   optional: true
           resources:
             requests:
-              cpu: 100m
+              cpu: 50m
               memory: 256Mi
             limits:
               cpu: 500m

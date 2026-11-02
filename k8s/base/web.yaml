@@ -36,21 +36,25 @@ spec:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_HOSTS
+                  optional: true
             - name: LOGAI2_ES_INDEX
               valueFrom:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_INDEX
+                  optional: true
             - name: LOGAI2_ES_USER
               valueFrom:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_USER
+                  optional: true
             - name: LOGAI2_ES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: logai-env
                   key: LOGAI_ES_PASSWORD
+                  optional: true
             - name: LOGAI2_ES_VERIFY_CERTS
               valueFrom:
                 secretKeyRef:
