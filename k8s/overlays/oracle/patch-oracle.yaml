@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: logai-postgres
+spec:
+  template:
+    spec:
+      nodeSelector:
+        logai-data: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: logai-pg-pvc
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  volumeName: logai-pg-pv

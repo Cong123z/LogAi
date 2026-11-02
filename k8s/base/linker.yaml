@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logai-linker
+  labels:
+    app.kubernetes.io/name: logai
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: logai-linker
+  template:
+    metadata:
+      labels:
+        app: logai-linker
+        app.kubernetes.io/name: logai
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: logai-linker
+          image: logai2-engine
+          imagePullPolicy: IfNotPresent
+          command: ["python", "scripts/run_linker.py"]
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: logai-env
+                  key: POSTGRES_PASSWORD
+            - name: LOGAI2_DATABASE_DSN
+              value: "postgresql://logai:$(POSTGRES_PASSWORD)@logai-postgres:5432/logai"
+            - name: LOGAI2_EMBEDDING_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_URL
+            - name: LOGAI2_EMBEDDING_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_MODEL
+                  optional: true
+            - name: LOGAI2_EMBEDDING_TIMEOUT_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_TIMEOUT_SECONDS
+                  optional: true
+            - name: LOGAI2_EMBEDDING_RETRY_BACKOFF_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS
+                  optional: true
+            - name: LOGAI2_EMBEDDING_BATCH_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_BATCH_SIZE
+                  optional: true
+            - name: LOGAI2_EMBEDDING_DIMENSION
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_DIMENSION
+                  optional: true
+            - name: LOGAI2_EMBEDDING_MAX_RETRIES
+              valueFrom:
+                configMapKeyRef:
+                  name: logai-embedding
+                  key: LOGAI_EMBEDDING_MAX_RETRIES
+                  optional: true
+            - name: LOGAI2_EMBEDDING_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: logai-env
+                  key: LOGAI_EMBEDDING_API_KEY
+                  optional: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

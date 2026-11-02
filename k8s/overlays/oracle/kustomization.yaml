@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# GitOps overlay for the Oracle Cloud cluster, rendered by Argo CD
+# (see k8s/argocd/logai-application.yaml).
+namespace: logai
+
+resources:
+  - ../../base
+  - pv.yaml
+
+patches:
+  - path: patch-oracle.yaml
+
+# The CI workflow rewrites newTag to sha-<commit> after each image it publishes
+# on master. Argo CD sees that commit and rolls Deployments.
+images:
+  - name: logai2-engine
+    newName: ghcr.io/cong123z/logai
+    newTag: sha-1622694cd425e7c07e6364397bc0d96f8a4a5a64

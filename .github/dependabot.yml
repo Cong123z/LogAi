@@ -1,0 +1,8 @@
+# Opens a weekly PR when a pinned GitHub Action has a new release, updating
+# both the commit SHA and the version comment in .github/workflows/*.yml.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

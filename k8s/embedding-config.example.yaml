@@ -1,0 +1,15 @@
+# Set the endpoint supplied by the cluster administrator and apply this file in
+# the same namespace as LogAI:  kubectl apply -n logai -f k8s/embedding-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logai-embedding
+data:
+  # Base URL for BGE-M3 service (OpenAI-compatible /v1/embeddings or TEI)
+  LOGAI_EMBEDDING_URL: "http://bge-m3.embedding.svc.cluster.local:8080"
+  LOGAI_EMBEDDING_MODEL: "bge-m3"
+  LOGAI_EMBEDDING_TIMEOUT_SECONDS: "30"
+  LOGAI_EMBEDDING_MAX_RETRIES: "2"
+  LOGAI_EMBEDDING_RETRY_BACKOFF_SECONDS: "1"
+  LOGAI_EMBEDDING_BATCH_SIZE: "32"
+  LOGAI_EMBEDDING_DIMENSION: "1024"

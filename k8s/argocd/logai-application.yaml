@@ -1,0 +1,22 @@
+# Argo CD Application for LogAI on the Oracle Cloud cluster.
+# Apply once by hand:  kubectl apply -n argocd -f k8s/argocd/logai-application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: logai
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Cong123z/LogAi.git
+    targetRevision: master
+    path: k8s/overlays/oracle
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: logai
+  syncPolicy:
+    automated:
+      prune: true      # delete resources removed from Git (PVC is protected by annotation)
+      selfHeal: true   # undo manual kubectl edits
+    syncOptions:
+      - CreateNamespace=true
